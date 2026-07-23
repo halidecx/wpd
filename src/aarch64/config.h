@@ -15,5 +15,9 @@
 #define HAVE_AS_ARCHEXT_SVE2_DIRECTIVE 0
 #define HAVE_SECTION_DATA_REL_RO 0
 #define HAVE_SME 0
+#ifdef __APPLE__
+#define EXTERN_ASM _
+#else
 #define EXTERN_ASM
+#endif
 #endif
