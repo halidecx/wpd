@@ -2,11 +2,12 @@ project(
   'wpd',
   'c',
   version: '0.0.0',
-  meson_version: '>=1.11.0',
+  meson_version: '>= 0.54.0',
   default_options: [
     'buildtype=release',
     'c_std=c11',
     'warning_level=2',
+    'b_ndebug=if-release'
   ],
 )
 
