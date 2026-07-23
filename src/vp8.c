@@ -957,7 +957,7 @@ int check_intra_pred4x4_mode_emuedge(int mode, int mb_x, int mb_y, int *copy_buf
         return !mb_x ? DC_129_PRED : mode;
     case TM_VP8_PRED:
         return check_tm_pred4x4_mode(mode, mb_x, mb_y);
-    case DC_PRED: // 4x4 DC doesn't use the same "H.264-style" exceptions as 16x16/8x8 DC
+    case DC_PRED: // 4x4 DC uses different edge handling from 16x16/8x8 DC
     case DIAG_DOWN_RIGHT_PRED:
     case VERT_RIGHT_PRED:
     case HOR_DOWN_PRED:
@@ -989,7 +989,7 @@ void intra_predict(VP8Context *s, uint8_t *dst[3], VP8Macroblock *mb,
         } else {
             mode = check_intra_pred8x8_mode(mb->mode, mb_x, mb_y);
         }
-        s->hpc.pred16x16[mode](dst[0], s->linesize);
+    s->pred.pred16x16[mode](dst[0], s->linesize);
     } else {
         uint8_t *ptr = dst[0];
         uint8_t *intra4x4 = s->intra4x4_pred_mode_mb;
@@ -1053,7 +1053,7 @@ void intra_predict(VP8Context *s, uint8_t *dst[3], VP8Macroblock *mb,
                 } else {
                     mode = intra4x4[x];
                 }
-                s->hpc.pred4x4[mode](dst, topright, linesize);
+                s->pred.pred4x4[mode](dst, topright, linesize);
                 if (copy) {
                     AV_COPY32(ptr+4*x              , copy_dst+12);
                     AV_COPY32(ptr+4*x+s->linesize  , copy_dst+20);
@@ -1081,8 +1081,8 @@ void intra_predict(VP8Context *s, uint8_t *dst[3], VP8Macroblock *mb,
     } else {
         mode = check_intra_pred8x8_mode(s->chroma_pred_mode, mb_x, mb_y);
     }
-    s->hpc.pred8x8[mode](dst[1], s->uvlinesize);
-    s->hpc.pred8x8[mode](dst[2], s->uvlinesize);
+    s->pred.pred8x8[mode](dst[1], s->uvlinesize);
+    s->pred.pred8x8[mode](dst[2], s->uvlinesize);
 
     if (!(avctx->flags & CODEC_FLAG_EMU_EDGE && !mb_y) && (s->deblock_filter || !mb_y))
         xchg_mb_border(s->top_border[mb_x+1], dst[0], dst[1], dst[2],
@@ -1241,7 +1241,7 @@ void vp8_mc_part(VP8Context *s, uint8_t *dst[3],
 }
 
 /* Fetch pixels for estimated mv 4 macroblocks ahead.
- * Optimized for 64-byte cache lines.  Inspired by ffh264 prefetch_motion. */
+ * Optimized for 64-byte cache lines. */
 static av_always_inline void prefetch_motion(VP8Context *s, VP8Macroblock *mb, int mb_x, int mb_y, int mb_xy, int ref)
 {
     /* Don't prefetch refs that haven't been used very often this frame. */
@@ -1795,7 +1795,7 @@ av_cold int vp8_decode_init(AVCodecContext *avctx)
     avctx->pix_fmt = PIX_FMT_YUV420P;
 
     dsputil_init(&s->dsp, avctx);
-    ff_h264_pred_init(&s->hpc, CODEC_ID_VP8, 8);
+    ff_vp8_pred_init(&s->pred);
     ff_vp8dsp_init(&s->vp8dsp);
 
     return 0;

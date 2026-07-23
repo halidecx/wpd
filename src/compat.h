@@ -73,8 +73,6 @@ static av_always_inline int have_armv6(int flags) { return !!(flags & AV_CPU_FLA
 static av_always_inline int have_neon(int flags) { return !!(flags & AV_CPU_FLAG_NEON); }
 #endif
 #define CODEC_ID_VP8 1
-#define CODEC_ID_RV40 2
-#define CODEC_ID_SVQ3 3
 #define PIX_FMT_YUV420P 0
 #define CODEC_FLAG_EMU_EDGE 1
 #define AV_PICTURE_TYPE_I 1

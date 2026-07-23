@@ -28,7 +28,7 @@
 #include "vp56.h"
 #include "vp56data.h"
 #include "vp8dsp.h"
-#include "h264pred.h"
+#include "vp8pred.h"
 
 #define VP8_MAX_QUANT 127
 
@@ -233,7 +233,7 @@ typedef struct {
     VP56RangeCoder coeff_partition[8];
     DSPContext dsp;
     VP8DSPContext vp8dsp;
-    H264PredContext hpc;
+    VP8PredContext pred;
     vp8_mc_func put_pixels_tab[3][3][3];
     AVFrame frames[5];
 

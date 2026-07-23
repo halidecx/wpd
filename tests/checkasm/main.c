@@ -5,7 +5,7 @@
 #include "checkasm.h"
 
 void checkasm_check_vp8dsp(void);
-void checkasm_check_h264pred(void);
+void checkasm_check_vp8pred(void);
 void checkasm_check_videodsp(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
@@ -27,9 +27,9 @@ static const CheckasmCpuInfo cpu_flags[] = {
 };
 
 static const CheckasmTest tests[] = {
-    { "vp8dsp",   checkasm_check_vp8dsp,   NULL, NULL },
-    { "h264pred", checkasm_check_h264pred, NULL, NULL },
-    { "videodsp", checkasm_check_videodsp, NULL, NULL },
+    { "vp8dsp",   checkasm_check_vp8dsp },
+    { "vp8pred",  checkasm_check_vp8pred },
+    { "videodsp", checkasm_check_videodsp },
     { 0 }
 };
 

@@ -25,7 +25,6 @@
 #define AVCODEC_VP8DATA_H
 
 #include "vp8.h"
-#include "h264pred.h"
 
 static const uint8_t vp8_pred4x4_mode[] =
 {
@@ -631,7 +630,6 @@ static const uint8_t vp8_token_update_probs[4][8][3][NUM_DCT_TOKENS-1] =
     },
 };
 
-// fixme: copied from h264data.h
 static const uint8_t zigzag_scan[16]={
     0+0*4, 1+0*4, 0+1*4, 0+2*4,
     1+1*4, 2+0*4, 3+0*4, 2+1*4,

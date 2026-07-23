@@ -20,7 +20,7 @@ lib_sources = files(
   'src/vp8.c',
   'src/vp8dsp.c',
   'src/vp56rac.c',
-  'src/h264pred.c',
+  'src/vp8pred.c',
   'src/compat.c',
 )
 lib_objects = []
@@ -74,7 +74,7 @@ if asm_enabled
     lib_objects += nasm_gen.process(
       files(
         'src/x86/vp8dsp.asm',
-        'src/x86/h264_intrapred.asm',
+        'src/x86/vp8_intrapred.asm',
         'src/x86/videodsp.asm',
       ),
       extra_args: ['-DHAVE_AVX2_EXTERNAL=1'],
@@ -82,12 +82,12 @@ if asm_enabled
     lib_objects += nasm_gen.process(files('src/x86/vp8dsp_loopfilter.asm'))
     lib_sources += files(
       'src/x86/vp8dsp_init.c',
-      'src/x86/h264pred_init.c',
+      'src/x86/vp8pred_init.c',
       'src/x86/videodsp_init.c',
     )
     lib_c_args += [
       '-DFFVP8_ENABLE_X86_SIMD=1',
-      '-DFFVP8_H264PRED_X86=1',
+      '-DFFVP8_PRED_X86=1',
       '-DHAVE_YASM=1',
       '-DHAVE_AVX2_EXTERNAL=1',
       '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
@@ -97,12 +97,12 @@ if asm_enabled
     lib_sources += files(
       'src/aarch64/vp8dsp_neon.S',
       'src/aarch64/vp8dsp_init_aarch64.c',
-      'src/aarch64/h264pred_neon.S',
-      'src/aarch64/h264pred_init.c',
+      'src/aarch64/vp8pred_neon.S',
+      'src/aarch64/vp8pred_init.c',
       'src/aarch64/videodsp.S',
       'src/aarch64/videodsp_init.c',
     )
-    lib_c_args += ['-DFFVP8_H264PRED_AARCH64=1']
+    lib_c_args += ['-DFFVP8_PRED_AARCH64=1']
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
     lib_sources += files(
@@ -112,14 +112,14 @@ if asm_enabled
       'src/arm/vp8dsp_init_arm.c',
       'src/arm/vp8dsp_init_armv6.c',
       'src/arm/vp8dsp_init_neon.c',
-      'src/arm/h264pred_neon.S',
-      'src/arm/h264pred_init.c',
+      'src/arm/vp8pred_neon.S',
+      'src/arm/vp8pred_init.c',
       'src/arm/videodsp_armv5te.S',
       'src/arm/videodsp_init.c',
     )
     lib_c_args += [
-      '-DFFVP8_H264PRED_ARM=1',
       '-DFFVP8_ARM_NEON_ASM=1',
+      '-DFFVP8_PRED_ARM=1',
     ]
   endif
 endif
@@ -159,7 +159,7 @@ if asm_enabled and checkasm_dep.found()
     files(
       'tests/checkasm/main.c',
       'tests/checkasm/vp8dsp.c',
-      'tests/checkasm/h264pred.c',
+      'tests/checkasm/vp8pred.c',
       'tests/checkasm/videodsp.c',
     ),
     dependencies: [ffvp8_dep, checkasm_dep],

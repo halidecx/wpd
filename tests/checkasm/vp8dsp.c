@@ -135,7 +135,7 @@ static void check_idct(VP8DSPContext *d, bool is_vp7)
             memcpy(subcoef1, subcoef0, 4 * 4 * sizeof(int16_t));
             // Note, this uses a pixel stride of 4, even though the real decoder uses a stride as a
             // multiple of 16. If optimizations want to take advantage of that, this test needs to be
-            // updated to make it more like the h264dsp tests.
+            // Match the other DSP test layout.
             call_ref(dst0, subcoef0, 4);
             call_new(dst1, subcoef1, 4);
             if (memcmp(dst0, dst1, 4 * 4) ||
