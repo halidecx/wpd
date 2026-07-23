@@ -30,8 +30,8 @@ tm_shuf: times 8 db 0x03, 0x80
 
 SECTION .text
 
-cextern pb_1
-cextern pb_3
+cextern_naked wpd_pb_1
+cextern_naked wpd_pb_3
 
 ;-----------------------------------------------------------------------------
 ; void ff_pred16x16_vertical_8(uint8_t *src, ptrdiff_t stride)
@@ -61,7 +61,7 @@ cglobal pred16x16_vertical_8, 2,3
 cglobal pred16x16_horizontal_8, 2,3
     mov       r2, 8
 %if cpuflag(ssse3) && notcpuflag(avx2)
-    mova      m2, [pb_3]
+    mova      m2, [wpd_pb_3]
 %endif
 .loop:
 %if cpuflag(avx2)
@@ -245,7 +245,7 @@ cglobal pred8x8_vertical_8, 2,2
 cglobal pred8x8_horizontal_8, 2,3,3
     mov       r2, 4
 %if cpuflag(ssse3) && notcpuflag(avx2)
-    mova      m2, [pb_3]
+    mova      m2, [wpd_pb_3]
 %endif
 .loop:
 %if cpuflag(avx2)
@@ -375,7 +375,7 @@ cglobal pred8x8_tm_vp8_8, 2,3,6
 %ifnidn %1, %4
     mova    %1, %4
 %endif
-    pand    %3, [pb_1]
+    pand    %3, [wpd_pb_1]
     psubusb %2, %3
     pavgb   %1, %2
 %endmacro

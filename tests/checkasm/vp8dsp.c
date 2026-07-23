@@ -30,8 +30,8 @@
     do {                                                                     \
         int x, y;                                                            \
         for (y = 0; y < 4; y++) {                                            \
-            AV_WN32A((src) + y * (stride), rnd());                           \
-            AV_WN32A((dst) + y * (stride), rnd());                           \
+            WPD_WN32A((src) + y * (stride), rnd());                           \
+            WPD_WN32A((dst) + y * (stride), rnd());                           \
             for (x = 0; x < 4; x++)                                          \
                 (coef)[y * 4 + x] = (src)[y * (stride) + x] -                \
                                     (dst)[y * (stride) + x];                 \
@@ -114,7 +114,7 @@ static void check_idct(VP8DSPContext *d, bool is_vp7)
     LOCAL_ALIGNED_16(int16_t, subcoef0, [4 * 4]);
     LOCAL_ALIGNED_16(int16_t, subcoef1, [4 * 4]);
     int dc;
-    declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *dst, int16_t *block, ptrdiff_t stride);
+    declare_func_emms(WPD_CPU_MMX, void, uint8_t *dst, int16_t *block, ptrdiff_t stride);
 
     randomize_buffers(src, dst, 4, coef);
 
@@ -157,7 +157,7 @@ static void check_idct_dc4(VP8DSPContext *d, bool is_vp7)
     LOCAL_ALIGNED_16(int16_t, subcoef0, [4][4 * 4]);
     LOCAL_ALIGNED_16(int16_t, subcoef1, [4][4 * 4]);
     int i, chroma;
-    declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *dst, int16_t block[4][16], ptrdiff_t stride);
+    declare_func_emms(WPD_CPU_MMX, void, uint8_t *dst, int16_t block[4][16], ptrdiff_t stride);
 
     for (chroma = 0; chroma <= 1; chroma++) {
         void (*idct4dc)(uint8_t *, int16_t[4][16], ptrdiff_t) = chroma ? d->vp8_idct_dc_add4uv : d->vp8_idct_dc_add4y;
@@ -197,7 +197,7 @@ static void check_luma_dc_wht(VP8DSPContext *d, bool is_vp7)
     LOCAL_ALIGNED_16(int16_t, block1, [4][4][16]);
     int dc_only;
     int blockx, blocky;
-    declare_func_emms(AV_CPU_FLAG_MMX, void, int16_t block[4][4][16], int16_t dc[16]);
+    declare_func_emms(WPD_CPU_MMX, void, int16_t block[4][4][16], int16_t dc[16]);
 
     for (blocky = 0; blocky < 4; blocky++) {
         for (blockx = 0; blockx < 4; blockx++) {
@@ -246,7 +246,7 @@ static void check_luma_dc_wht(VP8DSPContext *d, bool is_vp7)
     do {                                                  \
         int k;                                            \
         for (k = 0; k < SRC_BUF_SIZE; k += 4) {           \
-            AV_WN32A(buf + k, rnd());                     \
+            WPD_WN32A(buf + k, rnd());                     \
         }                                                 \
     } while (0)
 
@@ -256,7 +256,7 @@ static void check_mc(VP8DSPContext *d)
     BUF_RECT(uint8_t, dst0, 16, 16);
     BUF_RECT(uint8_t, dst1, 16, 16);
     int type, k, dx, dy;
-    declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *, ptrdiff_t,
+    declare_func_emms(WPD_CPU_MMX, void, uint8_t *, ptrdiff_t,
                       const uint8_t *, ptrdiff_t, int, int, int);
 
     for (type = 0; type < 2; type++) {
@@ -314,7 +314,7 @@ static void check_mc(VP8DSPContext *d)
 
 #undef randomize_buffers
 
-#define setpx(a, b, c) buf[(a) + (b) * jstride] = av_clip_uint8(c)
+#define setpx(a, b, c) buf[(a) + (b) * jstride] = wpd_clip_uint8(c)
 // Set the pixel to c +/- [0,d]
 #define setdx(a, b, c, d) setpx(a, b, c - (d) + (rnd() % ((d) * 2 + 1)))
 // Set the pixel to c +/- [d,d+e] (making sure it won't be clipped)

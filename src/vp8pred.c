@@ -133,7 +133,7 @@ static void pred4x4_horizontal_down(uint8_t *src, const uint8_t *topright, int s
 
 static void pred4x4_tm(uint8_t *src, const uint8_t *topright, int stride)
 {
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP - src[-1 - stride];
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP - src[-1 - stride];
     uint8_t *top = src - stride;
     for (int y = 0; y < 4; y++) {
         uint8_t *cm_in = cm + src[-1];
@@ -177,7 +177,7 @@ static void pred_tm(uint8_t *src, int stride, int size)
     const int top_left = src[-stride - 1];
     for (int y = 0; y < size; y++)
         for (int x = 0; x < size; x++)
-            src[y * stride + x] = av_clip_uint8(src[y * stride - 1] + src[x - stride] - top_left);
+            src[y * stride + x] = wpd_clip_uint8(src[y * stride - 1] + src[x - stride] - top_left);
 }
 
 static void pred_dc(uint8_t *src, int stride, int size)
@@ -241,11 +241,11 @@ void ff_vp8_pred_init(VP8PredContext *pred)
             pred16x16_dc127, pred16x16_dc129,
         },
     };
-#if defined(FFVP8_PRED_X86)
+#if defined(WPD_PRED_X86)
     ff_vp8_pred_init_x86(pred);
-#elif defined(FFVP8_PRED_AARCH64)
+#elif defined(WPD_PRED_AARCH64)
     ff_vp8_pred_init_aarch64(pred);
-#elif defined(FFVP8_PRED_ARM)
+#elif defined(WPD_PRED_ARM)
     ff_vp8_pred_init_arm(pred);
 #endif
 }

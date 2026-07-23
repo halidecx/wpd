@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_AARCH64_VP8DSP_H
-#define AVCODEC_AARCH64_VP8DSP_H
+#ifndef WPD_AARCH64_VP8DSP_H
+#define WPD_AARCH64_VP8DSP_H
 
 #include "../vp8dsp.h"
 
@@ -72,4 +72,4 @@
     VP8_MC(bilin ## w ## _v, opt);              \
     VP8_MC(bilin ## w ## _hv, opt)
 
-#endif /* AVCODEC_AARCH64_VP8DSP_H */
+#endif /* WPD_AARCH64_VP8DSP_H */

@@ -18,15 +18,15 @@
 
 #include <stdint.h>
 
-#include "compat.h"
+#include "wpd_codec.h"
 #include "vp8dsp.h"
 
-av_cold void ff_vp8dsp_init_arm(VP8DSPContext *dsp)
+wpd_cold void ff_vp8dsp_init_arm(VP8DSPContext *dsp)
 {
-    int cpu_flags = av_get_cpu_flags();
+    int cpu_flags = wpd_get_cpu_flags();
 
-    if (have_armv6(cpu_flags))
+    if (wpd_have_armv6(cpu_flags))
         ff_vp8dsp_init_armv6(dsp);
-    if (have_neon(cpu_flags))
+    if (wpd_have_neon(cpu_flags))
         ff_vp8dsp_init_neon(dsp);
 }

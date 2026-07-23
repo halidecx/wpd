@@ -16,12 +16,13 @@ cpu_family = host_machine.cpu_family()
 
 inc_dirs = [include_directories('include', 'src')]
 lib_sources = files(
-  'src/ffvp8.c',
+  'src/wpd_decoder.c',
   'src/vp8.c',
   'src/vp8dsp.c',
   'src/vp56rac.c',
   'src/vp8pred.c',
-  'src/compat.c',
+  'src/wpd_compat.c',
+  'src/wpd_cpu.c',
 )
 lib_objects = []
 lib_c_args = [
@@ -84,10 +85,11 @@ if asm_enabled
       'src/x86/vp8dsp_init.c',
       'src/x86/vp8pred_init.c',
       'src/x86/videodsp_init.c',
+      'src/x86/wpd_simd_constants.c',
     )
     lib_c_args += [
-      '-DFFVP8_ENABLE_X86_SIMD=1',
-      '-DFFVP8_PRED_X86=1',
+      '-DWPD_ENABLE_X86_SIMD=1',
+      '-DWPD_PRED_X86=1',
       '-DHAVE_YASM=1',
       '-DHAVE_AVX2_EXTERNAL=1',
       '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
@@ -102,7 +104,7 @@ if asm_enabled
       'src/aarch64/videodsp.S',
       'src/aarch64/videodsp_init.c',
     )
-    lib_c_args += ['-DFFVP8_PRED_AARCH64=1']
+    lib_c_args += ['-DWPD_PRED_AARCH64=1']
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
     lib_sources += files(
@@ -118,16 +120,16 @@ if asm_enabled
       'src/arm/videodsp_init.c',
     )
     lib_c_args += [
-      '-DFFVP8_ARM_NEON_ASM=1',
-      '-DFFVP8_PRED_ARM=1',
+      '-DWPD_ARM_NEON_ASM=1',
+      '-DWPD_PRED_ARM=1',
     ]
   endif
 endif
 
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 
-libffvp8 = static_library(
-  'ffvp8',
+libwpd = static_library(
+  'wpd',
   lib_sources,
   lib_objects,
   include_directories: inc_dirs,
@@ -135,15 +137,15 @@ libffvp8 = static_library(
   install: false,
 )
 
-ffvp8_dep = declare_dependency(
-  link_with: libffvp8,
+wpd_dep = declare_dependency(
+  link_with: libwpd,
   include_directories: inc_dirs,
 )
 
 executable(
   'wpd',
   'tools/wpd.c',
-  dependencies: ffvp8_dep,
+  dependencies: wpd_dep,
   install: false,
 )
 
@@ -162,7 +164,7 @@ if asm_enabled and checkasm_dep.found()
       'tests/checkasm/vp8pred.c',
       'tests/checkasm/videodsp.c',
     ),
-    dependencies: [ffvp8_dep, checkasm_dep],
+    dependencies: [wpd_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),
     c_args: lib_c_args,
     build_by_default: false,

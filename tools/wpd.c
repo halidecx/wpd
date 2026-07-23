@@ -1,4 +1,4 @@
-#include "ffvp8.h"
+#include "wpd.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -28,7 +28,7 @@ static int write_plane(FILE *output, const uint8_t *data, ptrdiff_t stride,
 int main(int argc, char **argv)
 {
     uint8_t header[32], frame_header[12];
-    FFVP8Decoder *decoder = NULL;
+    WPDDecoder *decoder = NULL;
     FILE *input = NULL, *output = NULL;
     int status = 1, wrote_header = 0;
     uint32_t frame_rate, time_scale;
@@ -60,7 +60,7 @@ int main(int argc, char **argv)
         frame_rate = 1;
         time_scale = 1;
     }
-    decoder = ffvp8_decoder_create();
+    decoder = wpd_decoder_create();
     if (!decoder) {
         fprintf(stderr, "out of memory\n");
         goto done;
@@ -68,16 +68,16 @@ int main(int argc, char **argv)
     while (fread(frame_header, 1, sizeof(frame_header), input) == sizeof(frame_header)) {
         uint32_t size = rl32(frame_header);
         uint8_t *compressed = malloc(size ? size : 1);
-        FFVP8Frame frame;
+        WPDFrame frame;
         int decode_result;
         if (!compressed || fread(compressed, 1, size, input) != size) {
             fprintf(stderr, "%s: truncated IVF frame\n", argv[1]);
             free(compressed);
             goto done;
         }
-        decode_result = ffvp8_decoder_decode(decoder, compressed, size, &frame);
+        decode_result = wpd_decoder_decode(decoder, compressed, size, &frame);
         if (decode_result < 0) {
-            fprintf(stderr, "VP8 decode failed: %s\n", ffvp8_decoder_error(decoder));
+            fprintf(stderr, "VP8 decode failed: %s\n", wpd_decoder_error(decoder));
             free(compressed);
             goto done;
         }
@@ -107,7 +107,7 @@ int main(int argc, char **argv)
     }
     status = 0;
 done:
-    ffvp8_decoder_free(decoder);
+    wpd_decoder_free(decoder);
     if (input)
         fclose(input);
     if (output && fclose(output) && !status)

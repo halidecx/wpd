@@ -151,10 +151,10 @@ filter_h2_shuf:  db 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5,  6, 6,  7, 7,  8
 pw_20091: times 4 dw 20091
 pw_17734: times 4 dw 17734
 
-cextern pw_3
-cextern pw_4
-cextern pw_64
-cextern pw_256
+cextern_naked wpd_pw_3
+cextern_naked wpd_pw_4
+cextern_naked wpd_pw_64
+cextern_naked wpd_pw_256
 
 SECTION .text
 
@@ -218,7 +218,7 @@ cglobal put_vp8_epel%1_h6, 6, 6 + npicregs, 6+2*(%1==8), dst, dststride, src, sr
     add     srcq, srcstrideq
     paddw     m0, m1
     paddsw    m0, m2
-    pmulhrsw  m0, [pw_256]
+    pmulhrsw  m0, [wpd_pw_256]
     packuswb  m0, m0
     MOV   [dstq], m0        ; store
 
@@ -229,7 +229,7 @@ cglobal put_vp8_epel%1_h6, 6, 6 + npicregs, 6+2*(%1==8), dst, dststride, src, sr
     RET
 
 cglobal put_vp8_epel%1_h4, 6, 6 + npicregs, 6+!!(%1 == 8), dst, dststride, src, srcstride, height, mx, picreg
-    mova      m2, [pw_256]
+    mova      m2, [wpd_pw_256]
 %if %1 == 8
     shl      mxd, 4
     mova      m3, [filter_h4_shuf1]
@@ -281,7 +281,7 @@ cglobal put_vp8_epel%1_v4, 7, 7, 8, dst, dststride, src, srcstride, height, picr
 %endif
     mova      m5, [fourtap_filter_b+myq-16]
     mova      m6, [fourtap_filter_b+myq]
-    mova      m7, [pw_256]
+    mova      m7, [wpd_pw_256]
 
     ; read 3 lines
     mov  picregq, srcstrideq
@@ -372,7 +372,7 @@ cglobal put_vp8_epel%1_v6, 7, 7, 8, dst, dststride, src, srcstride, height, picr
     lea      srcq, [srcq+2*srcstrideq]
     paddsw     m1, m0
     mova       m0, m2
-    pmulhrsw   m1, [pw_256]
+    pmulhrsw   m1, [wpd_pw_256]
     mova       m2, m4
     packuswb   m1, m1
     movd   [dstq], m1
@@ -398,7 +398,7 @@ cglobal put_vp8_epel%1_v6, 7, 7, 8, dst, dststride, src, srcstride, height, picr
     paddsw    m6, m7
     mova      m1, m2
     mova      m2, m3
-    pmulhrsw  m6, [pw_256]
+    pmulhrsw  m6, [wpd_pw_256]
     mova      m3, m4
     packuswb  m6, m6
     mova      m4, m5
@@ -424,7 +424,7 @@ cglobal put_vp8_epel8_h4, 6, 6 + npicregs, 10, dst, dststride, src, srcstride, h
 %endif
     lea      mxq, [fourtap_filter_v+mxq-32]
     pxor      m7, m7
-    mova      m4, [pw_64]
+    mova      m4, [wpd_pw_64]
     mova      m5, [mxq+ 0]
     mova      m6, [mxq+16]
 %ifdef m8
@@ -473,7 +473,7 @@ cglobal put_vp8_epel8_h6, 6, 6 + npicregs, 14, dst, dststride, src, srcstride, h
 %endif
     lea      mxq, [sixtap_filter_v+mxq-96]
     pxor      m7, m7
-    mova      m6, [pw_64]
+    mova      m6, [wpd_pw_64]
 %ifdef m8
     mova      m8, [mxq+ 0]
     mova      m9, [mxq+16]
@@ -535,7 +535,7 @@ cglobal put_vp8_epel8_v4, 7, 7, 8, dst, dststride, src, srcstride, height, picre
     lea  picregq, [fourtap_filter_v_m]
 %endif
     lea      myq, [fourtap_filter_v+myq-32]
-    mova      m6, [pw_64]
+    mova      m6, [wpd_pw_64]
     pxor      m7, m7
     mova      m5, [myq+48]
 
@@ -618,7 +618,7 @@ cglobal put_vp8_epel8_v6, 7, 7, 8, dst, dststride, src, srcstride, height, picre
     movh      m5, [srcq+srcstrideq]      ; read new row
     punpcklbw m5, m7
     pmullw    m0, [myq+0]
-    paddw     m6, [pw_64]
+    paddw     m6, [wpd_pw_64]
     paddw     m6, m0
     mova      m0, m1
     mova      m1, m2
@@ -859,7 +859,7 @@ cglobal vp8_idct_dc_add, 3, 3, 6, dst, block, stride
     pxor       m1, m1
 
     ; calculate DC
-    paddw      m0, [pw_4]
+    paddw      m0, [wpd_pw_4]
     movd [blockq], m1
     DEFINE_ARGS dst1, dst2, stride
     lea     dst2q, [dst1q+strideq*2]
@@ -913,7 +913,7 @@ cglobal vp8_idct_dc_add4y, 3, 3, 6, dst, block, stride
     pxor      m1, m1
 
     ; calculate DC
-    paddw     m0, [pw_4]
+    paddw     m0, [wpd_pw_4]
     movd [blockq+32*0], m1
     movd [blockq+32*1], m1
     movd [blockq+32*2], m1
@@ -948,7 +948,7 @@ cglobal vp8_idct_dc_add4uv, 3, 3, 0, dst, block, stride
     pxor      m6, m6
 
     ; calculate DC
-    paddw     m0, [pw_4]
+    paddw     m0, [wpd_pw_4]
     movd [blockq+32*0], m6
     movd [blockq+32*1], m6
     movd [blockq+32*2], m6
@@ -1026,7 +1026,7 @@ cglobal vp8_idct_add, 3, 3, 0, dst, block, stride
     ; actual IDCT
     VP8_IDCT_TRANSFORM4x4_1D 0, 1, 2, 3, 4, 5
     TRANSPOSE4x4W            0, 1, 2, 3, 4
-    paddw        m0, [pw_4]
+    paddw        m0, [wpd_pw_4]
     VP8_IDCT_TRANSFORM4x4_1D 0, 1, 2, 3, 4, 5
     TRANSPOSE4x4W            0, 1, 2, 3, 4
 
@@ -1081,7 +1081,7 @@ cglobal vp8_luma_dc_wht, 2, 3, 0, block, dc1, dc2
     movaps [dc1q+16], xmm0
     HADAMARD4_1D  0, 1, 2, 3
     TRANSPOSE4x4W 0, 1, 2, 3, 4
-    paddw         m0, [pw_3]
+    paddw         m0, [wpd_pw_3]
     HADAMARD4_1D  0, 1, 2, 3
     psraw         m0, 3
     psraw         m1, 3

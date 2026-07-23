@@ -34,11 +34,11 @@ pb_27_63: times 8 db 27, 63
 pb_18_63: times 8 db 18, 63
 pb_9_63:  times 8 db  9, 63
 
-cextern pb_1
-cextern pb_3
-cextern pw_9
-cextern pw_18
-cextern pb_80
+cextern_naked wpd_pb_1
+cextern_naked wpd_pb_3
+cextern_naked wpd_pw_9
+cextern_naked wpd_pw_18
+cextern_naked wpd_pb_80
 
 SECTION .text
 
@@ -220,20 +220,20 @@ cglobal vp8_%1_loop_filter_simple, 3, %2, 8, dst, stride, flim, cntr
     mova           m6, m1           ; m6=backup of p0
     psubusb        m1, m2           ; p0-q0
     psubusb        m2, m6           ; q0-p0
-    por            m1, m2           ; FFABS(p0-q0)
-    paddusb        m1, m1           ; m1=FFABS(p0-q0)*2
+    por            m1, m2           ; WPD_ABS(p0-q0)
+    paddusb        m1, m1           ; m1=WPD_ABS(p0-q0)*2
 
     mova           m4, m3
     mova           m2, m0
     psubusb        m3, m0           ; q1-p1
     psubusb        m0, m4           ; p1-q1
-    por            m3, m0           ; FFABS(p1-q1)
-    mova           m0, [pb_80]
+    por            m3, m0           ; WPD_ABS(p1-q1)
+    mova           m0, [wpd_pb_80]
     pxor           m2, m0
     pxor           m4, m0
     psubsb         m2, m4           ; m2=p1-q1 (signed) backup for below
     pand           m3, [pb_FE]
-    psrlq          m3, 1            ; m3=FFABS(p1-q1)/2, this can be used signed
+    psrlq          m3, 1            ; m3=WPD_ABS(p1-q1)/2, this can be used signed
     paddusb        m3, m1
     psubusb        m3, m7
     pxor           m1, m1
@@ -252,7 +252,7 @@ cglobal vp8_%1_loop_filter_simple, 3, %2, 8, dst, stride, flim, cntr
     mova           m3, [pb_F8]
     mova           m1, m2
     paddsb         m2, [pb_4]       ; f1<<3=a+4
-    paddsb         m1, [pb_3]       ; f2<<3=a+3
+    paddsb         m1, [wpd_pb_3]       ; f2<<3=a+3
     pand           m2, m3
     pand           m1, m3           ; cache f2<<3
 
@@ -575,10 +575,10 @@ cglobal vp8_%1_loop_filter16y_inner, 5, 5, 13, stack_size, dst, stride, flimE, f
 
     ; filter_common; at this point, m2-m5=p1-q1 and m0 is filter_mask
 %ifdef m8 ; x86-64
-    mova             m8, [pb_80]
+    mova             m8, [wpd_pb_80]
 %define m_pb_80 m8
 %else ; x86-32
-%define m_pb_80 [pb_80]
+%define m_pb_80 [wpd_pb_80]
 %endif
     mova             m1, m4
     mova             m7, m3
@@ -599,7 +599,7 @@ cglobal vp8_%1_loop_filter16y_inner, 5, 5, 13, stack_size, dst, stride, flimE, f
     pand             m7, m0
     mova             m1, [pb_F8]
     mova             m6, m7
-    paddsb           m7, [pb_3]
+    paddsb           m7, [wpd_pb_3]
     paddsb           m6, [pb_4]
     pand             m7, m1
     pand             m6, m1
@@ -634,7 +634,7 @@ cglobal vp8_%1_loop_filter16y_inner, 5, 5, 13, stack_size, dst, stride, flimE, f
     pxor             m7, m7
     pand             m0, m6
     pand             m1, m6
-    psubusb          m1, [pb_1]
+    psubusb          m1, [wpd_pb_1]
     pavgb            m0, m7          ; a
     pavgb            m1, m7          ; -a
     psubusb          m5, m0
@@ -956,10 +956,10 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 
     ; filter_common; at this point, m2-m5=p1-q1 and m0 is filter_mask
 %ifdef m8 ; x86-64
-    mova             m8, [pb_80]
+    mova             m8, [wpd_pb_80]
 %define m_pb_80 m8
 %else ; x86-32
-%define m_pb_80 [pb_80]
+%define m_pb_80 [wpd_pb_80]
 %endif
     mova             m1, m4
     mova             m7, m3
@@ -988,7 +988,7 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 
     mova             m1, [pb_F8]
     mova             m6, m7
-    paddsb           m7, [pb_3]
+    paddsb           m7, [wpd_pb_3]
     paddsb           m6, [pb_4]
     pand             m7, m1
     pand             m6, m1
@@ -1017,7 +1017,7 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 
     ; filter_mbedge (m2-m5 = p1-q1; lim_res carries w)
 %if cpuflag(ssse3)
-    mova             m7, [pb_1]
+    mova             m7, [wpd_pb_1]
 %else
     mova             m7, [pw_63]
 %endif
@@ -1097,8 +1097,8 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 %else
     mova            m6, m_maskres
     mova            m1, m_limres
-    pmullw          m6, [pw_18]
-    pmullw          m1, [pw_18]
+    pmullw          m6, [wpd_pw_18]
+    pmullw          m1, [wpd_pw_18]
     paddw           m6, m7
     paddw           m1, m7
 %endif
@@ -1138,8 +1138,8 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     mova            m6, m_maskres
     mova            m1, m_limres
 %endif
-    pmullw          m6, [pw_9]
-    pmullw          m1, [pw_9]
+    pmullw          m6, [wpd_pw_9]
+    pmullw          m1, [wpd_pw_9]
     paddw           m6, m7
     paddw           m1, m7
 %endif

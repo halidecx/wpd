@@ -34,15 +34,15 @@ static const char *const pred8x8_modes[VP8_PRED8X8_COUNT] = {
         int i;                                 \
         for (i = 0; i < BUF_SIZE; i += 4) {    \
             uint32_t r = rnd();                \
-            AV_WN32A(buf0 + i, r);             \
-            AV_WN32A(buf1 + i, r);             \
+            WPD_WN32A(buf0 + i, r);             \
+            WPD_WN32A(buf1 + i, r);             \
         }                                      \
     } while (0)
 
 static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
 {
     uint8_t *topright = buf0 + 2 * 16;
-    declare_func_emms(AV_CPU_FLAG_MMX | AV_CPU_FLAG_MMXEXT, void,
+    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
                       uint8_t *src, const uint8_t *topright, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED4X4_COUNT; mode++) {
@@ -59,7 +59,7 @@ static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
 
 static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
 {
-    declare_func_emms(AV_CPU_FLAG_MMX | AV_CPU_FLAG_MMXEXT, void,
+    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
                       uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
@@ -76,7 +76,7 @@ static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
 
 static void check_pred16x16(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
 {
-    declare_func_emms(AV_CPU_FLAG_MMX | AV_CPU_FLAG_MMXEXT, void,
+    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
                       uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
@@ -96,11 +96,11 @@ void checkasm_check_vp8pred(void)
 {
     LOCAL_ALIGNED_16(uint8_t, buf0, [BUF_SIZE]);
     LOCAL_ALIGNED_16(uint8_t, buf1, [BUF_SIZE]);
-    AVCodecContext avctx = { 0 };
-    DSPContext dsp;
+    WpdCodecContext avctx = { 0 };
+    WpdDSPContext dsp;
     VP8PredContext pred;
 
-    dsputil_init(&dsp, &avctx);
+    wpd_dsp_init(&dsp, &avctx);
     ff_vp8_pred_init(&pred);
     check_pred4x4(&pred, buf0, buf1);
     report("pred4x4");

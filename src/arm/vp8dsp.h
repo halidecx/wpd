@@ -16,8 +16,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_ARM_VP8DSP_H
-#define AVCODEC_ARM_VP8DSP_H
+#ifndef WPD_ARM_VP8DSP_H
+#define WPD_ARM_VP8DSP_H
 
 #include "../vp8dsp.h"
 
@@ -75,4 +75,4 @@ void ff_vp8dsp_init_neon(VP8DSPContext *dsp);
     VP8_MC(bilin ## w ## _v, opt);              \
     VP8_MC(bilin ## w ## _hv, opt)
 
-#endif /* AVCODEC_ARM_VP8DSP_H */
+#endif /* WPD_ARM_VP8DSP_H */

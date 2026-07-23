@@ -1,32 +1,7 @@
-/*
- * VP8 compatible video decoder
- *
- * Copyright (C) 2010 David Conrad
- * Copyright (C) 2010 Ronald S. Bultje
- * Copyright (C) 2010 Jason Garrett-Glaser
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
+#ifndef WPD_VP8_H
+#define WPD_VP8_H
 
-#ifndef AVCODEC_VP8_H
-#define AVCODEC_VP8_H
-
-#include "vp56.h"
-#include "vp56data.h"
+#include "vp56rac.h"
 #include "vp8dsp.h"
 #include "vp8pred.h"
 
@@ -84,9 +59,9 @@ typedef struct {
 } VP8Macroblock;
 
 typedef struct {
-    AVCodecContext *avctx;
-    AVFrame *framep[4];
-    AVFrame *next_framep[4];
+    WpdCodecContext *avctx;
+    WpdFrame *framep[4];
+    WpdFrame *next_framep[4];
     uint8_t *edge_emu_buffer;
 
     uint16_t mb_width;   /* number of horizontal MB */
@@ -180,7 +155,7 @@ typedef struct {
      * per macroblock. We keep the last row in top_nnz.
      */
     uint8_t (*top_nnz)[9];
-    DECLARE_ALIGNED(8, uint8_t, left_nnz)[9];
+    WPD_DECLARE_ALIGNED(8, uint8_t, left_nnz)[9];
 
     /**
      * This is the index plus one of the last non-zero coeff
@@ -189,10 +164,10 @@ typedef struct {
      *     1 -> dc-only (special transform)
      *     2+-> full transform
      */
-    DECLARE_ALIGNED(16, uint8_t, non_zero_count_cache)[6][4];
+    WPD_DECLARE_ALIGNED(16, uint8_t, non_zero_count_cache)[6][4];
     VP56RangeCoder c;   ///< header context, includes mb modes and motion vectors
-    DECLARE_ALIGNED(16, DCTELEM, block)[6][4][16];
-    DECLARE_ALIGNED(16, DCTELEM, block_dc)[16];
+    WPD_DECLARE_ALIGNED(16, WpdDctElem, block)[6][4][16];
+    WPD_DECLARE_ALIGNED(16, WpdDctElem, block_dc)[16];
     uint8_t intra4x4_pred_mode_mb[16];
 
     /**
@@ -231,11 +206,11 @@ typedef struct {
      */
     int num_coeff_partitions;
     VP56RangeCoder coeff_partition[8];
-    DSPContext dsp;
+    WpdDSPContext dsp;
     VP8DSPContext vp8dsp;
     VP8PredContext pred;
     vp8_mc_func put_pixels_tab[3][3][3];
-    AVFrame frames[5];
+    WpdFrame frames[5];
 
     /**
      * A list of segmentation_map buffers that are to be free()'ed in
@@ -248,4 +223,9 @@ typedef struct {
     int maps_are_invalid;
 } VP8Context;
 
-#endif /* AVCODEC_VP8_H */
+int vp8_decode_init(WpdCodecContext *context);
+int vp8_decode_frame(WpdCodecContext *context, void *frame, int *got_frame,
+                     WpdPacket *packet);
+int vp8_decode_free(WpdCodecContext *context);
+
+#endif /* WPD_VP8_H */

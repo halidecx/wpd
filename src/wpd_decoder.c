@@ -1,60 +1,59 @@
-#include "ffvp8.h"
+#include "wpd.h"
 
-#include "compat.h"
+#include "wpd_codec.h"
 #include "vp8.h"
-#include "vp8_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 
-struct FFVP8Decoder {
-    AVCodecContext codec;
+struct WPDDecoder {
+    WpdCodecContext codec;
     VP8Context vp8;
-    AVFrame decoded;
+    WpdFrame decoded;
     uint8_t *packet_buffer;
     size_t packet_capacity;
     char error[128];
 };
 
-#define FFVP8_PACKET_PADDING 64
+#define WPD_PACKET_PADDING 64
 
-FFVP8Decoder *ffvp8_decoder_create(void)
+WPDDecoder *wpd_decoder_create(void)
 {
-    FFVP8Decoder *decoder = calloc(1, sizeof(*decoder));
+    WPDDecoder *decoder = calloc(1, sizeof(*decoder));
     if (!decoder)
         return NULL;
     decoder->codec.priv_data = &decoder->vp8;
     decoder->codec.flags = 0;
-    decoder->codec.skip_frame = AVDISCARD_DEFAULT;
-    decoder->codec.skip_loop_filter = AVDISCARD_DEFAULT;
+    decoder->codec.skip_frame = WPD_DISCARD_DEFAULT;
+    decoder->codec.skip_loop_filter = WPD_DISCARD_DEFAULT;
     if (vp8_decode_init(&decoder->codec) < 0) {
         snprintf(decoder->error, sizeof(decoder->error), "decoder initialization failed");
     }
     return decoder;
 }
 
-int ffvp8_decoder_decode(FFVP8Decoder *decoder,
+int wpd_decoder_decode(WPDDecoder *decoder,
                          const uint8_t *data, size_t size,
-                         FFVP8Frame *frame)
+                         WPDFrame *frame)
 {
-    AVPacket packet;
+    WpdPacket packet;
     int got_frame = 0;
     int result;
     if (!decoder || !data || !frame || size > INT_MAX)
         return -1;
     memset(frame, 0, sizeof(*frame));
-    if (decoder->packet_capacity < size + FFVP8_PACKET_PADDING) {
+    if (decoder->packet_capacity < size + WPD_PACKET_PADDING) {
         uint8_t *new_buffer = realloc(decoder->packet_buffer,
-                                      size + FFVP8_PACKET_PADDING);
+                                      size + WPD_PACKET_PADDING);
         if (!new_buffer) {
             snprintf(decoder->error, sizeof(decoder->error), "out of memory");
             return -1;
         }
         decoder->packet_buffer = new_buffer;
-        decoder->packet_capacity = size + FFVP8_PACKET_PADDING;
+        decoder->packet_capacity = size + WPD_PACKET_PADDING;
     }
     memcpy(decoder->packet_buffer, data, size);
-    memset(decoder->packet_buffer + size, 0, FFVP8_PACKET_PADDING);
+    memset(decoder->packet_buffer + size, 0, WPD_PACKET_PADDING);
     packet.data = decoder->packet_buffer;
     packet.size = (int)size;
     result = vp8_decode_frame(&decoder->codec, &decoder->decoded, &got_frame, &packet);
@@ -75,7 +74,7 @@ int ffvp8_decoder_decode(FFVP8Decoder *decoder,
     return 0;
 }
 
-void ffvp8_decoder_reset(FFVP8Decoder *decoder)
+void wpd_decoder_reset(WPDDecoder *decoder)
 {
     if (!decoder)
         return;
@@ -92,12 +91,12 @@ void ffvp8_decoder_reset(FFVP8Decoder *decoder)
         decoder->error[0] = 0;
 }
 
-const char *ffvp8_decoder_error(const FFVP8Decoder *decoder)
+const char *wpd_decoder_error(const WPDDecoder *decoder)
 {
     return decoder && decoder->error[0] ? decoder->error : "unknown decoder error";
 }
 
-void ffvp8_decoder_free(FFVP8Decoder *decoder)
+void wpd_decoder_free(WPDDecoder *decoder)
 {
     if (decoder) {
         vp8_decode_free(&decoder->codec);

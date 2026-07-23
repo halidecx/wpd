@@ -1,7 +1,7 @@
-#ifndef FFVP8_PRED_H
-#define FFVP8_PRED_H
+#ifndef WPD_PRED_H
+#define WPD_PRED_H
 
-#include "compat.h"
+#include "wpd_codec.h"
 
 enum VP8Pred4x4Mode {
     VERT_PRED,

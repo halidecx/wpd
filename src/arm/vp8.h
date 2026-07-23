@@ -16,16 +16,16 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_ARM_VP8_H
-#define AVCODEC_ARM_VP8_H
+#ifndef WPD_ARM_VP8_H
+#define WPD_ARM_VP8_H
 
-#include "compat.h"
+#include "wpd_codec.h"
 
 #if defined(__arm__)
 #define decode_block_coeffs_internal ff_decode_block_coeffs_armv6
-int ff_decode_block_coeffs_armv6(VP56RangeCoder *rc, DCTELEM block[16],
+int ff_decode_block_coeffs_armv6(VP56RangeCoder *rc, WpdDctElem block[16],
                                  uint8_t probs[8][3][NUM_DCT_TOKENS-1],
                                  int i, uint8_t *token_prob, int16_t qmul[2]);
 #endif
 
-#endif /* AVCODEC_ARM_VP8_H */
+#endif /* WPD_ARM_VP8_H */

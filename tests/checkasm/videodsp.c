@@ -25,7 +25,7 @@
     do {                                                \
         size_t i;                                       \
         for (i = 0; i < w * h * sizeof(*src0); i += 4)  \
-            AV_WN32A(((uint8_t *) src0) + i, rnd());    \
+            WPD_WN32A(((uint8_t *) src0) + i, rnd());    \
     } while (0)
 
 #define iter_1d(type, fix, fix_val, var, var_start, var_end)        \
@@ -75,10 +75,10 @@
 
 void checkasm_check_videodsp(void)
 {
-    DSPContext vdsp;
-    AVCodecContext avctx = { 0 };
+    WpdDSPContext vdsp;
+    WpdCodecContext avctx = { 0 };
 
-    dsputil_init(&vdsp, &avctx);
+    wpd_dsp_init(&vdsp, &avctx);
     if (check_func(vdsp.emulated_edge_mc, "emulated_edge_mc_8"))
         check_emu_edge(uint8_t);
 

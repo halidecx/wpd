@@ -19,10 +19,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "compat.h"
-#include "vp56.h"
+#include "wpd_codec.h"
+#include "vp56rac.h"
 
-const uint8_t ff_vp56_norm_shift[256]= {
+const uint8_t wpd_vp56_norm_shift[256]= {
  8,7,6,6,5,5,5,5,4,4,4,4,4,4,4,4,
  3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
  2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,
@@ -37,11 +37,11 @@ const uint8_t ff_vp56_norm_shift[256]= {
  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
 };
 
-void ff_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf, int buf_size)
+void wpd_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf, int buf_size)
 {
     c->high = 255;
     c->bits = -16;
     c->buffer = buf;
     c->end = buf + buf_size;
-    c->code_word = bytestream_get_be24(&c->buffer);
+    c->code_word = wpd_bytestream_get_be24(&c->buffer);
 }

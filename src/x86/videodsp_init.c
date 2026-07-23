@@ -19,7 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "compat.h"
+#include "wpd_codec.h"
 
 #include <assert.h>
 
@@ -109,7 +109,7 @@ static emu_edge_hfix_func * const hfixtbl_avx2[11] = {
 extern emu_edge_hvar_func ff_emu_edge_hvar_avx2;
 #endif
 
-static av_always_inline void emulated_edge_mc(uint8_t *dst, const uint8_t *src,
+static wpd_always_inline void emulated_edge_mc(uint8_t *dst, const uint8_t *src,
                                               ptrdiff_t dst_stride,
                                               ptrdiff_t src_stride,
                                               x86_reg block_w, x86_reg block_h,
@@ -125,7 +125,7 @@ static av_always_inline void emulated_edge_mc(uint8_t *dst, const uint8_t *src,
     if (!w || !h)
         return;
 
-    av_assert2(block_w <= FFABS(dst_stride));
+    av_assert2(block_w <= WPD_ABS(dst_stride));
 
     if (src_y >= h) {
         src -= src_y*src_stride;
@@ -144,10 +144,10 @@ static av_always_inline void emulated_edge_mc(uint8_t *dst, const uint8_t *src,
         src_x  = 1 - block_w;
     }
 
-    start_y = FFMAX(0, -src_y);
-    start_x = FFMAX(0, -src_x);
-    end_y   = FFMIN(block_h, h-src_y);
-    end_x   = FFMIN(block_w, w-src_x);
+    start_y = WPD_MAX(0, -src_y);
+    start_x = WPD_MAX(0, -src_x);
+    end_y   = WPD_MIN(block_h, h-src_y);
+    end_x   = WPD_MIN(block_w, w-src_x);
     av_assert2(start_x < end_x && block_w > 0);
     av_assert2(start_y < end_y && block_h > 0);
 
@@ -198,7 +198,7 @@ void ff_emulated_edge_mc_sse2(uint8_t *buf, const uint8_t *src,
 }
 
 #if HAVE_AVX2_EXTERNAL
-static av_noinline void emulated_edge_mc_avx2(uint8_t *buf, const uint8_t *src,
+static wpd_noinline void emulated_edge_mc_avx2(uint8_t *buf, const uint8_t *src,
                                               ptrdiff_t buf_stride,
                                               ptrdiff_t src_stride,
                                               int block_w, int block_h,
@@ -213,16 +213,16 @@ static av_noinline void emulated_edge_mc_avx2(uint8_t *buf, const uint8_t *src,
 
 void ff_prefetch_mmxext(uint8_t *buf, int stride, int h);
 
-av_cold void ff_dsputil_init_x86(DSPContext *ctx)
+wpd_cold void wpd_dsp_init_x86(WpdDSPContext *ctx)
 {
-    int cpu_flags = av_get_cpu_flags();
+    int cpu_flags = wpd_get_cpu_flags();
 
-    if (EXTERNAL_MMXEXT(cpu_flags))
+    if (WPD_CPU_HAS_MMX2(cpu_flags))
         ctx->prefetch = ff_prefetch_mmxext;
-    if (EXTERNAL_SSE2(cpu_flags))
+    if (WPD_CPU_HAS_SSE2(cpu_flags))
         ctx->emulated_edge_mc = ff_emulated_edge_mc_sse2;
 #if HAVE_AVX2_EXTERNAL
-    if (EXTERNAL_AVX2(cpu_flags))
+    if (WPD_CPU_HAS_AVX2(cpu_flags))
         ctx->emulated_edge_mc = emulated_edge_mc_avx2;
 #endif
 }

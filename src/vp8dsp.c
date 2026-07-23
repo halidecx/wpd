@@ -24,11 +24,24 @@
  * VP8 compatible video decoder
  */
 
-#include "compat.h"
+#include "wpd_codec.h"
 #include "vp8dsp.h"
 
+uint8_t wpd_crop_table[256 + 2 * WPD_MAX_NEG_CROP];
+
+void wpd_dsp_data_init(void)
+{
+    static int initialized;
+
+    if (!initialized) {
+        for (int i = -WPD_MAX_NEG_CROP; i < 256 + WPD_MAX_NEG_CROP; i++)
+            wpd_crop_table[i + WPD_MAX_NEG_CROP] = wpd_clip_uint8(i);
+        initialized = 1;
+    }
+}
+
 // TODO: Maybe add dequant
-static void vp8_luma_dc_wht_c(DCTELEM block[4][4][16], DCTELEM dc[16])
+static void vp8_luma_dc_wht_c(WpdDctElem block[4][4][16], WpdDctElem dc[16])
 {
     int i, t0, t1, t2, t3;
 
@@ -61,7 +74,7 @@ static void vp8_luma_dc_wht_c(DCTELEM block[4][4][16], DCTELEM dc[16])
     }
 }
 
-static void vp8_luma_dc_wht_dc_c(DCTELEM block[4][4][16], DCTELEM dc[16])
+static void vp8_luma_dc_wht_dc_c(WpdDctElem block[4][4][16], WpdDctElem dc[16])
 {
     int i, val = (dc[0] + 3) >> 3;
     dc[0] = 0;
@@ -77,10 +90,10 @@ static void vp8_luma_dc_wht_dc_c(DCTELEM block[4][4][16], DCTELEM dc[16])
 #define MUL_20091(a) ((((a)*20091) >> 16) + (a))
 #define MUL_35468(a)  (((a)*35468) >> 16)
 
-static void vp8_idct_add_c(uint8_t *dst, DCTELEM block[16], ptrdiff_t stride)
+static void vp8_idct_add_c(uint8_t *dst, WpdDctElem block[16], ptrdiff_t stride)
 {
     int i, t0, t1, t2, t3;
-    DCTELEM tmp[16];
+    WpdDctElem tmp[16];
 
     for (i = 0; i < 4; i++) {
         t0 = block[0*4+i] + block[2*4+i];
@@ -104,29 +117,29 @@ static void vp8_idct_add_c(uint8_t *dst, DCTELEM block[16], ptrdiff_t stride)
         t2 = MUL_35468(tmp[1*4+i]) - MUL_20091(tmp[3*4+i]);
         t3 = MUL_20091(tmp[1*4+i]) + MUL_35468(tmp[3*4+i]);
 
-        dst[0] = av_clip_uint8(dst[0] + ((t0 + t3 + 4) >> 3));
-        dst[1] = av_clip_uint8(dst[1] + ((t1 + t2 + 4) >> 3));
-        dst[2] = av_clip_uint8(dst[2] + ((t1 - t2 + 4) >> 3));
-        dst[3] = av_clip_uint8(dst[3] + ((t0 - t3 + 4) >> 3));
+        dst[0] = wpd_clip_uint8(dst[0] + ((t0 + t3 + 4) >> 3));
+        dst[1] = wpd_clip_uint8(dst[1] + ((t1 + t2 + 4) >> 3));
+        dst[2] = wpd_clip_uint8(dst[2] + ((t1 - t2 + 4) >> 3));
+        dst[3] = wpd_clip_uint8(dst[3] + ((t0 - t3 + 4) >> 3));
         dst += stride;
     }
 }
 
-static void vp8_idct_dc_add_c(uint8_t *dst, DCTELEM block[16], ptrdiff_t stride)
+static void vp8_idct_dc_add_c(uint8_t *dst, WpdDctElem block[16], ptrdiff_t stride)
 {
     int i, dc = (block[0] + 4) >> 3;
     block[0] = 0;
 
     for (i = 0; i < 4; i++) {
-        dst[0] = av_clip_uint8(dst[0] + dc);
-        dst[1] = av_clip_uint8(dst[1] + dc);
-        dst[2] = av_clip_uint8(dst[2] + dc);
-        dst[3] = av_clip_uint8(dst[3] + dc);
+        dst[0] = wpd_clip_uint8(dst[0] + dc);
+        dst[1] = wpd_clip_uint8(dst[1] + dc);
+        dst[2] = wpd_clip_uint8(dst[2] + dc);
+        dst[3] = wpd_clip_uint8(dst[3] + dc);
         dst += stride;
     }
 }
 
-static void vp8_idct_dc_add4uv_c(uint8_t *dst, DCTELEM block[4][16], ptrdiff_t stride)
+static void vp8_idct_dc_add4uv_c(uint8_t *dst, WpdDctElem block[4][16], ptrdiff_t stride)
 {
     vp8_idct_dc_add_c(dst+stride*0+0, block[0], stride);
     vp8_idct_dc_add_c(dst+stride*0+4, block[1], stride);
@@ -134,7 +147,7 @@ static void vp8_idct_dc_add4uv_c(uint8_t *dst, DCTELEM block[4][16], ptrdiff_t s
     vp8_idct_dc_add_c(dst+stride*4+4, block[3], stride);
 }
 
-static void vp8_idct_dc_add4y_c(uint8_t *dst, DCTELEM block[4][16], ptrdiff_t stride)
+static void vp8_idct_dc_add4y_c(uint8_t *dst, WpdDctElem block[4][16], ptrdiff_t stride)
 {
     vp8_idct_dc_add_c(dst+ 0, block[0], stride);
     vp8_idct_dc_add_c(dst+ 4, block[1], stride);
@@ -144,22 +157,22 @@ static void vp8_idct_dc_add4y_c(uint8_t *dst, DCTELEM block[4][16], ptrdiff_t st
 
 // because I like only having two parameters to pass functions...
 #define LOAD_PIXELS\
-    int av_unused p3 = p[-4*stride];\
-    int av_unused p2 = p[-3*stride];\
-    int av_unused p1 = p[-2*stride];\
-    int av_unused p0 = p[-1*stride];\
-    int av_unused q0 = p[ 0*stride];\
-    int av_unused q1 = p[ 1*stride];\
-    int av_unused q2 = p[ 2*stride];\
-    int av_unused q3 = p[ 3*stride];
+    int wpd_unused p3 = p[-4*stride];\
+    int wpd_unused p2 = p[-3*stride];\
+    int wpd_unused p1 = p[-2*stride];\
+    int wpd_unused p0 = p[-1*stride];\
+    int wpd_unused q0 = p[ 0*stride];\
+    int wpd_unused q1 = p[ 1*stride];\
+    int wpd_unused q2 = p[ 2*stride];\
+    int wpd_unused q3 = p[ 3*stride];
 
 #define clip_int8(n) (cm[n+0x80]-0x80)
 
-static av_always_inline void filter_common(uint8_t *p, ptrdiff_t stride, int is4tap)
+static wpd_always_inline void filter_common(uint8_t *p, ptrdiff_t stride, int is4tap)
 {
     LOAD_PIXELS
     int a, f1, f2;
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP;
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
 
     a = 3*(q0 - p0);
 
@@ -170,8 +183,8 @@ static av_always_inline void filter_common(uint8_t *p, ptrdiff_t stride, int is4
 
     // We deviate from the spec here with c(a+3) >> 3
     // since that's what libvpx does.
-    f1 = FFMIN(a+4, 127) >> 3;
-    f2 = FFMIN(a+3, 127) >> 3;
+    f1 = WPD_MIN(a+4, 127) >> 3;
+    f2 = WPD_MIN(a+3, 127) >> 3;
 
     // Despite what the spec says, we do need to clamp here to
     // be bitexact with libvpx.
@@ -186,35 +199,35 @@ static av_always_inline void filter_common(uint8_t *p, ptrdiff_t stride, int is4
     }
 }
 
-static av_always_inline int simple_limit(uint8_t *p, ptrdiff_t stride, int flim)
+static wpd_always_inline int simple_limit(uint8_t *p, ptrdiff_t stride, int flim)
 {
     LOAD_PIXELS
-    return 2*FFABS(p0-q0) + (FFABS(p1-q1) >> 1) <= flim;
+    return 2*WPD_ABS(p0-q0) + (WPD_ABS(p1-q1) >> 1) <= flim;
 }
 
 /**
  * E - limit at the macroblock edge
  * I - limit for interior difference
  */
-static av_always_inline int normal_limit(uint8_t *p, ptrdiff_t stride, int E, int I)
+static wpd_always_inline int normal_limit(uint8_t *p, ptrdiff_t stride, int E, int I)
 {
     LOAD_PIXELS
     return simple_limit(p, stride, E)
-        && FFABS(p3-p2) <= I && FFABS(p2-p1) <= I && FFABS(p1-p0) <= I
-        && FFABS(q3-q2) <= I && FFABS(q2-q1) <= I && FFABS(q1-q0) <= I;
+        && WPD_ABS(p3-p2) <= I && WPD_ABS(p2-p1) <= I && WPD_ABS(p1-p0) <= I
+        && WPD_ABS(q3-q2) <= I && WPD_ABS(q2-q1) <= I && WPD_ABS(q1-q0) <= I;
 }
 
 // high edge variance
-static av_always_inline int hev(uint8_t *p, ptrdiff_t stride, int thresh)
+static wpd_always_inline int hev(uint8_t *p, ptrdiff_t stride, int thresh)
 {
     LOAD_PIXELS
-    return FFABS(p1-p0) > thresh || FFABS(q1-q0) > thresh;
+    return WPD_ABS(p1-p0) > thresh || WPD_ABS(q1-q0) > thresh;
 }
 
-static av_always_inline void filter_mbedge(uint8_t *p, ptrdiff_t stride)
+static wpd_always_inline void filter_mbedge(uint8_t *p, ptrdiff_t stride)
 {
     int a0, a1, a2, w;
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP;
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
 
     LOAD_PIXELS
 
@@ -267,7 +280,7 @@ LOOP_FILTER(v, 16, 1, stride,)
 LOOP_FILTER(h, 16, stride, 1,)
 
 #define UV_LOOP_FILTER(dir, stridea, strideb) \
-LOOP_FILTER(dir, 8, stridea, strideb, av_always_inline) \
+LOOP_FILTER(dir, 8, stridea, strideb, wpd_always_inline) \
 static void vp8_ ## dir ## _loop_filter8uv_c(uint8_t *dstU, uint8_t *dstV, ptrdiff_t stride,\
                                       int fE, int fI, int hev_thresh)\
 {\
@@ -336,7 +349,7 @@ PUT_PIXELS(4)
 static void put_vp8_epel ## SIZE ## _h ## TAPS ## _c(uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride, int h, int mx, int my) \
 { \
     const uint8_t *filter = subpel_filters[mx-1]; \
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP; \
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP; \
     int x, y; \
 \
     for (y = 0; y < h; y++) { \
@@ -350,7 +363,7 @@ static void put_vp8_epel ## SIZE ## _h ## TAPS ## _c(uint8_t *dst, ptrdiff_t dst
 static void put_vp8_epel ## SIZE ## _v ## TAPS ## _c(uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride, int h, int mx, int my) \
 { \
     const uint8_t *filter = subpel_filters[my-1]; \
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP; \
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP; \
     int x, y; \
 \
     for (y = 0; y < h; y++) { \
@@ -364,7 +377,7 @@ static void put_vp8_epel ## SIZE ## _v ## TAPS ## _c(uint8_t *dst, ptrdiff_t dst
 static void put_vp8_epel ## SIZE ## _h ## HTAPS ## v ## VTAPS ## _c(uint8_t *dst, ptrdiff_t dststride, const uint8_t *src, ptrdiff_t srcstride, int h, int mx, int my) \
 { \
     const uint8_t *filter = subpel_filters[mx-1]; \
-    uint8_t *cm = ff_cropTbl + MAX_NEG_CROP; \
+    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP; \
     int x, y; \
     uint8_t tmp_array[(2*SIZE+VTAPS-1)*SIZE]; \
     uint8_t *tmp = tmp_array; \
@@ -490,7 +503,7 @@ VP8_BILINEAR(4)
     dsp->put_vp8_bilinear_pixels_tab[IDX][2][1] = put_vp8_bilinear ## SIZE ## _hv_c; \
     dsp->put_vp8_bilinear_pixels_tab[IDX][2][2] = put_vp8_bilinear ## SIZE ## _hv_c
 
-av_cold void ff_vp8dsp_init(VP8DSPContext *dsp)
+wpd_cold void ff_vp8dsp_init(VP8DSPContext *dsp)
 {
     dsp->vp8_luma_dc_wht    = vp8_luma_dc_wht_c;
     dsp->vp8_luma_dc_wht_dc = vp8_luma_dc_wht_dc_c;
@@ -520,14 +533,14 @@ av_cold void ff_vp8dsp_init(VP8DSPContext *dsp)
     VP8_BILINEAR_MC_FUNC(1, 8);
     VP8_BILINEAR_MC_FUNC(2, 4);
 
-    if (HAVE_MMX) {
+    if (WPD_HAVE_MMX) {
         ff_vp78dsp_init_x86(dsp);
         ff_vp8dsp_init_x86(dsp);
     }
-    if (HAVE_ALTIVEC)
+    if (WPD_HAVE_ALTIVEC)
         ff_vp8dsp_init_altivec(dsp);
-    if (ARCH_ARM)
+    if (WPD_ARCH_ARM)
         ff_vp8dsp_init_arm(dsp);
-    if (ARCH_AARCH64)
+    if (WPD_ARCH_AARCH64)
         ff_vp8dsp_init_aarch64(dsp);
 }

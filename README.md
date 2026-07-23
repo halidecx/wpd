@@ -17,7 +17,7 @@ build/wpd input.ivf output.y4m
 ```
 
 Architecture-specific assembly is enabled automatically. Use
-`meson setup build -Denable_asm=disabled` for a portable C-only build.
+`meson setup build -Denable_asm=false` for a portable C-only build.
 
 ## Test
 
@@ -26,4 +26,5 @@ meson test -C build
 ```
 
 The checkasm dependency is detected through pkg-config or built as a Meson
-subproject. It can be disabled with `-Denable_checkasm=disabled`.
+subproject. The checkasm executable and test are enabled when assembly is
+enabled.
