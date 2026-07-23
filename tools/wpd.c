@@ -30,16 +30,18 @@ int main(int argc, char **argv)
     uint8_t header[32], frame_header[12];
     WPDDecoder *decoder = NULL;
     FILE *input = NULL, *output = NULL;
-    int status = 1, wrote_header = 0;
+    int discard_output, status = 1, wrote_header = 0;
     uint32_t frame_rate, time_scale;
 
     if (argc != 3) {
         fprintf(stderr, "usage: %s input.ivf output.y4m\n", argv[0]);
         return 2;
     }
+    discard_output = !strcmp(argv[2], "/dev/null");
     input = fopen(argv[1], "rb");
-    output = fopen(argv[2], "wb");
-    if (!input || !output) {
+    if (!discard_output)
+        output = fopen(argv[2], "wb");
+    if (!input || (!discard_output && !output)) {
         perror(!input ? argv[1] : argv[2]);
         goto done;
     }
@@ -84,6 +86,10 @@ int main(int argc, char **argv)
         free(compressed);
         if (decode_result > 0)
             continue;
+        if (discard_output) {
+            wrote_header = 1;
+            continue;
+        }
         if (!wrote_header) {
             if (fprintf(output, "YUV4MPEG2 W%d H%d F%u:%u Ip A0:0 C420jpeg\n",
                         frame.width, frame.height, frame_rate, time_scale) < 0)

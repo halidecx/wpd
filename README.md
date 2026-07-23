@@ -16,6 +16,13 @@ writes planar 4:2:0 YUV4MPEG output:
 build/wpd input.ivf output.y4m
 ```
 
+Using `/dev/null` selects decode-only output and avoids serializing the decoded
+picture:
+
+```sh
+build/wpd input.ivf /dev/null
+```
+
 Architecture-specific assembly is enabled automatically. Use
 `meson setup build -Denable_asm=false` for a portable C-only build.
 
