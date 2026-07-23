@@ -1,0 +1,4 @@
+option('enable_asm',
+    type: 'boolean',
+    value: true,
+    description: 'Build asm files, if available')
