@@ -1,6 +1,13 @@
 #!/bin/bash -eu
 
-for input in testdata/*.webp; do
+shopt -s nullglob
+inputs=(testdata/*.webp)
+if (( ${#inputs[@]} == 0 )); then
+    echo "no WebP files found in testdata" >&2
+    exit 1
+fi
+
+for input in "${inputs[@]}"; do
     echo -ne "$input\t"
     case "$input" in
         *yuva*)              pixel_format=yuva420p ;;
@@ -19,10 +26,7 @@ for input in testdata/*.webp; do
     fi
 
     output=${input%.webp}.yuv
-    ffmpeg_vt -loglevel warning -hide_banner -y -threads 1 \
-        -i "$input" \
-        -fps_mode passthrough -f rawvideo \
-        -pix_fmt "$pixel_format" "$output"
+    ./build/wpd "$input" "$output" "$pixel_format"
     ffmpeg_vt -hide_banner -threads 1 \
         -i "$input" \
         -threads 1 -f rawvideo \

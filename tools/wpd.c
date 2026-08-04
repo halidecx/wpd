@@ -5,12 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static uint32_t rl32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 |
-           (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
 static int write_plane(FILE *output, const uint8_t *data, ptrdiff_t stride,
                        int width, int height)
 {
@@ -20,96 +14,110 @@ static int write_plane(FILE *output, const uint8_t *data, ptrdiff_t stride,
     return 0;
 }
 
-/* Raw planar 4:2:0, the layout dwebp writes for -yuv. */
-static int write_frame(FILE *output, const WPDFrame *frame)
+static const char *format_name(WPDPixelFormat format)
 {
-    if (write_plane(output, frame->data[0], frame->stride[0],
-                    frame->width, frame->height) < 0 ||
-        write_plane(output, frame->data[1], frame->stride[1],
-                    (frame->width + 1) / 2, (frame->height + 1) / 2) < 0 ||
-        write_plane(output, frame->data[2], frame->stride[2],
-                    (frame->width + 1) / 2, (frame->height + 1) / 2) < 0)
-        return -1;
-    return 0;
+    switch (format) {
+    case WPD_PIX_FMT_YUV420P:  return "yuv420p";
+    case WPD_PIX_FMT_YUVA420P: return "yuva420p";
+    case WPD_PIX_FMT_ARGB:     return "argb";
+    }
+    return "unknown";
 }
 
 /*
- * Walk the RIFF chunks looking for the lossy bitstream. Chunk payloads are
- * padded to an even length, which the size field does not include.
+ * Write one raw frame. Requesting yuv420p from a yuva420p frame drops the
+ * alpha plane; any other conversion is rejected.
  */
-static int decode_webp(const char *input_name, FILE *input, FILE *output)
+static int write_frame(FILE *output, const WPDFrame *frame,
+                       const char *pixel_format)
 {
-    uint8_t header[12], chunk_header[8];
-    WPDDecoder *decoder = NULL;
-    int status = 1;
-    uint32_t riff_size, consumed = 4;
+    int planes;
 
-    if (fread(header, 1, sizeof(header), input) != sizeof(header) ||
-        memcmp(header, "RIFF", 4) || memcmp(header + 8, "WEBP", 4)) {
-        fprintf(stderr, "%s: not a WebP file\n", input_name);
-        return 1;
-    }
-    riff_size = rl32(header + 4);
+    if (!pixel_format)
+        pixel_format = format_name(frame->format);
 
-    while (consumed + 8 <= riff_size &&
-           fread(chunk_header, 1, sizeof(chunk_header), input) == sizeof(chunk_header)) {
-        uint32_t size = rl32(chunk_header + 4);
-        uint32_t padded_size = size + (size & 1);
-        consumed += 8;
-        if (!memcmp(chunk_header, "VP8 ", 4)) {
-            uint8_t *compressed = malloc(size ? size : 1);
-            WPDFrame frame;
-            if (!compressed || fread(compressed, 1, size, input) != size) {
-                fprintf(stderr, "%s: truncated WebP file\n", input_name);
-                free(compressed);
-                goto done;
-            }
-            decoder = wpd_decoder_create();
-            if (!decoder) {
-                fprintf(stderr, "out of memory\n");
-                free(compressed);
-                goto done;
-            }
-            if (wpd_decoder_decode(decoder, compressed, size, &frame) < 0) {
-                fprintf(stderr, "VP8 decode failed: %s\n", wpd_decoder_error(decoder));
-                free(compressed);
-                goto done;
-            }
-            free(compressed);
-            if (output && write_frame(output, &frame) < 0) {
-                perror("write");
-                goto done;
-            }
-            status = 0;
-            goto done;
+    if (frame->format == WPD_PIX_FMT_ARGB) {
+        if (strcmp(pixel_format, "argb")) {
+            fprintf(stderr, "cannot convert argb frame to %s\n", pixel_format);
+            return -1;
         }
-        if (!memcmp(chunk_header, "VP8L", 4)) {
-            fprintf(stderr, "%s: lossless WebP is not supported\n", input_name);
-            goto done;
-        }
-        if (!memcmp(chunk_header, "ALPH", 4))
-            fprintf(stderr, "%s: warning: ignoring alpha plane\n", input_name);
-        if (fseek(input, padded_size, SEEK_CUR) != 0) {
-            fprintf(stderr, "%s: truncated WebP file\n", input_name);
-            goto done;
-        }
-        consumed += padded_size;
+        return write_plane(output, frame->data[0], frame->stride[0],
+                           frame->width * 4, frame->height);
     }
-    fprintf(stderr, "%s: no lossy (VP8) bitstream found\n", input_name);
-done:
-    wpd_decoder_free(decoder);
-    return status;
+
+    if (!strcmp(pixel_format, "yuv420p")) {
+        planes = 3;
+    } else if (!strcmp(pixel_format, "yuva420p")) {
+        planes = 4;
+    } else {
+        fprintf(stderr, "cannot convert %s frame to %s\n",
+                format_name(frame->format), pixel_format);
+        return -1;
+    }
+    if (planes == 4 && frame->format != WPD_PIX_FMT_YUVA420P) {
+        fprintf(stderr, "frame has no alpha plane\n");
+        return -1;
+    }
+
+    for (int p = 0; p < planes; p++) {
+        int width  = p == 1 || p == 2 ? (frame->width + 1) / 2 : frame->width;
+        int height = p == 1 || p == 2 ? (frame->height + 1) / 2 : frame->height;
+        if (write_plane(output, frame->data[p], frame->stride[p],
+                        width, height) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static uint8_t *read_file(const char *name, FILE *input, size_t *size)
+{
+    uint8_t *data = NULL;
+    size_t capacity = 0, used = 0;
+
+    for (;;) {
+        size_t n;
+        if (used == capacity) {
+            uint8_t *grown;
+            capacity = capacity ? capacity * 2 : 1 << 16;
+            grown = realloc(data, capacity);
+            if (!grown) {
+                free(data);
+                return NULL;
+            }
+            data = grown;
+        }
+        n = fread(data + used, 1, capacity - used, input);
+        used += n;
+        if (n == 0) {
+            if (ferror(input)) {
+                perror(name);
+                free(data);
+                return NULL;
+            }
+            break;
+        }
+    }
+    *size = used;
+    return data;
 }
 
 int main(int argc, char **argv)
 {
     FILE *input = NULL, *output = NULL;
-    int discard_output, status = 1;
+    WPDDecoder *decoder = NULL;
+    uint8_t *data = NULL;
+    size_t size;
+    const char *pixel_format = NULL;
+    int discard_output, frames = 0, ret, status = 1;
+    WPDFrame frame;
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s input.webp output.yuv\n", argv[0]);
+    if (argc < 3 || argc > 4) {
+        fprintf(stderr, "usage: %s input.webp output.yuv [pixel_format]\n",
+                argv[0]);
         return 2;
     }
+    if (argc == 4)
+        pixel_format = argv[3];
     discard_output = !strcmp(argv[2], "/dev/null");
     input = fopen(argv[1], "rb");
     if (!discard_output)
@@ -118,8 +126,40 @@ int main(int argc, char **argv)
         perror(!input ? argv[1] : argv[2]);
         goto done;
     }
-    status = decode_webp(argv[1], input, output);
+
+    data = read_file(argv[1], input, &size);
+    if (!data)
+        goto done;
+
+    decoder = wpd_decoder_create();
+    if (!decoder) {
+        fprintf(stderr, "out of memory\n");
+        goto done;
+    }
+    if (wpd_decoder_open(decoder, data, size) < 0) {
+        fprintf(stderr, "%s: %s\n", argv[1], wpd_decoder_error(decoder));
+        goto done;
+    }
+    while ((ret = wpd_decoder_next_frame(decoder, &frame)) > 0) {
+        if (output && write_frame(output, &frame, pixel_format) < 0) {
+            if (ferror(output))
+                perror("write");
+            goto done;
+        }
+        frames++;
+    }
+    if (ret < 0) {
+        fprintf(stderr, "%s: %s\n", argv[1], wpd_decoder_error(decoder));
+        goto done;
+    }
+    if (!frames) {
+        fprintf(stderr, "%s: no image data found\n", argv[1]);
+        goto done;
+    }
+    status = 0;
 done:
+    wpd_decoder_free(decoder);
+    free(data);
     if (input)
         fclose(input);
     if (output && fclose(output) && !status)
