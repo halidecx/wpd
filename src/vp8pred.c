@@ -216,11 +216,13 @@ void ff_vp8_pred_init(VP8PredContext *pred)
             pred16x16_left_dc, pred16x16_top_dc, pred16x16_dc128,
         },
     };
-#if defined(WPD_PRED_X86)
-    ff_vp8_pred_init_x86(pred);
-#elif defined(WPD_PRED_AARCH64)
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
     ff_vp8_pred_init_aarch64(pred);
-#elif defined(WPD_PRED_ARM)
+#elif WPD_ARCH_ARM
     ff_vp8_pred_init_arm(pred);
+#elif WPD_ARCH_X86
+    ff_vp8_pred_init_x86(pred);
+#endif
 #endif
 }

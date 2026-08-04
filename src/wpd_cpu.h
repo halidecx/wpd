@@ -3,6 +3,11 @@
 
 #include "wpd_compat.h"
 
+/* Set by the build; 0 means no architecture-specific assembly was compiled. */
+#ifndef WPD_HAVE_ASM
+#define WPD_HAVE_ASM 0
+#endif
+
 #if defined(__aarch64__)
 #define WPD_ARCH_AARCH64 1
 #else

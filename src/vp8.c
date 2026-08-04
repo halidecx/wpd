@@ -1,6 +1,6 @@
 #include "wpd_codec.h"
 #include "vp8.h"
-#if WPD_ARCH_ARM
+#if WPD_HAVE_ASM && WPD_ARCH_ARM
 #   include "arm/vp8.h"
 #endif
 

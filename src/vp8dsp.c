@@ -337,10 +337,13 @@ wpd_cold void ff_vp8dsp_init(VP8DSPContext *dsp)
     dsp->vp8_v_loop_filter_simple = vp8_v_loop_filter_simple_c;
     dsp->vp8_h_loop_filter_simple = vp8_h_loop_filter_simple_c;
 
-    if (WPD_HAVE_MMX)
-        ff_vp8dsp_init_x86(dsp);
-    if (WPD_ARCH_ARM)
-        ff_vp8dsp_init_arm(dsp);
-    if (WPD_ARCH_AARCH64)
-        ff_vp8dsp_init_aarch64(dsp);
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+    ff_vp8dsp_init_aarch64(dsp);
+#elif WPD_ARCH_ARM
+    ff_vp8dsp_init_arm(dsp);
+#elif WPD_ARCH_X86
+    ff_vp8dsp_init_x86(dsp);
+#endif
+#endif
 }

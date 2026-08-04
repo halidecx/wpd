@@ -38,6 +38,8 @@ asm_enabled = get_option('enable_asm') and (
   cpu_family.startswith('x86')
 )
 
+lib_c_args += '-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)
+
 if asm_enabled
   if cpu_family.startswith('x86')
     nasm = find_program('nasm')
@@ -87,8 +89,6 @@ if asm_enabled
       'src/x86/wpd_simd_constants.c',
     )
     lib_c_args += [
-      '-DWPD_ENABLE_X86_SIMD=1',
-      '-DWPD_PRED_X86=1',
       '-DHAVE_YASM=1',
       '-DHAVE_AVX2_EXTERNAL=1',
       '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
@@ -101,7 +101,6 @@ if asm_enabled
       'src/aarch64/vp8pred_neon.S',
       'src/aarch64/vp8pred_init.c',
     )
-    lib_c_args += ['-DWPD_PRED_AARCH64=1']
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
     lib_sources += files(
@@ -114,10 +113,7 @@ if asm_enabled
       'src/arm/vp8pred_neon.S',
       'src/arm/vp8pred_init.c',
     )
-    lib_c_args += [
-      '-DWPD_ARM_NEON_ASM=1',
-      '-DWPD_PRED_ARM=1',
-    ]
+    lib_c_args += ['-DWPD_ARM_NEON_ASM=1']
   endif
 endif
 
