@@ -3,9 +3,9 @@
 WebP Decoder
 
 Decodes the lossy (VP8) bitstream of a WebP file. Because a still image is a
-single VP8 keyframe, the decoder is intra-only: there is no motion
-compensation, no reference frame management and no inter-frame prediction.
-Lossless (VP8L) WebP and alpha are not supported.
+single VP8 keyframe, the decoder is intra-only: there is no motion compensation,
+no reference frame management and no inter-frame prediction. Lossless (VP8L)
+WebP and alpha are not supported.
 
 ## Build
 
@@ -14,8 +14,8 @@ meson setup build
 meson compile -C build
 ```
 
-The decoder executable is written to `build/wpd`. It reads a lossy WebP file
-and writes raw planar 4:2:0 YUV, byte-identical to
+The decoder executable is written to `build/wpd`. It reads a lossy WebP file and
+writes raw planar 4:2:0 YUV, byte-identical to
 `dwebp input.webp -yuv -o output.yuv`:
 
 ```sh
