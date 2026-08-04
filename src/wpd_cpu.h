@@ -20,18 +20,10 @@
 #endif
 #if defined(__i386__) || defined(__x86_64__)
 #define WPD_ARCH_X86 1
-#if defined(WPD_ENABLE_X86_SIMD)
-#define WPD_HAVE_MMX 1
-#else
-#define WPD_HAVE_MMX 0
-#endif
 #else
 #define WPD_ARCH_X86 0
-#define WPD_HAVE_MMX 0
 #endif
 
-#define WPD_HAVE_ALTIVEC 0
-#define WPD_HAVE_BIGENDIAN 0
 #define WPD_CPU_MMX      (1 << 0)
 #define WPD_CPU_MMX2     (1 << 1)
 #define WPD_CPU_SSE      (1 << 2)

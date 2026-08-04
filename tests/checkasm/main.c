@@ -26,8 +26,8 @@ static const CheckasmCpuInfo cpu_flags[] = {
 };
 
 static const CheckasmTest tests[] = {
-    { "vp8dsp",   checkasm_check_vp8dsp },
-    { "vp8pred",  checkasm_check_vp8pred },
+    { "vp8dsp",   checkasm_check_vp8dsp,  NULL, NULL },
+    { "vp8pred",  checkasm_check_vp8pred, NULL, NULL },
     { 0 }
 };
 

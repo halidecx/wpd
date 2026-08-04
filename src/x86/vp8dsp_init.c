@@ -72,7 +72,13 @@ void ff_vp8_h_loop_filter8uv_mbedge_ ## NAME(uint8_t *dstU,             \
 
 DECLARE_LOOP_FILTER(sse2)
 DECLARE_LOOP_FILTER(ssse3)
-DECLARE_LOOP_FILTER(sse4)
+
+/* Only the horizontal variants have an SSE4 implementation. */
+void ff_vp8_h_loop_filter_simple_sse4(uint8_t *dst, ptrdiff_t stride, int flim);
+void ff_vp8_h_loop_filter16y_mbedge_sse4(uint8_t *dst, ptrdiff_t stride,
+                                         int e, int i, int hvt);
+void ff_vp8_h_loop_filter8uv_mbedge_sse4(uint8_t *dstU, uint8_t *dstV,
+                                         ptrdiff_t s, int e, int i, int hvt);
 
 wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c)
 {

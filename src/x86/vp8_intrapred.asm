@@ -521,32 +521,6 @@ cglobal pred4x4_down_left_8, 3,3
     RET
 
 ;------------------------------------------------------------------------------
-; void ff_pred4x4_vertical_left_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                        ptrdiff_t stride)
-;------------------------------------------------------------------------------
-
-INIT_MMX mmxext
-cglobal pred4x4_vertical_left_8, 3,3
-    sub       r0, r2
-    movq      m1, [r0]
-    punpckldq m1, [r1]
-    movq      m0, m1
-    movq      m2, m1
-    psrlq     m0, 8
-    psrlq     m2, 16
-    movq      m4, m0
-    pavgb     m4, m1
-    PRED4x4_LOWPASS m0, m1, m2, m0, m5
-    lea       r1, [r0+r2*2]
-    movh      [r0+r2*1], m4
-    movh      [r0+r2*2], m0
-    psrlq     m4, 8
-    psrlq     m0, 8
-    movh      [r1+r2*1], m4
-    movh      [r1+r2*2], m0
-    RET
-
-;------------------------------------------------------------------------------
 ; void ff_pred4x4_horizontal_up_8_mmxext(uint8_t *src, const uint8_t *topright,
 ;                                        ptrdiff_t stride)
 ;------------------------------------------------------------------------------

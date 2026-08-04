@@ -51,25 +51,4 @@
     VP8_LF_SIMPLE(h, opt);                      \
     VP8_LF_SIMPLE(v, opt)
 
-#define VP8_MC(n, opt)                                                  \
-    void ff_put_vp8_##n##_##opt(uint8_t *dst, ptrdiff_t dststride,      \
-                                const uint8_t *src, ptrdiff_t srcstride,\
-                                int h, int x, int y)
-
-#define VP8_EPEL(w, opt)                        \
-    VP8_MC(pixels ## w, opt);                   \
-    VP8_MC(epel ## w ## _h4, opt);              \
-    VP8_MC(epel ## w ## _h6, opt);              \
-    VP8_MC(epel ## w ## _v4, opt);              \
-    VP8_MC(epel ## w ## _h4v4, opt);            \
-    VP8_MC(epel ## w ## _h6v4, opt);            \
-    VP8_MC(epel ## w ## _v6, opt);              \
-    VP8_MC(epel ## w ## _h4v6, opt);            \
-    VP8_MC(epel ## w ## _h6v6, opt)
-
-#define VP8_BILIN(w, opt)                       \
-    VP8_MC(bilin ## w ## _h, opt);              \
-    VP8_MC(bilin ## w ## _v, opt);              \
-    VP8_MC(bilin ## w ## _hv, opt)
-
 #endif /* WPD_AARCH64_VP8DSP_H */

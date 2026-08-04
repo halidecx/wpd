@@ -283,59 +283,6 @@ FUNC    .func   \name
     .endif
 .endm
 
-.macro  const   name, align=4, relocate=0
-    .macro endconst
-ELF     .size   \name, . - \name
-        .purgem endconst
-    .endm
-#if HAVE_SECTION_DATA_REL_RO
-.if \relocate
-        .section        .data.rel.ro
-.else
-        .section        .rodata
-.endif
-#elif defined(_WIN32)
-        .section        .rdata
-#elif !defined(__MACH__)
-        .section        .rodata
-#else
-        .const_data
-#endif
-        .align          \align
-\name:
-.endm
-
-.macro  movrel rd, val, offset=0
-#if CONFIG_PIC && defined(__APPLE__)
-    .if \offset < 0
-        adrp            \rd, \val@PAGE
-        add             \rd, \rd, \val@PAGEOFF
-        sub             \rd, \rd, -(\offset)
-    .else
-        adrp            \rd, \val+(\offset)@PAGE
-        add             \rd, \rd, \val+(\offset)@PAGEOFF
-    .endif
-#elif CONFIG_PIC && defined(_WIN32)
-    .if \offset < 0
-        adrp            \rd, \val
-        add             \rd, \rd, :lo12:\val
-        sub             \rd, \rd, -(\offset)
-    .else
-        adrp            \rd, \val+(\offset)
-        add             \rd, \rd, :lo12:\val+(\offset)
-    .endif
-#elif CONFIG_PIC
-#   if __has_feature(hwaddress_sanitizer)
-        adrp            \rd, :pg_hi21_nc:\val+(\offset)
-#   else
-        adrp            \rd, \val+(\offset)
-#   endif
-        add             \rd, \rd, :lo12:\val+(\offset)
-#else
-        ldr             \rd, =\val+\offset
-#endif
-.endm
-
 #define GLUE(a, b) a ## b
 #define JOIN(a, b) GLUE(a, b)
 #define X(s) JOIN(EXTERN_ASM, s)
@@ -344,24 +291,4 @@ ELF     .size   \name, . - \name
 #define w18 do_not_use_w18
 
 #if HAVE_SME
-.macro sme_entry
-        AARCH64_SIGN_LINK_REGISTER
-        stp             x29, x30, [sp, #-80]!
-        mov             x29, sp
-        stp             d8,  d9,  [sp, #16]
-        stp             d10, d11, [sp, #32]
-        stp             d12, d13, [sp, #48]
-        stp             d14, d15, [sp, #64]
-        smstart
-.endm
-
-.macro sme_exit
-        smstop
-        ldp             d8,  d9,  [sp, #16]
-        ldp             d10, d11, [sp, #32]
-        ldp             d12, d13, [sp, #48]
-        ldp             d14, d15, [sp, #64]
-        ldp             x29, x30, [sp], #80
-        AARCH64_VALIDATE_LINK_REGISTER
-.endm
 #endif

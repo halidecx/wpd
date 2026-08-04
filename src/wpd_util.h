@@ -50,8 +50,6 @@ void *wpd_mallocz(size_t size);
 void wpd_free(void *pointer);
 void wpd_freep(void *pointer);
 void wpd_log(void *context, int level, const char *format, ...);
-void wpd_log_missing_feature(void *context, const char *feature, int want_sample);
-int wpd_check_image_size(unsigned width, unsigned height, int log_offset,
-                         void *log_context);
+int wpd_check_image_size(unsigned width, unsigned height);
 
 #endif

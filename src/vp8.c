@@ -624,15 +624,16 @@ static int wpd_alloc_picture(WpdCodecContext *context, WpdFrame *frame)
 
 static int update_dimensions(VP8Context *s, int width, int height)
 {
-    if (wpd_check_image_size(width, height, 0, s->avctx))
+    if (wpd_check_image_size(width, height))
         return WPD_ERROR_INVALID_DATA;
 
     free_buffers(s);
     wpd_release_picture(&s->frame);
-    wpd_set_dimensions(s->avctx, width, height);
+    s->avctx->width  = width;
+    s->avctx->height = height;
 
-    s->mb_width  = (s->avctx->coded_width +15) / 16;
-    s->mb_height = (s->avctx->coded_height+15) / 16;
+    s->mb_width  = (width  + 15) / 16;
+    s->mb_height = (height + 15) / 16;
 
     s->filter_strength         = wpd_mallocz(s->mb_width*sizeof(*s->filter_strength));
     s->intra4x4_pred_mode_top  = wpd_mallocz(s->mb_width*4);
@@ -785,7 +786,7 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf, int buf_size)
     buf_size -= 7;
 
     if (hscale || vscale)
-        wpd_log_missing_feature(s->avctx, "Upscaling", 1);
+        wpd_log(s->avctx, WPD_LOG_WARNING, "Upscaling is not supported\n");
 
     for (i = 0; i < 4; i++)
         for (j = 0; j < 16; j++)
@@ -1461,7 +1462,6 @@ wpd_cold int vp8_decode_init(WpdCodecContext *avctx)
     VP8Context *s = avctx->priv_data;
 
     s->avctx = avctx;
-    avctx->pix_fmt = WPD_PIXEL_FORMAT_YUV420P;
 
     wpd_dsp_data_init();
     ff_vp8_pred_init(&s->pred);

@@ -26,11 +26,7 @@ lib_sources = files(
   'src/wpd_cpu.c',
 )
 lib_objects = []
-lib_c_args = [
-  '-Wno-unused-parameter',
-  '-Wno-maybe-uninitialized',
-  '-Wno-parentheses',
-]
+lib_c_args = ['-Wno-unused-parameter']
 
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or
@@ -53,6 +49,13 @@ if asm_enabled
     endif
     nasm_format += is_x86_64 ? '64' : '32'
 
+    # Platforms whose C ABI prepends an underscore need nasm to mangle to match.
+    nasm_prefix_args = []
+    if host_machine.system() in ['darwin', 'ios', 'tvos', 'os/2'] or (
+       host_machine.system() == 'windows' and not is_x86_64)
+      nasm_prefix_args = ['-DPREFIX=1']
+    endif
+
     nasm_gen = generator(
       nasm,
       output: '@BASENAME@.obj',
@@ -66,6 +69,7 @@ if asm_enabled
         '-DHAVE_X86_SSE2AVX=0',
         '-DARCH_X86_64=@0@'.format(is_x86_64 ? 1 : 0),
         '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
+        nasm_prefix_args,
         '-I', source_root / 'src' + '/',
         '-MQ', '@OUTPUT@',
         '-MD', '@DEPFILE@',
