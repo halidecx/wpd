@@ -20,15 +20,12 @@ typedef struct WPDFrame {
 WPDDecoder *wpd_decoder_create(void);
 
 /*
- * Decode exactly one VP8 compressed frame. Returns 0 with a visible frame,
- * 1 when an invisible reference frame was consumed, and -1 on failure.
+ * Decode one VP8 keyframe, the bitstream carried by a lossy WebP file.
+ * Returns 0 and fills in frame on success, -1 on failure.
  */
 int wpd_decoder_decode(WPDDecoder *decoder,
                          const uint8_t *data, size_t size,
                          WPDFrame *frame);
-
-/* Drop reference pictures and restart at the next keyframe. */
-void wpd_decoder_reset(WPDDecoder *decoder);
 
 /* A short description of the last failure, owned by decoder. */
 const char *wpd_decoder_error(const WPDDecoder *decoder);

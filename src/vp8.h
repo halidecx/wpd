@@ -27,20 +27,6 @@ enum dct_token {
 // used to signal 4x4 intra pred in luma MBs
 #define MODE_I4x4 4
 
-enum inter_mvmode {
-    VP8_MVMODE_ZERO = MODE_I4x4 + 1,
-    VP8_MVMODE_MV,
-    VP8_MVMODE_SPLIT
-};
-
-enum inter_splitmvmode {
-    VP8_SPLITMVMODE_16x8 = 0,    ///< 2 16x8 blocks (vertical)
-    VP8_SPLITMVMODE_8x16,        ///< 2 8x16 blocks (horizontal)
-    VP8_SPLITMVMODE_8x8,         ///< 2x2 blocks of 8x8px each
-    VP8_SPLITMVMODE_4x4,         ///< 4x4 blocks of 4x4px each
-    VP8_SPLITMVMODE_NONE,        ///< (only used in prediction) no split MVs
-};
-
 typedef struct {
     uint8_t filter_level;
     uint8_t inner_limit;
@@ -49,42 +35,26 @@ typedef struct {
 
 typedef struct {
     uint8_t skip;
-    // todo: make it possible to check for at least (i4x4 or split_mv)
-    // in one op. are others needed?
     uint8_t mode;
-    uint8_t ref_frame;
-    uint8_t partitioning;
-    VP56mv mv;
-    VP56mv bmv[16];
 } VP8Macroblock;
 
 typedef struct {
     WpdCodecContext *avctx;
-    WpdFrame *framep[4];
-    WpdFrame *next_framep[4];
-    uint8_t *edge_emu_buffer;
+    WpdFrame frame;
 
     uint16_t mb_width;   /* number of horizontal MB */
     uint16_t mb_height;  /* number of vertical MB */
     int linesize;
     int uvlinesize;
 
-    uint8_t keyframe;
     uint8_t deblock_filter;
     uint8_t mbskip_enabled;
     uint8_t segment;             ///< segment of the current macroblock
     uint8_t chroma_pred_mode;    ///< 8x8c pred mode of the current macroblock
     uint8_t profile;
-    VP56mv mv_min;
-    VP56mv mv_max;
-
-    int8_t sign_bias[4]; ///< one state [0, 1] per ref frame type
-    int ref_count[3];
 
     /**
      * Base parameters for segmentation, i.e. per-macroblock parameters.
-     * These must be kept unchanged even if segmentation is not used for
-     * a frame, since the values persist between interframes.
      */
     struct {
         uint8_t enabled;
@@ -100,7 +70,6 @@ typedef struct {
         uint8_t sharpness;
     } filter;
 
-    VP8Macroblock *macroblocks;
     VP8FilterStrength *filter_strength;
 
     uint8_t *intra4x4_pred_mode_top;
@@ -118,28 +87,15 @@ typedef struct {
         int16_t chroma_qmul[2];
     } qmat[4];
 
+    /**
+     * Every macroblock of a keyframe references the current frame and is
+     * either i16x16 or i4x4, so only two of the coded loop filter deltas can
+     * ever apply. The rest are parsed and dropped.
+     */
     struct {
-        uint8_t enabled;    ///< whether each mb can have a different strength based on mode/ref
-
-        /**
-         * filter strength adjustment for the following macroblock modes:
-         * [0-3] - i16x16 (always zero)
-         * [4]   - i4x4
-         * [5]   - zero mv
-         * [6]   - inter modes except for zero or split mv
-         * [7]   - split mv
-         *  i16x16 modes never have any adjustment
-         */
-        int8_t mode[VP8_MVMODE_SPLIT+1];
-
-        /**
-         * filter strength adjustment for macroblocks that reference:
-         * [0] - intra / VP56_FRAME_CURRENT
-         * [1] - VP56_FRAME_PREVIOUS
-         * [2] - VP56_FRAME_GOLDEN
-         * [3] - altref / VP56_FRAME_GOLDEN2
-         */
-        int8_t ref[4];
+        uint8_t enabled;
+        int8_t ref_intra;   ///< adjustment for intra-referencing macroblocks
+        int8_t mode_i4x4;   ///< adjustment for i4x4 macroblocks
     } lf_delta;
 
     /**
@@ -165,40 +121,20 @@ typedef struct {
      *     2+-> full transform
      */
     WPD_DECLARE_ALIGNED(16, uint8_t, non_zero_count_cache)[6][4];
-    VP56RangeCoder c;   ///< header context, includes mb modes and motion vectors
+    VP56RangeCoder c;   ///< header context, includes mb modes
     WPD_DECLARE_ALIGNED(16, WpdDctElem, block)[6][4][16];
     WPD_DECLARE_ALIGNED(16, WpdDctElem, block_dc)[16];
     uint8_t intra4x4_pred_mode_mb[16];
 
     /**
-     * These are all of the updatable probabilities for binary decisions.
-     * They are only implictly reset on keyframes, making it quite likely
-     * for an interframe to desync if a prior frame's header was corrupt
-     * or missing outright!
+     * Updatable probabilities for binary decisions. A keyframe resets these
+     * to their defaults before applying the updates coded in its header.
      */
     struct {
         uint8_t segmentid[3];
         uint8_t mbskip;
-        uint8_t intra;
-        uint8_t last;
-        uint8_t golden;
-        uint8_t pred16x16[4];
-        uint8_t pred8x8c[3];
         uint8_t token[4][16][3][NUM_DCT_TOKENS-1];
-        uint8_t mvc[2][19];
-    } prob[2];
-
-    VP8Macroblock *macroblocks_base;
-    int invisible;
-    int update_last;    ///< update VP56_FRAME_PREVIOUS with the current one
-    int update_golden;  ///< VP56_FRAME_NONE if not updated, or which frame to copy if so
-    int update_altref;
-
-    /**
-     * If this flag is not set, all the probability updates
-     * are discarded after this frame is decoded.
-     */
-    int update_probabilities;
+    } prob;
 
     /**
      * All coefficients are contained in separate arith coding contexts.
@@ -206,26 +142,12 @@ typedef struct {
      */
     int num_coeff_partitions;
     VP56RangeCoder coeff_partition[8];
-    WpdDSPContext dsp;
     VP8DSPContext vp8dsp;
     VP8PredContext pred;
-    vp8_mc_func put_pixels_tab[3][3][3];
-    WpdFrame frames[5];
-
-    /**
-     * A list of segmentation_map buffers that are to be free()'ed in
-     * the next decoding iteration. We can't free() them right away
-     * because the map may still be used by subsequent decoding threads.
-     * Unused if frame threading is off.
-     */
-    uint8_t *segmentation_maps[5];
-    int num_maps_to_be_freed;
-    int maps_are_invalid;
 } VP8Context;
 
 int vp8_decode_init(WpdCodecContext *context);
-int vp8_decode_frame(WpdCodecContext *context, void *frame, int *got_frame,
-                     WpdPacket *packet);
+int vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
 int vp8_decode_free(WpdCodecContext *context);
 
 #endif /* WPD_VP8_H */

@@ -23,9 +23,6 @@ WPDDecoder *wpd_decoder_create(void)
     if (!decoder)
         return NULL;
     decoder->codec.priv_data = &decoder->vp8;
-    decoder->codec.flags = 0;
-    decoder->codec.skip_frame = WPD_DISCARD_DEFAULT;
-    decoder->codec.skip_loop_filter = WPD_DISCARD_DEFAULT;
     if (vp8_decode_init(&decoder->codec) < 0) {
         snprintf(decoder->error, sizeof(decoder->error), "decoder initialization failed");
     }
@@ -37,7 +34,6 @@ int wpd_decoder_decode(WPDDecoder *decoder,
                          WPDFrame *frame)
 {
     WpdPacket packet;
-    int got_frame = 0;
     int result;
     if (!decoder || !data || !frame || size > INT_MAX)
         return -1;
@@ -56,15 +52,13 @@ int wpd_decoder_decode(WPDDecoder *decoder,
     memset(decoder->packet_buffer + size, 0, WPD_PACKET_PADDING);
     packet.data = decoder->packet_buffer;
     packet.size = (int)size;
-    result = vp8_decode_frame(&decoder->codec, &decoder->decoded, &got_frame, &packet);
+    result = vp8_decode_frame(&decoder->codec, &decoder->decoded, &packet);
     if (result < 0) {
         snprintf(decoder->error, sizeof(decoder->error),
-                 "invalid VP8 frame (%d)", result);
+                 "invalid VP8 keyframe (%d)", result);
         return -1;
     }
     decoder->error[0] = 0;
-    if (!got_frame)
-        return 1;
     for (int plane = 0; plane < 3; plane++) {
         frame->data[plane] = decoder->decoded.data[plane];
         frame->stride[plane] = decoder->decoded.linesize[plane];
@@ -72,23 +66,6 @@ int wpd_decoder_decode(WPDDecoder *decoder,
     frame->width = decoder->codec.width;
     frame->height = decoder->codec.height;
     return 0;
-}
-
-void wpd_decoder_reset(WPDDecoder *decoder)
-{
-    if (!decoder)
-        return;
-    vp8_decode_free(&decoder->codec);
-    memset(&decoder->vp8, 0, sizeof(decoder->vp8));
-    memset(&decoder->decoded, 0, sizeof(decoder->decoded));
-    decoder->codec.width = decoder->codec.height = 0;
-    decoder->codec.coded_width = decoder->codec.coded_height = 0;
-    decoder->codec.priv_data = &decoder->vp8;
-    if (vp8_decode_init(&decoder->codec) < 0)
-        snprintf(decoder->error, sizeof(decoder->error),
-                 "decoder reinitialization failed");
-    else
-        decoder->error[0] = 0;
 }
 
 const char *wpd_decoder_error(const WPDDecoder *decoder)

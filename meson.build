@@ -77,7 +77,6 @@ if asm_enabled
       files(
         'src/x86/vp8dsp.asm',
         'src/x86/vp8_intrapred.asm',
-        'src/x86/videodsp.asm',
       ),
       extra_args: ['-DHAVE_AVX2_EXTERNAL=1'],
     )
@@ -85,7 +84,6 @@ if asm_enabled
     lib_sources += files(
       'src/x86/vp8dsp_init.c',
       'src/x86/vp8pred_init.c',
-      'src/x86/videodsp_init.c',
       'src/x86/wpd_simd_constants.c',
     )
     lib_c_args += [
@@ -102,8 +100,6 @@ if asm_enabled
       'src/aarch64/vp8dsp_init_aarch64.c',
       'src/aarch64/vp8pred_neon.S',
       'src/aarch64/vp8pred_init.c',
-      'src/aarch64/videodsp.S',
-      'src/aarch64/videodsp_init.c',
     )
     lib_c_args += ['-DWPD_PRED_AARCH64=1']
   elif cpu_family.startswith('arm')
@@ -117,8 +113,6 @@ if asm_enabled
       'src/arm/vp8dsp_init_neon.c',
       'src/arm/vp8pred_neon.S',
       'src/arm/vp8pred_init.c',
-      'src/arm/videodsp_armv5te.S',
-      'src/arm/videodsp_init.c',
     )
     lib_c_args += [
       '-DWPD_ARM_NEON_ASM=1',
@@ -163,7 +157,6 @@ if asm_enabled and checkasm_dep.found()
       'tests/checkasm/main.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
-      'tests/checkasm/videodsp.c',
     ),
     dependencies: [wpd_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),

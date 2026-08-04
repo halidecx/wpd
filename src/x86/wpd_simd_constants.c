@@ -23,5 +23,3 @@ WORD_VECTOR(wpd_pw_9, 9);
 WORD_VECTOR(wpd_pw_18, 18);
 WORD_VECTOR(wpd_pw_27, 27);
 WORD_VECTOR(wpd_pw_63, 63);
-WORD_VECTOR(wpd_pw_64, 64);
-WORD_VECTOR(wpd_pw_256, 256);

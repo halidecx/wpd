@@ -21,12 +21,11 @@
 static const char *const pred4x4_modes[VP8_PRED4X4_COUNT] = {
     "vertical_vp8", "horizontal_vp8", "dc", "down_left", "down_right",
     "vertical_right", "horizontal_down", "vertical_left_vp8", "horizontal_up",
-    "tm_vp8", "vertical", "horizontal", "dc_127", "dc_129",
+    "tm_vp8",
 };
 
 static const char *const pred8x8_modes[VP8_PRED8X8_COUNT] = {
-    "dc", "horizontal", "vertical", "tm_vp8", "left_dc", "top_dc",
-    "dc_128", "dc_127", "dc_129",
+    "dc", "horizontal", "vertical", "tm_vp8", "left_dc", "top_dc", "dc_128",
 };
 
 #define randomize_buffers()                    \
@@ -96,11 +95,9 @@ void checkasm_check_vp8pred(void)
 {
     LOCAL_ALIGNED_16(uint8_t, buf0, [BUF_SIZE]);
     LOCAL_ALIGNED_16(uint8_t, buf1, [BUF_SIZE]);
-    WpdCodecContext avctx = { 0 };
-    WpdDSPContext dsp;
     VP8PredContext pred;
 
-    wpd_dsp_init(&dsp, &avctx);
+    wpd_dsp_data_init();
     ff_vp8_pred_init(&pred);
     check_pred4x4(&pred, buf0, buf1);
     report("pred4x4");

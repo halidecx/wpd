@@ -6,7 +6,6 @@
 
 void checkasm_check_vp8dsp(void);
 void checkasm_check_vp8pred(void);
-void checkasm_check_videodsp(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
 #if WPD_ARCH_X86
@@ -29,7 +28,6 @@ static const CheckasmCpuInfo cpu_flags[] = {
 static const CheckasmTest tests[] = {
     { "vp8dsp",   checkasm_check_vp8dsp },
     { "vp8pred",  checkasm_check_vp8pred },
-    { "videodsp", checkasm_check_videodsp },
     { 0 }
 };
 

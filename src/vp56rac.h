@@ -26,25 +26,6 @@
 
 #include "wpd_codec.h"
 
-/* VP8 uses the VP5/6 reference-frame numbering from the original decoder. */
-typedef enum VP56Frame {
-    VP56_FRAME_NONE     = -1,
-    VP56_FRAME_CURRENT  =  0,
-    VP56_FRAME_PREVIOUS =  1,
-    VP56_FRAME_GOLDEN   =  2,
-    VP56_FRAME_GOLDEN2  =  3,
-} VP56Frame;
-
-typedef struct VP56Tree {
-    int8_t val;
-    int8_t prob_idx;
-} VP56Tree;
-
-typedef struct {
-    int16_t x;
-    int16_t y;
-} WPD_DECLARE_ALIGNED(4, , VP56mv);
-
 typedef struct {
     int high;
     int bits;
@@ -143,17 +124,6 @@ static wpd_always_inline int vp8_rac_get(VP56RangeCoder *c)
     return vp56_rac_get_prob(c, 128);
 }
 
-static wpd_unused int vp56_rac_gets(VP56RangeCoder *c, int bits)
-{
-    int value = 0;
-
-    while (bits--) {
-        value = (value << 1) | vp56_rac_get(c);
-    }
-
-    return value;
-}
-
 static wpd_unused int vp8_rac_get_uint(VP56RangeCoder *c, int bits)
 {
     int value = 0;
@@ -179,33 +149,6 @@ static wpd_unused int vp8_rac_get_sint(VP56RangeCoder *c, int bits)
         v = -v;
 
     return v;
-}
-
-// P(7)
-static wpd_unused int vp56_rac_gets_nn(VP56RangeCoder *c, int bits)
-{
-    int v = vp56_rac_gets(c, 7) << 1;
-    return v + !v;
-}
-
-static wpd_unused int vp8_rac_get_nn(VP56RangeCoder *c)
-{
-    int v = vp8_rac_get_uint(c, 7) << 1;
-    return v + !v;
-}
-
-static wpd_always_inline
-int vp56_rac_get_tree(VP56RangeCoder *c,
-                      const VP56Tree *tree,
-                      const uint8_t *probs)
-{
-    while (tree->val > 0) {
-        if (vp56_rac_get_prob(c, probs[tree->prob_idx]))
-            tree += tree->val;
-        else
-            tree++;
-    }
-    return -tree->val;
 }
 
 /**

@@ -14,10 +14,6 @@ enum VP8Pred4x4Mode {
     VERT_LEFT_PRED,
     HOR_UP_PRED,
     TM_VP8_PRED,
-    VERT_VP8_PRED,
-    HOR_VP8_PRED,
-    DC_127_PRED,
-    DC_129_PRED,
     VP8_PRED4X4_COUNT,
 };
 
@@ -29,8 +25,6 @@ enum VP8Pred8x8Mode {
     LEFT_DC_PRED8x8,
     TOP_DC_PRED8x8,
     DC_128_PRED8x8,
-    DC_127_PRED8x8,
-    DC_129_PRED8x8,
     VP8_PRED8X8_COUNT,
 };
 

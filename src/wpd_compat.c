@@ -2,7 +2,6 @@
 
 #include <stdarg.h>
 
-void *wpd_malloc(size_t size) { return malloc(size); }
 void *wpd_mallocz(size_t size) { return calloc(1, size); }
 void wpd_free(void *pointer) { free(pointer); }
 void wpd_freep(void *pointer)
@@ -34,39 +33,4 @@ void wpd_set_dimensions(WpdCodecContext *context, int width, int height)
 {
     context->width = context->coded_width = width;
     context->height = context->coded_height = height;
-}
-
-static void prefetch(uint8_t *buf, int stride, int h)
-{ (void)buf; (void)stride; (void)h; }
-
-static void emulated_edge_mc(uint8_t *dst, const uint8_t *src,
-                             ptrdiff_t dst_stride, ptrdiff_t src_stride,
-                             int block_w, int block_h, int src_x, int src_y,
-                             int width, int height)
-{
-    const uint8_t *origin = src - (ptrdiff_t)src_y * src_stride - src_x;
-    for (int y = 0; y < block_h; y++) {
-        int sy = wpd_clip(src_y + y, 0, height - 1);
-        for (int x = 0; x < block_w; x++) {
-            int sx = wpd_clip(src_x + x, 0, width - 1);
-            dst[(ptrdiff_t)y * dst_stride + x] = origin[(ptrdiff_t)sy * src_stride + sx];
-        }
-    }
-}
-
-void wpd_dsp_init(WpdDSPContext *dsp, WpdCodecContext *context)
-{
-    (void)context;
-    wpd_dsp_data_init();
-    dsp->prefetch = prefetch;
-    dsp->emulated_edge_mc = emulated_edge_mc;
-#if WPD_ARCH_X86 && WPD_HAVE_MMX
-    wpd_dsp_init_x86(dsp);
-#endif
-#if WPD_ARCH_ARM
-    wpd_dsp_init_arm(dsp);
-#endif
-#if WPD_ARCH_AARCH64
-    wpd_dsp_init_aarch64(dsp);
-#endif
 }
