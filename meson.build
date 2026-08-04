@@ -107,6 +107,21 @@ if asm_enabled
     )
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
+
+    # Thumb-2 gives us sbfx and a real movw/movt; without it the asm falls back
+    # to sxth+asr and a mov/orr pair. Two separate questions, as in FFmpeg:
+    # whether the target CPU has the instructions, and whether the assembler
+    # will emit them.
+    armv6t2 = cc.compiles(
+      '''#if !defined(__ARM_ARCH_6T2__) && (!defined(__ARM_ARCH) || __ARM_ARCH < 7)
+         #error no Thumb-2 on this target
+         #endif
+         int main(void) { return 0; }''',
+      name: 'ARMv6T2 target')
+    armv6t2_external = armv6t2 and cc.compiles(
+      'void f(void) { __asm__(".syntax unified\\nsbfx r0, r0, #0, #1"); }',
+      name: 'ARMv6T2 assembler support')
+
     lib_sources += files(
       'src/arm/vp8_armv6.S',
       'src/arm/vp8dsp_armv6.S',
@@ -118,6 +133,12 @@ if asm_enabled
       'src/arm/vp8pred_init.c',
     )
     lib_c_args += ['-DWPD_ARM_NEON_ASM=1']
+    if armv6t2
+      lib_c_args += ['-DWPD_ARM_ARMV6T2_ASM=1']
+    endif
+    if armv6t2_external
+      lib_c_args += ['-DWPD_ARM_ARMV6T2_EXTERNAL_ASM=1']
+    endif
   endif
 endif
 
