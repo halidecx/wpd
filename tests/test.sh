@@ -10,7 +10,7 @@ fi
 for input in "${inputs[@]}"; do
     echo -ne "$input\t"
     case "$input" in
-        *yuva*)              pixel_format=yuva420p ;;
+        *yuva*)               pixel_format=yuva420p ;;
         *yuv*|*lossy.webp)    pixel_format=yuv420p ;;
         *rgb*|*lossless.webp) pixel_format=argb ;;
         *)
