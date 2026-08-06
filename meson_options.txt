@@ -2,3 +2,8 @@ option('enable_asm',
     type: 'boolean',
     value: true,
     description: 'Build asm files, if available')
+
+option('libwebpdecoder',
+    type: 'string',
+    value: '',
+    description: 'Path to a static libwebpdecoder.a for libwebpdec')

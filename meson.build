@@ -187,7 +187,13 @@ executable(
   install: false,
 )
 
-libwebp_dep = dependency('libwebp', required: false, static: true)
+libwebpdecoder_path = get_option('libwebpdecoder')
+if libwebpdecoder_path != ''
+  libwebp_dep = declare_dependency(link_args: [libwebpdecoder_path])
+  message('libwebpdec decoder: ' + libwebpdecoder_path)
+else
+  libwebp_dep = dependency('libwebp', required: false, static: true)
+endif
 libwebpdemux_dep = dependency('libwebpdemux', required: false, static: true)
 
 if libwebp_dep.found() and libwebpdemux_dep.found()
