@@ -1,15 +1,12 @@
 #!/bin/bash -eu
 
-RUNS="${1:-"256"}"
-WARMUP_RUNS="${2:-"24"}"
+WPD="${1:-"./build/wpd"}"
+LWP="${2:-"./build/libwebpdec"}"
+REPEAT="${3:-48}"
 
-for file in "wpd-test-data/lossy.webp" "wpd-test-data/a_lossy.webp"; do
-    hyperfine -N \
-        --warmup "${WARMUP_RUNS}" --runs "${RUNS}" \
-        "./build/wpd $file /dev/null" \
-        "dwebp $file -yuv -o /dev/null"
+for file in "lossy.webp" "a_lossy.webp" "lossless.webp"; do
+    printf '\n=== %s (x%s) ===\n' "$file" "$REPEAT"
+    hyperfine -N --warmup 4 --runs 16 \
+        -n "wpd" "$WPD --repeat $REPEAT wpd-test-data/$file /dev/null" \
+        -n "lwp" "$LWP --repeat $REPEAT wpd-test-data/$file /dev/null"
 done
-
-hyperfine -N --warmup "${WARMUP_RUNS}" --runs "${RUNS}" \
-    "./build/wpd wpd-test-data/lossless.webp /dev/null" \
-    "dwebp wpd-test-data/lossless.webp -pam -o /dev/null"

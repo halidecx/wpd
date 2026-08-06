@@ -182,6 +182,24 @@ executable(
   install: false,
 )
 
+libwebp_dep = dependency('libwebp', required: false, static: true)
+libwebpdemux_dep = dependency('libwebpdemux', required: false, static: true)
+
+if libwebp_dep.found() and libwebpdemux_dep.found()
+  executable(
+    'libwebpdec',
+    'tools/libwebpdec.c',
+    getopt_sources,
+    dependencies: [libwebp_dep, libwebpdemux_dep],
+    include_directories: getopt_inc_dirs,
+    build_by_default: false,
+    install: false,
+  )
+  message('libwebpdec: enabled (build explicitly with target libwebpdec)')
+else
+  message('libwebpdec: disabled (static libwebp and libwebpdemux not found)')
+endif
+
 checkasm_dep = dependency(
   'checkasm',
   fallback: ['checkasm', 'checkasm_dep'],

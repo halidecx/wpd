@@ -33,6 +33,16 @@ build/wpd input.webp /dev/null
 Architecture-specific assembly is enabled automatically. Use
 `meson setup build -Denable_asm=false` for a portable C-only build.
 
+For benchmarks against libwebp, install its development libraries and build the
+optional statically linked comparison binary explicitly:
+
+```sh
+meson compile -C build libwebpdec
+./scripts/bench.sh
+```
+
+`libwebpdec` is not included in the default build.
+
 ## Test
 
 ```sh

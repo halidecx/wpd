@@ -14,7 +14,7 @@ meson compile -C build
 Test scripts:
 
 ```sh
-./scripts/bench.sh      # performance, wpd vs dwebp
+./scripts/bench.sh      # performance, wpd vs libwebpdec
 ./scripts/test.sh       # correctness, vs FFmpeg
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
