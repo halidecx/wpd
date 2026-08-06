@@ -177,5 +177,7 @@ wpd_cold void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp) {
 #if WPD_HAVE_ASM && WPD_ARCH_AARCH64
     if (wpd_have_neon(wpd_get_cpu_flags()))
         wpd_vp8l_dsp_init_aarch64(dsp);
+#elif WPD_HAVE_ASM && WPD_ARCH_X86
+    wpd_vp8l_dsp_init_x86(dsp);
 #endif
 }

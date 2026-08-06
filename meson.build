@@ -96,6 +96,7 @@ if asm_enabled
 
     lib_objects += nasm_gen.process(
       files(
+        'src/x86/vp8l.asm',
         'src/x86/vp8dsp.asm',
         'src/x86/vp8_intrapred.asm',
       ),
@@ -103,6 +104,7 @@ if asm_enabled
     )
     lib_objects += nasm_gen.process(files('src/x86/vp8dsp_loopfilter.asm'))
     lib_sources += files(
+      'src/x86/vp8l_init.c',
       'src/x86/vp8dsp_init.c',
       'src/x86/vp8pred_init.c',
       'src/x86/wpd_simd_constants.c',
