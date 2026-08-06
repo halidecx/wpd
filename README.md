@@ -41,6 +41,14 @@ meson compile -C build libwebpdec
 ./scripts/bench.sh
 ```
 
+To use a particular static libwebp decoder instead of the system one, configure
+the build with its path:
+
+```sh
+meson setup build -Dlibwebpdecoder=/path/to/libwebpdecoder.a
+meson compile -C build libwebpdec
+```
+
 `libwebpdec` is not included in the default build.
 
 ## Test

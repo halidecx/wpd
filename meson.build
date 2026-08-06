@@ -187,7 +187,13 @@ executable(
   install: false,
 )
 
-libwebp_dep = dependency('libwebp', required: false, static: true)
+libwebpdecoder_path = get_option('libwebpdecoder')
+if libwebpdecoder_path != ''
+  libwebp_dep = declare_dependency(link_args: [libwebpdecoder_path])
+  message('libwebpdec decoder: ' + libwebpdecoder_path)
+else
+  libwebp_dep = dependency('libwebp', required: false, static: true)
+endif
 libwebpdemux_dep = dependency('libwebpdemux', required: false, static: true)
 
 if libwebp_dep.found() and libwebpdemux_dep.found()
@@ -212,18 +218,37 @@ checkasm_dep = dependency(
 )
 
 if asm_enabled and checkasm_dep.found()
+  # checkasm needs entry points the decoder doesn't, such as a C reference for
+  # the coefficient decoder that arm32 replaces at compile time. Building them
+  # into a separate copy of the library keeps the shipped one bit-identical.
+  libwpd_checkasm = static_library(
+    'wpd_checkasm',
+    lib_sources,
+    lib_objects,
+    include_directories: inc_dirs,
+    c_args: lib_c_args + ['-DWPD_CHECKASM=1'],
+    build_by_default: false,
+    install: false,
+  )
+
+  wpd_checkasm_dep = declare_dependency(
+    link_with: libwpd_checkasm,
+    include_directories: inc_dirs,
+  )
+
   checkasm = executable(
     'checkasm',
     files(
       'tests/checkasm/main.c',
       'tests/checkasm/lossless.c',
+      'tests/checkasm/vp8coeffs.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
     ),
-    dependencies: [wpd_dep, checkasm_dep],
+    dependencies: [wpd_checkasm_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),
-    c_args: lib_c_args,
-    build_by_default: false,
+    c_args: lib_c_args + ['-DWPD_CHECKASM=1'],
+    build_by_default: true,
     install: false,
   )
   test('checkasm', checkasm, suite: 'checkasm', timeout: 180)

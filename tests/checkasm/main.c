@@ -5,6 +5,7 @@
 #include "checkasm.h"
 
 void checkasm_check_lossless(void);
+void checkasm_check_vp8coeffs(void);
 void checkasm_check_vp8dsp(void);
 void checkasm_check_vp8pred(void);
 
@@ -25,11 +26,11 @@ static const CheckasmCpuInfo cpu_flags[] = {
 #endif
     {0}};
 
-static const CheckasmTest tests[] = {
-    {"lossless", checkasm_check_lossless, NULL, NULL},
-    {"vp8dsp", checkasm_check_vp8dsp, NULL, NULL},
-    {"vp8pred", checkasm_check_vp8pred, NULL, NULL},
-    {0}};
+static const CheckasmTest tests[] = {{"lossless", checkasm_check_lossless},
+                                     {"vp8coeffs", checkasm_check_vp8coeffs},
+                                     {"vp8dsp", checkasm_check_vp8dsp},
+                                     {"vp8pred", checkasm_check_vp8pred},
+                                     {0}};
 
 static void set_cpu_flags(CheckasmCpu flags) {
     wpd_set_cpu_flags_for_test((int)flags);

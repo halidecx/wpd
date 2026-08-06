@@ -622,6 +622,12 @@ static int update_dimensions(VP8Context *s, int width, int height) {
     if (wpd_check_image_size(width, height))
         return WPD_ERROR_INVALID_DATA;
 
+    // keep the buffers and picture when the dimensions are unchanged;
+    // everything they carry is rewritten at the start of each frame
+    if (width == s->avctx->width && height == s->avctx->height &&
+        s->frame.allocation[0] && s->filter_strength)
+        return 0;
+
     free_buffers(s);
     wpd_release_picture(&s->frame);
     s->avctx->width  = width;
@@ -896,7 +902,6 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         c, vp8_pred8x8c_tree, vp8_pred8x8c_prob_intra);
 }
 
-#ifndef decode_block_coeffs_internal
 /**
  * @param c arithmetic bitstream reader context
  * @param block destination for block coefficients
@@ -906,10 +911,9 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
  * @return 0 if no coeffs were decoded
  *         otherwise, the index of the last coeff decoded plus one
  */
-static int decode_block_coeffs_internal(
-    VP56RangeCoder *c, WpdDctElem block[16],
-    uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, uint8_t *token_prob,
-    int16_t qmul[2]) {
+static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
+                                 uint8_t probs[16][3][NUM_DCT_TOKENS - 1],
+                                 int i, uint8_t *token_prob, int16_t qmul[2]) {
     goto skip_eob;
     do {
         int coeff;
@@ -955,10 +959,31 @@ static int decode_block_coeffs_internal(
             }
             token_prob = probs[i + 1][2];
         }
-        block[zigzag_scan[i]] = (vp8_rac_get(c) ? -coeff : coeff) * qmul[!!i];
+        block[zigzag_scan[i]] = vp8_rac_get_signed(c, coeff) * qmul[!!i];
     } while (++i < 16);
 
     return i;
+}
+
+// arm/vp8.h points this at ff_decode_block_coeffs_armv6 on arm32.
+#ifndef decode_block_coeffs_internal
+#define decode_block_coeffs_internal decode_block_coeffs_c
+#endif
+
+#ifdef WPD_CHECKASM
+/**
+ * External alias for the C coefficient decoder.
+ *
+ * checkasm needs a reference to compare ff_decode_block_coeffs_armv6 against,
+ * but on arm32 decode_block_coeffs_internal *is* the asm. A second caller
+ * costs the shipped decoder ~0.3% of its instruction count, because it stops
+ * GCC specializing decode_block_coeffs_c for its one real call site, so this
+ * is compiled only into the library checkasm links against.
+ */
+int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
+                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
+                              uint8_t *token_prob, int16_t qmul[2]) {
+    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
 }
 #endif
 
@@ -1031,9 +1056,8 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
             nnz_total += nnz;
         }
 
-    // chroma blocks
-    // TODO: what to do about dimensions? 2nd dim for luma is x,
-    // but for chroma it's (y<<1)|x
+    // Chroma blocks. Note the second index is x for luma above but (y<<1)|x
+    // here, since each chroma plane is a single 2x2 grid of blocks.
     for (i = 4; i < 6; i++)
         for (y = 0; y < 2; y++)
             for (x = 0; x < 2; x++) {
@@ -1447,7 +1471,8 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     if ((ret = decode_frame_header(s, avpkt->data, avpkt->size)) < 0)
         return ret;
 
-    if ((ret = wpd_alloc_picture(avctx, curframe)) < 0) {
+    if (!curframe->allocation[0] &&
+        (ret = wpd_alloc_picture(avctx, curframe)) < 0) {
         wpd_log(avctx, WPD_LOG_ERROR, "Frame allocation failed\n");
         return ret;
     }
@@ -1459,7 +1484,9 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     memset(s->top_nnz, 0, s->mb_width * sizeof(*s->top_nnz));
     memset(s->intra4x4_pred_mode_top, DC_PRED, s->mb_width * 4);
 
-    // top edge of 127 for intra prediction
+    // top edge of 127 for intra prediction; entry 0 is cleared in full since
+    // the picture is reused across frames and no longer freshly zeroed
+    memset(s->top_border[0], 0, sizeof(*s->top_border));
     s->top_border[0][15] = s->top_border[0][23] = 127;
     memset(
         &s->top_border[0][31], 127, s->mb_width * sizeof(*s->top_border) + 1);

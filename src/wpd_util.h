@@ -26,11 +26,6 @@ static wpd_always_inline unsigned wpd_clip_uintp2(int value, int bits) {
     return value < 0 ? 0 : value > max ? max : value;
 }
 
-static wpd_always_inline uint32_t wpd_r32(const void *p) {
-    uint32_t v;
-    memcpy(&v, p, 4);
-    return v;
-}
 static wpd_always_inline uint64_t wpd_r64(const void *p) {
     uint64_t v;
     memcpy(&v, p, 8);
