@@ -1,9 +1,9 @@
 #!/bin/bash -eu
 
 shopt -s nullglob
-inputs=(testdata/*.webp)
+inputs=(wpd-test-data/*.webp)
 if (( ${#inputs[@]} == 0 )); then
-    echo "no WebP files found in testdata" >&2
+    echo "no WebP files found in wpd-test-data" >&2
     exit 1
 fi
 

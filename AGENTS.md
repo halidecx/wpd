@@ -14,7 +14,13 @@ meson compile -C build
 Test reference SSIM scores versus decodes:
 
 ```sh
-./test.sh
+./tests/test.sh
+```
+
+Test speed:
+
+```sh
+./tests/bench.sh
 ```
 
 Inspect the structure of a WebP file (still or animated):
@@ -23,5 +29,5 @@ Inspect the structure of a WebP file (still or animated):
 webpmux -info [i.webp]
 ```
 
-When testing, decode into the `testdata` dir. **Never** delete the WebP
+When testing, decode into the `wpd-test-data` dir. **Never** delete the WebP
 reference files in there.
