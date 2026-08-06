@@ -433,6 +433,8 @@ void checkasm_check_vp8dsp(void) {
     // Needs to be zeroed because not all size 16 epel functions exist.
     VP8DSPContext d = {0};
 
+    // The C loop filters index wpd_crop_table, which is only populated here.
+    wpd_dsp_data_init();
     ff_vp8dsp_init(&d);
     report("mc");
     check_all(&d);
