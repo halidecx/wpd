@@ -2,6 +2,17 @@
 
 A fast WebP decoder based on ffvp8 and FFmpeg's WebP decoder.
 
+## Code
+
+- Comments should be added only when necessary, maximum 2 lines
+- No intrinsics; you may add them to test performance, but they should
+  ultimately be re-written to handwritten assembly that matches or exceeds their
+  performance
+- Every assembly addition should have a checkasm test
+- dav1d is the gold standard for decoder libraries; reference a dav1d checkout
+  when you need to do research
+- Run stylecheck after finishing changes
+
 ## Usage
 
 Compile `wpd` binary to `build/`:
