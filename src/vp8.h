@@ -146,6 +146,17 @@ typedef struct {
     VP8PredContext pred;
 } VP8Context;
 
+#ifdef WPD_CHECKASM
+/**
+ * The C coefficient decoder, exposed so checkasm can use it as the reference
+ * for arch-specific replacements such as ff_decode_block_coeffs_armv6. Only
+ * present in the checkasm build; see src/vp8.c for why.
+ */
+int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
+                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
+                              uint8_t *token_prob, int16_t qmul[2]);
+#endif
+
 int vp8_decode_init(WpdCodecContext *context);
 int vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
 int vp8_decode_free(WpdCodecContext *context);

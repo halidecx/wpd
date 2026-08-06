@@ -902,7 +902,6 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         c, vp8_pred8x8c_tree, vp8_pred8x8c_prob_intra);
 }
 
-#ifndef decode_block_coeffs_internal
 /**
  * @param c arithmetic bitstream reader context
  * @param block destination for block coefficients
@@ -912,10 +911,9 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
  * @return 0 if no coeffs were decoded
  *         otherwise, the index of the last coeff decoded plus one
  */
-static int decode_block_coeffs_internal(
-    VP56RangeCoder *c, WpdDctElem block[16],
-    uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, uint8_t *token_prob,
-    int16_t qmul[2]) {
+static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
+                                 uint8_t probs[16][3][NUM_DCT_TOKENS - 1],
+                                 int i, uint8_t *token_prob, int16_t qmul[2]) {
     goto skip_eob;
     do {
         int coeff;
@@ -965,6 +963,27 @@ static int decode_block_coeffs_internal(
     } while (++i < 16);
 
     return i;
+}
+
+// arm/vp8.h points this at ff_decode_block_coeffs_armv6 on arm32.
+#ifndef decode_block_coeffs_internal
+#define decode_block_coeffs_internal decode_block_coeffs_c
+#endif
+
+#ifdef WPD_CHECKASM
+/**
+ * External alias for the C coefficient decoder.
+ *
+ * checkasm needs a reference to compare ff_decode_block_coeffs_armv6 against,
+ * but on arm32 decode_block_coeffs_internal *is* the asm. A second caller
+ * costs the shipped decoder ~0.3% of its instruction count, because it stops
+ * GCC specializing decode_block_coeffs_c for its one real call site, so this
+ * is compiled only into the library checkasm links against.
+ */
+int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
+                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
+                              uint8_t *token_prob, int16_t qmul[2]) {
+    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
 }
 #endif
 
