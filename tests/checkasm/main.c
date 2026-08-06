@@ -4,6 +4,7 @@
  */
 #include "checkasm.h"
 
+void checkasm_check_lossless(void);
 void checkasm_check_vp8dsp(void);
 void checkasm_check_vp8pred(void);
 
@@ -25,6 +26,7 @@ static const CheckasmCpuInfo cpu_flags[] = {
     {0}};
 
 static const CheckasmTest tests[] = {
+    {"lossless", checkasm_check_lossless, NULL, NULL},
     {"vp8dsp", checkasm_check_vp8dsp, NULL, NULL},
     {"vp8pred", checkasm_check_vp8pred, NULL, NULL},
     {0}};
