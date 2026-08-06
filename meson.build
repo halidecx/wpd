@@ -223,7 +223,7 @@ if asm_enabled and checkasm_dep.found()
     dependencies: [wpd_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),
     c_args: lib_c_args,
-    build_by_default: false,
+    build_by_default: true,
     install: false,
   )
   test('checkasm', checkasm, suite: 'checkasm', timeout: 180)
