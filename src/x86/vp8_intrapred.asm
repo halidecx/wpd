@@ -1,26 +1,3 @@
-;******************************************************************************
-;* VP8 intra prediction asm optimizations
-;* Copyright (c) 2010 Fiona Glaser
-;* Copyright (c) 2010 Holger Lubitz
-;* Copyright (c) 2010 Loren Merritt
-;* Copyright (c) 2010 Ronald S. Bultje
-;*
-;* This file is part of FFmpeg.
-;*
-;* FFmpeg is free software; you can redistribute it and/or
-;* modify it under the terms of the GNU Lesser General Public
-;* License as published by the Free Software Foundation; either
-;* version 2.1 of the License, or (at your option) any later version.
-;*
-;* FFmpeg is distributed in the hope that it will be useful,
-;* but WITHOUT ANY WARRANTY; without even the implied warranty of
-;* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-;* Lesser General Public License for more details.
-;*
-;* You should have received a copy of the GNU Lesser General Public
-;* License along with FFmpeg; if not, write to the Free Software
-;* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
-;******************************************************************************
 
 %include "asm/x86/x86util.asm"
 
@@ -28,9 +5,6 @@ SECTION_RODATA
 
 tm_shuf: times 8 db 0x03, 0x80
 
-; pred4x4_vertical_left, over A (bytes 0-7) then B (bytes 8-15):
-;   row0 = A0 A1 A2 A3   row1 = B0 B1 B2 B3
-;   row2 = A1 A2 A3 B4   row3 = B1 B2 B3 B5
 vl_shuf: db 0, 1, 2, 3, 8, 9, 10, 11, 1, 2, 3, 12, 9, 10, 11, 13
 
 SECTION .text
@@ -38,17 +12,7 @@ SECTION .text
 cextern_naked wpd_pb_1
 cextern_naked wpd_pb_3
 
-; On unrolling: a taken branch per iteration costs roughly a fixed amount, so it
-; hurts in proportion to how little work the iteration does. Measured on a
-; 13700K, replacing the row loop with %rep is worth -53% on pred8x8_horizontal
-; and -38% on pred8x8_dc (bodies of two stores), but nothing at all on the
-; pred16x16/pred8x8 TrueMotion loops or pred16x16_vertical, whose bodies are
-; long enough to hide the branch. Those keep their loops rather than pay four to
-; sixteen times the code size for no gain.
 
-;-----------------------------------------------------------------------------
-; void ff_pred16x16_vertical_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_XMM sse
 cglobal pred16x16_vertical_8, 2,3
@@ -66,9 +30,6 @@ cglobal pred16x16_vertical_8, 2,3
     jg .loop
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred16x16_horizontal_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 %macro PRED16x16_H 0
 cglobal pred16x16_horizontal_8, 2,3
@@ -108,14 +69,8 @@ PRED16x16_H
 INIT_XMM avx2
 PRED16x16_H
 
-;-----------------------------------------------------------------------------
-; void ff_pred16x16_dc_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
-; Fill %2 rows of mmsize (or 8, for movq) bytes at r2, stride r1, with m0.
-; Four rows per step so the pointer only advances %2/4 times; r3 is dead by the
-; time any caller gets here.
-%macro DC_FILL 2 ; storeop, rows
+%macro DC_FILL 2
     lea       r3, [r1+r1*2]
 %rep %2/4
     %1 [r2+r1*0], m0
@@ -171,15 +126,6 @@ PRED16x16_DC
 INIT_XMM ssse3
 PRED16x16_DC
 
-;-----------------------------------------------------------------------------
-; void ff_pred16x16_top_dc_8(uint8_t *src, ptrdiff_t stride)
-; void ff_pred16x16_left_dc_8(uint8_t *src, ptrdiff_t stride)
-; void ff_pred16x16_dc_128_8(uint8_t *src, ptrdiff_t stride)
-;
-; The edge-clamped DC modes, reached only on the frame's first row and column
-; (check_intra_pred8x8_mode). Each averages one edge instead of two, so the
-; rounding bias halves: (sum + 8) >> 4 rather than (sum + 16) >> 5.
-;-----------------------------------------------------------------------------
 
 %macro PRED16x16_TOP_DC 0
 cglobal pred16x16_top_dc_8, 2,4
@@ -187,7 +133,7 @@ cglobal pred16x16_top_dc_8, 2,4
     sub       r0, r1
     pxor      m1, m1
     mova      m0, [r0]
-    psadbw    m0, m1              ; halves land in words 0 and 4
+    psadbw    m0, m1
     movhlps   m2, m0
     paddd     m0, m2
     movd     r3d, m0
@@ -231,12 +177,7 @@ PRED16x16_LEFT_DC
 INIT_XMM ssse3
 PRED16x16_LEFT_DC
 
-; No dc_128 here: it is a plain memset of a compile-time constant, which the C
-; compiler already lowers to the same store stream. Measured identical.
 
-;-----------------------------------------------------------------------------
-; void ff_pred16x16_tm_vp8_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_XMM sse2
 cglobal pred16x16_tm_vp8_8, 2,6,6
@@ -323,9 +264,6 @@ cglobal pred8x8_vertical_8, 2,2
     movq [r0+r1*2], m0
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred8x8_horizontal_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 %macro PRED8x8_H 0
 cglobal pred8x8_horizontal_8, 2,3,3
@@ -354,9 +292,6 @@ PRED8x8_H
 INIT_XMM avx2
 PRED8x8_H
 
-;-----------------------------------------------------------------------------
-; void ff_pred8x8_dc_vp8_8_mmxext(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 INIT_MMX mmxext
 cglobal pred8x8_dc_vp8_8, 2,7
     mov       r4, r0
@@ -388,13 +323,6 @@ cglobal pred8x8_dc_vp8_8, 2,7
 %endrep
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred8x8_top_dc_8(uint8_t *src, ptrdiff_t stride)
-; void ff_pred8x8_left_dc_8(uint8_t *src, ptrdiff_t stride)
-; void ff_pred8x8_dc_128_8(uint8_t *src, ptrdiff_t stride)
-;
-; As above at 8x8: one edge, (sum + 4) >> 3.
-;-----------------------------------------------------------------------------
 
 %macro PRED8x8_TOP_DC 0
 cglobal pred8x8_top_dc_8, 2,4
@@ -444,9 +372,6 @@ PRED8x8_LEFT_DC
 INIT_XMM ssse3
 PRED8x8_LEFT_DC
 
-;-----------------------------------------------------------------------------
-; void ff_pred8x8_tm_vp8_8(uint8_t *src, ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_XMM sse2
 cglobal pred8x8_tm_vp8_8, 2,6,4
@@ -502,8 +427,6 @@ cglobal pred8x8_tm_vp8_8, 2,3,6
 %endrep
     RET
 
-; dest, left, right, src, tmp
-; output: %1 = (t[n-1] + t[n]*2 + t[n+1] + 2) >> 2
 %macro PRED4x4_LOWPASS 5
     mova    %5, %2
     pavgb   %2, %3
@@ -542,10 +465,6 @@ cglobal pred4x4_dc_8, 3,5
     mov   [r0+r2*2], r3d
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_tm_vp8_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                 ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_tm_vp8_8, 3,6
@@ -608,20 +527,16 @@ cglobal pred4x4_tm_vp8_8, 3,3
     movd [r1+r2*2], mm5
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_vertical_vp8_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                       ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_vertical_vp8_8, 3,3
     sub       r0, r2
     movd      m1, [r0-1]
     movd      m0, [r0]
-    mova      m2, m0   ;t0 t1 t2 t3
-    punpckldq m0, [r1] ;t0 t1 t2 t3 t4 t5 t6 t7
+    mova      m2, m0
+    punpckldq m0, [r1]
     lea       r1, [r0+r2*2]
-    psrlq     m0, 8    ;t1 t2 t3 t4
+    psrlq     m0, 8
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
     movd [r0+r2*1], m2
     movd [r0+r2*2], m2
@@ -629,79 +544,58 @@ cglobal pred4x4_vertical_vp8_8, 3,3
     movd [r1+r2*2], m2
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_horizontal_vp8_8_sse2(uint8_t *src, const uint8_t *topright,
-;                                       ptrdiff_t stride)
-;
-; No vector registers: the left edge is five strided single-byte loads, and
-; gathering those into a register costs more than the whole transform. Every
-; output row is one repeated byte, so an imul splats it across the dword store.
-; The last tap is (l2 + 3*l3 + 2) >> 2, i.e. avg3(l2, l3, l3) -- l3 is its own
-; right neighbour. The sse2 tag is only the dispatch tier (x86-64 baseline).
-;-----------------------------------------------------------------------------
 
 INIT_XMM sse2
 cglobal pred4x4_horizontal_vp8_8, 3,7
     sub       r0, r2
     lea       r1, [r0+r2*2]
-    movzx    r3d, byte [r0-1]           ; lt
-    movzx    r4d, byte [r0+r2*1-1]      ; l0
-    movzx    r5d, byte [r0+r2*2-1]      ; l1
-    movzx    r6d, byte [r1+r2*1-1]      ; l2
+    movzx    r3d, byte [r0-1]
+    movzx    r4d, byte [r0+r2*1-1]
+    movzx    r5d, byte [r0+r2*2-1]
+    movzx    r6d, byte [r1+r2*1-1]
 
-    lea      r3d, [r3+r5+2]             ; lt + l1 + 2
-    lea      r3d, [r3+r4*2]             ; + 2*l0
+    lea      r3d, [r3+r5+2]
+    lea      r3d, [r3+r4*2]
     shr      r3d, 2
     imul     r3d, 0x01010101
     mov [r0+r2*1], r3d
 
-    lea      r3d, [r4+r6+2]             ; l0 + l2 + 2
-    lea      r3d, [r3+r5*2]             ; + 2*l1
+    lea      r3d, [r4+r6+2]
+    lea      r3d, [r3+r5*2]
     shr      r3d, 2
     imul     r3d, 0x01010101
     mov [r0+r2*2], r3d
 
-    movzx    r4d, byte [r1+r2*2-1]      ; l3
-    lea      r3d, [r5+r4+2]             ; l1 + l3 + 2
-    lea      r3d, [r3+r6*2]             ; + 2*l2
+    movzx    r4d, byte [r1+r2*2-1]
+    lea      r3d, [r5+r4+2]
+    lea      r3d, [r3+r6*2]
     shr      r3d, 2
     imul     r3d, 0x01010101
     mov [r1+r2*1], r3d
 
-    lea      r3d, [r6+r4+2]             ; l2 + l3 + 2
-    lea      r3d, [r3+r4*2]             ; + 2*l3
+    lea      r3d, [r6+r4+2]
+    lea      r3d, [r3+r4*2]
     shr      r3d, 2
     imul     r3d, 0x01010101
     mov [r1+r2*2], r3d
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_vertical_left_vp8_8_ssse3(uint8_t *src,
-;                                           const uint8_t *topright,
-;                                           ptrdiff_t stride)
-;
-; From seq = t0..t7 build A[i] = avg2(t[i], t[i+1]) and B[i] = avg3(t[i],
-; t[i+1], t[i+2]) once. Rows 0 and 1 are A[0..3] and B[0..3]; rows 2 and 3 are
-; those shifted by one, except that each ends one step further along B. That
-; irregularity is what makes pshufb worth it: concatenating A and B puts every
-; output byte in one register, so a single shuffle lays out all four rows.
-;-----------------------------------------------------------------------------
 
 INIT_XMM ssse3
 cglobal pred4x4_vertical_left_vp8_8, 3,3
     sub        r0, r2
-    movd       m0, [r0]        ; t0 t1 t2 t3
+    movd       m0, [r0]
     movd       m1, [r1]
-    punpckldq  m0, m1          ; t0 t1 t2 t3 t4 t5 t6 t7
+    punpckldq  m0, m1
     mova       m1, m0
-    psrldq     m1, 1           ; t1 ..
+    psrldq     m1, 1
     mova       m2, m0
-    psrldq     m2, 2           ; t2 ..
+    psrldq     m2, 2
     mova       m3, m0
-    pavgb      m3, m1          ; A
-    PRED4x4_LOWPASS m4, m0, m2, m1, m5  ; B
-    punpcklqdq m3, m4          ; A in bytes 0-7, B in bytes 8-15
-    pshufb     m3, [vl_shuf]   ; the four rows, packed
+    pavgb      m3, m1
+    PRED4x4_LOWPASS m4, m0, m2, m1, m5
+    punpcklqdq m3, m4
+    pshufb     m3, [vl_shuf]
     lea        r1, [r0+r2*2]
     movd [r0+r2*1], m3
     psrldq     m3, 4
@@ -712,10 +606,6 @@ cglobal pred4x4_vertical_left_vp8_8, 3,3
     movd [r1+r2*2], m3
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_down_left_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                    ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 INIT_MMX mmxext
 cglobal pred4x4_down_left_8, 3,3
     sub       r0, r2
@@ -739,10 +629,6 @@ cglobal pred4x4_down_left_8, 3,3
     movd      [r1+r2*2], m0
     RET
 
-;------------------------------------------------------------------------------
-; void ff_pred4x4_horizontal_up_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                        ptrdiff_t stride)
-;------------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_horizontal_up_8, 3,3
@@ -773,30 +659,25 @@ cglobal pred4x4_horizontal_up_8, 3,3
     movd    [r1+r2*2], m1
     RET
 
-;------------------------------------------------------------------------------
-; void ff_pred4x4_horizontal_down_8_mmxext(uint8_t *src,
-;                                          const uint8_t *topright,
-;                                          ptrdiff_t stride)
-;------------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_horizontal_down_8, 3,3
     sub       r0, r2
     lea       r1, [r0+r2*2]
-    movh      m0, [r0-4]      ; lt ..
-    punpckldq m0, [r0]        ; t3 t2 t1 t0 lt .. .. ..
-    psllq     m0, 8           ; t2 t1 t0 lt .. .. .. ..
-    movd      m1, [r1+r2*2-4] ; l3
-    punpcklbw m1, [r1+r2*1-4] ; l2 l3
-    movd      m2, [r0+r2*2-4] ; l1
-    punpcklbw m2, [r0+r2*1-4] ; l0 l1
-    punpckhwd m1, m2          ; l0 l1 l2 l3
-    punpckhdq m1, m0          ; t2 t1 t0 lt l0 l1 l2 l3
+    movh      m0, [r0-4]
+    punpckldq m0, [r0]
+    psllq     m0, 8
+    movd      m1, [r1+r2*2-4]
+    punpcklbw m1, [r1+r2*1-4]
+    movd      m2, [r0+r2*2-4]
+    punpcklbw m2, [r0+r2*1-4]
+    punpckhwd m1, m2
+    punpckhdq m1, m0
     movq      m0, m1
     movq      m2, m1
     movq      m5, m1
-    psrlq     m0, 16          ; .. .. t2 t1 t0 lt l0 l1
-    psrlq     m2, 8           ; .. t2 t1 t0 lt l0 l1 l2
+    psrlq     m0, 16
+    psrlq     m2, 8
     pavgb     m5, m2
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
     punpcklbw m5, m2
@@ -810,25 +691,20 @@ cglobal pred4x4_horizontal_down_8, 3,3
     movh      [r0+r2*1], m2
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_vertical_right_8_mmxext(uint8_t *src,
-;                                         const uint8_t *topright,
-;                                         ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_vertical_right_8, 3,3
     sub     r0, r2
     lea     r1, [r0+r2*2]
-    movh    m0, [r0]                    ; ........t3t2t1t0
+    movh    m0, [r0]
     movq    m5, m0
-    PALIGNR m0, [r0-8], 7, m1           ; ......t3t2t1t0lt
+    PALIGNR m0, [r0-8], 7, m1
     pavgb   m5, m0
-    PALIGNR m0, [r0+r2*1-8], 7, m1      ; ....t3t2t1t0ltl0
+    PALIGNR m0, [r0+r2*1-8], 7, m1
     movq    m1, m0
-    PALIGNR m0, [r0+r2*2-8], 7, m2      ; ..t3t2t1t0ltl0l1
+    PALIGNR m0, [r0+r2*2-8], 7, m2
     movq    m2, m0
-    PALIGNR m0, [r1+r2*1-8], 7, m3      ; t3t2t1t0ltl0l1l2
+    PALIGNR m0, [r1+r2*1-8], 7, m3
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
     movq    m1, m2
     psrlq   m2, 16
@@ -842,10 +718,6 @@ cglobal pred4x4_vertical_right_8, 3,3
     movh    [r1+r2*2], m2
     RET
 
-;-----------------------------------------------------------------------------
-; void ff_pred4x4_down_right_8_mmxext(uint8_t *src, const uint8_t *topright,
-;                                     ptrdiff_t stride)
-;-----------------------------------------------------------------------------
 
 INIT_MMX mmxext
 cglobal pred4x4_down_right_8, 3,3

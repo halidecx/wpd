@@ -1,8 +1,3 @@
-/*
- * WebP decoder: RIFF container, lossless (VP8L), alpha and animation
- * support ported from FFmpeg's libavcodec/webp.c; lossy bitstreams are
- * handled by the VP8 decoder in vp8.c.
- */
 
 #include "wpd.h"
 
@@ -113,7 +108,6 @@ enum ImageRole {
     IMAGE_ROLE_NB,
 };
 
-/* Fixed-point YUV<->RGB (CCIR range), as in FFmpeg's colorspace.h. */
 #define SCALEBITS 10
 #define ONE_HALF (1 << (SCALEBITS - 1))
 #define FIX(x) ((int)((x) * (1 << SCALEBITS) + 0.5))
@@ -175,18 +169,9 @@ static wpd_always_inline int u8_to_s8(uint8_t v) { return (int8_t)v; }
 
 #define CEIL_RSHIFT(v, s) (-((-(v)) >> (s)))
 
-/*
- * Least-significant-bit-first bit reader, the bit order used by the VP8L
- * bitstream. Bits are prefetched into a 64-bit window and refilled 32 bits
- * at a time, so the common path costs a shift and a mask. Reads past the
- * end return zero and latch the eos flag, which callers check.
- *
- * Modelled on libwebp's VP8LBitReader (src/utils/bit_reader_utils.[hc]).
- */
-
-#define BR_MAX_BITS 24 /* max bits a single read may return */
-#define BR_LBITS 64 /* size of the prefetch window */
-#define BR_WBITS 32 /* bits guaranteed after a refill */
+#define BR_MAX_BITS 24
+#define BR_LBITS 64
+#define BR_WBITS 32
 
 static const uint32_t br_bit_mask[BR_MAX_BITS + 1] = {
     0,        0x000001, 0x000003, 0x000007, 0x00000f, 0x00001f, 0x00003f,
@@ -195,14 +180,15 @@ static const uint32_t br_bit_mask[BR_MAX_BITS + 1] = {
     0x1fffff, 0x3fffff, 0x7fffff, 0xffffff};
 
 typedef struct LEBitReader {
-    uint64_t       val; /* prefetched bits */
+    uint64_t       val;
     const uint8_t *buf;
-    size_t         len; /* buffer length in bytes */
-    size_t         pos; /* byte position in buf */
-    int            bit_pos; /* bit position within val */
-    int            eos; /* a read ran past the end */
+    size_t         len;
+    size_t         pos;
+    int            bit_pos;
+    int            eos;
 } LEBitReader;
 
+/* VP8L is LSB-first; refills leave 32 usable bits in a 64-bit window. */
 static void br_init(LEBitReader *br, const uint8_t *buf, size_t size) {
     size_t   prefetch = WPD_MIN(size, sizeof(br->val));
     uint64_t value    = 0;
@@ -222,11 +208,11 @@ static wpd_always_inline int br_is_eos(const LEBitReader *br) {
 }
 
 static void br_set_eos(LEBitReader *br) {
+    /* Reset bit_pos so later prefetch shifts remain defined. */
     br->eos     = 1;
-    br->bit_pos = 0; /* keep later shifts well-defined */
+    br->bit_pos = 0;
 }
 
-/* Refill the window byte by byte; used near the end of the buffer. */
 static void br_shift_bytes(LEBitReader *br) {
     while (br->bit_pos >= 8 && br->pos < br->len) {
         br->val >>= 8;
@@ -238,7 +224,6 @@ static void br_shift_bytes(LEBitReader *br) {
         br_set_eos(br);
 }
 
-/* Peek at the next bits without consuming them. */
 static wpd_always_inline uint32_t br_prefetch(const LEBitReader *br) {
     return (uint32_t)(br->val >> (br->bit_pos & (BR_LBITS - 1)));
 }
@@ -247,11 +232,6 @@ static wpd_always_inline void br_set_bit_pos(LEBitReader *br, int pos) {
     br->bit_pos = pos;
 }
 
-/*
- * Make at least BR_WBITS bits available. Callers pair this with
- * br_prefetch()/br_set_bit_pos() to decode a symbol without a refill check
- * per bit.
- */
 static void br_do_fill(LEBitReader *br) {
     if (br->pos + sizeof(br->val) < br->len) {
         br->val >>= BR_WBITS;
@@ -284,11 +264,6 @@ static wpd_always_inline unsigned br_bit(LEBitReader *br) {
     return br_bits(br, 1);
 }
 
-/*
- * A decoded image. ARGB images use a single packed plane in data[0];
- * planar images use Y/U/V/A in data[0..3]. Planes in alloc[] are owned,
- * others (the lossy path borrows the VP8 decoder's planes) are not.
- */
 typedef struct WebPImage {
     uint8_t       *data[4];
     uint8_t       *alloc[4];
@@ -341,33 +316,21 @@ static int image_alloc_yuva(WebPImage *img, int w, int h) {
 #define GET_PIXEL_COMP(img, x, y, c) \
     (*((img)->data[0] + (y) * (img)->linesize[0] + 4 * (x) + (c)))
 
-/*
- * Canonical Huffman reader backed by a two-level lookup table: an 8-bit
- * root table resolves every code of eight bits or fewer in a single probe,
- * longer codes chain into a secondary table sized to the codes below it.
- *
- * Ported from libwebp's src/utils/huffman_utils.c.
- */
-
 #define HUFF_TABLE_BITS 8
 #define HUFF_TABLE_MASK ((1 << HUFF_TABLE_BITS) - 1)
 
 typedef struct HuffCode {
-    uint8_t  bits; /* code length, or root_bits + the
-                                         * secondary table's width */
-    uint16_t value; /* symbol, or offset to that table */
+    uint8_t  bits;
+    uint16_t value;
 } HuffCode;
 
 typedef struct HuffReader {
     HuffCode *table;
 } HuffReader;
 
+/* An 8-bit root table sends longer canonical codes to secondary tables. */
 static void huff_reader_free(HuffReader *r) { wpd_freep(&r->table); }
 
-/*
- * reverse(reverse(key, len) + 1, len), where reverse() reverses the len
- * least significant bits: the next code in bit-reversed (table index) order.
- */
 static wpd_always_inline uint32_t huff_next_key(uint32_t key, int len) {
     uint32_t step = 1u << (len - 1);
 
@@ -375,7 +338,6 @@ static wpd_always_inline uint32_t huff_next_key(uint32_t key, int len) {
     return step ? (key & (step - 1)) + step : key;
 }
 
-/* Store code at table[0], table[step], ..., table[end - step]. */
 static wpd_always_inline void huff_replicate(HuffCode *table, int step, int end,
                                              HuffCode code) {
     do {
@@ -384,10 +346,6 @@ static wpd_always_inline void huff_replicate(HuffCode *table, int step, int end,
     } while (end > 0);
 }
 
-/*
- * Width of the secondary table that will hold the codes starting at length
- * len; count is the histogram of the lengths still to be placed.
- */
 static int huff_next_table_bits(const int *count, int len, int root_bits) {
     int left = 1 << (len - root_bits);
 
@@ -401,17 +359,12 @@ static int huff_next_table_bits(const int *count, int len, int root_bits) {
     return len - root_bits;
 }
 
-/*
- * Build the lookup tables for code_lengths into root_table and return the
- * total number of entries used, or 0 if the code is not a valid, complete
- * Huffman tree. Called first with root_table and sorted NULL to size the
- * allocation, then again to fill it.
- */
 static int huff_build_table(HuffCode *root_table, int root_bits,
                             const uint8_t *code_lengths, int code_lengths_size,
                             uint16_t *sorted) {
-    HuffCode *table      = root_table; /* next free space in the tables */
-    int       total_size = 1 << root_bits;
+    /* The first call sizes the tables; the second call fills them. */
+    HuffCode *table                              = root_table;
+    int       total_size                         = 1 << root_bits;
     int       count[MAX_HUFFMAN_CODE_LENGTH + 1] = {0};
     int       offset[MAX_HUFFMAN_CODE_LENGTH + 1];
     int       len, symbol, step;
@@ -421,7 +374,7 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
             return 0;
         count[code_lengths[symbol]]++;
     }
-    if (count[0] == code_lengths_size) /* every length is zero */
+    if (count[0] == code_lengths_size)
         return 0;
 
     offset[1] = 0;
@@ -431,7 +384,6 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
         offset[len + 1] = offset[len] + count[len];
     }
 
-    /* sort symbols by length, and by symbol order within a length */
     for (symbol = 0; symbol < code_lengths_size; symbol++) {
         const int len_sym = code_lengths[symbol];
         if (len_sym > 0) {
@@ -445,7 +397,6 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
         }
     }
 
-    /* a code with a single symbol consumes no bits at all */
     if (offset[MAX_HUFFMAN_CODE_LENGTH] == 1) {
         if (sorted) {
             HuffCode code;
@@ -457,9 +408,9 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
     }
 
     {
-        uint32_t low  = 0xFFFFFFFFu; /* low bits of the current root entry */
-        uint32_t mask = total_size - 1;
-        uint32_t key  = 0; /* reversed prefix code */
+        uint32_t low        = 0xFFFFFFFFu;
+        uint32_t mask       = total_size - 1;
+        uint32_t key        = 0;
         int      num_nodes  = 1;
         int      num_open   = 1;
         int      table_bits = root_bits;
@@ -515,7 +466,7 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
         }
 
         if (num_nodes != 2 * offset[MAX_HUFFMAN_CODE_LENGTH] - 1)
-            return 0; /* tree is over- or under-subscribed */
+            return 0;
     }
 
     return total_size;
@@ -547,10 +498,6 @@ static int huff_reader_build(HuffReader *r, const uint8_t *code_lengths,
     return 0;
 }
 
-/*
- * Decode one symbol. The caller must have called br_fill() beforehand so
- * that at least BR_WBITS bits are buffered.
- */
 static wpd_always_inline int huff_read_symbol(const HuffCode *table,
                                               LEBitReader    *br) {
     uint32_t val = br_prefetch(br);
@@ -558,7 +505,7 @@ static wpd_always_inline int huff_read_symbol(const HuffCode *table,
 
     table += val & HUFF_TABLE_MASK;
     nbits = table->bits - HUFF_TABLE_BITS;
-    if (nbits > 0) { /* code longer than the root table */
+    if (nbits > 0) {
         br_set_bit_pos(br, br->bit_pos + HUFF_TABLE_BITS);
         val = br_prefetch(br);
         table += table->value;
@@ -568,25 +515,16 @@ static wpd_always_inline int huff_read_symbol(const HuffCode *table,
     return table->value;
 }
 
-/*
- * The five Huffman codes that decode one meta-code. When the red, blue and
- * alpha codes each hold a single symbol, a literal pixel is fully
- * determined by its green symbol and the other three reads are skipped.
- *
- * libwebp also shortcuts the case where every code is single-symbol, so a
- * pixel needs no reads at all. That was tried here and removed: the extra
- * per-pixel test cost more on ordinary images than it ever recovered.
- */
 typedef struct HTreeGroup {
     HuffReader trees[HUFFMAN_CODES_PER_META_CODE];
     int        trivial_literal;
-    uint8_t    literal[4]; /* [A, R, G, B]; green read per pixel */
+    uint8_t    literal[4];
 } HTreeGroup;
 
 typedef struct ImageContext {
     enum ImageRole role;
-    WebPImage     *frame; /* target image */
-    WebPImage      storage; /* backing store for non-primary roles */
+    WebPImage     *frame;
+    WebPImage      storage;
     int            color_cache_bits;
     uint32_t      *color_cache;
     int            nb_huffman_groups;
@@ -601,15 +539,14 @@ struct WPDDecoder {
     int             vp8_initialized;
     WPDLosslessDSP  ldsp;
 
-    uint8_t *file; /* padded copy of the input */
+    uint8_t *file;
     size_t   file_size;
-    size_t   pos, end; /* chunk walk over the RIFF payload */
+    size_t   pos, end;
     int      animation;
     int      still_done;
     int      frame_index;
     int      canvas_width, canvas_height;
 
-    /* alpha chunk state, for the following lossy bitstream */
     int                   has_alpha;
     enum AlphaCompression alpha_compression;
     enum AlphaFilter      alpha_filter;
@@ -618,14 +555,11 @@ struct WPDDecoder {
     uint8_t              *alpha_plane;
     size_t                alpha_plane_size;
 
-    /* lossless decoder state */
     LEBitReader        gb;
-    uint8_t           *alpha_dst; /* set while decoding an alpha chunk:
-                                         * where an 8-bit color-indexing
-                                         * transform may write directly */
+    uint8_t           *alpha_dst;
     int                alpha_dst_stride;
-    int                alpha_dst_used; /* it did, so skip green extraction */
-    int                width, height; /* dimensions of the current subimage */
+    int                alpha_dst_used;
+    int                width, height;
     int                lossless_has_alpha;
     int                nb_transforms;
     enum TransformType transforms[4];
@@ -633,11 +567,10 @@ struct WPDDecoder {
     int                nb_huffman_groups;
     ImageContext       image[IMAGE_ROLE_NB];
 
-    WebPImage argb; /* lossless output image */
-    WebPImage alpha_argb; /* lossless-coded alpha channel */
-    WebPImage subframe; /* current subframe (may borrow planes) */
+    WebPImage argb;
+    WebPImage alpha_argb;
+    WebPImage subframe;
 
-    /* animation state */
     WebPImage canvas;
     int       anmf_flags, pos_x, pos_y;
     int       prev_anmf_flags, prev_width, prev_height, prev_pos_x, prev_pos_y;
@@ -660,16 +593,11 @@ static void image_ctx_free(ImageContext *img) {
     memset(img, 0, sizeof(*img));
 }
 
-/*
- * A "simple" code lists its one or two symbols inline; express it as code
- * lengths so that it builds into a table like any other code.
- */
 static void read_huffman_code_simple(WPDDecoder *s, uint8_t *code_lengths,
                                      int alphabet_size) {
     int nb_symbols = br_bit(&s->gb) + 1;
     int symbol;
 
-    /* the first symbol is written as either 1 or 8 bits */
     symbol = br_bit(&s->gb) ? br_bits(&s->gb, 8) : br_bit(&s->gb);
     if (symbol < alphabet_size)
         code_lengths[symbol] = 1;
@@ -724,7 +652,6 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
         br_fill(&s->gb);
         code_len = huff_read_symbol(code_len_hc.table, &s->gb);
         if (code_len < 16) {
-            /* Code length code [0..15] indicates literal code lengths. */
             code_lengths[symbol++] = code_len;
             if (code_len)
                 prev_code_len = code_len;
@@ -733,18 +660,11 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
             switch (code_len) {
             default: ret = WPD_ERROR_INVALID_DATA; goto finish;
             case 16:
-                /* Code 16 repeats the previous non-zero value [3..6] times. */
                 repeat = 3 + br_bits(&s->gb, 2);
                 length = prev_code_len;
                 break;
-            case 17:
-                /* Code 17 emits a streak of zeros [3..10]. */
-                repeat = 3 + br_bits(&s->gb, 3);
-                break;
-            case 18:
-                /* Code 18 emits a streak of zeros of length [11..138]. */
-                repeat = 11 + br_bits(&s->gb, 7);
-                break;
+            case 17: repeat = 3 + br_bits(&s->gb, 3); break;
+            case 18: repeat = 11 + br_bits(&s->gb, 7); break;
             }
             if (symbol + repeat > alphabet_size) {
                 wpd_log(NULL,
@@ -790,8 +710,6 @@ static int decode_entropy_image(WPDDecoder *s) {
     img                 = &s->image[IMAGE_ROLE_ENTROPY];
     img->size_reduction = block_bits;
 
-    /* the number of huffman groups is determined by the maximum group number
-     * coded in the entropy image */
     max = 0;
     for (y = 0; y < img->frame->height; y++) {
         for (x = 0; x < img->frame->width; x++) {
@@ -862,7 +780,6 @@ static int parse_transform_color_indexing(WPDDecoder *s) {
     if (width_bits > 0)
         s->reduced_width = (s->width + ((1 << width_bits) - 1)) >> width_bits;
 
-    /* color index values are delta-coded */
     ct = img->frame->data[0] + 4;
     for (x = 4; x < img->frame->width * 4; x++, ct++) ct[0] += ct[-4];
 
@@ -936,7 +853,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
     if (!img->huffman_groups)
         return WPD_ERROR(ENOMEM);
 
-    /* scratch big enough for the largest alphabet (green plus color cache) */
     max_alphabet_size = alphabet_sizes[HUFF_IDX_GREEN];
     if (img->color_cache_bits > 0)
         max_alphabet_size += 1 << img->color_cache_bits;
@@ -965,7 +881,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
             }
         }
 
-        /* a single-symbol code reads no bits, and so has bits == 0 */
         hg->trivial_literal = hg->trees[HUFF_IDX_RED].table[0].bits == 0 &&
             hg->trees[HUFF_IDX_BLUE].table[0].bits == 0 &&
             hg->trees[HUFF_IDX_ALPHA].table[0].bits == 0;
@@ -993,16 +908,12 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
         br_fill(&s->gb);
         v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
         if (v < NUM_LITERAL_CODES) {
-            /* literal pixel values */
             uint8_t *p = GET_PIXEL(img->frame, x, y);
 
             if (hg->trivial_literal) {
                 copy32(p, hg->literal);
                 p[2] = v;
             } else {
-                /* Read all three symbols before storing anything: a store
-                 * through a uint8_t * may alias the bit reader, which would
-                 * force its state to be reloaded between reads. */
                 int r = huff_read_symbol(hg->trees[HUFF_IDX_RED].table, &s->gb);
                 int b, a;
                 br_fill(&s->gb);
@@ -1021,10 +932,8 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 y++;
             }
         } else if (v < NUM_LITERAL_CODES + NUM_LENGTH_CODES) {
-            /* LZ77 backwards mapping */
             int prefix_code, length, distance, ref_x, ref_y;
 
-            /* parse length and distance */
             prefix_code = v - NUM_LITERAL_CODES;
             if (prefix_code < 4) {
                 length = prefix_code + 1;
@@ -1033,9 +942,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 int offset     = (2 + (prefix_code & 1)) << extra_bits;
                 length         = offset + br_bits(&s->gb, extra_bits) + 1;
             }
-            /* Either the length read above refilled the window, or the
-             * green symbol left at least 17 bits in it; both cover the
-             * distance symbol. The extra bits after it need a fresh fill. */
             prefix_code = huff_read_symbol(hg->trees[HUFF_IDX_DIST].table,
                                            &s->gb);
             br_fill(&s->gb);
@@ -1054,7 +960,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 distance       = offset + br_bits(&s->gb, extra_bits) + 1;
             }
 
-            /* find reference location */
             if (distance <= NUM_SHORT_DISTANCES) {
                 int xi   = lz77_distance_offsets[distance - 1][0];
                 int yi   = lz77_distance_offsets[distance - 1][1];
@@ -1085,11 +990,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
             if (ref_y == y && ref_x >= x)
                 return WPD_ERROR_INVALID_DATA;
 
-            /*
-             * Copy pixels. Source and destination can overlap and both can
-             * wrap onto the next line, so walk them with running pointers
-             * and only recompute a row base when one actually wraps.
-             */
             {
                 const int height = img->frame->height;
                 uint8_t  *p      = GET_PIXEL(img->frame, x, y);
@@ -1139,7 +1039,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 }
             }
         } else {
-            /* read from color cache */
             uint8_t *p         = GET_PIXEL(img->frame, x, y);
             int      cache_idx = v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES);
 
@@ -1164,11 +1063,6 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
     return 0;
 }
 
-/*
- * Undo the predictor transform in place. The predictor mode is constant
- * over a tile, so it is looked up (and the predictor dispatched) once per
- * run of pixels rather than once per pixel.
- */
 static int apply_predictor_transform(WPDDecoder *s) {
     ImageContext              *img       = &s->image[IMAGE_ROLE_ARGB];
     ImageContext              *pimg      = &s->image[IMAGE_ROLE_PREDICTOR];
@@ -1185,7 +1079,6 @@ static int apply_predictor_transform(WPDDecoder *s) {
     if (width <= 0 || height <= 0)
         return 0;
 
-    /* first row: opaque black for the corner pixel, L for the rest */
     pred_add[0](row, NULL, 1, row);
     if (width > 1)
         pred_add[1](row + 1, NULL, width - 1, row + 1);
@@ -1196,11 +1089,9 @@ static int apply_predictor_transform(WPDDecoder *s) {
             (y >> tile_bits) * pimg->frame->linesize[0];
         int x = 1;
 
-        /* first pixel of every later row follows T */
         pred_add[2](row, upper, 1, row);
 
         while (x < width) {
-            /* the mode lives in the green channel of the predictor image */
             const unsigned m     = modes[(x >> tile_bits) * 4 + 2];
             int            x_end = (x & ~tile_mask) + tile_size;
 
@@ -1222,10 +1113,6 @@ static wpd_always_inline uint8_t color_transform_delta(uint8_t color_pred,
     return u8_to_s8(color_pred) * u8_to_s8(color) >> 5;
 }
 
-/*
- * The three multipliers are constant over a tile, so hoist the tile lookup
- * out of the pixel loop and walk the row with a running pointer.
- */
 static int apply_color_transform(WPDDecoder *s) {
     ImageContext *img       = &s->image[IMAGE_ROLE_ARGB];
     ImageContext *cimg      = &s->image[IMAGE_ROLE_COLOR_TRANSFORM];
@@ -1277,13 +1164,6 @@ static int apply_subtract_green_transform(WPDDecoder *s) {
     return 0;
 }
 
-/*
- * The 8-bit form of the color indexing transform, for a VP8L-coded alpha
- * chunk whose only transform this is. A palette entry's green byte is the
- * alpha value, so the indices can be expanded straight into the caller's
- * alpha plane rather than into a full ARGB image that a later pass would
- * only re-extract green from. This is libwebp's use_8b_decode case.
- */
 static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
     ImageContext *img    = &s->image[IMAGE_ROLE_ARGB];
     ImageContext *pal    = &s->image[IMAGE_ROLE_COLOR_INDEXING];
@@ -1293,13 +1173,11 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
     uint8_t       palette[256];
     int           i, x, y;
 
-    /* indices past the end of the palette decode to transparent */
     for (i = 0; i < pal_w; i++)
         palette[i] = GET_PIXEL_COMP(pal->frame, i, 0, 2);
     memset(palette + pal_w, 0, sizeof(palette) - pal_w);
 
     for (y = 0; y < height; y++) {
-        /* the green byte of each source pixel, packed or not */
         const uint8_t *src = GET_PIXEL(img->frame, 0, y) + 2;
         uint8_t       *dst = s->alpha_dst + (size_t)s->alpha_dst_stride * y;
 
@@ -1316,7 +1194,7 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
                     packed >>= pixel_bits;
                 }
             }
-            if (x < width) { /* partial group at the row end */
+            if (x < width) {
                 unsigned packed = *src;
                 for (; x < width; x++) {
                     *dst++ = palette[packed & bit_mask];
@@ -1343,13 +1221,6 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
     pal = &s->image[IMAGE_ROLE_COLOR_INDEXING];
 
     if (pal->size_reduction > 0) {
-        /*
-         * Undo pixel packing. Each source pixel's green byte holds several
-         * palette indices, least significant first. Unpacking and the
-         * palette lookup are fused into one pass: the separate bit-reader
-         * pass this replaces cost more than everything else in the alpha
-         * path put together.
-         */
         const int      pixel_bits      = 8 >> pal->size_reduction;
         const int      pixels_per_byte = 1 << pal->size_reduction;
         const unsigned bit_mask        = (1u << pixel_bits) - 1;
@@ -1359,7 +1230,6 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
         uint8_t       *line;
 
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), pal_size);
-        /* indices past the end of the palette decode to transparent black */
         memset(palette + pal_size, 0, sizeof(palette) - pal_size);
 
         line = malloc(img->frame->linesize[0] + WPD_FILE_PADDING);
@@ -1371,7 +1241,7 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
             uint8_t       *dst = GET_PIXEL(img->frame, 0, y);
 
             memcpy(line, dst, img->frame->linesize[0]);
-            src = line + 2; /* green byte of the first pixel */
+            src = line + 2;
 
             for (x = 0; x + pixels_per_byte <= width; x += pixels_per_byte) {
                 unsigned packed = *src;
@@ -1382,7 +1252,7 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
                     dst += 4;
                 }
             }
-            if (x < width) { /* partial group at the row end */
+            if (x < width) {
                 unsigned packed = *src;
                 for (; x < width; x++) {
                     copy32(dst, &palette[(packed & bit_mask) * 4]);
@@ -1392,16 +1262,14 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
             }
         }
         free(line);
-        s->reduced_width = s->width; // we are back to full size
+        s->reduced_width = s->width;
         return 0;
     }
 
-    // switch to local palette if it's worth initializing it
     if (img->frame->height * img->frame->width > 300) {
         uint8_t   palette[256 * 4];
         const int size = pal->frame->width * 4;
-        memcpy(palette, GET_PIXEL(pal->frame, 0, 0), size); // copy palette
-        // set extra entries to transparent black
+        memcpy(palette, GET_PIXEL(pal->frame, 0, 0), size);
         memset(palette + size, 0, 256 * 4 - size);
         for (y = 0; y < img->frame->height; y++) {
             for (x = 0; x < img->frame->width; x++) {
@@ -1476,7 +1344,6 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
         h = s->height;
     }
 
-    /* parse transformations */
     s->nb_transforms = 0;
     s->reduced_width = s->width;
     used             = 0;
@@ -1505,7 +1372,6 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
             goto free_and_return;
     }
 
-    /* decode primary image */
     s->image[IMAGE_ROLE_ARGB].frame = out;
     if (is_alpha_chunk)
         s->image[IMAGE_ROLE_ARGB].is_alpha_primary = 1;
@@ -1513,7 +1379,6 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
     if (ret < 0)
         goto free_and_return;
 
-    /* apply transformations */
     for (i = s->nb_transforms - 1; i >= 0; i--) {
         switch (s->transforms[i]) {
         case PREDICTOR_TRANSFORM: ret = apply_predictor_transform(s); break;
@@ -1544,15 +1409,12 @@ static void alpha_inverse_prediction(WebPImage *frame, enum AlphaFilter m) {
 
     ls = frame->linesize[3];
 
-    /* filter first row using horizontal filter */
     dec = frame->data[3] + 1;
     for (x = 1; x < frame->width; x++, dec++) *dec += *(dec - 1);
 
-    /* filter first column using vertical filter */
     dec = frame->data[3] + ls;
     for (y = 1; y < frame->height; y++, dec += ls) *dec += *(dec - ls);
 
-    /* filter the rest using the specified filter */
     switch (m) {
     case ALPHA_FILTER_HORIZONTAL:
         for (y = 1; y < frame->height; y++) {
@@ -1606,7 +1468,6 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
             return ret;
         }
 
-        /* copy green component of alpha image to alpha plane of primary image */
         if (!s->alpha_dst_used)
             for (y = 0; y < s->height; y++)
                 s->ldsp.extract_green(p->data[3] + p->linesize[3] * y,
@@ -1615,18 +1476,12 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
         image_free(&s->alpha_argb);
     }
 
-    /* apply alpha filtering */
     if (s->alpha_filter)
         alpha_inverse_prediction(p, s->alpha_filter);
 
     return 0;
 }
 
-/*
- * Decode a lossy (VP8) bitstream into out. The Y/U/V planes are borrowed
- * from the VP8 decoder and stay valid until its next invocation; the
- * alpha plane, if any, lives in s->alpha_plane.
- */
 static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
                                   const uint8_t *data_start,
                                   unsigned int   data_size) {
@@ -1679,12 +1534,6 @@ static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
     return 0;
 }
 
-/*
- * Animation compositing, ported from FFmpeg's webp_anim decoder. The
- * canvas is either YUVA420P (lossy subframes) or ARGB (lossless ones),
- * upgraded from YUVA to ARGB when a lossless frame follows lossy ones.
- */
-
 static int image_nb_components(const WebPImage *img) {
     switch (img->format) {
     case WPD_PIX_FMT_YUV420P: return 3;
@@ -1693,10 +1542,6 @@ static int image_nb_components(const WebPImage *img) {
     }
 }
 
-/*
- * Blend src (foreground) into dst (background), in ARGB format.
- * pos_x, pos_y is the position in dst.
- */
 static void blend_alpha_argb(WebPImage *dst, const WebPImage *src, int pos_x,
                              int pos_y) {
     for (int y = 0; y < src->height; y++) {
@@ -1710,7 +1555,6 @@ static void blend_alpha_argb(WebPImage *dst, const WebPImage *src, int pos_x,
             if (src_alpha == 255) {
                 memcpy(dst_argb, src_argb, 4);
             } else if (src_alpha == 0) {
-                // no-op
             } else {
                 int tmp_alpha   = (dst_alpha * (256 - src_alpha)) >> 8;
                 int blend_alpha = src_alpha + tmp_alpha;
@@ -1736,13 +1580,8 @@ static void blend_alpha_argb(WebPImage *dst, const WebPImage *src, int pos_x,
     }
 }
 
-/*
- * Blend src (foreground) into dst (background), in YUVA format.
- * pos_x, pos_y is the position in dst.
- */
 static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
                              int pos_y) {
-    // blend U & V planes first, because the later step may modify alpha plane
     for (int y = 0; y < CEIL_RSHIFT(src->height, 1); y++) {
         int            tile_h = WPD_MIN(src->height - y * 2, 2);
         const uint8_t *src_u  = src->data[1] + y * src->linesize[1];
@@ -1752,8 +1591,7 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
         uint8_t *dst_v = dst->data[2] + ((pos_y >> 1) + y) * dst->linesize[2] +
             (pos_x >> 1);
         for (int x = 0; x < CEIL_RSHIFT(src->width, 1); x++) {
-            int tile_w = WPD_MIN(src->width - x * 2, 2);
-            // calculate the average alpha of the tile
+            int tile_w    = WPD_MIN(src->width - x * 2, 2);
             int src_alpha = 0;
             int dst_alpha = 0;
             for (int yy = 0; yy < tile_h; yy++) {
@@ -1773,7 +1611,6 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
                 *dst_u = *src_u;
                 *dst_v = *src_v;
             } else if (src_alpha == 0) {
-                // no-op
             } else {
                 int tmp_alpha   = (dst_alpha * (256 - src_alpha)) >> 8;
                 int blend_alpha = src_alpha + tmp_alpha;
@@ -1794,7 +1631,6 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
         }
     }
 
-    // blend Y & A planes
     for (int y = 0; y < src->height; y++) {
         const uint8_t *src_y = src->data[0] + y * src->linesize[0];
         const uint8_t *src_a = src->data[3] + y * src->linesize[3];
@@ -1808,7 +1644,6 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
                 *dst_y = *src_y;
                 *dst_a = 255;
             } else if (src_alpha == 0) {
-                // no-op
             } else {
                 int tmp_alpha   = (dst_alpha * (256 - src_alpha)) >> 8;
                 int blend_alpha = src_alpha + tmp_alpha;
@@ -1829,7 +1664,6 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
 
 static wpd_always_inline void webp_yuva2argb(uint8_t *out, int Y, int U, int V,
                                              int A) {
-    // variables used in macros
     const uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
     uint8_t        r, g, b;
     int            y, cb, cr;
@@ -1888,7 +1722,6 @@ static void blend_yuva2argb(WebPImage *dst, const WebPImage *src, int pos_x,
             if (src_alpha == 255) {
                 webp_yuva2argb(dst_argb, *src_y, *src_u, *src_v, src_alpha);
             } else if (src_alpha == 0) {
-                // no-op
             } else {
                 uint8_t tmp[4];
                 int     tmp_alpha   = (dst_alpha * (256 - src_alpha)) >> 8;
@@ -1926,8 +1759,6 @@ static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
 
     if ((s->anmf_flags & ANMF_FLAG_NO_BLEND) ||
         frame->format == WPD_PIX_FMT_YUV420P) {
-        // do not blend, overwrite
-
         if (canvas->format == WPD_PIX_FMT_ARGB) {
             if (canvas->format == frame->format) {
                 const uint8_t *src = frame->data[0];
@@ -1941,7 +1772,7 @@ static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
             } else {
                 copy_yuva2argb(canvas, frame, s->pos_x, s->pos_y);
             }
-        } else /* canvas->format == WPD_PIX_FMT_YUVA420P */ {
+        } else {
             int nb_components = image_nb_components(frame);
 
             for (int comp = 0; comp < nb_components; comp++) {
@@ -1959,7 +1790,6 @@ static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
             }
 
             if (nb_components < 4) {
-                // frame does not have alpha, set alpha to 255
                 uint8_t *dst = canvas->data[3] +
                     s->pos_y * canvas->linesize[3] + s->pos_x;
                 for (int y = 0; y < frame->height; y++) {
@@ -1969,24 +1799,18 @@ static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
             }
         }
     } else {
-        // alpha blending
-
         if (canvas->format == WPD_PIX_FMT_ARGB) {
             if (canvas->format == frame->format) {
                 blend_alpha_argb(canvas, frame, s->pos_x, s->pos_y);
             } else {
                 blend_yuva2argb(canvas, frame, s->pos_x, s->pos_y);
             }
-        } else /* canvas->format == WPD_PIX_FMT_YUVA420P */ {
+        } else {
             blend_alpha_yuva(canvas, frame, s->pos_x, s->pos_y);
         }
     }
 }
 
-/*
- * Fill a rectangle on the canvas with the background color (transparent
- * black, matching FFmpeg's default of not using the ANIM chunk color).
- */
 static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
                              int height) {
     WebPImage *canvas = &s->canvas;
@@ -1998,7 +1822,7 @@ static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
                 pos_x * 4;
             for (int x = 0; x < width; x++, dst += 4) copy32(dst, bg);
         }
-    } else /* canvas->format == WPD_PIX_FMT_YUVA420P */ {
+    } else {
         for (int comp = 0; comp < 4; comp++) {
             int      shift = (comp == 1 || comp == 2) ? 1 : 0;
             uint8_t *dst   = canvas->data[comp] +
@@ -2025,10 +1849,6 @@ static int allocate_canvas(WPDDecoder *s, WPDPixelFormat format) {
 static int prepare_canvas(WPDDecoder *s, int key_frame, WPDPixelFormat format) {
     int ret;
 
-    /*
-     * Clear the canvas on keyframes and frames that overwrite the entire
-     * canvas.
-     */
     if (key_frame ||
         ((s->anmf_flags & ANMF_FLAG_NO_BLEND) && (s->pos_x == 0) &&
          (s->pos_x + s->width == s->canvas_width) && (s->pos_y == 0) &&
@@ -2043,12 +1863,6 @@ static int prepare_canvas(WPDDecoder *s, int key_frame, WPDPixelFormat format) {
     } else {
         if (format == WPD_PIX_FMT_ARGB &&
             s->canvas.format == WPD_PIX_FMT_YUVA420P) {
-            /*
-             * If we have a lossless frame following a lossy frame, we
-             * upgrade the canvas to ARGB, but we don't convert the canvas
-             * back to YUVA if there is a lossy frame following a lossless
-             * frame.
-             */
             WebPImage yuva_canvas = s->canvas;
             memset(&s->canvas, 0, sizeof(s->canvas));
             ret = allocate_canvas(s, WPD_PIX_FMT_ARGB);
@@ -2059,7 +1873,6 @@ static int prepare_canvas(WPDDecoder *s, int key_frame, WPDPixelFormat format) {
             copy_yuva2argb(&s->canvas, &yuva_canvas, 0, 0);
             image_free(&yuva_canvas);
         }
-        /* Dispose of previous frame if needed. */
         if (s->prev_anmf_flags & ANMF_FLAG_DISPOSE)
             fill_canvas_rect(
                 s, s->prev_pos_x, s->prev_pos_y, s->prev_width, s->prev_height);
@@ -2077,19 +1890,15 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
     if (size < 16)
         return WPD_ERROR_INVALID_DATA;
 
-    s->pos_x = WPD_RL24(p) * 2;
-    s->pos_y = WPD_RL24(p + 3) * 2;
-    /* Frame dimensions are taken from the decoded bitstream below;
-     * duration is irrelevant for raw decoding. */
+    s->pos_x      = WPD_RL24(p) * 2;
+    s->pos_y      = WPD_RL24(p + 3) * 2;
     s->anmf_flags = p[15];
     p += 16;
 
-    /* Reset alpha and dimensions from previous frame. */
     s->has_alpha = 0;
     s->width     = 0;
     s->height    = 0;
 
-    /* Parse ANMF subchunks. */
     while (end - p > 8) {
         uint32_t chunk_type   = WPD_RL32(p);
         uint32_t payload_size = WPD_RL32(p + 4);
@@ -2101,8 +1910,6 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         p += 8;
 
         if ((size_t)(end - p) < padded_size) {
-            /* we seem to be running out of data, but it could also be that
-             * the bitstream has trailing junk leading to bogus payload_size. */
             break;
         }
 
@@ -2219,7 +2026,6 @@ int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
     if (!decoder || !data)
         return -1;
 
-    /* reset per-file state */
     image_free(&decoder->canvas);
     image_free(&decoder->argb);
     memset(&decoder->subframe, 0, sizeof(decoder->subframe));
@@ -2233,7 +2039,6 @@ int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
     decoder->prev_width = decoder->prev_height = 0;
     decoder->prev_pos_x = decoder->prev_pos_y = 0;
     memset(decoder->background_argb, 0, sizeof(decoder->background_argb));
-    /* transparent black in YUV (CCIR range) */
     decoder->background_yuva[0] = RGB_TO_Y_CCIR(0, 0, 0);
     decoder->background_yuva[1] = RGB_TO_U_CCIR(0, 0, 0, 0);
     decoder->background_yuva[2] = RGB_TO_V_CCIR(0, 0, 0, 0);
@@ -2283,7 +2088,6 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
         padded_size = size + (size & 1);
 
         if (decoder->end - (decoder->pos + 8) < padded_size) {
-            /* truncated file or trailing junk; stop like FFmpeg does */
             break;
         }
         decoder->pos += 8 + padded_size;
@@ -2293,11 +2097,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             decoder->canvas_width  = WPD_RL24(payload + 4) + 1;
             decoder->canvas_height = WPD_RL24(payload + 7) + 1;
             break;
-        case MKTAG('A', 'N', 'I', 'M'):
-            /* Background color intentionally ignored: FFmpeg's demuxer only
-             * forwards it with -usebgcolor, which the tests do not use. */
-            decoder->animation = 1;
-            break;
+        case MKTAG('A', 'N', 'I', 'M'): decoder->animation = 1; break;
         case MKTAG('A', 'L', 'P', 'H'): {
             int alpha_header, filter_m, compression;
 

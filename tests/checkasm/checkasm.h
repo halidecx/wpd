@@ -1,4 +1,3 @@
-/* Compatibility glue for FFmpeg-derived checkasm tests and checkasm 1.x. */
 #ifndef WPD_TEST_CHECKASM_H
 #define WPD_TEST_CHECKASM_H
 

@@ -1,24 +1,3 @@
-/*
- * VP8 DSP functions x86-optimized
- * Copyright (c) 2010 Ronald S. Bultje <rsbultje@gmail.com>
- * Copyright (c) 2010 Fiona Glaser <fiona@x264.com>
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
 
 #include "vp8dsp.h"
 #include "wpd_codec.h"
@@ -57,7 +36,6 @@ void ff_vp8_idct_add_sse(uint8_t *dst, int16_t block[16], ptrdiff_t stride);
 DECLARE_LOOP_FILTER(sse2)
 DECLARE_LOOP_FILTER(ssse3)
 
-/* Only the horizontal variants have an SSE4 implementation. */
 void ff_vp8_h_loop_filter_simple_sse4(uint8_t *dst, ptrdiff_t stride, int flim);
 void ff_vp8_h_loop_filter16y_mbedge_sse4(uint8_t *dst, ptrdiff_t stride, int e,
                                          int i, int hvt);

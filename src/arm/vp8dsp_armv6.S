@@ -1,122 +1,67 @@
-/*
- * VP8 ARMv6 optimisations
- *
- * Copyright (c) 2010 Google Inc.
- * Copyright (c) 2010 Rob Clark <rob@ti.com>
- * Copyright (c) 2011 Mans Rullgard <mans@mansr.com>
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- *
- * This code was partially ported from libvpx, which uses this license:
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *
- *   * Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in
- *     the documentation and/or other materials provided with the
- *     distribution.
- *
- *   * Neither the name of Google nor the names of its contributors may
- *     be used to endorse or promote products derived from this software
- *     without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
 
 #include "asm.S"
 
-@ idct
 
-@ void vp8_luma_dc_wht(int16_t block[4][4][16], int16_t dc[16])
 function ff_vp8_luma_dc_wht_armv6, export=1
         push            {r4-r10, lr}
 
         ldm             r1,  {r2-r9}
         mov             r10, #0
         mov             lr,  #0
-        uadd16          r12, r2,  r8            @ t0[0,1]
-        usub16          r2,  r2,  r8            @ t3[0,1]
+        uadd16          r12, r2,  r8
+        usub16          r2,  r2,  r8
         stm             r1!, {r10, lr}
-        uadd16          r8,  r4,  r6            @ t1[0,1]
-        usub16          r4,  r4,  r6            @ t2[0,1]
+        uadd16          r8,  r4,  r6
+        usub16          r4,  r4,  r6
         stm             r1!, {r10, lr}
-        uadd16          r6,  r12, r8            @ dc0[0,1]
-        usub16          r12, r12, r8            @ dc2[0,1]
+        uadd16          r6,  r12, r8
+        usub16          r12, r12, r8
         stm             r1!, {r10, lr}
-        uadd16          r8,  r2,  r4            @ dc1[0,1]
-        usub16          r2,  r2,  r4            @ dc3[0,1]
+        uadd16          r8,  r2,  r4
+        usub16          r2,  r2,  r4
         stm             r1!, {r10, lr}
 
-        uadd16          lr,  r3,  r9            @ t0[2,3]
-        usub16          r3,  r3,  r9            @ t3[2,3]
-        uadd16          r9,  r5,  r7            @ t1[2,3]
-        usub16          r5,  r5,  r7            @ t2[2,3]
+        uadd16          lr,  r3,  r9
+        usub16          r3,  r3,  r9
+        uadd16          r9,  r5,  r7
+        usub16          r5,  r5,  r7
 
-        uadd16          r7,  lr,  r9            @ dc0[2,3]
-        usub16          lr,  lr,  r9            @ dc2[2,3]
-        uadd16          r9,  r3,  r5            @ dc1[2,3]
-        usub16          r3,  r3,  r5            @ dc3[2,3]
+        uadd16          r7,  lr,  r9
+        usub16          lr,  lr,  r9
+        uadd16          r9,  r3,  r5
+        usub16          r3,  r3,  r5
 
         mov             r1,  #3
-        orr             r1,  r1,  #0x30000      @ 3 | 3 (round)
+        orr             r1,  r1,  #0x30000
 
-        pkhbt           r4,  r6,  r8,  lsl #16  @ dc{0,1}[0]
-        pkhtb           r6,  r8,  r6,  asr #16  @ dc{0,1}[1]
-        pkhbt           r5,  r12, r2,  lsl #16  @ dc{2,3}[0]
-        pkhtb           r12, r2,  r12, asr #16  @ dc{2,3}[1]
-        pkhbt           r8,  r7,  r9,  lsl #16  @ dc{0,1}[2]
+        pkhbt           r4,  r6,  r8,  lsl #16
+        pkhtb           r6,  r8,  r6,  asr #16
+        pkhbt           r5,  r12, r2,  lsl #16
+        pkhtb           r12, r2,  r12, asr #16
+        pkhbt           r8,  r7,  r9,  lsl #16
         uadd16          r4,  r4,  r1
         uadd16          r5,  r5,  r1
-        pkhtb           r7,  r9,  r7,  asr #16  @ dc{0,1}[3]
-        pkhbt           r2,  lr,  r3,  lsl #16  @ dc{2,3}[2]
-        pkhtb           lr,  r3,  lr,  asr #16  @ dc{2,3}[3]
+        pkhtb           r7,  r9,  r7,  asr #16
+        pkhbt           r2,  lr,  r3,  lsl #16
+        pkhtb           lr,  r3,  lr,  asr #16
 
-        uadd16          r9,  r4,  r7            @ t0[0,1]
-        uadd16          r3,  r5,  lr            @ t0[2,3]
-        usub16          r4,  r4,  r7            @ t3[0,1]
-        usub16          r5,  r5,  lr            @ t3[2,3]
-        uadd16          r7,  r6,  r8            @ t1[0,1]
-        uadd16          lr,  r12, r2            @ t1[2,3]
-        usub16          r6,  r6,  r8            @ t2[0,1]
-        usub16          r12, r12, r2            @ t2[2,3]
+        uadd16          r9,  r4,  r7
+        uadd16          r3,  r5,  lr
+        usub16          r4,  r4,  r7
+        usub16          r5,  r5,  lr
+        uadd16          r7,  r6,  r8
+        uadd16          lr,  r12, r2
+        usub16          r6,  r6,  r8
+        usub16          r12, r12, r2
 
-        uadd16          r8,  r9,  r7            @ block[0,1][0]
-        uadd16          r2,  r3,  lr            @ block[2,3][0]
-        usub16          r9,  r9,  r7            @ block[0,1][2]
-        usub16          r3,  r3,  lr            @ block[2,3][2]
-        uadd16          r7,  r4,  r6            @ block[0,1][1]
-        uadd16          lr,  r5,  r12           @ block[2,3][1]
-        usub16          r4,  r4,  r6            @ block[0,1][3]
-        usub16          r5,  r5,  r12           @ block[2,3][3]
+        uadd16          r8,  r9,  r7
+        uadd16          r2,  r3,  lr
+        usub16          r9,  r9,  r7
+        usub16          r3,  r3,  lr
+        uadd16          r7,  r4,  r6
+        uadd16          lr,  r5,  r12
+        usub16          r4,  r4,  r6
+        usub16          r5,  r5,  r12
 
 #if HAVE_ARMV6T2_EXTERNAL
         sbfx            r6,  r8,  #3,  #13
@@ -128,28 +73,28 @@ function ff_vp8_luma_dc_wht_armv6, export=1
         sxth            r12, r7
         sxth            r1,  r9
         sxth            r10, r4
-        asr             r6,  #3                 @ block[0][0]
-        asr             r12, #3                 @ block[0][1]
-        asr             r1,  #3                 @ block[0][2]
-        asr             r10, #3                 @ block[0][3]
+        asr             r6,  #3
+        asr             r12, #3
+        asr             r1,  #3
+        asr             r10, #3
 #endif
 
         strh            r6,  [r0], #32
-        asr             r8,  r8,  #19           @ block[1][0]
+        asr             r8,  r8,  #19
         strh            r12, [r0], #32
-        asr             r7,  r7,  #19           @ block[1][1]
+        asr             r7,  r7,  #19
         strh            r1,  [r0], #32
-        asr             r9,  r9,  #19           @ block[1][2]
+        asr             r9,  r9,  #19
         strh            r10, [r0], #32
-        asr             r4,  r4,  #19           @ block[1][3]
+        asr             r4,  r4,  #19
         strh            r8,  [r0], #32
-        asr             r6,  r2,  #19           @ block[3][0]
+        asr             r6,  r2,  #19
         strh            r7,  [r0], #32
-        asr             r12, lr,  #19           @ block[3][1]
+        asr             r12, lr,  #19
         strh            r9,  [r0], #32
-        asr             r1,  r3,  #19           @ block[3][2]
+        asr             r1,  r3,  #19
         strh            r4,  [r0], #32
-        asr             r10, r5,  #19           @ block[3][3]
+        asr             r10, r5,  #19
 
 #if HAVE_ARMV6T2_EXTERNAL
         sbfx            r2,  r2,  #3,  #13
@@ -161,10 +106,10 @@ function ff_vp8_luma_dc_wht_armv6, export=1
         sxth            lr,  lr
         sxth            r3,  r3
         sxth            r5,  r5
-        asr             r2,  #3                 @ block[2][0]
-        asr             lr,  #3                 @ block[2][1]
-        asr             r3,  #3                 @ block[2][2]
-        asr             r5,  #3                 @ block[2][3]
+        asr             r2,  #3
+        asr             lr,  #3
+        asr             r3,  #3
+        asr             r5,  #3
 #endif
 
         strh            r2,  [r0], #32
@@ -179,7 +124,6 @@ function ff_vp8_luma_dc_wht_armv6, export=1
         pop             {r4-r10, pc}
 endfunc
 
-@ void vp8_luma_dc_wht_dc(int16_t block[4][4][16], int16_t dc[16])
 function ff_vp8_luma_dc_wht_dc_armv6, export=1
         ldrsh           r2,  [r1]
         mov             r3,  #0
@@ -192,49 +136,48 @@ function ff_vp8_luma_dc_wht_dc_armv6, export=1
         bx              lr
 endfunc
 
-@ void vp8_idct_add(uint8_t *dst, int16_t block[16], ptrdiff_t stride)
 function ff_vp8_idct_add_armv6, export=1
         push            {r4-r12, lr}
         sub             sp,  sp,  #32
 
-        movw            r3,  #20091             @ cospi8sqrt2minus1
-        movw            r4,  #35468             @ sinpi8sqrt2
+        movw            r3,  #20091
+        movw            r4,  #35468
         mov             r5,  sp
 1:
-        ldr             r6,  [r1, #8]       @  i5 | i4  = block1[1] | block1[0]
-        ldr             lr,  [r1, #16]      @  i9 | i8  = block2[1] | block2[0]
-        ldr             r12, [r1, #24]      @ i13 | i12 = block3[1] | block3[0]
+        ldr             r6,  [r1, #8]
+        ldr             lr,  [r1, #16]
+        ldr             r12, [r1, #24]
 
-        smulwt          r9,  r3,  r6            @ ip[5] * cospi8sqrt2minus1
-        smulwb          r7,  r3,  r6            @ ip[4] * cospi8sqrt2minus1
-        smulwt          r10, r4,  r6            @ ip[5] * sinpi8sqrt2
-        smulwb          r8,  r4,  r6            @ ip[4] * sinpi8sqrt2
-        pkhbt           r7,  r7,  r9,  lsl #16  @ 5c | 4c
-        smulwt          r11, r3,  r12           @ ip[13] * cospi8sqrt2minus1
-        pkhbt           r8,  r8,  r10, lsl #16  @ 5s   | 4s   = t2 first half
-        uadd16          r6,  r6,  r7            @ 5c+5 | 4c+4 = t3 first half
-        smulwb          r9,  r3,  r12           @ ip[12] * cospi8sqrt2minus1
-        smulwt          r7,  r4,  r12           @ ip[13] * sinpi8sqrt2
-        smulwb          r10, r4,  r12           @ ip[12] * sinpi8sqrt2
+        smulwt          r9,  r3,  r6
+        smulwb          r7,  r3,  r6
+        smulwt          r10, r4,  r6
+        smulwb          r8,  r4,  r6
+        pkhbt           r7,  r7,  r9,  lsl #16
+        smulwt          r11, r3,  r12
+        pkhbt           r8,  r8,  r10, lsl #16
+        uadd16          r6,  r6,  r7
+        smulwb          r9,  r3,  r12
+        smulwt          r7,  r4,  r12
+        smulwb          r10, r4,  r12
 
-        pkhbt           r9,  r9,  r11, lsl #16  @ 13c | 12c
-        ldr             r11, [r1]               @  i1 | i0
-        pkhbt           r10, r10,  r7, lsl #16  @ 13s | 12s    = t3 second half
-        uadd16          r7,  r12, r9            @ 13c+13  | 12c+12 = t2 2nd half
-        uadd16          r6,  r6,  r10           @ d = t3
-        uadd16          r10, r11, lr            @ a = t0
-        usub16          r7,  r8,  r7            @ c = t2
-        usub16          r8,  r11, lr            @ b = t1
-        uadd16          r9,  r10, r6            @ a+d = tmp{0,1}[0]
-        usub16          r10, r10, r6            @ a-d = tmp{0,1}[3]
-        uadd16          r6,  r8,  r7            @ b+c = tmp{0,1}[1]
-        usub16          r7,  r8,  r7            @ b-c = tmp{0,1}[2]
+        pkhbt           r9,  r9,  r11, lsl #16
+        ldr             r11, [r1]
+        pkhbt           r10, r10,  r7, lsl #16
+        uadd16          r7,  r12, r9
+        uadd16          r6,  r6,  r10
+        uadd16          r10, r11, lr
+        usub16          r7,  r8,  r7
+        usub16          r8,  r11, lr
+        uadd16          r9,  r10, r6
+        usub16          r10, r10, r6
+        uadd16          r6,  r8,  r7
+        usub16          r7,  r8,  r7
         mov             r8,  #0
         cmp             sp,  r5
-        str             r6,  [r5, #8]           @  o5 | o4
-        str             r7,  [r5, #16]          @  o9 | o8
-        str             r10, [r5, #24]          @ o13 | o12
-        str             r9,  [r5], #4           @  o1 | o0
+        str             r6,  [r5, #8]
+        str             r7,  [r5, #16]
+        str             r10, [r5, #24]
+        str             r9,  [r5], #4
         str             r8,  [r1, #8]
         str             r8,  [r1, #16]
         str             r8,  [r1, #24]
@@ -244,42 +187,42 @@ function ff_vp8_idct_add_armv6, export=1
         mov             r5,  #2
 2:
         pop             {r1, r6, r12, lr}
-        smulwt          r9,  r3,  r12           @ ip[5] * cospi8sqrt2minus1
-        smulwt          r7,  r3,  r1            @ ip[1] * cospi8sqrt2minus1
-        smulwt          r10, r4,  r12           @ ip[5] * sinpi8sqrt2
-        smulwt          r8,  r4,  r1            @ ip[1] * sinpi8sqrt2
-        pkhbt           r11, r1,  r12, lsl #16  @ i4 | i0 = t0/t1 first half
-        pkhtb           r1,  r12, r1,  asr #16  @ i5 | i1
-        pkhbt           r7,  r7,  r9,  lsl #16  @ 5c | 1c
-        pkhbt           r8,  r8,  r10, lsl #16  @ 5s | 1s = t2 first half
-        pkhbt           r9,  r6,  lr,  lsl #16  @ i6 | i2 = t0/t1 second half
-        pkhtb           r12, lr,  r6,  asr #16  @ i7 | i3
-        uadd16          r1,  r7,  r1            @ 5c+5 | 1c+1 = t3 first half
-        uadd16          r10, r11, r9            @ a = t0
-        usub16          r9,  r11, r9            @ b = t1
-        smulwt          r7,  r3,  r12           @ ip[7] * cospi8sqrt2minus1
-        smulwb          lr,  r3,  r12           @ ip[3] * cospi8sqrt2minus1
-        smulwt          r11, r4,  r12           @ ip[7] * sinpi8sqrt2
-        smulwb          r6,  r4,  r12           @ ip[3] * sinpi8sqrt2
+        smulwt          r9,  r3,  r12
+        smulwt          r7,  r3,  r1
+        smulwt          r10, r4,  r12
+        smulwt          r8,  r4,  r1
+        pkhbt           r11, r1,  r12, lsl #16
+        pkhtb           r1,  r12, r1,  asr #16
+        pkhbt           r7,  r7,  r9,  lsl #16
+        pkhbt           r8,  r8,  r10, lsl #16
+        pkhbt           r9,  r6,  lr,  lsl #16
+        pkhtb           r12, lr,  r6,  asr #16
+        uadd16          r1,  r7,  r1
+        uadd16          r10, r11, r9
+        usub16          r9,  r11, r9
+        smulwt          r7,  r3,  r12
+        smulwb          lr,  r3,  r12
+        smulwt          r11, r4,  r12
+        smulwb          r6,  r4,  r12
         subs            r5,  r5,  #1
-        pkhbt           r7,  lr,  r7,  lsl #16  @ 7c | 3c
-        pkhbt           r11, r6,  r11, lsl #16  @ 7s | 3s = t3 second half
+        pkhbt           r7,  lr,  r7,  lsl #16
+        pkhbt           r11, r6,  r11, lsl #16
         mov             r6,  #0x4
         orr             r6,  r6,  #0x40000
-        uadd16          r12, r7,  r12           @ 7c+7 | 3c+3 = t2 second half
-        uadd16          r10, r10, r6            @ t0 + 4
-        uadd16          r9,  r9,  r6            @ t1 + 4
-        usub16          lr,  r8,  r12           @ c (o5 | o1) = t2
-        uadd16          r12, r11, r1            @ d (o7 | o3) = t3
-        usub16          r1,  r9,  lr            @ b-c = dst{0,1}[2]
-        uadd16          r7,  r10, r12           @ a+d = dst{0,1}[0]
-        usub16          r12, r10, r12           @ a-d = dst{0,1}[3]
-        uadd16          r10, r9,  lr            @ b+c = dst{0,1}[1]
+        uadd16          r12, r7,  r12
+        uadd16          r10, r10, r6
+        uadd16          r9,  r9,  r6
+        usub16          lr,  r8,  r12
+        uadd16          r12, r11, r1
+        usub16          r1,  r9,  lr
+        uadd16          r7,  r10, r12
+        usub16          r12, r10, r12
+        uadd16          r10, r9,  lr
 
-        asr             lr,  r1,  #3            @ o[1][2]
-        asr             r9,  r12, #3            @ o[1][3]
-        pkhtb           r8,  lr,  r7,  asr #19  @ o[1][0,2]
-        pkhtb           r11, r9,  r10, asr #19  @ o[1][1,3]
+        asr             lr,  r1,  #3
+        asr             r9,  r12, #3
+        pkhtb           r8,  lr,  r7,  asr #19
+        pkhtb           r11, r9,  r10, asr #19
         ldr             lr,  [r0]
         sxth            r12, r12
         ldr             r9,  [r0, r2]
@@ -290,11 +233,11 @@ function ff_vp8_idct_add_armv6, export=1
 #else
         sxth            r7,  r7
         sxth            r10, r10
-        asr             r7,  #3                 @ o[0][0]
-        asr             r10, #3                 @ o[0][1]
+        asr             r7,  #3
+        asr             r10, #3
 #endif
-        pkhbt           r7,  r7,  r1,  lsl #13  @ o[0][0,2]
-        pkhbt           r10, r10, r12, lsl #13  @ o[0][1,3]
+        pkhbt           r7,  r7,  r1,  lsl #13
+        pkhbt           r10, r10, r12, lsl #13
 
         uxtab16         r7,  r7,  lr
         uxtab16         r10, r10, lr,  ror #8
@@ -314,7 +257,6 @@ function ff_vp8_idct_add_armv6, export=1
         pop             {r4-r12, pc}
 endfunc
 
-@ void vp8_idct_dc_add(uint8_t *dst, int16_t block[16], ptrdiff_t stride)
 function ff_vp8_idct_dc_add_armv6, export=1
         push            {r4-r6, lr}
         add             r6,  r0,  r2,  lsl #1
@@ -326,8 +268,8 @@ function ff_vp8_idct_dc_add_armv6, export=1
         ldr             r5,  [r0]
         ldr             r4,  [r0, r2]
         pkhbt           r3,  r3,  r3,  lsl #16
-        uxtab16         lr,  r3,  r5            @ a1+2 | a1+0
-        uxtab16         r5,  r3,  r5,  ror #8   @ a1+3 | a1+1
+        uxtab16         lr,  r3,  r5
+        uxtab16         r5,  r3,  r5,  ror #8
         uxtab16         r12, r3,  r4
         uxtab16         r4,  r3,  r4,  ror #8
         usat16          lr,  #8,  lr
@@ -355,7 +297,6 @@ function ff_vp8_idct_dc_add_armv6, export=1
         pop             {r4-r6, pc}
 endfunc
 
-@ void vp8_idct_dc_add4uv(uint8_t *dst, int16_t block[4][16], ptrdiff_t stride)
 function ff_vp8_idct_dc_add4uv_armv6, export=1
         push            {r4, lr}
 
@@ -371,7 +312,6 @@ function ff_vp8_idct_dc_add4uv_armv6, export=1
         pop             {r4, pc}
 endfunc
 
-@ void vp8_idct_dc_add4y(uint8_t *dst, int16_t block[4][16], ptrdiff_t stride)
 function ff_vp8_idct_dc_add4y_armv6, export=1
         push            {r4, lr}
 
@@ -386,76 +326,74 @@ function ff_vp8_idct_dc_add4y_armv6, export=1
         pop             {r4, pc}
 endfunc
 
-@ loopfilter
 
 .macro  transpose       o3,  o2,  o1,  o0,  i0,  i1,  i2,  i3
-        uxtb16          \o1, \i1                @ xx 12 xx 10
-        uxtb16          \o0, \i0                @ xx 02 xx 00
-        uxtb16          \o3, \i3                @ xx 32 xx 30
-        uxtb16          \o2, \i2                @ xx 22 xx 20
-        orr             \o1, \o0, \o1, lsl #8   @ 12 02 10 00
-        orr             \o3, \o2, \o3, lsl #8   @ 32 22 30 20
+        uxtb16          \o1, \i1
+        uxtb16          \o0, \i0
+        uxtb16          \o3, \i3
+        uxtb16          \o2, \i2
+        orr             \o1, \o0, \o1, lsl #8
+        orr             \o3, \o2, \o3, lsl #8
 
-        uxtb16          \i1, \i1, ror #8        @ xx 13 xx 11
-        uxtb16          \i3, \i3, ror #8        @ xx 33 xx 31
-        uxtb16          \i0, \i0, ror #8        @ xx 03 xx 01
-        uxtb16          \i2, \i2, ror #8        @ xx 23 xx 21
-        orr             \i0, \i0, \i1, lsl #8   @ 13 03 11 01
-        orr             \i2, \i2, \i3, lsl #8   @ 33 23 31 21
+        uxtb16          \i1, \i1, ror #8
+        uxtb16          \i3, \i3, ror #8
+        uxtb16          \i0, \i0, ror #8
+        uxtb16          \i2, \i2, ror #8
+        orr             \i0, \i0, \i1, lsl #8
+        orr             \i2, \i2, \i3, lsl #8
 
-        pkhtb           \o2, \o3, \o1, asr #16  @ 32 22 12 02
-        pkhbt           \o0, \o1, \o3, lsl #16  @ 30 20 10 00
-        pkhtb           \o3, \i2, \i0, asr #16  @ 33 23 13 03
-        pkhbt           \o1, \i0, \i2, lsl #16  @ 31 21 11 01
+        pkhtb           \o2, \o3, \o1, asr #16
+        pkhbt           \o0, \o1, \o3, lsl #16
+        pkhtb           \o3, \i2, \i0, asr #16
+        pkhbt           \o1, \i0, \i2, lsl #16
 .endm
 
 .macro  simple_filter
-        uqsub8          r7,  r3,  r6            @ p1 - q1
-        uqsub8          r8,  r6,  r3            @ q1 - p1
-        uqsub8          r10, r4,  r5            @ p0 - q0
-        uqsub8          r9,  r5,  r4            @ q0 - p0
-        orr             r7,  r7,  r8            @ abs(p1 - q1)
-        orr             r9,  r9,  r10           @ abs(p0 - q0)
-        uhadd8          r7,  r7,  lr            @ abs(p1 - q2) >> 1
-        uqadd8          r9,  r9,  r9            @ abs(p0 - q0) * 2
-        uqadd8          r7,  r7,  r9            @ abs(p0 - q0)*2 + abs(p1-q1)/2
+        uqsub8          r7,  r3,  r6
+        uqsub8          r8,  r6,  r3
+        uqsub8          r10, r4,  r5
+        uqsub8          r9,  r5,  r4
+        orr             r7,  r7,  r8
+        orr             r9,  r9,  r10
+        uhadd8          r7,  r7,  lr
+        uqadd8          r9,  r9,  r9
+        uqadd8          r7,  r7,  r9
         mvn             r8,  #0
-        usub8           r10, r12, r7            @ compare to flimit
-        sel             r10, r8,  lr            @ filter mask: F or 0
+        usub8           r10, r12, r7
+        sel             r10, r8,  lr
         cmp             r10, #0
         beq             2f
 
-        eor             r3,  r3,  r2            @ ps1
-        eor             r6,  r6,  r2            @ qs1
-        eor             r4,  r4,  r2            @ ps0
-        eor             r5,  r5,  r2            @ qs0
+        eor             r3,  r3,  r2
+        eor             r6,  r6,  r2
+        eor             r4,  r4,  r2
+        eor             r5,  r5,  r2
 
-        qsub8           r3,  r3,  r6            @ vp8_filter = p1 - q1
-        qsub8           r6,  r5,  r4            @ q0 - p0
-        qadd8           r3,  r3,  r6            @ += q0 - p0
-        lsr             r7,  r2,  #5            @ 0x04040404
-        qadd8           r3,  r3,  r6            @ += q0 - p0
-        sub             r9,  r7,  r2,  lsr #7   @ 0x03030303
-        qadd8           r3,  r3,  r6            @ vp8_filter = p1-q1 + 3*(q0-p0)
-        and             r3,  r3,  r10           @ vp8_filter &= mask
+        qsub8           r3,  r3,  r6
+        qsub8           r6,  r5,  r4
+        qadd8           r3,  r3,  r6
+        lsr             r7,  r2,  #5
+        qadd8           r3,  r3,  r6
+        sub             r9,  r7,  r2,  lsr #7
+        qadd8           r3,  r3,  r6
+        and             r3,  r3,  r10
 
-        qadd8           r9,  r3,  r9            @ Filter2 = vp8_filter + 3
-        qadd8           r3,  r3,  r7            @ Filter1 = vp8_filter + 4
+        qadd8           r9,  r3,  r9
+        qadd8           r3,  r3,  r7
 
         shadd8          r9,  r9,  lr
         shadd8          r3,  r3,  lr
         shadd8          r9,  r9,  lr
         shadd8          r3,  r3,  lr
-        shadd8          r9,  r9,  lr            @ Filter2 >>= 3
-        shadd8          r3,  r3,  lr            @ Filter1 >>= 3
+        shadd8          r9,  r9,  lr
+        shadd8          r3,  r3,  lr
 
-        qadd8           r4,  r4,  r9            @ u = p0 + Filter2
-        qsub8           r5,  r5,  r3            @ u = q0 - Filter1
-        eor             r4,  r4,  r2            @ *op0 = u ^ 0x80
-        eor             r5,  r5,  r2            @ *oq0 = u ^ 0x80
+        qadd8           r4,  r4,  r9
+        qsub8           r5,  r5,  r3
+        eor             r4,  r4,  r2
+        eor             r5,  r5,  r2
 .endm
 
-@ void vp8_v_loop_filter16_simple(uint8_t *dst, ptrdiff_t stride, int flim)
 function ff_vp8_v_loop_filter16_simple_armv6, export=1
         push            {r4-r11, lr}
 
@@ -465,14 +403,14 @@ function ff_vp8_v_loop_filter16_simple_armv6, export=1
         orr             r12, r2,  r2,  lsl #8
         mov32           r2,  0x80808080
 1:
-        ldr_nreg        r3,  r0,  r1,  lsl #1   @ p1
-        ldr_nreg        r4,  r0,  r1            @ p0
-        ldr             r5,  [r0]               @ q0
-        ldr             r6,  [r0, r1]           @ q1
+        ldr_nreg        r3,  r0,  r1,  lsl #1
+        ldr_nreg        r4,  r0,  r1
+        ldr             r5,  [r0]
+        ldr             r6,  [r0, r1]
         simple_filter
 T       sub             r7,  r0,  r1
-        str             r5,  [r0]               @ oq0
-A       str             r4,  [r0, -r1]          @ op0
+        str             r5,  [r0]
+A       str             r4,  [r0, -r1]
 T       str             r4,  [r7]
 2:
         subs            r11, r11, #1
@@ -483,70 +421,70 @@ T       str             r4,  [r7]
 endfunc
 
 .macro  filter_mask_p
-        uqsub8          r6,  r9,  r10           @ p3 - p2
-        uqsub8          r7,  r10, r9            @ p2 - p3
-        uqsub8          r8,  r10, r11           @ p2 - p1
-        uqsub8          r10, r11, r10           @ p1 - p2
-        orr             r6,  r6,  r7            @ abs(p3-p2)
-        orr             r8,  r8,  r10           @ abs(p2-p1)
-        uqsub8          lr,  r6,  r2            @ compare to limit
-        uqsub8          r8,  r8,  r2            @ compare to limit
-        uqsub8          r6,  r11, r12           @ p1 - p0
+        uqsub8          r6,  r9,  r10
+        uqsub8          r7,  r10, r9
+        uqsub8          r8,  r10, r11
+        uqsub8          r10, r11, r10
+        orr             r6,  r6,  r7
+        orr             r8,  r8,  r10
+        uqsub8          lr,  r6,  r2
+        uqsub8          r8,  r8,  r2
+        uqsub8          r6,  r11, r12
         orr             lr,  lr,  r8
-        uqsub8          r7,  r12, r11           @ p0 - p1
-        orr             r6,  r6,  r7            @ abs(p1-p0)
-        uqsub8          r7,  r6,  r2            @ compare to limit
-        uqsub8          r8,  r6,  r3            @ compare to thresh
+        uqsub8          r7,  r12, r11
+        orr             r6,  r6,  r7
+        uqsub8          r7,  r6,  r2
+        uqsub8          r8,  r6,  r3
         orr             lr,  lr,  r7
 .endm
 
 .macro filter_mask_pq
-        uqsub8          r6,  r11, r10           @ p1 - q1
-        uqsub8          r7,  r10, r11           @ q1 - p1
-        uqsub8          r11, r12, r9            @ p0 - q0
-        uqsub8          r12, r9,  r12           @ q0 - p0
-        orr             r6,  r6,  r7            @ abs(p1-q1)
-        orr             r12, r11, r12           @ abs(p0-q0)
+        uqsub8          r6,  r11, r10
+        uqsub8          r7,  r10, r11
+        uqsub8          r11, r12, r9
+        uqsub8          r12, r9,  r12
+        orr             r6,  r6,  r7
+        orr             r12, r11, r12
         mov32           r7,  0x7f7f7f7f
-        uqadd8          r12, r12, r12           @ abs(p0-q0) * 2
-        and             r6,  r7,  r6,  lsr #1   @ abs(p1-q1) / 2
-        uqadd8          r12, r12, r6            @ abs(p0-q0) * 2 + abs(p1-q1)/2
+        uqadd8          r12, r12, r12
+        and             r6,  r7,  r6,  lsr #1
+        uqadd8          r12, r12, r6
 .endm
 
 .macro  filter_mask_v
         filter_mask_p
 
-        ldr             r10, [r0, r1]           @ q1
-        ldr_post        r9,  r0,  r1,  lsl #1   @ q0
+        ldr             r10, [r0, r1]
+        ldr_post        r9,  r0,  r1,  lsl #1
 
         filter_mask_pq
 
-        ldr             r11, [r0]               @ q2
+        ldr             r11, [r0]
 
-        uqsub8          r7,  r9,  r10           @ q0 - q1
-        uqsub8          r6,  r10, r9            @ q1 - q0
-        uqsub8          r12, r12, r4            @ compare to flimit
-        uqsub8          r9,  r11, r10           @ q2 - q1
-        uqsub8          r10, r10, r11           @ q1 - q2
+        uqsub8          r7,  r9,  r10
+        uqsub8          r6,  r10, r9
+        uqsub8          r12, r12, r4
+        uqsub8          r9,  r11, r10
+        uqsub8          r10, r10, r11
         orr             lr,  lr,  r12
-        ldr             r12, [r0, r1]           @ q3
-        orr             r6,  r7,  r6            @ abs(q1-q0)
-        orr             r10, r9,  r10           @ abs(q2-q1)
-        uqsub8          r9,  r12, r11           @ q3 - q2
-        uqsub8          r11, r11, r12           @ q2 - q3
-        uqsub8          r7,  r6,  r2            @ compare to limit
-        uqsub8          r10, r10, r2            @ compare to limit
-        uqsub8          r6,  r6,  r3            @ compare to thresh
-        orr             r9,  r9,  r11           @ abs(q3-q2)
+        ldr             r12, [r0, r1]
+        orr             r6,  r7,  r6
+        orr             r10, r9,  r10
+        uqsub8          r9,  r12, r11
+        uqsub8          r11, r11, r12
+        uqsub8          r7,  r6,  r2
+        uqsub8          r10, r10, r2
+        uqsub8          r6,  r6,  r3
+        orr             r9,  r9,  r11
         orr             lr,  lr,  r7
         orr             lr,  lr,  r10
-        uqsub8          r9,  r9,  r2            @ compare to limit
+        uqsub8          r9,  r9,  r2
         orr             lr,  lr,  r9
 
         mov             r12, #0
         usub8           lr,  r12, lr
         mvn             r11, #0
-        sel             lr,  r11, r12           @ filter mask
+        sel             lr,  r11, r12
         sub             r0,  r0,  r1,  lsl #1
 .endm
 
@@ -566,89 +504,89 @@ endfunc
 
         transpose       r12, r11, r10, r9,  r6,  r7,  r8,  lr
 
-        uqsub8          r8,  r12, r11           @ q3 - q2
-        uqsub8          lr,  r11, r12           @ q2 - q3
-        uqsub8          r7,  r9,  r10           @ q0 - q1
-        uqsub8          r6,  r10, r9            @ q1 - q0
-        uqsub8          r12, r11, r10           @ q2 - q1
-        uqsub8          r11, r10, r11           @ q1 - q2
-        orr             r8,  r8,  lr            @ abs(q3-q2)
-        orr             r6,  r7,  r6            @ abs(q1-q0)
-        orr             r11, r12, r11           @ abs(q2-q1)
-        ldr             lr,  [sp, #12]          @ load back (f)limit accumulator
-        uqsub8          r8,  r8,  r2            @ compare to limit
-        uqsub8          r7,  r6,  r2            @ compare to limit
-        uqsub8          r11, r11, r2            @ compare to limit
+        uqsub8          r8,  r12, r11
+        uqsub8          lr,  r11, r12
+        uqsub8          r7,  r9,  r10
+        uqsub8          r6,  r10, r9
+        uqsub8          r12, r11, r10
+        uqsub8          r11, r10, r11
+        orr             r8,  r8,  lr
+        orr             r6,  r7,  r6
+        orr             r11, r12, r11
+        ldr             lr,  [sp, #12]
+        uqsub8          r8,  r8,  r2
+        uqsub8          r7,  r6,  r2
+        uqsub8          r11, r11, r2
         orr             lr,  lr,  r8
-        uqsub8          r8,  r6,  r3            @ compare to thresh
+        uqsub8          r8,  r6,  r3
         orr             lr,  lr,  r7
-        ldr             r12, [sp, #8]           @ p1
+        ldr             r12, [sp, #8]
         orr             lr,  lr,  r11
 
-        ldr             r11, [sp, #4]           @ p0
+        ldr             r11, [sp, #4]
 
         filter_mask_pq
 
         mov             r10, #0
-        uqsub8          r12, r12, r4            @ compare to flimit
+        uqsub8          r12, r12, r4
         mvn             r11, #0
         orr             lr,  lr,  r12
         usub8           lr,  r10, lr
-        sel             lr,  r11, r10           @ filter mask
+        sel             lr,  r11, r10
 .endm
 
 .macro  filter          inner
         mov32           r12, 0x80808080
-        eor             r11, r7,  r12           @ ps1
-        eor             r8,  r8,  r12           @ ps0
-        eor             r9,  r9,  r12           @ qs0
-        eor             r10, r10, r12           @ qs1
+        eor             r11, r7,  r12
+        eor             r8,  r8,  r12
+        eor             r9,  r9,  r12
+        eor             r10, r10, r12
 
         stm             sp,  {r8-r11}
 
-        qsub8           r7,  r11, r10           @ vp8_signed_char_clamp(ps1-qs1)
-        qsub8           r8,  r9,  r8            @ vp8_signed_char_clamp(vp8_filter + 3 * ( qs0 - ps0))
+        qsub8           r7,  r11, r10
+        qsub8           r8,  r9,  r8
     .if \inner
-        and             r7,  r7,  r6            @ vp8_filter &= hev
+        and             r7,  r7,  r6
     .endif
         qadd8           r7,  r7,  r8
-        lsr             r10, r12, #5            @ 0x04040404
+        lsr             r10, r12, #5
         qadd8           r7,  r7,  r8
-        sub             r9,  r10, r12, lsr #7   @ 0x03030303
+        sub             r9,  r10, r12, lsr #7
         qadd8           r7,  r7,  r8
 
-        and             r7,  r7,  lr            @ vp8_filter &= mask
+        and             r7,  r7,  lr
     .if !\inner
-        mov             r12, r7                 @ Filter2
-        and             r7,  r7,  r6            @ Filter2 &= hev
+        mov             r12, r7
+        and             r7,  r7,  r6
     .endif
-        qadd8           lr,  r7,  r9            @ Filter2 = vp8_signed_char_clamp(vp8_filter+3)
-        qadd8           r7,  r7,  r10           @ Filter1 = vp8_signed_char_clamp(vp8_filter+4)
+        qadd8           lr,  r7,  r9
+        qadd8           r7,  r7,  r10
 
         mov             r9,  #0
-        shadd8          lr,  lr,  r9            @ Filter2 >>= 3
-        shadd8          r7,  r7,  r9            @ Filter1 >>= 3
         shadd8          lr,  lr,  r9
         shadd8          r7,  r7,  r9
-        shadd8          lr,  lr,  r9            @ Filter2
-        shadd8          r7,  r7,  r9            @ Filter1
+        shadd8          lr,  lr,  r9
+        shadd8          r7,  r7,  r9
+        shadd8          lr,  lr,  r9
+        shadd8          r7,  r7,  r9
 .endm
 
 .macro  filter_v        inner
-        orr             r10, r6,  r8            @ calculate vp8_hevmask
-        ldr_nreg        r7,  r0,  r1,  lsl #1   @ p1
+        orr             r10, r6,  r8
+        ldr_nreg        r7,  r0,  r1,  lsl #1
         usub8           r10, r12, r10
-        ldr_nreg        r8,  r0,  r1            @ p0
-        sel             r6,  r12, r11           @ obtain vp8_hevmask
-        ldr             r9,  [r0]               @ q0
-        ldr             r10, [r0, r1]           @ q1
+        ldr_nreg        r8,  r0,  r1
+        sel             r6,  r12, r11
+        ldr             r9,  [r0]
+        ldr             r10, [r0, r1]
         filter          \inner
 .endm
 
 .macro  filter_h        inner
         orr             r9,  r6,  r8
         usub8           r9,  r12, r9
-        sel             r6,  r12, r11           @ hev mask
+        sel             r6,  r12, r11
 
         stm             sp,  {r6, lr}
 
@@ -665,20 +603,20 @@ endfunc
 
 .macro  filter_inner
         ldm             sp,  {r8, r9}
-        lsr             r10, r10, #2            @ 0x01010101
-        qadd8           r8,  r8,  lr            @ u = vp8_signed_char_clamp(ps0 + Filter2)
+        lsr             r10, r10, #2
+        qadd8           r8,  r8,  lr
         mov             lr,  #0
-        qsub8           r9,  r9,  r7            @ u = vp8_signed_char_clamp(qs0 - Filter1)
-        sadd8           r7,  r7,  r10           @ vp8_filter += 1
-        ldr             r10, [sp, #8]           @ qs1
-        shadd8          r7,  r7,  lr            @ vp8_filter >>= 1
-        eor             r8,  r8,  r12           @ *op0 = u ^ 0x80
-        bic             r7,  r7,  r6            @ vp8_filter &= ~hev
-        qadd8           r11, r11, r7            @ u = vp8_signed_char_clamp(ps1 + vp8_filter)
-        eor             r9,  r9,  r12           @ *oq0 = u ^ 0x80
-        qsub8           r10, r10, r7            @ u = vp8_signed_char_clamp(qs1 - vp8_filter)
-        eor             r11, r11, r12           @ *op1 = u ^ 0x80
-        eor             r10, r10, r12           @ *oq1 = u ^ 0x80
+        qsub8           r9,  r9,  r7
+        sadd8           r7,  r7,  r10
+        ldr             r10, [sp, #8]
+        shadd8          r7,  r7,  lr
+        eor             r8,  r8,  r12
+        bic             r7,  r7,  r6
+        qadd8           r11, r11, r7
+        eor             r9,  r9,  r12
+        qsub8           r10, r10, r7
+        eor             r11, r11, r12
+        eor             r10, r10, r12
 .endm
 
 .macro  filter_x        c0
@@ -704,24 +642,24 @@ endfunc
 
         mov32           lr,  0x80808080
 
-        orr             r10, r6,  r10, lsl #8   @ u = vp8_signed_char_clamp((63 + Filter2 * 27)>>7)
-        qsub8           r8,  r9,  r10           @ s = vp8_signed_char_clamp(qs0 - u)
-        qadd8           r10, r11, r10           @ s = vp8_signed_char_clamp(ps0 + u)
-        eor             r8,  r8,  lr            @ *oq0 = s ^ 0x80
-        eor             r10, r10, lr            @ *op0 = s ^ 0x80
+        orr             r10, r6,  r10, lsl #8
+        qsub8           r8,  r9,  r10
+        qadd8           r10, r11, r10
+        eor             r8,  r8,  lr
+        eor             r10, r10, lr
 .endm
 
 .macro  filter_1
         ldm             sp,  {r8, r9}
         qadd8           r11, r8,  lr
         qsub8           r9,  r9,  r7
-        bic             r12, r12, r6            @ vp8_filter &= ~hev
+        bic             r12, r12, r6
         filter_x        #27
 .endm
 
 .macro  filter_2
-        ldr             r9,   [sp, #8]          @ qs1
-        ldr             r11,  [sp, #12]         @ ps1
+        ldr             r9,   [sp, #8]
+        ldr             r11,  [sp, #12]
         filter_x        #18
 .endm
 
@@ -738,15 +676,15 @@ function vp8_v_loop_filter_inner_armv6
         orr             r2,  r2,  r2,  lsl #16
         orr             r3,  r3,  r3,  lsl #16
         orr             r6,  r6,  r6,  lsl #16
-        orr             r4,  r2,  r2,  lsl #8   @ flimE
-        orr             r2,  r3,  r3,  lsl #8   @ flimI
-        orr             r3,  r6,  r6,  lsl #8   @ thresh
+        orr             r4,  r2,  r2,  lsl #8
+        orr             r2,  r3,  r3,  lsl #8
+        orr             r3,  r6,  r6,  lsl #8
 1:
         sub             r0,  r0,  r1,  lsl #2
-        ldr             r10, [r0, r1]           @ p2
-        ldr_post        r9,  r0,  r1,  lsl #1   @ p3
-        ldr             r12, [r0, r1]           @ p0
-        ldr_post        r11, r0,  r1,  lsl #1   @ p1
+        ldr             r10, [r0, r1]
+        ldr_post        r9,  r0,  r1,  lsl #1
+        ldr             r12, [r0, r1]
+        ldr_post        r11, r0,  r1,  lsl #1
 
         filter_mask_v
         cmp             lr,  #0
@@ -754,13 +692,13 @@ function vp8_v_loop_filter_inner_armv6
         filter_v        inner=1
         filter_inner
 
-A       str             r11, [r0, -r1, lsl #1]  @ op1
-A       str             r8,  [r0, -r1]          @ op0
+A       str             r11, [r0, -r1, lsl #1]
+A       str             r8,  [r0, -r1]
 T       sub             r0,  r0,  r1,  lsl #1
 T       str             r8,  [r0, r1]
 T       str_post        r11, r0,  r1,  lsl #1
-        str             r9,  [r0]               @ oq0
-        str             r10, [r0, r1]           @ oq1
+        str             r9,  [r0]
+        str             r10, [r0, r1]
 2:
         add             r0,  r0,  #4
         cmp             r5,  #3
@@ -797,15 +735,15 @@ function vp8_v_loop_filter_armv6
 
         orr             r3,  r3,  r3,  lsl #16
         orr             r6,  r6,  r6,  lsl #16
-        orr             r4,  r2,  r2,  lsl #8   @ flimE
-        orr             r2,  r3,  r3,  lsl #8   @ flimI
-        orr             r3,  r6,  r6,  lsl #8   @ thresh
+        orr             r4,  r2,  r2,  lsl #8
+        orr             r2,  r3,  r3,  lsl #8
+        orr             r3,  r6,  r6,  lsl #8
 1:
         sub             r0,  r0,  r1,  lsl #2
-        ldr             r10, [r0, r1]           @ p2
-        ldr_post        r9,  r0,  r1,  lsl #1   @ p3
-        ldr             r12, [r0, r1]           @ p0
-        ldr_post        r11, r0,  r1,  lsl #1   @ p1
+        ldr             r10, [r0, r1]
+        ldr_post        r9,  r0,  r1,  lsl #1
+        ldr             r12, [r0, r1]
+        ldr_post        r11, r0,  r1,  lsl #1
 
         filter_mask_v
         cmp             lr,  #0
@@ -814,27 +752,27 @@ function vp8_v_loop_filter_armv6
         filter_v        inner=0
         filter_1
 
-        str             r8,  [r0]               @ *oq0
-A       str             r10, [r0, -r1]          @ *op0
+        str             r8,  [r0]
+A       str             r10, [r0, -r1]
 T       sub             r0,  r0,  r1,  lsl #1
 T       str             r10, [r0, r1]
 
         filter_2
 
-A       str             r10, [r0, -r1, lsl #1]  @ *op1
+A       str             r10, [r0, -r1, lsl #1]
 T       str_post        r10, r0,  r1,  lsl #1
-        str             r8,  [r0, r1]           @ *oq1
+        str             r8,  [r0, r1]
 
-        ldr             r9,  [r0, r1,  lsl #1]  @ q2
+        ldr             r9,  [r0, r1,  lsl #1]
         add             r0,  r0,  r1
-A       ldr             r11, [r0, -r1, lsl #2]  @ p2
+A       ldr             r11, [r0, -r1, lsl #2]
 T       ldr_dpre        r11, r0,  r1,  lsl #2
 
         filter_3
 
-A       str             r10, [r0, -r1, lsl #2]  @ *op2
+A       str             r10, [r0, -r1, lsl #2]
 T       str_post        r10, r0,  r1,  lsl #2
-        str             r8,  [r0, r1]           @ *oq2
+        str             r8,  [r0, r1]
         sub             r0,  r0,  r1
 2:
         add             r0,  r0,  #4
@@ -866,7 +804,6 @@ function ff_vp8_v_loop_filter8uv_armv6, export=1
         b               vp8_v_loop_filter_armv6
 endfunc
 
-@ void vp8_h_loop_filter16_simple(uint8_t *dst, ptrdiff_t stride, int flim)
 function ff_vp8_h_loop_filter16_simple_armv6, export=1
         push            {r4-r11, lr}
         orr             r12, r2,  r2,  lsl #16
@@ -914,9 +851,9 @@ function vp8_h_loop_filter_inner_armv6
 
         orr             r3,  r3,  r3,  lsl #16
         orr             r9,  r9,  r9,  lsl #16
-        orr             r4,  r2,  r2,  lsl #8   @ flimE
-        orr             r2,  r3,  r3,  lsl #8   @ flimI
-        orr             r3,  r9,  r9,  lsl #8   @ thresh
+        orr             r4,  r2,  r2,  lsl #8
+        orr             r2,  r3,  r3,  lsl #8
+        orr             r3,  r9,  r9,  lsl #8
         sub             r0,  r0,  #4
 1:
         ldr             r7,  [r0, r1]
@@ -983,9 +920,9 @@ function vp8_h_loop_filter_armv6
 
         orr             r3,  r3,  r3,  lsl #16
         orr             r9,  r9,  r9,  lsl #16
-        orr             r4,  r2,  r2,  lsl #8   @ flimE
-        orr             r2,  r3,  r3,  lsl #8   @ flimI
-        orr             r3,  r9,  r9,  lsl #8   @ thresh
+        orr             r4,  r2,  r2,  lsl #8
+        orr             r2,  r3,  r3,  lsl #8
+        orr             r3,  r9,  r9,  lsl #8
 1:
         sub             r0,  r0,  #4
         ldr             r7,  [r0, r1]
@@ -1026,10 +963,10 @@ function vp8_h_loop_filter_armv6
         sub             r0,  r0,  r1,  lsl #2
         add             r0,  r0,  #3
 
-        ldrb            r11, [r0, #-5]          @ p2 for 1/7th difference
-        strb            r10, [r0, #-4]          @ op1
-        strb            r8,  [r0, #-1]          @ oq1
-        ldrb_post       r9,  r0,  r1            @ q2 for 1/7th difference
+        ldrb            r11, [r0, #-5]
+        strb            r10, [r0, #-4]
+        strb            r8,  [r0, #-1]
+        ldrb_post       r9,  r0,  r1
 
         lsr             r10, r10, #8
         lsr             r8,  r8,  #8

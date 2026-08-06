@@ -1,28 +1,4 @@
-/*
- * Copyright (C) 2010 David Conrad
- * Copyright (C) 2010 Ronald S. Bultje
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
 
-/**
- * @file
- * VP8 compatible video decoder
- */
 
 #include "vp8dsp.h"
 #include "wpd_codec.h"
@@ -39,7 +15,6 @@ void wpd_dsp_data_init(void) {
     }
 }
 
-// TODO: Maybe add dequant
 static void vp8_luma_dc_wht_c(WpdDctElem block[4][4][16], WpdDctElem dc[16]) {
     int i, t0, t1, t2, t3;
 
@@ -56,10 +31,10 @@ static void vp8_luma_dc_wht_c(WpdDctElem block[4][4][16], WpdDctElem dc[16]) {
     }
 
     for (i = 0; i < 4; i++) {
-        t0            = dc[i * 4 + 0] + dc[i * 4 + 3] + 3; // rounding
+        t0            = dc[i * 4 + 0] + dc[i * 4 + 3] + 3;
         t1            = dc[i * 4 + 1] + dc[i * 4 + 2];
         t2            = dc[i * 4 + 1] - dc[i * 4 + 2];
-        t3            = dc[i * 4 + 0] - dc[i * 4 + 3] + 3; // rounding
+        t3            = dc[i * 4 + 0] - dc[i * 4 + 3] + 3;
         dc[i * 4 + 0] = 0;
         dc[i * 4 + 1] = 0;
         dc[i * 4 + 2] = 0;
@@ -153,7 +128,6 @@ static void vp8_idct_dc_add4y_c(uint8_t *dst, WpdDctElem block[4][16],
     vp8_idct_dc_add_c(dst + 12, block[3], stride);
 }
 
-// because I like only having two parameters to pass functions...
 #define LOAD_PIXELS                     \
     int wpd_unused p3 = p[-4 * stride]; \
     int wpd_unused p2 = p[-3 * stride]; \
@@ -179,17 +153,14 @@ static wpd_always_inline void filter_common(uint8_t *p, ptrdiff_t stride,
 
     a = clip_int8(a);
 
-    // We deviate from the spec here with c(a+3) >> 3
-    // since that's what libvpx does.
+    /* Match libvpx's c(a + 3) >> 3 behavior rather than the spec wording. */
     f1 = WPD_MIN(a + 4, 127) >> 3;
     f2 = WPD_MIN(a + 3, 127) >> 3;
 
-    // Despite what the spec says, we do need to clamp here to
-    // be bitexact with libvpx.
+    /* Clamping here is required for libvpx bit-exact output. */
     p[-1 * stride] = cm[p0 + f2];
     p[0 * stride]  = cm[q0 - f1];
 
-    // only used for _inner on blocks without high edge variance
     if (!is4tap) {
         a              = (f1 + 1) >> 1;
         p[-2 * stride] = cm[p1 + a];
@@ -203,10 +174,6 @@ static wpd_always_inline int simple_limit(uint8_t *p, ptrdiff_t stride,
     return 2 * WPD_ABS(p0 - q0) + (WPD_ABS(p1 - q1) >> 1) <= flim;
 }
 
-/**
- * E - limit at the macroblock edge
- * I - limit for interior difference
- */
 static wpd_always_inline int normal_limit(uint8_t *p, ptrdiff_t stride, int E,
                                           int I) {
     LOAD_PIXELS
@@ -215,7 +182,6 @@ static wpd_always_inline int normal_limit(uint8_t *p, ptrdiff_t stride, int E,
         WPD_ABS(q3 - q2) <= I && WPD_ABS(q2 - q1) <= I && WPD_ABS(q1 - q0) <= I;
 }
 
-// high edge variance
 static wpd_always_inline int hev(uint8_t *p, ptrdiff_t stride, int thresh) {
     LOAD_PIXELS
     return WPD_ABS(p1 - p0) > thresh || WPD_ABS(q1 - q0) > thresh;

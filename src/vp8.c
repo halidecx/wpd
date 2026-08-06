@@ -4,10 +4,6 @@
 #include "arm/vp8.h"
 #endif
 
-/*
- * Static VP8 probability, prediction, token, and quantization tables.
- * Originally kept in vp8data.h; local to this translation unit.
- */
 static const uint8_t vp8_pred4x4_mode[] = {
     [DC_PRED8x8]    = DC_PRED,
     [VERT_PRED8x8]  = VERT_PRED,
@@ -16,30 +12,30 @@ static const uint8_t vp8_pred4x4_mode[] = {
 };
 
 static const int8_t vp8_pred16x16_tree_intra[4][2] = {
-    {-MODE_I4x4, 1}, // '0'
+    {-MODE_I4, 1},
     {2, 3},
-    {-DC_PRED8x8, -VERT_PRED8x8}, // '100', '101'
-    {-HOR_PRED8x8, -PLANE_PRED8x8}, // '110', '111'
+    {-DC_PRED8x8, -VERT_PRED8x8},
+    {-HOR_PRED8x8, -PLANE_PRED8x8},
 };
 
 static const uint8_t vp8_pred16x16_prob_intra[4] = {145, 156, 163, 128};
 
 static const int8_t vp8_pred4x4_tree[9][2] = {
-    {-DC_PRED, 1}, // '0'
-    {-TM_VP8_PRED, 2}, // '10'
-    {-VERT_PRED, 3}, // '110'
+    {-DC_PRED, 1},
+    {-TM_VP8_PRED, 2},
+    {-VERT_PRED, 3},
     {4, 6},
-    {-HOR_PRED, 5}, // '11100'
-    {-DIAG_DOWN_RIGHT_PRED, -VERT_RIGHT_PRED}, // '111010', '111011'
-    {-DIAG_DOWN_LEFT_PRED, 7}, // '11110'
-    {-VERT_LEFT_PRED, 8}, // '111110'
-    {-HOR_DOWN_PRED, -HOR_UP_PRED}, // '1111110', '1111111'
+    {-HOR_PRED, 5},
+    {-DIAG_DOWN_RIGHT_PRED, -VERT_RIGHT_PRED},
+    {-DIAG_DOWN_LEFT_PRED, 7},
+    {-VERT_LEFT_PRED, 8},
+    {-HOR_DOWN_PRED, -HOR_UP_PRED},
 };
 
 static const int8_t vp8_pred8x8c_tree[3][2] = {
-    {-DC_PRED8x8, 1}, // '0'
-    {-VERT_PRED8x8, 2}, // '10
-    {-HOR_PRED8x8, -PLANE_PRED8x8}, // '110', '111'
+    {-DC_PRED8x8, 1},
+    {-VERT_PRED8x8, 2},
+    {-HOR_PRED8x8, -PLANE_PRED8x8},
 };
 
 static const uint8_t vp8_pred8x8c_prob_intra[3] = {142, 114, 183};
@@ -170,8 +166,6 @@ static const uint8_t vp8_pred4x4_prob_intra[10][10][9] = {
 static const uint8_t vp8_coeff_band[16] = {
     0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7};
 
-/* Inverse of vp8_coeff_band: mappings of bands to coefficient indexes.
- * Each list is -1-terminated. */
 static const int8_t vp8_coeff_band_indexes[8][10] = {
     {0, -1},
     {1, -1},
@@ -190,7 +184,6 @@ static const uint8_t vp8_dct_cat5_prob[] = {180, 157, 141, 134, 130, 0};
 static const uint8_t vp8_dct_cat6_prob[] = {
     254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129, 0};
 
-// only used for cat3 and above; cat 1 and 2 are referenced directly
 const uint8_t *const ff_vp8_dct_cat_prob[] = {
     vp8_dct_cat3_prob,
     vp8_dct_cat4_prob,
@@ -622,8 +615,6 @@ static int update_dimensions(VP8Context *s, int width, int height) {
     if (wpd_check_image_size(width, height))
         return WPD_ERROR_INVALID_DATA;
 
-    // keep the buffers and picture when the dimensions are unchanged;
-    // everything they carry is rewritten at the start of each frame
     if (width == s->avctx->width && height == s->avctx->height &&
         s->frame.allocation[0] && s->filter_strength)
         return 0;
@@ -654,7 +645,7 @@ static void parse_segment_info(VP8Context *s) {
 
     s->segmentation.update_map = vp8_rac_get(c);
 
-    if (vp8_rac_get(c)) { // update segment feature data
+    if (vp8_rac_get(c)) {
         s->segmentation.absolute_vals = vp8_rac_get(c);
 
         for (i = 0; i < 4; i++)
@@ -669,13 +660,8 @@ static void parse_segment_info(VP8Context *s) {
                                                   : 255;
 }
 
-/**
- * Read the eight loop filter deltas: four indexed by reference frame, then
- * four indexed by prediction mode. Only the intra entry of the first group
- * and the i4x4 entry of the second can apply to a keyframe, but all eight
- * are coded and so must be consumed.
- */
 static void update_lf_deltas(VP8Context *s) {
+    /* Consume all eight coded deltas, even though keyframes apply only two. */
     VP56RangeCoder *c = &s->c;
     int             i;
 
@@ -685,10 +671,10 @@ static void update_lf_deltas(VP8Context *s) {
 
             if (vp8_rac_get(c))
                 delta = -delta;
-            if (i == 0) /* ref frame "current", i.e. intra */
+            if (i == 0)
                 s->lf_delta.ref_intra = delta;
-            else if (i == 4) /* first mode entry, i.e. i4x4 */
-                s->lf_delta.mode_i4x4 = delta;
+            else if (i == 4)
+                s->lf_delta.mode_i4 = delta;
         }
     }
 }
@@ -813,7 +799,7 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
 
     if (vp8_rac_get(c))
         wpd_log(s->avctx, WPD_LOG_WARNING, "Unspecified colorspace\n");
-    vp8_rac_get(c); // whether we can skip clamping in dsp functions
+    vp8_rac_get(c);
 
     if ((s->segmentation.enabled = vp8_rac_get(c)))
         parse_segment_info(s);
@@ -835,7 +821,7 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
 
     get_quants(s);
 
-    vp8_rac_get(c); // refresh entropy probs; nothing follows this frame
+    vp8_rac_get(c);
 
     for (i = 0; i < 4; i++)
         for (j = 0; j < 8; j++)
@@ -881,7 +867,6 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         int bit    = vp56_rac_get_prob(c, s->prob.segmentid[0]);
         s->segment = vp56_rac_get_prob(c, s->prob.segmentid[1 + bit]) + 2 * bit;
     } else {
-        /* Without a coded map every macroblock lands in the first segment. */
         s->segment = 0;
     }
 
@@ -890,7 +875,7 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
     mb->mode = vp8_rac_get_tree(
         c, vp8_pred16x16_tree_intra, vp8_pred16x16_prob_intra);
 
-    if (mb->mode == MODE_I4x4) {
+    if (mb->mode == MODE_I4) {
         decode_intra4x4_modes(s, c, mb_x);
     } else {
         const uint32_t modes = vp8_pred4x4_mode[mb->mode] * 0x01010101u;
@@ -902,54 +887,43 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         c, vp8_pred8x8c_tree, vp8_pred8x8c_prob_intra);
 }
 
-/**
- * @param c arithmetic bitstream reader context
- * @param block destination for block coefficients
- * @param probs probabilities to use when reading trees from the bitstream
- * @param i initial coeff index, 0 unless a separate DC block is coded
- * @param qmul array holding the dc/ac dequant factor at position 0/1
- * @return 0 if no coeffs were decoded
- *         otherwise, the index of the last coeff decoded plus one
- */
 static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
                                  uint8_t probs[16][3][NUM_DCT_TOKENS - 1],
                                  int i, uint8_t *token_prob, int16_t qmul[2]) {
     goto skip_eob;
     do {
         int coeff;
-        if (!vp56_rac_get_prob_branchy(c, token_prob[0])) // DCT_EOB
+        if (!vp56_rac_get_prob_branchy(c, token_prob[0]))
             return i;
 
     skip_eob:
-        if (!vp56_rac_get_prob_branchy(c, token_prob[1])) { // DCT_0
+        if (!vp56_rac_get_prob_branchy(c, token_prob[1])) {
             if (++i == 16)
-                return i; // invalid input; blocks should end with EOB
+                return i;
             token_prob = probs[i][0];
             goto skip_eob;
         }
 
-        if (!vp56_rac_get_prob_branchy(c, token_prob[2])) { // DCT_1
+        if (!vp56_rac_get_prob_branchy(c, token_prob[2])) {
             coeff      = 1;
             token_prob = probs[i + 1][1];
         } else {
-            if (!vp56_rac_get_prob_branchy(c, token_prob[3])) { // DCT 2,3,4
+            if (!vp56_rac_get_prob_branchy(c, token_prob[3])) {
                 coeff = vp56_rac_get_prob_branchy(c, token_prob[4]);
                 if (coeff)
                     coeff += vp56_rac_get_prob(c, token_prob[5]);
                 coeff += 2;
             } else {
-                // DCT_CAT*
                 if (!vp56_rac_get_prob_branchy(c, token_prob[6])) {
-                    if (!vp56_rac_get_prob_branchy(c,
-                                                   token_prob[7])) { // DCT_CAT1
+                    if (!vp56_rac_get_prob_branchy(c, token_prob[7])) {
                         coeff = 5 + vp56_rac_get_prob(c, vp8_dct_cat1_prob[0]);
-                    } else { // DCT_CAT2
+                    } else {
                         coeff = 7;
                         coeff += vp56_rac_get_prob(c, vp8_dct_cat2_prob[0])
                             << 1;
                         coeff += vp56_rac_get_prob(c, vp8_dct_cat2_prob[1]);
                     }
-                } else { // DCT_CAT3 and up
+                } else {
                     int a   = vp56_rac_get_prob(c, token_prob[8]);
                     int b   = vp56_rac_get_prob(c, token_prob[9 + a]);
                     int cat = (a << 1) + b;
@@ -965,21 +939,11 @@ static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
     return i;
 }
 
-// arm/vp8.h points this at ff_decode_block_coeffs_armv6 on arm32.
 #ifndef decode_block_coeffs_internal
 #define decode_block_coeffs_internal decode_block_coeffs_c
 #endif
 
 #ifdef WPD_CHECKASM
-/**
- * External alias for the C coefficient decoder.
- *
- * checkasm needs a reference to compare ff_decode_block_coeffs_armv6 against,
- * but on arm32 decode_block_coeffs_internal *is* the asm. A second caller
- * costs the shipped decoder ~0.3% of its instruction count, because it stops
- * GCC specializing decode_block_coeffs_c for its one real call site, so this
- * is compiled only into the library checkasm links against.
- */
 int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
                               uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
                               uint8_t *token_prob, int16_t qmul[2]) {
@@ -987,23 +951,12 @@ int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
 }
 #endif
 
-/**
- * @param c arithmetic bitstream reader context
- * @param block destination for block coefficients
- * @param probs probabilities to use when reading trees from the bitstream
- * @param i initial coeff index, 0 unless a separate DC block is coded
- * @param zero_nhood the initial prediction context for number of surrounding
- *                   all-zero blocks (only left/top, so 0-2)
- * @param qmul array holding the dc/ac dequant factor at position 0/1
- * @return 0 if no coeffs were decoded
- *         otherwise, the index of the last coeff decoded plus one
- */
 static wpd_always_inline int decode_block_coeffs(
     VP56RangeCoder *c, WpdDctElem block[16],
     uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, int zero_nhood,
     int16_t qmul[2]) {
     uint8_t *token_prob = probs[i][zero_nhood];
-    if (!vp56_rac_get_prob_branchy(c, token_prob[0])) // DCT_EOB
+    if (!vp56_rac_get_prob_branchy(c, token_prob[0]))
         return 0;
     return decode_block_coeffs_internal(c, block, probs, i, token_prob, qmul);
 }
@@ -1017,10 +970,9 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
     int segment  = s->segment;
     int block_dc = 0;
 
-    if (mb->mode != MODE_I4x4) {
+    if (mb->mode != MODE_I4) {
         nnz_pred = t_nnz[8] + l_nnz[8];
 
-        // decode DC values and do hadamard
         nnz      = decode_block_coeffs(c,
                                        s->block_dc,
                                        s->prob.token[1],
@@ -1040,7 +992,6 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
         luma_ctx   = 0;
     }
 
-    // luma blocks
     for (y = 0; y < 4; y++)
         for (x = 0; x < 4; x++) {
             nnz_pred = l_nnz[y] + t_nnz[x];
@@ -1050,14 +1001,11 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
                                            luma_start,
                                            nnz_pred,
                                            s->qmat[segment].luma_qmul);
-            // nnz+block_dc may be one more than the actual last index, but we don't care
             s->non_zero_count_cache[y][x] = nnz + block_dc;
             t_nnz[x] = l_nnz[y] = !!nnz;
             nnz_total += nnz;
         }
 
-    // Chroma blocks. Note the second index is x for luma above but (y<<1)|x
-    // here, since each chroma plane is a single 2x2 grid of blocks.
     for (i = 4; i < 6; i++)
         for (y = 0; y < 2; y++)
             for (x = 0; x < 2; x++) {
@@ -1073,9 +1021,7 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
                 nnz_total += nnz;
             }
 
-    // if there were no coded coeffs despite the macroblock not being marked skip,
-    // we MUST not do the inner loop filter and should not do IDCT
-    // Since skip isn't used for bitstream prediction, just manually set it.
+    /* An empty coefficient block skips both IDCT and the inner loop filter. */
     if (!nnz_total)
         mb->skip = 1;
 }
@@ -1097,7 +1043,7 @@ static wpd_always_inline void xchg_mb_border(uint8_t *top_border,
                                              int uvlinesize, int mb_x, int mb_y,
                                              int mb_width, int simple,
                                              int xchg) {
-    uint8_t *top_border_m1 = top_border - 32; // for TL prediction
+    uint8_t *top_border_m1 = top_border - 32;
     src_y -= linesize;
     src_cb -= uvlinesize;
     src_cr -= uvlinesize;
@@ -1116,8 +1062,6 @@ static wpd_always_inline void xchg_mb_border(uint8_t *top_border,
     if (mb_x < mb_width - 1)
         XCHG(top_border + 32, src_y + 16, 1);
 
-    // only copy chroma for normal loop filter
-    // or to initialize the top row to 127
     if (!simple || !mb_y) {
         XCHG(top_border_m1 + 16, src_cb - 8, xchg);
         XCHG(top_border_m1 + 24, src_cr - 8, xchg);
@@ -1141,8 +1085,6 @@ static wpd_always_inline void intra_predict(VP8Context *s, uint8_t *dst[3],
     int      x, y, mode, nnz;
     uint32_t tr;
 
-    // for the first row, we need to run xchg_mb_border to init the top edge to 127
-    // otherwise, skip it if we aren't going to deblock
     if (s->deblock_filter || !mb_y)
         xchg_mb_border(s->top_border[mb_x + 1],
                        dst[0],
@@ -1156,19 +1098,15 @@ static wpd_always_inline void intra_predict(VP8Context *s, uint8_t *dst[3],
                        s->filter.simple,
                        1);
 
-    if (mb->mode < MODE_I4x4) {
+    if (mb->mode < MODE_I4) {
         mode = check_intra_pred8x8_mode(mb->mode, mb_x, mb_y);
         s->pred.pred16x16[mode](dst[0], s->linesize);
     } else {
         uint8_t *ptr      = dst[0];
         uint8_t *intra4x4 = s->intra4x4_pred_mode_mb;
 
-        // all blocks on the right edge of the macroblock use bottom edge
-        // the top macroblock for their topright edge
         uint8_t *tr_right = ptr - s->linesize + 16;
 
-        // if we're on the right edge of the frame, said edge is extended
-        // from the top macroblock
         if (mb_x == s->mb_width - 1) {
             tr       = tr_right[-1] * 0x01010101u;
             tr_right = (uint8_t *)&tr;
@@ -1225,7 +1163,7 @@ static wpd_always_inline void idct_mb(VP8Context *s, uint8_t *dst[3],
                                       VP8Macroblock *mb) {
     int x, y, ch;
 
-    if (mb->mode != MODE_I4x4) {
+    if (mb->mode != MODE_I4) {
         uint8_t *y_dst = dst[0];
         for (y = 0; y < 4; y++) {
             uint32_t nnz4 = WPD_RL32(s->non_zero_count_cache[y]);
@@ -1297,8 +1235,8 @@ static wpd_always_inline void filter_level_for_mb(VP8Context        *s,
 
     if (s->lf_delta.enabled) {
         filter_level += s->lf_delta.ref_intra;
-        if (mb->mode == MODE_I4x4)
-            filter_level += s->lf_delta.mode_i4x4;
+        if (mb->mode == MODE_I4)
+            filter_level += s->lf_delta.mode_i4;
     }
 
     filter_level = wpd_clip_uintp2(filter_level, 6);
@@ -1312,19 +1250,18 @@ static wpd_always_inline void filter_level_for_mb(VP8Context        *s,
 
     f->filter_level = filter_level;
     f->inner_limit  = interior_limit;
-    f->inner_filter = !mb->skip || mb->mode == MODE_I4x4;
+    f->inner_filter = !mb->skip || mb->mode == MODE_I4;
 }
 
 static wpd_always_inline void filter_mb(VP8Context *s, uint8_t *dst[3],
                                         VP8FilterStrength *f, int mb_x,
                                         int mb_y) {
-    int mbedge_lim, bedge_lim, hev_thresh;
-    int filter_level = f->filter_level;
-    int inner_limit  = f->inner_limit;
-    int inner_filter = f->inner_filter;
-    int linesize     = s->linesize;
-    int uvlinesize   = s->uvlinesize;
-    /* The keyframe row of the spec's high edge variance threshold table. */
+    int                  mbedge_lim, bedge_lim, hev_thresh;
+    int                  filter_level       = f->filter_level;
+    int                  inner_limit        = f->inner_limit;
+    int                  inner_filter       = f->inner_filter;
+    int                  linesize           = s->linesize;
+    int                  uvlinesize         = s->uvlinesize;
     static const uint8_t hev_thresh_lut[64] = {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1,
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2,
@@ -1484,8 +1421,6 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     memset(s->top_nnz, 0, s->mb_width * sizeof(*s->top_nnz));
     memset(s->intra4x4_pred_mode_top, DC_PRED, s->mb_width * 4);
 
-    // top edge of 127 for intra prediction; entry 0 is cleared in full since
-    // the picture is reused across frames and no longer freshly zeroed
     memset(s->top_border[0], 0, sizeof(*s->top_border));
     s->top_border[0][15] = s->top_border[0][23] = 127;
     memset(
@@ -1501,11 +1436,10 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
         memset(s->left_nnz, 0, sizeof(s->left_nnz));
         WPD_WN32A(s->intra4x4_pred_mode_left, DC_PRED * 0x01010101);
 
-        // left edge of 129 for intra prediction
         for (i = 0; i < 3; i++)
             for (y = 0; y < 16 >> !!i; y++)
                 dst[i][y * curframe->linesize[i] - 1] = 129;
-        if (mb_y == 1) // top left edge is also 129
+        if (mb_y == 1)
             s->top_border[0][15] = s->top_border[0][23] = s->top_border[0][31] =
                 129;
 
@@ -1521,10 +1455,9 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
                 idct_mb(s, dst, &mb);
             } else {
                 WPD_ZERO64(s->left_nnz);
-                WPD_WN64(s->top_nnz[mb_x], 0); // array of 9, so unaligned
+                WPD_WN64(s->top_nnz[mb_x], 0);
 
-                // Reset DC block predictors if they would exist if the mb had coefficients
-                if (mb.mode != MODE_I4x4) {
+                if (mb.mode != MODE_I4) {
                     s->left_nnz[8]      = 0;
                     s->top_nnz[mb_x][8] = 0;
                 }

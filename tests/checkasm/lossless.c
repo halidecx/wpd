@@ -1,7 +1,3 @@
-/*
- * Checks for the VP8L inverse predictors.
- * SPDX-License-Identifier: LGPL-2.1-or-later
- */
 
 #include <string.h>
 
@@ -9,15 +5,9 @@
 #include "vp8l_dsp.h"
 
 #define MAX_PIXELS 256
-/*
- * One pixel of lead-in for out[-1] and upper[-1], and a tail that covers
- * upper[num_pixels] and gives an over-write somewhere to land where the
- * comparison will see it.
- */
 #define GUARD_PIXELS 8
 #define BUF_PIXELS (1 + MAX_PIXELS + GUARD_PIXELS)
 
-/* lengths that between them hit every unrolled tier and every tail */
 static const int lengths[] = {
     1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 19, 31, 63, 64, 255, MAX_PIXELS};
 
@@ -41,7 +31,6 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
 
                 randomize_pixels(upper0, upper1);
                 randomize_pixels(row0, row1);
-                /* in and out alias, exactly as the decoder calls these */
                 call_ref(row0 + 1, upper0 + 1, n, row0 + 1);
                 call_new(row1 + 1, upper1 + 1, n, row1 + 1);
                 if (memcmp(row0, row1, sizeof(row0)) ||

@@ -1,31 +1,4 @@
-;*****************************************************************************
-;* x86inc.asm: x86 abstraction layer
-;*****************************************************************************
-;* Copyright (C) 2005-2024 x264 project
-;*
-;* Authors: Loren Merritt <lorenm@u.washington.edu>
-;*          Henrik Gramner <henrik@gramner.com>
-;*          Anton Mitrofanov <BugMaster@narod.ru>
-;*          Fiona Glaser <fiona@x264.com>
-;*
-;* Permission to use, copy, modify, and/or distribute this software for any
-;* purpose with or without fee is hereby granted, provided that the above
-;* copyright notice and this permission notice appear in all copies.
-;*
-;* THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-;* WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-;* MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
-;* ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-;* WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-;* ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
-;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-;*****************************************************************************
 
-; This is a header file for the x86inc.asm assembly language, which uses
-; NASM/YASM syntax combined with a large number of macros to provide easy
-; abstraction between different calling conventions (x86_32, win64, linux64).
-; It also has various other useful features to simplify writing the kind of
-; DSP functions that are most often used.
 
 %ifndef private_prefix
     %error private_prefix not defined
@@ -82,14 +55,10 @@
     %define mangle(x) x
 %endif
 
-; Use VEX-encoding even in non-AVX functions
 %ifndef FORCE_VEX_ENCODING
     %define FORCE_VEX_ENCODING 0
 %endif
 
-; aout does not support align=
-; NOTE: This section is out of sync with x264, in order to
-; keep supporting OS/2.
 %macro SECTION_RODATA 0-1 16
     %ifidn __OUTPUT_FORMAT__,aout
         SECTION .text
@@ -105,10 +74,10 @@
 %endmacro
 
 %if ARCH_X86_64
-    %define PIC 1 ; always use PIC on x86-64
+    %define PIC 1
     default rel
 %elifidn __OUTPUT_FORMAT__,win32
-    %define PIC 0 ; PIC isn't used on 32-bit Windows
+    %define PIC 0
 %elifndef PIC
     %define PIC 0
 %endif
@@ -116,51 +85,17 @@
 %define HAVE_PRIVATE_EXTERN 1
 %ifdef __NASM_VERSION_ID__
     %use smartalign
-    %if __NASM_VERSION_ID__ < 0x020e0000 ; 2.14
+    %if __NASM_VERSION_ID__ < 0x020e0000
         %define HAVE_PRIVATE_EXTERN 0
     %endif
 %endif
 
-; Macros to eliminate most code duplication between x86_32 and x86_64:
-; Currently this works only for leaf functions which load all their arguments
-; into registers at the start, and make no other use of the stack. Luckily that
-; covers most use cases.
 
-; PROLOGUE:
-; %1 = number of arguments. loads them from stack if needed.
-; %2 = number of registers used. pushes callee-saved regs if needed.
-; %3 = number of xmm registers used. pushes callee-saved xmm regs if needed.
-; %4 = (optional) stack size to be allocated. The stack will be aligned before
-;      allocating the specified stack size. If the required stack alignment is
-;      larger than the known stack alignment the stack will be manually aligned
-;      and an extra register will be allocated to hold the original stack
-;      pointer (to not invalidate r0m etc.). To prevent the use of an extra
-;      register as stack pointer, request a negative stack size.
-; %4+/%5+ = list of names to define to registers
-; PROLOGUE can also be invoked by adding the same options to cglobal
 
-; e.g.
-; cglobal foo, 2,3,7,0x40, dst, src, tmp
-; declares a function (foo) that automatically loads two arguments (dst and
-; src) into registers, uses one additional register (tmp) plus 7 vector
-; registers (m0-m6) and allocates 0x40 bytes of stack space.
 
-; TODO Some functions can use some args directly from the stack. If they're the
-; last args then you can just not declare them, but if they're in the middle
-; we need more flexible macro.
 
-; RET:
-; Pops anything that was pushed by PROLOGUE, and returns.
 
-; REP_RET:
-; Use this instead of RET if it's a branch target.
 
-; registers:
-; rN and rNq are the native-size register holding function argument N
-; rNd, rNw, rNb are dword, word, and byte size
-; rNh is the high 8 bits of the word size
-; rNm is the original location of arg N (a register or on the stack), dword
-; rNmp is native size
 
 %macro DECLARE_REG 2-3
     %define r%1q %2
@@ -172,7 +107,7 @@
     %if %0 == 2
         %define r%1m  %2d
         %define r%1mp %2
-    %elif ARCH_X86_64 ; memory
+    %elif ARCH_X86_64
         %define r%1m [rstk + stack_offset + %3]
         %define r%1mp qword r %+ %1 %+ m
     %else
@@ -206,7 +141,6 @@ DECLARE_REG_SIZE si, sil, null
 DECLARE_REG_SIZE di, dil, null
 DECLARE_REG_SIZE bp, bpl, null
 
-; t# defines for when per-arch register allocation is more complex than just function arguments
 
 %macro DECLARE_REG_TMP 1-*
     %assign %%i 0
@@ -240,7 +174,7 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
 %if ARCH_X86_64
     lea %1, [%2]
 %elif PIC
-    call $+5 ; special-cased to not affect the RSB on most CPU:s
+    call $+5
     pop %1
     add %1, (%2)-$+1
 %else
@@ -248,9 +182,7 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
 %endif
 %endmacro
 
-; Repeats an instruction/operation for multiple arguments.
-; Example usage: "REPX {psrlw x, 8}, m0, m1, m2, m3"
-%macro REPX 2-* ; operation, args
+%macro REPX 2-*
     %xdefine %%f(x) %1
     %rep %0 - 1
         %rotate 1
@@ -352,7 +284,7 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
     %endif
 
     %xdefine %%stack_offset stack_offset
-    %undef stack_offset ; so that the current value of stack_offset doesn't get baked in by xdefine
+    %undef stack_offset
     %assign %%i 0
     %rep %0
         %xdefine %1q r %+ %%i %+ q
@@ -374,10 +306,6 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
 %define vzeroupper_required (mmsize > 16 && (ARCH_X86_64 == 0 || xmm_regs_used > 16 || notcpuflag(avx512)))
 %define high_mm_regs (16*cpuflag(avx512))
 
-; Large stack allocations on Windows need to use stack probing in order
-; to guarantee that all stack memory is committed before accessing it.
-; This is done by ensuring that the guard page(s) at the end of the
-; currently committed pages are touched prior to any pages beyond that.
 %if WIN64
     %assign STACK_PROBE_SIZE 8192
 %elifidn __OUTPUT_FORMAT__, win32
@@ -386,7 +314,7 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
     %assign STACK_PROBE_SIZE 0
 %endif
 
-%macro PROBE_STACK 1 ; stack_size
+%macro PROBE_STACK 1
     %if STACK_PROBE_SIZE
         %assign %%i STACK_PROBE_SIZE
         %rep %1 / STACK_PROBE_SIZE
@@ -407,7 +335,7 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
     %assign xmm_regs_used 0
 %endmacro
 
-%macro ALLOC_STACK 0-2 0, 0 ; stack_size, n_xmm_regs
+%macro ALLOC_STACK 0-2 0, 0
     RESET_STACK_STATE
     %ifnum %2
         %if mmsize != 8
@@ -422,27 +350,22 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
                 %assign stack_size -stack_size
             %endif
             %if WIN64
-                %assign %%pad %%pad + 32 ; shadow space
+                %assign %%pad %%pad + 32
                 %if xmm_regs_used > 8
-                    %assign %%pad %%pad + (xmm_regs_used-8)*16 ; callee-saved xmm registers
+                    %assign %%pad %%pad + (xmm_regs_used-8)*16
                 %endif
             %endif
             %if required_stack_alignment <= STACK_ALIGNMENT
-                ; maintain the current stack alignment
                 %assign stack_size_padded stack_size + %%pad + ((-%%pad-stack_offset-gprsize) & (STACK_ALIGNMENT-1))
                 PROBE_STACK stack_size_padded
                 SUB rsp, stack_size_padded
             %else
                 %assign %%reg_num (regs_used - 1)
                 %xdefine rstk r %+ %%reg_num
-                ; align stack, and save original stack location directly above
-                ; it, i.e. in [rsp+stack_size_padded], so we can restore the
-                ; stack in a single instruction (i.e. mov rsp, rstk or mov
-                ; rsp, [rsp+stack_size_padded])
-                %if %1 < 0 ; need to store rsp on stack
+                %if %1 < 0
                     %xdefine rstkm [rsp + stack_size + %%pad]
                     %assign %%pad %%pad + gprsize
-                %else ; can keep rsp in rstk during whole function
+                %else
                     %xdefine rstkm rstk
                 %endif
                 %assign stack_size_padded stack_size + ((%%pad + required_stack_alignment-1) & ~(required_stack_alignment-1))
@@ -461,8 +384,6 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
     %ifnum %1
         %if %1 != 0 && required_stack_alignment > STACK_ALIGNMENT
             %if %1 > 0
-                ; Reserve an additional register for storing the original stack pointer, but avoid using
-                ; eax/rax for this purpose since it can potentially get overwritten as a return value.
                 %assign regs_used (regs_used + 1)
                 %if ARCH_X86_64 && regs_used == 7
                     %assign regs_used 8
@@ -471,15 +392,13 @@ DECLARE_REG_TMP_SIZE 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
                 %endif
             %endif
             %if ARCH_X86_64 && regs_used < 5 + UNIX64 * 3
-                ; Ensure that we don't clobber any registers containing arguments. For UNIX64 we also preserve r6 (rax)
-                ; since it's used as a hidden argument in vararg functions to specify the number of vector registers used.
                 %assign regs_used 5 + UNIX64 * 3
             %endif
         %endif
     %endif
 %endmacro
 
-%if WIN64 ; Windows x64 ;=================================================
+%if WIN64
 
 DECLARE_REG 0,  rcx
 DECLARE_REG 1,  rdx
@@ -497,7 +416,7 @@ DECLARE_REG 12, R15, 104
 DECLARE_REG 13, R12, 112
 DECLARE_REG 14, R13, 120
 
-%macro PROLOGUE 2-5+ 0, 0 ; #args, #regs, #xmm_regs, [stack_size,] arg_names...
+%macro PROLOGUE 2-5+ 0, 0
     %assign num_args %1
     %assign regs_used %2
     ASSERT regs_used >= num_args
@@ -520,9 +439,7 @@ DECLARE_REG 14, R13, 120
     %endif
 %endmacro
 
-; Push XMM registers to the stack. If no argument is specified all used register
-; will be pushed, otherwise only push previously unpushed registers.
-%macro WIN64_PUSH_XMM 0-2 ; new_xmm_regs_used, xmm_regs_pushed
+%macro WIN64_PUSH_XMM 0-2
     %if mmsize != 8
         %if %0 == 2
             %assign %%pushed %2
@@ -533,7 +450,6 @@ DECLARE_REG 14, R13, 120
         %else
             %assign %%pushed 0
         %endif
-        ; Use the shadow space to store XMM6 and XMM7, the rest needs stack space allocated.
         %if %%pushed <= 6 + high_mm_regs && xmm_regs_used > 6 + high_mm_regs
             movaps [rstk + stack_offset +  8], xmm6
         %endif
@@ -556,8 +472,7 @@ DECLARE_REG 14, R13, 120
     %endif
 %endmacro
 
-; Allocated stack space for XMM registers and push all, or a subset, of those
-%macro WIN64_SPILL_XMM 1-2 ; xmm_regs_used, xmm_regs_reserved
+%macro WIN64_SPILL_XMM 1-2
     RESET_STACK_STATE
     %if mmsize != 8
         %assign xmm_regs_used %1
@@ -569,7 +484,6 @@ DECLARE_REG 14, R13, 120
             %assign %%xmm_regs_on_stack %1 - high_mm_regs - 8
         %endif
         %if %%xmm_regs_on_stack > 0
-            ; Allocate stack space for callee-saved xmm registers plus shadow space and align the stack.
             %assign %%pad %%xmm_regs_on_stack*16 + 32
             %assign stack_size_padded %%pad + ((-%%pad-stack_offset-gprsize) & (STACK_ALIGNMENT-1))
             SUB rsp, stack_size_padded
@@ -620,7 +534,7 @@ DECLARE_REG 14, R13, 120
     AUTO_REP_RET
 %endmacro
 
-%elif ARCH_X86_64 ; *nix x64 ;=============================================
+%elif ARCH_X86_64
 
 DECLARE_REG 0,  rdi
 DECLARE_REG 1,  rsi
@@ -638,7 +552,7 @@ DECLARE_REG 12, R15, 56
 DECLARE_REG 13, R12, 64
 DECLARE_REG 14, R13, 72
 
-%macro PROLOGUE 2-5+ 0, 0 ; #args, #regs, #xmm_regs, [stack_size,] arg_names...
+%macro PROLOGUE 2-5+ 0, 0
     %assign num_args %1
     %assign regs_used %2
     ASSERT regs_used >= num_args
@@ -675,7 +589,7 @@ DECLARE_REG 14, R13, 72
     AUTO_REP_RET
 %endmacro
 
-%else ; X86_32 ;==============================================================
+%else
 
 DECLARE_REG 0, eax, 4
 DECLARE_REG 1, ecx, 8
@@ -696,7 +610,7 @@ DECLARE_REG 6, ebp, 28
 
 DECLARE_ARG 7, 8, 9, 10, 11, 12, 13, 14
 
-%macro PROLOGUE 2-5+ 0, 0 ; #args, #regs, #xmm_regs, [stack_size,] arg_names...
+%macro PROLOGUE 2-5+ 0, 0
     %assign num_args %1
     %assign regs_used %2
     ASSERT regs_used >= num_args
@@ -739,7 +653,7 @@ DECLARE_ARG 7, 8, 9, 10, 11, 12, 13, 14
     AUTO_REP_RET
 %endmacro
 
-%endif ;======================================================================
+%endif
 
 %if WIN64 == 0
     %macro WIN64_SPILL_XMM 1-2
@@ -758,10 +672,6 @@ DECLARE_ARG 7, 8, 9, 10, 11, 12, 13, 14
     %endmacro
 %endif
 
-; On AMD cpus <=K10, an ordinary ret is slow if it immediately follows either
-; a branch or a branch target. So switch to a 2-byte form of ret in that case.
-; We can automatically detect "follows a branch", but not a branch target.
-; (SSSE3 is a sufficient condition to know that your cpu doesn't have this problem.)
 %macro REP_RET 0
     %if has_epilogue || cpuflag(ssse3)
         RET
@@ -774,7 +684,7 @@ DECLARE_ARG 7, 8, 9, 10, 11, 12, 13, 14
 %define last_branch_adr $$
 %macro AUTO_REP_RET 0
     %if notcpuflag(ssse3)
-        times ((last_branch_adr-$)>>31)+1 rep ; times 1 iff $ == last_branch_adr.
+        times ((last_branch_adr-$)>>31)+1 rep
     %endif
     ret
     annotate_function_size
@@ -795,7 +705,7 @@ DECLARE_ARG 7, 8, 9, 10, 11, 12, 13, 14
 
 BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, jna, jnae, jb, jbe, jnb, jnbe, jc, jnc, js, jns, jo, jno, jp, jnp
 
-%macro TAIL_CALL 1-2 1 ; callee, is_nonadjacent
+%macro TAIL_CALL 1-2 1
     %if has_epilogue
         call %1
         RET
@@ -805,22 +715,13 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     annotate_function_size
 %endmacro
 
-;=============================================================================
-; arch-independent part
-;=============================================================================
 
 %assign function_align 16
 
-; Begin a function.
-; Applies any symbol mangling needed for C linkage, and sets up a define such that
-; subsequent uses of the function name automatically refer to the mangled version.
-; Appends cpuflags to the function name if cpuflags has been specified.
-; The "" empty default parameter is a workaround for nasm, which fails if SUFFIX
-; is empty and we call cglobal_internal with just %1 %+ SUFFIX (without %2).
-%macro cglobal 1-2+ "" ; name, [PROLOGUE args]
+%macro cglobal 1-2+ ""
     cglobal_internal 1, %1 %+ SUFFIX, %2
 %endmacro
-%macro cvisible 1-2+ "" ; name, [PROLOGUE args]
+%macro cvisible 1-2+ ""
     cglobal_internal 0, %1 %+ SUFFIX, %2
 %endmacro
 %macro cglobal_internal 2-3+
@@ -849,18 +750,17 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     %endif
     align function_align
     %2:
-    RESET_MM_PERMUTATION        ; needed for x86-64, also makes disassembly somewhat nicer
-    %xdefine rstk rsp           ; copy of the original stack pointer, used when greater alignment than the known stack alignment is required
-    %assign stack_offset 0      ; stack pointer offset relative to the return address
-    %assign stack_size 0        ; amount of stack space that can be freely used inside a function
-    %assign stack_size_padded 0 ; total amount of allocated stack space, including space for callee-saved xmm registers on WIN64 and alignment padding
-    %assign xmm_regs_used 0     ; number of XMM registers requested, used for dealing with callee-saved registers on WIN64 and vzeroupper
+    RESET_MM_PERMUTATION
+    %xdefine rstk rsp
+    %assign stack_offset 0
+    %assign stack_size 0
+    %assign stack_size_padded 0
+    %assign xmm_regs_used 0
     %ifnidn %3, ""
         PROLOGUE %3
     %endif
 %endmacro
 
-; Create a global symbol from a local label with the correct name mangling and type
 %macro cglobal_label 1
     %if FORMAT_ELF
         global current_function %+ %1:function hidden
@@ -878,7 +778,6 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     extern %1
 %endmacro
 
-; like cextern, but without the prefix
 %macro cextern_naked 1
     %ifdef PREFIX
         %xdefine %1 mangle(%1)
@@ -900,32 +799,25 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
 %endmacro
 
 %if FORMAT_ELF
-    ; The GNU linker assumes the stack is executable by default.
     [SECTION .note.GNU-stack noalloc noexec nowrite progbits]
 
     %ifdef __NASM_VERSION_ID__
-        %if __NASM_VERSION_ID__ >= 0x020e0300 ; 2.14.03
+        %if __NASM_VERSION_ID__ >= 0x020e0300
             %if ARCH_X86_64
-                ; Control-flow Enforcement Technology (CET) properties.
                 [SECTION .note.gnu.property alloc noexec nowrite note align=gprsize]
-                dd 0x00000004  ; n_namesz
-                dd gprsize + 8 ; n_descsz
-                dd 0x00000005  ; n_type = NT_GNU_PROPERTY_TYPE_0
-                db "GNU",0     ; n_name
-                dd 0xc0000002  ; pr_type = GNU_PROPERTY_X86_FEATURE_1_AND
-                dd 0x00000004  ; pr_datasz
-                dd 0x00000002  ; pr_data = GNU_PROPERTY_X86_FEATURE_1_SHSTK
-                dd 0x00000000  ; pr_padding
+                dd 0x00000004
+                dd gprsize + 8
+                dd 0x00000005
+                db "GNU",0
+                dd 0xc0000002
+                dd 0x00000004
+                dd 0x00000002
+                dd 0x00000000
             %endif
         %endif
     %endif
 %endif
 
-; Tell debuggers how large the function was.
-; This may be invoked multiple times per function; we rely on later instances overriding earlier ones.
-; This is invoked by RET and similar macros, and also cglobal does it for the previous function,
-; but if the last function in a source file doesn't use any of the standard macros for its epilogue,
-; then its size might be unspecified.
 %macro annotate_function_size 0
     %ifdef __YASM_VER__
         %ifdef current_function
@@ -939,7 +831,6 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     %endif
 %endmacro
 
-; cpuflags
 
 %assign cpuflags_mmx       (1<<0)
 %assign cpuflags_mmx2      (1<<1)  | cpuflags_mmx
@@ -963,21 +854,17 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
 %assign cpuflags_bmi1      (1<<19) | cpuflags_avx|cpuflags_lzcnt
 %assign cpuflags_bmi2      (1<<20) | cpuflags_bmi1
 %assign cpuflags_avx2      (1<<21) | cpuflags_fma3|cpuflags_bmi2
-%assign cpuflags_avx512    (1<<22) | cpuflags_avx2 ; F, CD, BW, DQ, VL
-%assign cpuflags_avx512icl (1<<23) | cpuflags_avx512|cpuflags_gfni ; VNNI, IFMA, VBMI, VBMI2, VPOPCNTDQ, BITALG, VAES, VPCLMULQDQ
+%assign cpuflags_avx512    (1<<22) | cpuflags_avx2
+%assign cpuflags_avx512icl (1<<23) | cpuflags_avx512|cpuflags_gfni
 
 %assign cpuflags_cache32   (1<<24)
 %assign cpuflags_cache64   (1<<25)
-%assign cpuflags_aligned   (1<<26) ; not a cpu feature, but a function variant
+%assign cpuflags_aligned   (1<<26)
 %assign cpuflags_atom      (1<<27)
 
-; Returns a boolean value expressing whether or not the specified cpuflag is enabled.
 %define    cpuflag(x) (((((cpuflags & (cpuflags_ %+ x)) ^ (cpuflags_ %+ x)) - 1) >> 31) & 1)
 %define notcpuflag(x) (cpuflag(x) ^ 1)
 
-; Takes an arbitrary number of cpuflags from the above list.
-; All subsequent functions (up to the next INIT_CPUFLAGS) is built for the specified cpu.
-; You shouldn't need to invoke this macro directly, it's a subroutine for INIT_MMX &co.
 %macro INIT_CPUFLAGS 0-*
     %xdefine SUFFIX
     %undef cpuname
@@ -1025,12 +912,6 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     %endif
 %endmacro
 
-; Merge mmx, sse*, and avx*
-; m# is a simd register of the currently selected size
-; xm# is the corresponding xmm register if mmsize >= 16, otherwise the same as m#
-; ym# is the corresponding ymm register if mmsize >= 32, otherwise the same as m#
-; zm# is the corresponding zmm register if mmsize >= 64, otherwise the same as m#
-; (All 4 remain in sync through SWAP.)
 
 %macro CAT_XDEFINE 3
     %xdefine %1%2 %3
@@ -1040,7 +921,7 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     %undef %1%2
 %endmacro
 
-%macro DEFINE_MMREGS 1 ; mmtype
+%macro DEFINE_MMREGS 1
     %assign %%prev_mmregs 0
     %ifdef num_mmregs
         %assign %%prev_mmregs num_mmregs
@@ -1070,8 +951,7 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     %xdefine mmtype %1
 %endmacro
 
-; Prefer registers 16-31 over 0-15 to avoid having to use vzeroupper
-%macro AVX512_MM_PERMUTATION 0-1 0 ; start_reg
+%macro AVX512_MM_PERMUTATION 0-1 0
     %if ARCH_X86_64 && cpuflag(avx512)
         %assign %%i %1
         %rep 16-%1
@@ -1105,7 +985,7 @@ BRANCH_INSTR jz, je, jnz, jne, jl, jle, jnl, jnle, jg, jge, jng, jnge, ja, jae, 
     INIT_CPUFLAGS %1
     DEFINE_MMREGS xmm
     %if WIN64
-        AVX512_MM_PERMUTATION 6 ; Swap callee-saved registers with volatile registers
+        AVX512_MM_PERMUTATION 6
     %endif
     %xdefine bcstw 1to8
     %xdefine bcstd 1to4
@@ -1174,21 +1054,8 @@ INIT_XMM
     %assign i i+1
 %endrep
 
-; I often want to use macros that permute their arguments. e.g. there's no
-; efficient way to implement butterfly or transpose or dct without swapping some
-; arguments.
-;
-; I would like to not have to manually keep track of the permutations:
-; If I insert a permutation in the middle of a function, it should automatically
-; change everything that follows. For more complex macros I may also have multiple
-; implementations, e.g. the SSE2 and SSSE3 versions may have different permutations.
-;
-; Hence these macros. Insert a PERMUTE or some SWAPs at the end of a macro that
-; permutes its arguments. It's equivalent to exchanging the contents of the
-; registers, except that this way you exchange the register names instead, so it
-; doesn't cost any cycles.
 
-%macro PERMUTE 2-* ; takes a list of pairs to swap
+%macro PERMUTE 2-*
     %rep %0/2
         %xdefine %%tmp%2 m%2
         %rotate 2
@@ -1200,10 +1067,10 @@ INIT_XMM
     %endrep
 %endmacro
 
-%macro SWAP 2+ ; swaps a single chain (sometimes more concise than pairs)
-    %ifnum %1 ; SWAP 0, 1, ...
+%macro SWAP 2+
+    %ifnum %1
         SWAP_INTERNAL_NUM %1, %2
-    %else ; SWAP m0, m1, ...
+    %else
         SWAP_INTERNAL_NAME %1, %2
     %endif
 %endmacro
@@ -1228,9 +1095,6 @@ INIT_XMM
     SWAP_INTERNAL_NUM %%args
 %endmacro
 
-; If SAVE_MM_PERMUTATION is placed at the end of a function, then any later
-; calls to that function will automatically load the permutation, so values can
-; be returned in mmregs.
 %macro SAVE_MM_PERMUTATION 0-1
     %if %0
         %xdefine %%f %1_m
@@ -1245,7 +1109,7 @@ INIT_XMM
     %endrep
 %endmacro
 
-%macro LOAD_MM_PERMUTATION 0-1 ; name to load from
+%macro LOAD_MM_PERMUTATION 0-1
     %if %0
         %xdefine %%f %1_m
     %else
@@ -1268,7 +1132,6 @@ INIT_XMM
     %endif
 %endmacro
 
-; Append cpuflags to the callee's name iff the appended name is known and the plain name isn't
 %macro call 1
     %ifid %1
         call_internal %1 %+ SUFFIX, %1
@@ -1287,7 +1150,6 @@ INIT_XMM
     LOAD_MM_PERMUTATION %%i
 %endmacro
 
-; Substitutions that reduce instruction size but are functionally equivalent
 %macro add 2
     %ifnum %2
         %if %2==128
@@ -1312,9 +1174,6 @@ INIT_XMM
     %endif
 %endmacro
 
-;=============================================================================
-; AVX abstraction layer
-;=============================================================================
 
 %assign i 0
 %rep 32
@@ -1343,12 +1202,6 @@ INIT_XMM
     %endrep
 %endmacro
 
-;%1 == instruction
-;%2 == minimal instruction set
-;%3 == 1 if float, 0 if int
-;%4 == 1 if 4-operand emulation, 0 if 3-operand emulation, 255 otherwise (no emulation)
-;%5 == 1 if commutative (i.e. doesn't matter which src arg is which), 0 if not
-;%6+: operands
 %macro RUN_AVX_INSTR 6-9+
     %ifnum sizeof%7
         %assign __sizeofreg sizeof%7
@@ -1380,8 +1233,8 @@ INIT_XMM
                 %error use of ``%1'' avx instruction in cpuname function: current_function
             %elif __sizeofreg == 64 && notcpuflag(avx512)
                 %error use of ``%1'' avx512 instruction in cpuname function: current_function
-            %elifidn %1, pextrw ; special case because the base instruction is mmx2,
-                %ifnid %6       ; but sse4 is required for memory operands
+            %elifidn %1, pextrw
+                %ifnid %6
                     %if notcpuflag(sse4)
                         %error use of ``%1'' sse4 instruction in cpuname function: current_function
                     %endif
@@ -1399,9 +1252,6 @@ INIT_XMM
                     %xdefine __src1 %8
                     %xdefine __src2 %7
                 %elifnnum sizeof%8
-                    ; 3-operand AVX instructions with a memory arg can only have it in src2,
-                    ; whereas SSE emulation prefers to have it in src1 (i.e. the mov).
-                    ; So, if the instruction is commutative with a memory arg, swap them.
                     %xdefine __src1 %8
                     %xdefine __src2 %7
                 %endif
@@ -1449,29 +1299,24 @@ INIT_XMM
                 %ifnum regnumof%7
                     %ifnum regnumof%8
                         %if regnumof%7 < 8 && regnumof%8 >= 8 && regnumof%8 < 16 && sizeof%8 <= 32
-                            ; Most VEX-encoded instructions require an additional byte to encode when
-                            ; src2 is a high register (e.g. m8..15). If the instruction is commutative
-                            ; we can swap src1 and src2 when doing so reduces the instruction length.
                             %xdefine __src1 %8
                             %xdefine __src2 %7
                         %endif
                     %endif
-                %elifnum regnumof%8 ; put memory operands in src2 when possible
+                %elifnum regnumof%8
                     %xdefine __src1 %8
                     %xdefine __src2 %7
                 %else
                     %assign __emulate_avx 1
                 %endif
             %elifnnum regnumof%7
-                ; EVEX allows imm8 shift instructions to be used with memory operands,
-                ; but VEX does not. This handles those special cases.
                 %ifnnum %8
                     %assign __emulate_avx 1
                 %elif notcpuflag(avx512)
                     %assign __emulate_avx 1
                 %endif
             %endif
-            %if __emulate_avx ; a separate load is required
+            %if __emulate_avx
                 %if %3
                     vmovaps %6, %7
                 %else
@@ -1505,11 +1350,6 @@ INIT_XMM
     %endif
 %endmacro
 
-;%1 == instruction
-;%2 == minimal instruction set
-;%3 == 1 if float, 0 if int
-;%4 == 1 if 4-operand emulation, 0 if 3-operand emulation, 255 otherwise (no emulation)
-;%5 == 1 if commutative (i.e. doesn't matter which src arg is which), 0 if not
 %macro AVX_INSTR 1-5 fnord, 0, 255, 0
     %macro %1 1-10 fnord, fnord, fnord, fnord, %1, %2, %3, %4, %5
         %ifidn %2, fnord
@@ -1526,8 +1366,6 @@ INIT_XMM
     %endmacro
 %endmacro
 
-; Instructions with both VEX/EVEX and legacy encodings
-; Non-destructive instructions are written without parameters
 AVX_INSTR addpd, sse2, 1, 0, 1
 AVX_INSTR addps, sse, 1, 0, 1
 AVX_INSTR addsd, sse2, 1, 0, 0
@@ -1546,8 +1384,8 @@ AVX_INSTR andpd, sse2, 1, 0, 1
 AVX_INSTR andps, sse, 1, 0, 1
 AVX_INSTR blendpd, sse4, 1, 1, 0
 AVX_INSTR blendps, sse4, 1, 1, 0
-AVX_INSTR blendvpd, sse4, 1, 1, 0 ; last operand must be xmm0 with legacy encoding
-AVX_INSTR blendvps, sse4, 1, 1, 0 ; last operand must be xmm0 with legacy encoding
+AVX_INSTR blendvpd, sse4, 1, 1, 0
+AVX_INSTR blendvps, sse4, 1, 1, 0
 AVX_INSTR cmpeqpd, sse2, 1, 0, 1
 AVX_INSTR cmpeqps, sse, 1, 0, 1
 AVX_INSTR cmpeqsd, sse2, 1, 0, 0
@@ -1680,7 +1518,7 @@ AVX_INSTR pand, mmx, 0, 0, 1
 AVX_INSTR pandn, mmx, 0, 0, 0
 AVX_INSTR pavgb, mmx2, 0, 0, 1
 AVX_INSTR pavgw, mmx2, 0, 0, 1
-AVX_INSTR pblendvb, sse4, 0, 1, 0 ; last operand must be xmm0 with legacy encoding
+AVX_INSTR pblendvb, sse4, 0, 1, 0
 AVX_INSTR pblendw, sse4, 0, 1, 0
 AVX_INSTR pclmulhqhqdq, clmul, 0, 0, 0
 AVX_INSTR pclmulhqlqdq, clmul, 0, 0, 0
@@ -1813,13 +1651,10 @@ AVX_INSTR unpcklps, sse, 1, 0, 0
 AVX_INSTR xorpd, sse2, 1, 0, 1
 AVX_INSTR xorps, sse, 1, 0, 1
 
-; 3DNow instructions, for sharing code between AVX, SSE and 3DN
 AVX_INSTR pfadd, 3dnow, 1, 0, 1
 AVX_INSTR pfmul, 3dnow, 1, 0, 1
 AVX_INSTR pfsub, 3dnow, 1, 0, 0
 
-;%1 == instruction
-;%2 == minimal instruction set
 %macro GPR_INSTR 2
     %macro %1 2-5 fnord, %1, %2
         %ifdef cpuname
@@ -1851,7 +1686,6 @@ GPR_INSTR sarx, bmi2
 GPR_INSTR shlx, bmi2
 GPR_INSTR shrx, bmi2
 
-; base-4 constants for shuffles
 %assign i 0
 %rep 256
     %assign j ((i>>6)&3)*1000 + ((i>>4)&3)*100 + ((i>>2)&3)*10 + (i&3)
@@ -1882,14 +1716,11 @@ GPR_INSTR shrx, bmi2
     %endmacro
 %endmacro
 
-FMA_INSTR pmacsdd,  pmulld,  paddd ; sse4 emulation
-FMA_INSTR pmacsdql, pmuldq,  paddq ; sse4 emulation
+FMA_INSTR pmacsdd,  pmulld,  paddd
+FMA_INSTR pmacsdql, pmuldq,  paddq
 FMA_INSTR pmacsww,  pmullw,  paddw
 FMA_INSTR pmadcswd, pmaddwd, paddd
 
-; Macros for consolidating FMA3 and FMA4 using 4-operand (dst, src1, src2, src3) syntax.
-; FMA3 is only possible if dst is the same as one of the src registers.
-; Either src2 or src3 can be a memory operand.
 %macro FMA4_INSTR 2-*
     %push fma4_instr
     %xdefine %$prefix %1
@@ -1900,7 +1731,6 @@ FMA_INSTR pmadcswd, pmaddwd, paddd
             %elif cpuflag(fma4)
                 v%5%6 %1, %2, %3, %4
             %elifidn %1, %2
-                ; If %3 or %4 is a memory operand it needs to be encoded as the last operand.
                 %ifnum sizeof%3
                     v%{5}213%6 %2, %3, %4
                 %else
@@ -1926,8 +1756,7 @@ FMA4_INSTR fmsubadd, pd, ps
 FMA4_INSTR fnmadd,   pd, ps, sd, ss
 FMA4_INSTR fnmsub,   pd, ps, sd, ss
 
-; Macros for converting VEX instructions to equivalent EVEX ones.
-%macro EVEX_INSTR 2-3 0 ; vex, evex, prefer_evex
+%macro EVEX_INSTR 2-3 0
     %macro %1 2-7 fnord, fnord, %1, %2, %3
         %ifidn %3, fnord
             %define %%args %1, %2
@@ -1955,7 +1784,7 @@ FMA4_INSTR fnmsub,   pd, ps, sd, ss
         %if %%evex_required
             %6 %%args
         %else
-            %5 %%args ; Prefer VEX over EVEX due to shorter instruction length
+            %5 %%args
         %endif
     %endmacro
 %endmacro
@@ -1972,7 +1801,7 @@ EVEX_INSTR vpand,          vpandd
 EVEX_INSTR vpandn,         vpandnd
 EVEX_INSTR vpor,           vpord
 EVEX_INSTR vpxor,          vpxord
-EVEX_INSTR vrcpps,         vrcp14ps,   1 ; EVEX versions have higher precision
+EVEX_INSTR vrcpps,         vrcp14ps,   1
 EVEX_INSTR vrcpss,         vrcp14ss,   1
 EVEX_INSTR vrsqrtps,       vrsqrt14ps, 1
 EVEX_INSTR vrsqrtss,       vrsqrt14ss, 1

@@ -1,30 +1,6 @@
-/*
- * NEON inverse predictors for the VP8L predictor transform, ported from
- * libwebp's src/dsp/lossless_neon.c.
- *
- * Every operation here is per byte, so the decoder's [A, R, G, B] pixel
- * order needs no special care; only PRED_MODE_BLACK names a channel, and
- * it builds its constant from bytes.
- *
- * Predictors 5 to 7 and 10 to 13 depend on the pixel to their left, so
- * those run one pixel at a time in lane zero. Predictors 0 to 4, 8 and 9
- * have no such dependency and run sixteen pixels at a time.
- *
- * All of these take (const uint32_t *in, const uint32_t *upper,
- * int num_pixels, uint32_t *out), so x0 = in, x1 = upper, w2 = num_pixels
- * and x3 = out. in and out alias, which is why every block loads its
- * residual before storing the reconstruction. out[-1] holds the pixel to
- * the left, and upper[-1] through upper[num_pixels] may be read.
- */
 
 #include "asm.S"
 
-/*
- * The predictors with a left-pixel dependency keep that recurrence in lane
- * zero and step their inputs down by one pixel instead, so the rotates stay
- * off the loop-carried chain: only the arithmetic that actually produces the
- * next left pixel is on it.
- */
 .macro  step_pixel      a, b, c, d
         ext             \a\().16b, \a\().16b, \a\().16b, #4
     .ifnb \b
@@ -38,9 +14,8 @@
     .endif
 .endm
 
-/* PRED_MODE_BLACK */
 function ff_pred_add_0_neon, export=1
-        movi            v0.4s,   #255           // FF 00 00 00 per pixel
+        movi            v0.4s,   #255
         cmp             w2,  #16
         b.lt            2f
 1:      ldp             q16, q17, [x0], #32
@@ -71,24 +46,20 @@ function ff_pred_add_0_neon, export=1
 9:      ret
 endfunc
 
-/*
- * PRED_MODE_L, as a running per-byte prefix sum over four pixels. The
- * left pixel stays in a register across iterations rather than being
- * reloaded from out[-1].
- */
 function ff_pred_add_1_neon, export=1
+        // Retain left in a lane; its recurrence prevents wider independent work.
         ldur            s0,  [x3, #-4]
-        dup             v0.4s,   v0.s[0]        // the prefix sum adds it to every lane
+        dup             v0.4s,   v0.s[0]
         movi            v3.16b,  #0
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // a | b | c | d
+1:      ldr             q1,  [x0], #16
         sub             w2,  w2,  #4
-        ext             v2.16b,  v3.16b,  v1.16b, #12   // 0 | a | b | c
-        add             v1.16b,  v1.16b,  v2.16b        // a | a+b | b+c | c+d
-        ext             v2.16b,  v3.16b,  v1.16b, #8    // 0 | 0 | a | a+b
-        add             v1.16b,  v1.16b,  v2.16b        // running prefix
-        add             v1.16b,  v1.16b,  v0.16b        // + left
+        ext             v2.16b,  v3.16b,  v1.16b, #12
+        add             v1.16b,  v1.16b,  v2.16b
+        ext             v2.16b,  v3.16b,  v1.16b, #8
+        add             v1.16b,  v1.16b,  v2.16b
+        add             v1.16b,  v1.16b,  v0.16b
         cmp             w2,  #4
         str             q1,  [x3], #16
         dup             v0.4s,   v1.s[3]
@@ -102,10 +73,6 @@ function ff_pred_add_1_neon, export=1
 9:      ret
 endfunc
 
-/*
- * Predictors that just add a neighbouring pixel from the row above. The
- * stubs bias upper, so the shared body only ever reads upper[i].
- */
 function pred_add_top_neon
         cmp             w2,  #16
         b.lt            2f
@@ -141,27 +108,20 @@ function pred_add_top_neon
 9:      ret
 endfunc
 
-/* PRED_MODE_T */
 function ff_pred_add_2_neon, export=1
         b               pred_add_top_neon
 endfunc
 
-/* PRED_MODE_TR */
 function ff_pred_add_3_neon, export=1
         add             x1,  x1,  #4
         b               pred_add_top_neon
 endfunc
 
-/* PRED_MODE_TL */
 function ff_pred_add_4_neon, export=1
         sub             x1,  x1,  #4
         b               pred_add_top_neon
 endfunc
 
-/*
- * Predictors that average two of the pixels above. The stubs point x5 at
- * the second one.
- */
 function pred_add_avgtop_neon
         cmp             w2,  #16
         b.lt            2f
@@ -207,19 +167,16 @@ function pred_add_avgtop_neon
 9:      ret
 endfunc
 
-/* PRED_MODE_AVG_TL_T */
 function ff_pred_add_8_neon, export=1
         sub             x5,  x1,  #4
         b               pred_add_avgtop_neon
 endfunc
 
-/* PRED_MODE_AVG_T_TR */
 function ff_pred_add_9_neon, export=1
         add             x5,  x1,  #4
         b               pred_add_avgtop_neon
 endfunc
 
-/* PRED_MODE_AVG_T_AVG_L_TR: average(average(L, TR), T) */
 .macro  pred5_pixel
         uhadd           v16.8b,  v0.8b,   v4.8b
         uhadd           v16.8b,  v16.8b,  v2.8b
@@ -231,9 +188,9 @@ function ff_pred_add_5_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldur            q4,  [x1, #4]           // TR
-        ldr             q2,  [x1], #16          // T
+1:      ldr             q1,  [x0], #16
+        ldur            q4,  [x1, #4]
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
 .irp    lane, 0, 1, 2, 3
         pred5_pixel
@@ -251,10 +208,6 @@ function ff_pred_add_5_neon, export=1
 9:      ret
 endfunc
 
-/*
- * PRED_MODE_AVG_L_TL and PRED_MODE_AVG_L_T: average(L, one pixel above).
- * The stubs bias upper so the shared body reads a single top pixel.
- */
 .macro  pred67_pixel
         uhadd           v16.8b,  v0.8b,   v2.8b
         add             v0.8b,   v16.8b,  v1.8b
@@ -265,8 +218,8 @@ function pred_add_avgleft_neon
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldr             q2,  [x1], #16          // top
+1:      ldr             q1,  [x0], #16
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
 .irp    lane, 0, 1, 2, 3
         pred67_pixel
@@ -283,18 +236,15 @@ function pred_add_avgleft_neon
 9:      ret
 endfunc
 
-/* PRED_MODE_AVG_L_TL */
 function ff_pred_add_6_neon, export=1
         sub             x1,  x1,  #4
         b               pred_add_avgleft_neon
 endfunc
 
-/* PRED_MODE_AVG_L_T */
 function ff_pred_add_7_neon, export=1
         b               pred_add_avgleft_neon
 endfunc
 
-/* PRED_MODE_AVG_AVG_L_TL_AVG_T_TR */
 .macro  pred10_pixel
         uhadd           v16.8b,  v0.8b,   v3.8b
         uhadd           v16.8b,  v5.8b,   v16.8b
@@ -306,10 +256,10 @@ function ff_pred_add_10_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldur            q3,  [x1, #-4]          // TL
-        ldur            q4,  [x1, #4]           // TR
-        ldr             q2,  [x1], #16          // T
+1:      ldr             q1,  [x0], #16
+        ldur            q3,  [x1, #-4]
+        ldur            q4,  [x1, #4]
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
         uhadd           v5.16b,  v2.16b,  v4.16b
 .irp    lane, 0, 1, 2, 3
@@ -330,18 +280,12 @@ function ff_pred_add_10_neon, export=1
 9:      ret
 endfunc
 
-/*
- * PRED_MODE_SELECT: pick T when sum|L - TL| <= sum|T - TL|, else L. The
- * pairwise adds reduce each pixel's four byte differences into its lane.
- * BIT rather than BSL selects the winner, so the result lands straight in
- * v0 and no register move joins the chain.
- */
 .macro  pred11_pixel
         uabd            v17.8b,  v0.8b,   v3.8b
         uaddlp          v17.4h,  v17.8b
-        uaddlp          v17.2s,  v17.4h         // pa
+        uaddlp          v17.2s,  v17.4h
         cmhs            v17.2s,  v4.2s,   v17.2s
-        add             v0.8b,   v0.8b,   v1.8b // sum of L and the residual
+        add             v0.8b,   v0.8b,   v1.8b
         bit             v0.8b,   v5.8b,   v17.8b
         str             s0,  [x3], #4
 .endm
@@ -350,13 +294,13 @@ function ff_pred_add_11_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldur            q3,  [x1, #-4]          // TL
-        ldr             q2,  [x1], #16          // T
+1:      ldr             q1,  [x0], #16
+        ldur            q3,  [x1, #-4]
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
         uabd            v4.16b,  v2.16b,  v3.16b
         uaddlp          v4.8h,   v4.16b
-        uaddlp          v4.4s,   v4.8h          // pb
+        uaddlp          v4.4s,   v4.8h
         add             v5.16b,  v2.16b,  v1.16b
 .irp    lane, 0, 1, 2, 3
         pred11_pixel
@@ -371,19 +315,13 @@ function ff_pred_add_11_neon, export=1
         subs            w2,  w2,  #1
         uabd            v4.8b,   v2.8b,   v3.8b
         uaddlp          v4.4h,   v4.8b
-        uaddlp          v4.2s,   v4.4h          // pb
+        uaddlp          v4.2s,   v4.4h
         add             v5.8b,   v2.8b,   v1.8b
         pred11_pixel
         b.gt            3b
 9:      ret
 endfunc
 
-/*
- * PRED_MODE_ADD_SUBTRACT_FULL: clamp(L + T - TL). The left pixel is held
- * widened to 16-bit lanes, since it has to meet the signed T - TL
- * difference before the result is clamped back to bytes. One quad's
- * differences span two registers, four 16-bit lanes to a pixel.
- */
 .macro  pred12_pixel    diff
         add             v16.8h,  v0.8h,   \diff\().8h
         sqxtun          v16.8b,  v16.8h
@@ -397,17 +335,16 @@ function ff_pred_add_12_neon, export=1
         uxtl            v0.8h,   v0.8b
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldur            q3,  [x1, #-4]          // TL
-        ldr             q2,  [x1], #16          // T
+1:      ldr             q1,  [x0], #16
+        ldur            q3,  [x1, #-4]
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
-        usubl           v4.8h,   v2.8b,   v3.8b         // T - TL, pixels 0, 1
-        usubl2          v5.8h,   v2.16b,  v3.16b        // pixels 2, 3
+        usubl           v4.8h,   v2.8b,   v3.8b
+        usubl2          v5.8h,   v2.16b,  v3.16b
 .irp    diff, v4, v5
 .irp    lane, 0, 1
         pred12_pixel    \diff
         ext             v1.16b,  v1.16b,  v1.16b, #4
-        /* one pixel of the difference is four 16-bit lanes */
         ext             \diff\().16b, \diff\().16b, \diff\().16b, #8
 .endr
 .endr
@@ -424,16 +361,12 @@ function ff_pred_add_12_neon, export=1
 9:      ret
 endfunc
 
-/*
- * PRED_MODE_ADD_SUBTRACT_HALF: clamp(avg + (avg - TL) / 2), avg = (L + T) / 2.
- * The halving subtract rounds down while the C reference truncates toward
- * zero, so TL is biased down by one wherever it exceeds avg.
- */
+// Bias TL before uhsub so its rounded difference matches C's truncation toward zero.
 .macro  pred13_pixel
-        uhadd           v16.8b,  v0.8b,   v2.8b // avg
-        cmhi            v17.8b,  v3.8b,   v16.8b // TL > avg
-        add             v17.8b,  v3.8b,   v17.8b // TL biased down
-        uhsub           v18.8b,  v16.8b,  v17.8b // (avg - TL) / 2, signed
+        uhadd           v16.8b,  v0.8b,   v2.8b
+        cmhi            v17.8b,  v3.8b,   v16.8b
+        add             v17.8b,  v3.8b,   v17.8b
+        uhsub           v18.8b,  v16.8b,  v17.8b
         uxtl            v19.8h,  v16.8b
         saddw           v19.8h,  v19.8h,  v18.8b
         sqxtun          v20.8b,  v19.8h
@@ -445,9 +378,9 @@ function ff_pred_add_13_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
-1:      ldr             q1,  [x0], #16          // src
-        ldur            q3,  [x1, #-4]          // TL
-        ldr             q2,  [x1], #16          // T
+1:      ldr             q1,  [x0], #16
+        ldur            q3,  [x1, #-4]
+        ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
 .irp    lane, 0, 1, 2, 3
         pred13_pixel
@@ -465,11 +398,6 @@ function ff_pred_add_13_neon, export=1
 9:      ret
 endfunc
 
-/*
- * Gather the green byte of each ARGB pixel into a packed plane, for the
- * alpha values a VP8L alpha chunk carries in green. The tail stays scalar
- * so nothing is written past the end of the destination row.
- */
 function ff_extract_green_neon, export=1
         cmp             w2,  #16
         b.lt            2f

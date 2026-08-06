@@ -1,7 +1,3 @@
-/*
- * Standalone checkasm runner for WPD.
- * SPDX-License-Identifier: LGPL-2.1-or-later
- */
 #include "checkasm.h"
 
 void checkasm_check_lossless(void);

@@ -1,22 +1,3 @@
-/*
- * Copyright (C) 2010 Mans Rullgard
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
- */
 
 #include "asm.S"
 
@@ -66,13 +47,13 @@ T       orrcs           \cw, \cw, \t1
 function ff_decode_block_coeffs_armv6, export=1
         push            {r0,r1,r4-r11,lr}
         movrel          lr,  X(wpd_vp56_norm_shift)
-        ldrd            r4,  r5,  [sp, #44]             @ token_prob, qmul
+        ldrd            r4,  r5,  [sp, #44]
         cmp             r3,  #0
         ldr             r11, [r5]
-        ldm             r0,  {r5-r7}                    @ high, bits, buf
+        ldm             r0,  {r5-r7}
         it              ne
         pkhtbne         r11, r11, r11, asr #16
-        ldr             r8,  [r0, #16]                  @ code_word
+        ldr             r8,  [r0, #16]
 0:
         ldrb            r9,  [lr, r5]
         add             r3,  r3,  #1
@@ -129,8 +110,8 @@ A       orrcs           r8,  r8,  r10, lsl r6
         cmp             r7,  r9
         it              hi
         movhi           r7,  r9
-        stm             r0,  {r5-r7}                    @ high, bits, buf
-        str             r8,  [r0, #16]                  @ code_word
+        stm             r0,  {r5-r7}
+        str             r8,  [r0, #16]
 
         add             sp,  sp,  #8
         mov             r0,  r3

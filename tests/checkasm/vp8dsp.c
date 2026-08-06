@@ -1,22 +1,3 @@
-/*
- * Copyright (c) 2016 Martin Storsjo
- *
- * This file is part of FFmpeg.
- *
- * FFmpeg is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * FFmpeg is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with FFmpeg; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
- */
 
 #include <string.h>
 
@@ -129,9 +110,6 @@ static void check_idct(VP8DSPContext *d) {
             memcpy(dst0, dst, 4 * 4);
             memcpy(dst1, dst, 4 * 4);
             memcpy(subcoef1, subcoef0, 4 * 4 * sizeof(int16_t));
-            // Note, this uses a pixel stride of 4, even though the real decoder uses a stride as a
-            // multiple of 16. If optimizations want to take advantage of that, this test needs to be
-            // Match the other DSP test layout.
             call_ref(dst0, subcoef0, 4);
             call_new(dst1, subcoef1, 4);
             if (memcmp(dst0, dst1, 4 * 4) ||
@@ -242,9 +220,7 @@ static void check_luma_dc_wht(VP8DSPContext *d) {
 #undef randomize_buffers
 
 #define setpx(a, b, c) buf[(a) + (b) * jstride] = wpd_clip_uint8(c)
-// Set the pixel to c +/- [0,d]
 #define setdx(a, b, c, d) setpx(a, b, c - (d) + (rnd() % ((d) * 2 + 1)))
-// Set the pixel to c +/- [d,d+e] (making sure it won't be clipped)
 #define setdx2(a, b, o, c, d, e) \
     setpx(a, b, o = c + ((d) + (rnd() % (e))) * (c >= 128 ? -1 : 1))
 
@@ -257,10 +233,6 @@ static void randomize_loopfilter_buffers(int lineoff, int str, int dir,
     int      jstride = dir ? str : 1;
     int      i;
     for (i = 0; i < 8; i += 2) {
-        // Row 0 will trigger hev for q0/q1, row 2 will trigger hev for p0/p1,
-        // rows 4 and 6 will not trigger hev.
-        // force_hev 1 will make sure all rows trigger hev, while force_hev -1
-        // makes none of them trigger it.
         int idx = off + i * istride, p2, p1, p0, q0, q1, q2;
         setpx(idx, 0, q0 = rnd() & mask);
         if ((i == 0 && force_hev >= 0) || force_hev > 0)
@@ -279,7 +251,6 @@ static void randomize_loopfilter_buffers(int lineoff, int str, int dir,
     }
 }
 
-// Fill the buffer with random pixels
 static void fill_loopfilter_buffers(uint8_t *buf, ptrdiff_t stride, int w,
                                     int h) {
     int x, y;
@@ -430,7 +401,6 @@ static void check_all(VP8DSPContext *d) {
 void checkasm_check_vp8dsp(void) {
     VP8DSPContext d;
 
-    // The C loop filters index wpd_crop_table, which is only populated here.
     wpd_dsp_data_init();
     check_all(&d);
 }

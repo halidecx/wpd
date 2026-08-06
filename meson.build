@@ -64,7 +64,6 @@ if asm_enabled
     endif
     nasm_format += is_x86_64 ? '64' : '32'
 
-    # Platforms whose C ABI prepends an underscore need nasm to mangle to match.
     nasm_prefix_args = []
     if host_machine.system() in ['darwin', 'ios', 'tvos', 'os/2'] or (
        host_machine.system() == 'windows' and not is_x86_64)
@@ -127,10 +126,6 @@ if asm_enabled
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 
-    # Thumb-2 gives us sbfx and a real movw/movt; without it the asm falls back
-    # to sxth+asr and a mov/orr pair. Two separate questions, as in FFmpeg:
-    # whether the target CPU has the instructions, and whether the assembler
-    # will emit them.
     armv6t2 = cc.compiles(
       '''#if !defined(__ARM_ARCH_6T2__) && (!defined(__ARM_ARCH) || __ARM_ARCH < 7)
          #error no Thumb-2 on this target
@@ -218,9 +213,6 @@ checkasm_dep = dependency(
 )
 
 if asm_enabled and checkasm_dep.found()
-  # checkasm needs entry points the decoder doesn't, such as a C reference for
-  # the coefficient decoder that arm32 replaces at compile time. Building them
-  # into a separate copy of the library keeps the shipped one bit-identical.
   libwpd_checkasm = static_library(
     'wpd_checkasm',
     lib_sources,

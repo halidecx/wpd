@@ -20,7 +20,6 @@ void wpd_log(void *context, int level, const char *format, ...) {
 }
 
 int wpd_check_image_size(unsigned width, unsigned height) {
-    /* WebP codes the picture size in 14 bits. */
     return !width || !height || width > 16383 || height > 16383
         ? WPD_ERROR(EINVAL)
         : 0;

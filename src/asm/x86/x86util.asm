@@ -1,27 +1,3 @@
-;*****************************************************************************
-;* x86util.asm
-;*****************************************************************************
-;* Copyright (C) 2008-2010 x264 project
-;*
-;* Authors: Loren Merritt <lorenm@u.washington.edu>
-;*          Holger Lubitz <holger@lubitz.org>
-;*
-;* This file is part of FFmpeg.
-;*
-;* FFmpeg is free software; you can redistribute it and/or
-;* modify it under the terms of the GNU Lesser General Public
-;* License as published by the Free Software Foundation; either
-;* version 2.1 of the License, or (at your option) any later version.
-;*
-;* FFmpeg is distributed in the hope that it will be useful,
-;* but WITHOUT ANY WARRANTY; without even the implied warranty of
-;* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-;* Lesser General Public License for more details.
-;*
-;* You should have received a copy of the GNU Lesser General Public
-;* License along with FFmpeg; if not, write to the Free Software
-;* Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
-;******************************************************************************
 
 %define private_prefix ff
 %define public_prefix  avpriv
@@ -33,21 +9,10 @@
 
 %include "asm/x86/x86inc.asm"
 
-; expands to [base],...,[base+7*stride]
 %define PASS8ROWS(base, base3, stride, stride3) \
     [base],           [base  + stride],   [base  + 2*stride], [base3], \
     [base3 + stride], [base3 + 2*stride], [base3 + stride3],  [base3 + stride*4]
 
-; Interleave low src0 with low src1 and store in src0,
-; interleave high src0 with high src1 and store in src1.
-; %1 - types
-; %2 - index of the register with src0
-; %3 - index of the register with src1
-; %4 - index of the register for intermediate results
-; example for %1 - wd: input: src0: x0 x1 x2 x3 z0 z1 z2 z3
-;                             src1: y0 y1 y2 y3 q0 q1 q2 q3
-;                     output: src0: x0 y0 x1 y1 x2 y2 x3 y3
-;                             src1: z0 q0 z1 q1 z2 q2 z3 q3
 %macro SBUTTERFLY 4
 %ifidn %1, dqqq
     vperm2i128  m%4, m%2, m%3, q0301
@@ -123,7 +88,6 @@
     SWAP %2, %3
 %endmacro
 
-; identical behavior to TRANSPOSE4x4D, but using SSE1 float ops
 %macro TRANSPOSE4x4PS 5
     SBUTTERFLYPS %1, %2, %5
     SBUTTERFLYPS %3, %4, %5
@@ -145,9 +109,6 @@
     SWAP %2, %5
     SWAP %4, %7
 %else
-; in:  m0..m7
-; out: m0..m7, unless %11 in which case m2 is in %9
-; spills into %9 and %10
     movdqa %9, m%7
     SBUTTERFLY dq,  %1, %2, %7
     movdqa %10, m%2
@@ -186,9 +147,6 @@
     SWAP %2, %5
     SWAP %4, %7
 %else
-; in:  m0..m7, unless %11 in which case m6 is in %9
-; out: m0..m7, unless %11 in which case m4 is in %10
-; spills into %9 and %10
 %if %0<11
     movdqa %9, m%7
 %endif
@@ -219,9 +177,6 @@
 %endmacro
 
 %macro TRANSPOSE16x16W 18-19
-; in:  m0..m15, unless %19 in which case m6 is in %17
-; out: m0..m15, unless %19 in which case m4 is in %18
-; spills into %17 and %18
 %if %0 < 19
     mova       %17, m%7
 %endif
@@ -297,7 +252,6 @@
     MOVHL m%8, m%7
 %endmacro
 
-; PABSW macro assumes %1 != %2, while ABS1/2 macros work in-place
 %macro PABSW 2
 %if cpuflag(ssse3)
     pabsw      %1, %2
@@ -326,11 +280,11 @@
 %macro ABS1 2
 %if cpuflag(ssse3)
     pabsw   %1, %1
-%elif cpuflag(mmxext) ; a, tmp
+%elif cpuflag(mmxext)
     pxor    %2, %2
     psubw   %2, %1
     pmaxsw  %1, %2
-%else ; a, tmp
+%else
     pxor       %2, %2
     pcmpgtw    %2, %1
     pxor       %1, %2
@@ -342,14 +296,14 @@
 %if cpuflag(ssse3)
     pabsw   %1, %1
     pabsw   %2, %2
-%elif cpuflag(mmxext) ; a, b, tmp0, tmp1
+%elif cpuflag(mmxext)
     pxor    %3, %3
     pxor    %4, %4
     psubw   %3, %1
     psubw   %4, %2
     pmaxsw  %1, %3
     pmaxsw  %2, %4
-%else ; a, b, tmp0, tmp1
+%else
     pxor       %3, %3
     pxor       %4, %4
     pcmpgtw    %3, %1
@@ -361,7 +315,7 @@
 %endif
 %endmacro
 
-%macro ABSB 2 ; source mmreg, temp mmreg (unused for SSSE3)
+%macro ABSB 2
 %if cpuflag(ssse3)
     pabsb   %1, %1
 %else
@@ -371,7 +325,7 @@
 %endif
 %endmacro
 
-%macro ABSB2 4 ; src1, src2, tmp1, tmp2 (tmp1/2 unused for SSSE3)
+%macro ABSB2 4
 %if cpuflag(ssse3)
     pabsb   %1, %1
     pabsb   %2, %2
@@ -406,7 +360,7 @@
     movd      %1, [%2-3]
     pshufb    %1, %3
 %else
-    movd      %1, [%2-3] ;to avoid crossing a cacheline
+    movd      %1, [%2-3]
     punpcklbw %1, %1
     SPLATW    %1, %1, 3
 %endif
@@ -423,7 +377,7 @@
 %endif
 %endmacro
 
-%macro HADDD 2 ; sum junk
+%macro HADDD 2
 %if sizeof%1 == 32
 %define %2 xmm%2
     vextracti128 %2, %1, 1
@@ -440,7 +394,7 @@
 %if notcpuflag(xop) || sizeof%1 != 16
 %if cpuflag(mmxext)
     PSHUFLW %2, %1, q0032
-%else ; mmx
+%else
     mova    %2, %1
     psrlq   %2, 32
 %endif
@@ -450,7 +404,7 @@
 %undef %2
 %endmacro
 
-%macro HADDW 2 ; reg, tmp
+%macro HADDW 2
 %if cpuflag(xop) && sizeof%1 == 16
     vphaddwq  %1, %1
     movhlps   %2, %1
@@ -461,7 +415,7 @@
 %endif
 %endmacro
 
-%macro HADDPS 3 ; dst, src, tmp
+%macro HADDPS 3
 %if cpuflag(sse3)
     haddps  %1, %1, %2
 %else
@@ -479,7 +433,7 @@
 %else
     palignr %1, %2, %3
 %endif
-%else ; [dst,] src1, src2, imm, tmp
+%else
     %define %%dst %1
 %if %0==5
 %ifnidn %1, %2
@@ -537,17 +491,17 @@
 %endif
 %endmacro
 
-%macro DEINTB 5 ; mask, reg1, mask, reg2, optional src to fill masks from
+%macro DEINTB 5
 %ifnum %5
-    pand   m%3, m%5, m%4 ; src .. y6 .. y4
-    pand   m%1, m%5, m%2 ; dst .. y6 .. y4
+    pand   m%3, m%5, m%4
+    pand   m%1, m%5, m%2
 %else
     mova   m%1, %5
-    pand   m%3, m%1, m%4 ; src .. y6 .. y4
-    pand   m%1, m%1, m%2 ; dst .. y6 .. y4
+    pand   m%3, m%1, m%4
+    pand   m%1, m%1, m%2
 %endif
-    psrlw  m%2, 8        ; dst .. y7 .. y5
-    psrlw  m%4, 8        ; src .. y7 .. y5
+    psrlw  m%2, 8
+    psrlw  m%4, 8
 %endmacro
 
 %macro SUMSUB_BA 3-4
@@ -615,19 +569,19 @@
 
 %macro SUMSUBD2_AB 5
 %ifnum %4
-    psra%1  m%5, m%2, 1  ; %3: %3>>1
-    psra%1  m%4, m%3, 1  ; %2: %2>>1
-    padd%1  m%4, m%2     ; %3: %3>>1+%2
-    psub%1  m%5, m%3     ; %2: %2>>1-%3
+    psra%1  m%5, m%2, 1
+    psra%1  m%4, m%3, 1
+    padd%1  m%4, m%2
+    psub%1  m%5, m%3
     SWAP     %2, %5
     SWAP     %3, %4
 %else
     mova    %5, m%2
     mova    %4, m%3
-    psra%1  m%3, 1  ; %3: %3>>1
-    psra%1  m%2, 1  ; %2: %2>>1
-    padd%1  m%3, %5 ; %3: %3>>1+%2
-    psub%1  m%2, %4 ; %2: %2>>1-%3
+    psra%1  m%3, 1
+    psra%1  m%2, 1
+    padd%1  m%3, %5
+    psub%1  m%2, %4
 %endif
 %endmacro
 
@@ -649,14 +603,8 @@
 %macro IDCT4_1D 6-7
 %ifnum %6
     SUMSUBD2_AB %1, %3, %5, %7, %6
-    ; %3: %3>>1-%5 %5: %3+%5>>1
     SUMSUB_BA   %1, %4, %2, %7
-    ; %4: %2+%4 %2: %2-%4
     SUMSUB_BADC %1, %5, %4, %3, %2, %7
-    ; %5: %2+%4 + (%3+%5>>1)
-    ; %4: %2+%4 - (%3+%5>>1)
-    ; %3: %2-%4 + (%3>>1-%5)
-    ; %2: %2-%4 - (%3>>1-%5)
 %else
 %ifidn %1, w
     SUMSUBD2_AB %1, %3, %5, [%6], [%6+16]
@@ -667,10 +615,6 @@
     SUMSUB_BADC %1, %5, %4, %3, %2
 %endif
     SWAP %2, %5, %4
-    ; %2: %2+%4 + (%3+%5>>1) row0
-    ; %3: %2-%4 + (%3>>1-%5) row1
-    ; %4: %2-%4 - (%3>>1-%5) row2
-    ; %5: %2+%4 - (%3+%5>>1) row3
 %endmacro
 
 
@@ -701,7 +645,7 @@
     movhps [%5+%6+56], m%4
 %endmacro
 
-%macro LOAD_DIFF_8x4P 7-10 r0,r2,0 ; 4x dest, 2x temp, 2x pointer, increment?
+%macro LOAD_DIFF_8x4P 7-10 r0,r2,0
     LOAD_DIFF m%1, m%5, m%7, [%8],      [%9]
     LOAD_DIFF m%2, m%6, m%7, [%8+r1],   [%9+r3]
     LOAD_DIFF m%3, m%5, m%7, [%8+2*r1], [%9+2*r3]
@@ -733,7 +677,7 @@
     movh       %4, %1
 %endmacro
 
-%macro STORE_DIFFx2 8 ; add1, add2, reg1, reg2, zero, shift, source, stride
+%macro STORE_DIFFx2 8
     movh       %3, [%7]
     movh       %4, [%7+%8]
     psraw      %1, %6
@@ -748,10 +692,10 @@
     movh  [%7+%8], %4
 %endmacro
 
-%macro PMINUB 3 ; dst, src, ignored
+%macro PMINUB 3
 %if cpuflag(mmxext)
     pminub   %1, %2
-%else ; dst, src, tmp
+%else
     mova     %3, %1
     psubusb  %3, %2
     psubb    %1, %3
@@ -793,17 +737,17 @@
 %endif
 %endmacro
 
-%macro CLIPUB 3 ;(dst, min, max)
+%macro CLIPUB 3
     pmaxub %1, %2
     pminub %1, %3
 %endmacro
 
-%macro CLIPW 3 ;(dst, min, max)
+%macro CLIPW 3
     pmaxsw %1, %2
     pminsw %1, %3
 %endmacro
 
-%macro PMINSD 3 ; dst, src, tmp/unused
+%macro PMINSD 3
 %if cpuflag(sse4)
     pminsd    %1, %2
 %else
@@ -815,7 +759,7 @@
 %endif
 %endmacro
 
-%macro PMAXSD 3 ; dst, src, tmp/unused
+%macro PMAXSD 3
 %if cpuflag(sse4)
     pmaxsd    %1, %2
 %else
@@ -831,66 +775,66 @@
 %if cpuflag(sse4);  src/dst, min, max, unused
     pminsd  %1, %3
     pmaxsd  %1, %2
-%elif cpuflag(sse2) ; src/dst, min (float), max (float), unused
+%elif cpuflag(sse2)
     cvtdq2ps  %1, %1
     minps     %1, %3
     maxps     %1, %2
     cvtps2dq  %1, %1
-%else               ; src/dst, min, max, tmp
+%else
     PMINSD    %1, %3, %4
     PMAXSD    %1, %2, %4
 %endif
 %endmacro
 
-%macro VBROADCASTSS 2 ; dst xmm/ymm, src m32/xmm
+%macro VBROADCASTSS 2
 %if cpuflag(avx2)
     vbroadcastss  %1, %2
 %elif cpuflag(avx)
-    %ifnum sizeof%2         ; avx1 register
+    %ifnum sizeof%2
         shufps  xmm%1, xmm%2, xmm%2, q0000
-        %if sizeof%1 >= 32  ; mmsize>=32
+        %if sizeof%1 >= 32
             vinsertf128  %1, %1, xmm%1, 1
         %endif
-    %else                   ; avx1 memory
+    %else
         vbroadcastss  %1, %2
     %endif
 %else
-    %ifnum sizeof%2         ; sse register
+    %ifnum sizeof%2
         shufps  %1, %2, %2, q0000
-    %else                   ; sse memory
+    %else
         movss   %1, %2
         shufps  %1, %1, 0
     %endif
 %endif
 %endmacro
 
-%macro VBROADCASTSD 2 ; dst xmm/ymm, src m64
+%macro VBROADCASTSD 2
 %if cpuflag(avx) && mmsize == 32
     vbroadcastsd %1, %2
 %elif cpuflag(sse3)
     movddup      %1, %2
-%else ; sse2
+%else
     movsd        %1, %2
     movlhps      %1, %1
 %endif
 %endmacro
 
-%macro VPBROADCASTD 2 ; dst xmm/ymm, src m32/xmm
+%macro VPBROADCASTD 2
 %if cpuflag(avx2)
     vpbroadcastd  %1, %2
 %elif cpuflag(avx) && sizeof%1 >= 32
     %error vpbroadcastd not possible with ymm on avx1. try vbroadcastss
 %else
-    %ifnum sizeof%2         ; sse2 register
+    %ifnum sizeof%2
         pshufd  %1, %2, q0000
-    %else                   ; sse memory
+    %else
         movd    %1, %2
         pshufd  %1, %1, 0
     %endif
 %endif
 %endmacro
 
-%macro VBROADCASTI128 2 ; dst xmm/ymm, src : 128bits val
+%macro VBROADCASTI128 2
 %if mmsize > 16
     vbroadcasti128 %1, %2
 %else
@@ -922,7 +866,6 @@
 %endif
 %endmacro
 
-; Wrapper for non-FMA version of fmaddps
 %macro FMULADD_PS 5
     %if cpuflag(fma3) || cpuflag(fma4)
         fmaddps %1, %2, %3, %4
@@ -951,23 +894,21 @@
 %endif
 %endmacro
 
-%macro MOVHL 2 ; dst, src
+%macro MOVHL 2
 %ifidn %1, %2
     punpckhqdq %1, %2
 %elif cpuflag(avx)
     punpckhqdq %1, %2, %2
 %elif cpuflag(sse4)
-    pshufd     %1, %2, q3232 ; pshufd is slow on some older CPUs, so only use it on more modern ones
+    pshufd     %1, %2, q3232
 %else
-    movhlps    %1, %2        ; may cause an int/float domain transition and has a dependency on dst
+    movhlps    %1, %2
 %endif
 %endmacro
 
-; Horizontal Sum of Packed Single precision floats
-; The resulting sum is in all elements.
-%macro HSUMPS 2 ; dst/src, tmp
+%macro HSUMPS 2
 %if cpuflag(avx)
-    %if sizeof%1>=32  ; avx
+    %if sizeof%1>=32
         vperm2f128  %2, %1, %1, (0)*16+(1)
         addps       %1, %2
     %endif
@@ -975,22 +916,17 @@
     addps       %1, %2
     shufps      %2, %1, %1, q0321
     addps       %1, %2
-%else  ; this form is a bit faster than the short avx-like emulation.
+%else
     movaps      %2, %1
     shufps      %1, %1, q1032
     addps       %1, %2
     movaps      %2, %1
     shufps      %1, %1, q0321
     addps       %1, %2
-    ; all %1 members should be equal for as long as float a+b==b+a
 %endif
 %endmacro
 
-; Emulate blendvps if not available
-;
-; src_b is destroyed when using emulation with logical operands
-; SSE41 blendv instruction is hard coded to use xmm0 as mask
-%macro BLENDVPS 3 ; dst/src_a, src_b, mask
+%macro BLENDVPS 3
 %if cpuflag(avx)
     blendvps  %1, %1, %2, %3
 %elif cpuflag(sse4)
@@ -1005,11 +941,7 @@
 %endif
 %endmacro
 
-; Emulate pblendvb if not available
-;
-; src_b is destroyed when using emulation with logical operands
-; SSE41 blendv instruction is hard coded to use xmm0 as mask
-%macro PBLENDVB 3 ; dst/src_a, src_b, mask
+%macro PBLENDVB 3
 %if cpuflag(avx)
     %if cpuflag(avx) && notcpuflag(avx2) && sizeof%1 >= 32
         %error pblendb not possible with ymm on avx1, try blendvps.
@@ -1027,10 +959,6 @@
 %endif
 %endmacro
 
-; NASM panics when emitting CodeView debug info for an empty translation unit.
-; GNU binutils `strip` and some other tools such as older MSVC linker also fail
-; on such files. Emit a dummy byte in a section with IMAGE_SCN_LNK_REMOVE flag
-; to work around these issues. Sections like that are dropped by the linker.
 %ifidn __OUTPUT_FORMAT__,win64
     section .x86util info
         db 0

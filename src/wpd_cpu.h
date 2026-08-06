@@ -3,7 +3,6 @@
 
 #include "wpd_compat.h"
 
-/* Set by the build; 0 means no architecture-specific assembly was compiled. */
 #ifndef WPD_HAVE_ASM
 #define WPD_HAVE_ASM 0
 #endif

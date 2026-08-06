@@ -1,19 +1,8 @@
-/*
- * Inverse prediction for the VP8L predictor transform, operating on whole
- * pixels held in a native word. Every operation below treats the word as
- * four independent bytes, so the decoder's [A, R, G, B] byte order does not
- * matter; only PRED_MODE_BLACK names a specific channel, and it builds its
- * constant from bytes.
- *
- * The SWAR helpers and the predictor set are ported from libwebp's
- * src/dsp/lossless.c.
- */
 
 #include "vp8l_dsp.h"
 
 #include <string.h>
 
-/* per-byte (a + b) >> 1 */
 static wpd_always_inline uint32_t pred_avg2(uint32_t a, uint32_t b) {
     return (((a ^ b) & 0xFEFEFEFEu) >> 1) + (a & b);
 }
@@ -28,7 +17,7 @@ static wpd_always_inline uint32_t pred_avg4(uint32_t a, uint32_t b, uint32_t c,
     return pred_avg2(pred_avg2(a, b), pred_avg2(c, d));
 }
 
-/* per-byte a + b, with the carries between bytes discarded */
+/* Add four channels independently by discarding carries between bytes. */
 static wpd_always_inline uint32_t pred_add_pixels(uint32_t a, uint32_t b) {
     const uint32_t ag = (a & 0xFF00FF00u) + (b & 0xFF00FF00u);
     const uint32_t rb = (a & 0x00FF00FFu) + (b & 0x00FF00FFu);
@@ -39,7 +28,6 @@ static wpd_always_inline int pred_sub3(int a, int b, int c) {
     return WPD_ABS(b - c) - WPD_ABS(a - c);
 }
 
-/* PRED_MODE_SELECT: whichever of t and l is closer to tl, channel-summed */
 static wpd_always_inline uint32_t pred_select(uint32_t t, uint32_t l,
                                               uint32_t tl) {
     const int diff = pred_sub3(
@@ -87,7 +75,6 @@ static wpd_always_inline uint32_t pred_clamped_add_sub_half(uint32_t c0,
     return a << 24 | r << 16 | g << 8 | b;
 }
 
-/* opaque black (0xFF000000 in [A, R, G, B] order) as a native word */
 static wpd_always_inline uint32_t pred_black(void) {
     const uint8_t bytes[4] = {0xFF, 0x00, 0x00, 0x00};
     uint32_t      v;
@@ -113,14 +100,12 @@ static wpd_always_inline uint32_t pred_black(void) {
         }                                            \
     }
 
-/* PRED_MODE_BLACK */
 static void pred_add_0(const uint32_t *in, const uint32_t *upper,
                        int num_pixels, uint32_t *out) {
     const uint32_t black = pred_black();
     for (int x = 0; x < num_pixels; x++) out[x] = pred_add_pixels(in[x], black);
 }
 
-/* PRED_MODE_L: each pixel predicts from the one just reconstructed */
 static void pred_add_1(const uint32_t *in, const uint32_t *upper,
                        int num_pixels, uint32_t *out) {
     uint32_t left = out[-1];
@@ -128,9 +113,9 @@ static void pred_add_1(const uint32_t *in, const uint32_t *upper,
         out[x] = left = pred_add_pixels(in[x], left);
 }
 
-PRED_ADD(pred_add_2, t) /* T          */
-PRED_ADD(pred_add_3, tr) /* TR         */
-PRED_ADD(pred_add_4, tl) /* TL         */
+PRED_ADD(pred_add_2, t)
+PRED_ADD(pred_add_3, tr)
+PRED_ADD(pred_add_4, tl)
 PRED_ADD(pred_add_5, pred_avg3(l, t, tr))
 PRED_ADD(pred_add_6, pred_avg2(l, tl))
 PRED_ADD(pred_add_7, pred_avg2(l, t))
@@ -141,11 +126,6 @@ PRED_ADD(pred_add_11, pred_select(t, l, tl))
 PRED_ADD(pred_add_12, pred_clamped_add_sub_full(l, t, tl))
 PRED_ADD(pred_add_13, pred_clamped_add_sub_half(l, t, tl))
 
-/*
- * Gather the green byte of each ARGB pixel into a packed plane. A VP8L
- * alpha chunk carries the alpha values in green, so this runs over the
- * whole image and is worth deinterleaving a vector at a time.
- */
 static void extract_green_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
     for (int x = 0; x < num_pixels; x++, src += 4, dst++) *dst = src[2];
 }

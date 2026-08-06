@@ -12,7 +12,6 @@
 #else
 #define HAVE_NEON 0
 #endif
-/* Probed by the build: Thumb-2 on the target, and in the assembler. */
 #if defined(WPD_ARM_ARMV6T2_ASM)
 #define HAVE_ARMV6T2 1
 #else
