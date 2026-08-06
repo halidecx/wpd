@@ -38,7 +38,7 @@
 
 #if WPD_RAC_64
 
-typedef struct {
+typedef struct VP56RangeCoder {
     uint64_t       value; ///< cached bitstream window, read at shift `bits`
     uint32_t       range; ///< current range minus 1, in [127, 254]
     int            bits; ///< valid bits in `value`; refill when < 0
@@ -139,7 +139,7 @@ static wpd_always_inline int vp8_rac_get_signed(VP56RangeCoder *c, int v) {
 
 #else /* !WPD_RAC_64 */
 
-typedef struct {
+typedef struct VP56RangeCoder {
     int            high;
     int            bits;
     const uint8_t *buffer;

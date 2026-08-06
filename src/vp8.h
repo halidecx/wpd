@@ -27,18 +27,17 @@ enum dct_token {
 // used to signal 4x4 intra pred in luma MBs
 #define MODE_I4x4 4
 
-typedef struct {
+typedef struct VP8FilterStrength {
     uint8_t filter_level;
     uint8_t inner_limit;
     uint8_t inner_filter;
 } VP8FilterStrength;
 
-typedef struct {
-    uint8_t skip;
-    uint8_t mode;
+typedef struct VP8Macroblock {
+    uint8_t skip, mode;
 } VP8Macroblock;
 
-typedef struct {
+typedef struct VP8Context {
     WpdCodecContext *avctx;
     WpdFrame         frame;
 
