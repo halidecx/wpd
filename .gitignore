@@ -20,7 +20,13 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# clang-format, I guess?
+.cache/
+
+.DS_Store
+
 build/
+testdata/
 
 *.y4m
 *.yuv
