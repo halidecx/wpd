@@ -29,8 +29,8 @@ enum VP8Pred8x8Mode {
 };
 
 typedef struct VP8PredContext {
-    void (*pred4x4[VP8_PRED4X4_COUNT])(uint8_t *src,
-                                        const uint8_t *topright, int stride);
+    void (*pred4x4[VP8_PRED4X4_COUNT])(uint8_t *src, const uint8_t *topright,
+                                       int stride);
     void (*pred8x8[VP8_PRED8X8_COUNT])(uint8_t *src, int stride);
     void (*pred16x16[VP8_PRED8X8_COUNT])(uint8_t *src, int stride);
 } VP8PredContext;

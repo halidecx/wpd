@@ -1,12 +1,10 @@
-#include "wpd_codec.h"
 #include "vp8pred.h"
+#include "wpd_codec.h"
 
 #define PRED4(name, opt) \
     void ff_pred4x4_##name##_8_##opt(uint8_t *, const uint8_t *, int)
-#define PRED8(name, opt) \
-    void ff_pred8x8_##name##_8_##opt(uint8_t *, int)
-#define PRED16(name, opt) \
-    void ff_pred16x16_##name##_8_##opt(uint8_t *, int)
+#define PRED8(name, opt) void ff_pred8x8_##name##_8_##opt(uint8_t *, int)
+#define PRED16(name, opt) void ff_pred16x16_##name##_8_##opt(uint8_t *, int)
 
 PRED4(dc, mmxext);
 PRED4(down_left, mmxext);
@@ -33,20 +31,19 @@ PRED16(dc, ssse3);
 PRED16(tm_vp8, sse2);
 PRED16(tm_vp8, avx2);
 
-wpd_cold void ff_vp8_pred_init_x86(VP8PredContext *pred)
-{
+wpd_cold void ff_vp8_pred_init_x86(VP8PredContext *pred) {
     int flags = wpd_get_cpu_flags();
 
     if (WPD_CPU_HAS_MMX2(flags)) {
         pred->pred4x4[DIAG_DOWN_LEFT_PRED]  = ff_pred4x4_down_left_8_mmxext;
         pred->pred4x4[DIAG_DOWN_RIGHT_PRED] = ff_pred4x4_down_right_8_mmxext;
-        pred->pred4x4[VERT_RIGHT_PRED]      = ff_pred4x4_vertical_right_8_mmxext;
-        pred->pred4x4[HOR_DOWN_PRED]        = ff_pred4x4_horizontal_down_8_mmxext;
-        pred->pred4x4[HOR_UP_PRED]          = ff_pred4x4_horizontal_up_8_mmxext;
-        pred->pred4x4[DC_PRED]              = ff_pred4x4_dc_8_mmxext;
-        pred->pred4x4[TM_VP8_PRED]          = ff_pred4x4_tm_vp8_8_mmxext;
-        pred->pred4x4[VERT_PRED]            = ff_pred4x4_vertical_vp8_8_mmxext;
-        pred->pred8x8[DC_PRED8x8]           = ff_pred8x8_dc_vp8_8_mmxext;
+        pred->pred4x4[VERT_RIGHT_PRED] = ff_pred4x4_vertical_right_8_mmxext;
+        pred->pred4x4[HOR_DOWN_PRED]   = ff_pred4x4_horizontal_down_8_mmxext;
+        pred->pred4x4[HOR_UP_PRED]     = ff_pred4x4_horizontal_up_8_mmxext;
+        pred->pred4x4[DC_PRED]         = ff_pred4x4_dc_8_mmxext;
+        pred->pred4x4[TM_VP8_PRED]     = ff_pred4x4_tm_vp8_8_mmxext;
+        pred->pred4x4[VERT_PRED]       = ff_pred4x4_vertical_vp8_8_mmxext;
+        pred->pred8x8[DC_PRED8x8]      = ff_pred8x8_dc_vp8_8_mmxext;
     }
     if (WPD_CPU_HAS_SSE(flags))
         pred->pred16x16[VERT_PRED8x8] = ff_pred16x16_vertical_8_sse;
@@ -59,11 +56,11 @@ wpd_cold void ff_vp8_pred_init_x86(VP8PredContext *pred)
         pred->pred8x8[PLANE_PRED8x8]   = ff_pred8x8_tm_vp8_8_sse2;
     }
     if (WPD_CPU_HAS_SSSE3(flags)) {
-        pred->pred16x16[HOR_PRED8x8]   = ff_pred16x16_horizontal_8_ssse3;
-        pred->pred16x16[DC_PRED8x8]    = ff_pred16x16_dc_8_ssse3;
-        pred->pred8x8[HOR_PRED8x8]     = ff_pred8x8_horizontal_8_ssse3;
-        pred->pred8x8[PLANE_PRED8x8]   = ff_pred8x8_tm_vp8_8_ssse3;
-        pred->pred4x4[TM_VP8_PRED]     = ff_pred4x4_tm_vp8_8_ssse3;
+        pred->pred16x16[HOR_PRED8x8] = ff_pred16x16_horizontal_8_ssse3;
+        pred->pred16x16[DC_PRED8x8]  = ff_pred16x16_dc_8_ssse3;
+        pred->pred8x8[HOR_PRED8x8]   = ff_pred8x8_horizontal_8_ssse3;
+        pred->pred8x8[PLANE_PRED8x8] = ff_pred8x8_tm_vp8_8_ssse3;
+        pred->pred4x4[TM_VP8_PRED]   = ff_pred4x4_tm_vp8_8_ssse3;
     }
     if (WPD_CPU_HAS_AVX2(flags)) {
         pred->pred16x16[HOR_PRED8x8]   = ff_pred16x16_horizontal_8_avx2;

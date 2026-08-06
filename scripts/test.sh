@@ -26,7 +26,7 @@ for input in "${inputs[@]}"; do
     fi
 
     output=${input%.webp}.yuv
-    ./build/wpd "$input" "$output" "$pixel_format"
+    ./build/wpd -f "$pixel_format" "$input" "$output"
     ffmpeg_vt -hide_banner -threads 1 \
         -i "$input" \
         -threads 1 -f rawvideo \

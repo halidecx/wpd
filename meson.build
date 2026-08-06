@@ -15,6 +15,20 @@ cc = meson.get_compiler('c')
 source_root = meson.current_source_dir()
 cpu_family = host_machine.cpu_family()
 
+vcs_version = vcs_tag(
+  command: ['git', '-C', source_root, 'rev-parse', '--short=7', 'HEAD'],
+  fallback: 'unknown',
+  input: 'tools/vcs_version.h.in',
+  output: 'vcs_version.h',
+)
+
+getopt_sources = []
+getopt_inc_dirs = []
+if not cc.has_function('getopt_long', prefix: '#include <getopt.h>')
+  getopt_sources = files('tools/compat/getopt.c')
+  getopt_inc_dirs = include_directories('include/compat')
+endif
+
 inc_dirs = [include_directories('include', 'src')]
 lib_sources = files(
   'src/wpd_decoder.c',
@@ -161,7 +175,10 @@ wpd_dep = declare_dependency(
 executable(
   'wpd',
   'tools/wpd.c',
+  vcs_version,
+  getopt_sources,
   dependencies: wpd_dep,
+  include_directories: getopt_inc_dirs,
   install: false,
 )
 

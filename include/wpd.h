@@ -11,16 +11,16 @@ extern "C" {
 typedef struct WPDDecoder WPDDecoder;
 
 typedef enum WPDPixelFormat {
-    WPD_PIX_FMT_YUV420P,  /* planar Y, U, V; chroma subsampled 2x2 */
+    WPD_PIX_FMT_YUV420P, /* planar Y, U, V; chroma subsampled 2x2 */
     WPD_PIX_FMT_YUVA420P, /* planar Y, U, V, A; full-size alpha plane */
-    WPD_PIX_FMT_ARGB,     /* packed 8:8:8:8, byte order A, R, G, B */
+    WPD_PIX_FMT_ARGB, /* packed 8:8:8:8, byte order A, R, G, B */
 } WPDPixelFormat;
 
 typedef struct WPDFrame {
     const uint8_t *data[4];
-    ptrdiff_t stride[4];
-    int width;
-    int height;
+    ptrdiff_t      stride[4];
+    int            width;
+    int            height;
     WPDPixelFormat format;
 } WPDFrame;
 

@@ -15,12 +15,13 @@ The decoder executable is written to `build/wpd`. It reads a WebP file and
 writes raw frames:
 
 ```sh
-build/wpd input.webp output.raw [pixel_format]
+build/wpd [options] input.webp output.raw
 ```
 
-`pixel_format` is optional and may be `yuv420p`, `yuva420p`, or `argb`; when
-omitted, the decoded frame format is used. Animated input writes its frames
-sequentially to the output.
+Use `-f` or `--fmt` to select `auto`, `yuv420p`, `yuva420p`, or `argb` output;
+the default `auto` uses the decoded frame format. Use `-r` or `--repeat` to
+decode the input multiple times in-process for benchmarking. Animated input
+writes its frames sequentially to the output.
 
 Using `/dev/null` selects decode-only output and avoids serializing the decoded
 picture:

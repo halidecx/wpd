@@ -19,33 +19,49 @@
 #define src1 (buf1 + 4 * 16)
 
 static const char *const pred4x4_modes[VP8_PRED4X4_COUNT] = {
-    "vertical_vp8", "horizontal_vp8", "dc", "down_left", "down_right",
-    "vertical_right", "horizontal_down", "vertical_left_vp8", "horizontal_up",
+    "vertical_vp8",
+    "horizontal_vp8",
+    "dc",
+    "down_left",
+    "down_right",
+    "vertical_right",
+    "horizontal_down",
+    "vertical_left_vp8",
+    "horizontal_up",
     "tm_vp8",
 };
 
 static const char *const pred8x8_modes[VP8_PRED8X8_COUNT] = {
-    "dc", "horizontal", "vertical", "tm_vp8", "left_dc", "top_dc", "dc_128",
+    "dc",
+    "horizontal",
+    "vertical",
+    "tm_vp8",
+    "left_dc",
+    "top_dc",
+    "dc_128",
 };
 
-#define randomize_buffers()                    \
-    do {                                       \
-        int i;                                 \
-        for (i = 0; i < BUF_SIZE; i += 4) {    \
-            uint32_t r = rnd();                \
-            WPD_WN32A(buf0 + i, r);             \
-            WPD_WN32A(buf1 + i, r);             \
-        }                                      \
+#define randomize_buffers()                 \
+    do {                                    \
+        int i;                              \
+        for (i = 0; i < BUF_SIZE; i += 4) { \
+            uint32_t r = rnd();             \
+            WPD_WN32A(buf0 + i, r);         \
+            WPD_WN32A(buf1 + i, r);         \
+        }                                   \
     } while (0)
 
-static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
-{
+static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
     uint8_t *topright = buf0 + 2 * 16;
-    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
-                      uint8_t *src, const uint8_t *topright, ptrdiff_t stride);
+    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2,
+                      void,
+                      uint8_t       *src,
+                      const uint8_t *topright,
+                      ptrdiff_t      stride);
 
     for (int mode = 0; mode < VP8_PRED4X4_COUNT; mode++) {
-        if (check_func(pred->pred4x4[mode], "pred4x4_%s", pred4x4_modes[mode])) {
+        if (check_func(
+                pred->pred4x4[mode], "pred4x4_%s", pred4x4_modes[mode])) {
             randomize_buffers();
             call_ref(src0, topright, 12);
             call_new(src1, topright, 12);
@@ -56,13 +72,13 @@ static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
     }
 }
 
-static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
-{
-    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
-                      uint8_t *src, ptrdiff_t stride);
+static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
+    declare_func_emms(
+        WPD_CPU_MMX | WPD_CPU_MMX2, void, uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
-        if (check_func(pred->pred8x8[mode], "pred8x8_%s", pred8x8_modes[mode])) {
+        if (check_func(
+                pred->pred8x8[mode], "pred8x8_%s", pred8x8_modes[mode])) {
             randomize_buffers();
             call_ref(src0, 24);
             call_new(src1, 24);
@@ -73,14 +89,14 @@ static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
     }
 }
 
-static void check_pred16x16(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
-{
-    declare_func_emms(WPD_CPU_MMX | WPD_CPU_MMX2, void,
-                      uint8_t *src, ptrdiff_t stride);
+static void check_pred16x16(VP8PredContext *pred, uint8_t *buf0,
+                            uint8_t *buf1) {
+    declare_func_emms(
+        WPD_CPU_MMX | WPD_CPU_MMX2, void, uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
-        if (check_func(pred->pred16x16[mode], "pred16x16_%s",
-                       pred8x8_modes[mode])) {
+        if (check_func(
+                pred->pred16x16[mode], "pred16x16_%s", pred8x8_modes[mode])) {
             randomize_buffers();
             call_ref(src0, 48);
             call_new(src1, 48);
@@ -91,8 +107,7 @@ static void check_pred16x16(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1)
     }
 }
 
-void checkasm_check_vp8pred(void)
-{
+void checkasm_check_vp8pred(void) {
     LOCAL_ALIGNED_16(uint8_t, buf0, [BUF_SIZE]);
     LOCAL_ALIGNED_16(uint8_t, buf1, [BUF_SIZE]);
     VP8PredContext pred;

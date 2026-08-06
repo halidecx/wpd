@@ -27,11 +27,11 @@
 #include "wpd_codec.h"
 
 typedef struct {
-    int high;
-    int bits;
+    int            high;
+    int            bits;
     const uint8_t *buffer;
     const uint8_t *end;
-    unsigned int code_word;
+    unsigned int   code_word;
 } VP56RangeCoder;
 
 /**
@@ -39,18 +39,18 @@ typedef struct {
  */
 
 extern const uint8_t wpd_vp56_norm_shift[256];
-void wpd_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf, int buf_size);
+void wpd_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf,
+                                 int buf_size);
 
-static wpd_always_inline unsigned int vp56_rac_renorm(VP56RangeCoder *c)
-{
-    int shift = wpd_vp56_norm_shift[c->high];
-    int bits = c->bits;
+static wpd_always_inline unsigned int vp56_rac_renorm(VP56RangeCoder *c) {
+    int          shift     = wpd_vp56_norm_shift[c->high];
+    int          bits      = c->bits;
     unsigned int code_word = c->code_word;
 
-    c->high   <<= shift;
+    c->high <<= shift;
     code_word <<= shift;
-    bits       += shift;
-    if(bits >= 0 && c->buffer < c->end) {
+    bits += shift;
+    if (bits >= 0 && c->buffer < c->end) {
         code_word |= wpd_bytestream_get_be16(&c->buffer) << bits;
         bits -= 16;
     }
@@ -66,14 +66,14 @@ static wpd_always_inline unsigned int vp56_rac_renorm(VP56RangeCoder *c)
 
 #ifndef vp56_rac_get_prob
 #define vp56_rac_get_prob vp56_rac_get_prob
-static wpd_always_inline int vp56_rac_get_prob(VP56RangeCoder *c, uint8_t prob)
-{
+static wpd_always_inline int vp56_rac_get_prob(VP56RangeCoder *c,
+                                               uint8_t         prob) {
     unsigned int code_word = vp56_rac_renorm(c);
-    unsigned int low = 1 + (((c->high - 1) * prob) >> 8);
+    unsigned int low       = 1 + (((c->high - 1) * prob) >> 8);
     unsigned int low_shift = low << 16;
-    int bit = code_word >= low_shift;
+    int          bit       = code_word >= low_shift;
 
-    c->high = bit ? c->high - low : low;
+    c->high      = bit ? c->high - low : low;
     c->code_word = bit ? code_word - low_shift : code_word;
 
     return bit;
@@ -82,33 +82,32 @@ static wpd_always_inline int vp56_rac_get_prob(VP56RangeCoder *c, uint8_t prob)
 
 #ifndef vp56_rac_get_prob_branchy
 // branchy variant, to be used where there's a branch based on the bit decoded
-static wpd_always_inline int vp56_rac_get_prob_branchy(VP56RangeCoder *c, int prob)
-{
+static wpd_always_inline int vp56_rac_get_prob_branchy(VP56RangeCoder *c,
+                                                       int             prob) {
     unsigned long code_word = vp56_rac_renorm(c);
-    unsigned low = 1 + (((c->high - 1) * prob) >> 8);
-    unsigned low_shift = low << 16;
+    unsigned      low       = 1 + (((c->high - 1) * prob) >> 8);
+    unsigned      low_shift = low << 16;
 
     if (code_word >= low_shift) {
-        c->high     -= low;
+        c->high -= low;
         c->code_word = code_word - low_shift;
         return 1;
     }
 
-    c->high = low;
+    c->high      = low;
     c->code_word = code_word;
     return 0;
 }
 #endif
 
-static wpd_always_inline int vp56_rac_get(VP56RangeCoder *c)
-{
+static wpd_always_inline int vp56_rac_get(VP56RangeCoder *c) {
     unsigned int code_word = vp56_rac_renorm(c);
     /* equiprobable */
-    int low = (c->high + 1) >> 1;
+    int          low       = (c->high + 1) >> 1;
     unsigned int low_shift = low << 16;
-    int bit = code_word >= low_shift;
+    int          bit       = code_word >= low_shift;
     if (bit) {
-        c->high   -= low;
+        c->high -= low;
         code_word -= low_shift;
     } else {
         c->high = low;
@@ -119,25 +118,20 @@ static wpd_always_inline int vp56_rac_get(VP56RangeCoder *c)
 }
 
 // rounding is different than vp56_rac_get, is vp56_rac_get wrong?
-static wpd_always_inline int vp8_rac_get(VP56RangeCoder *c)
-{
+static wpd_always_inline int vp8_rac_get(VP56RangeCoder *c) {
     return vp56_rac_get_prob(c, 128);
 }
 
-static wpd_unused int vp8_rac_get_uint(VP56RangeCoder *c, int bits)
-{
+static wpd_unused int vp8_rac_get_uint(VP56RangeCoder *c, int bits) {
     int value = 0;
 
-    while (bits--) {
-        value = (value << 1) | vp8_rac_get(c);
-    }
+    while (bits--) { value = (value << 1) | vp8_rac_get(c); }
 
     return value;
 }
 
 // fixme: add 1 bit to all the calls to this?
-static wpd_unused int vp8_rac_get_sint(VP56RangeCoder *c, int bits)
-{
+static wpd_unused int vp8_rac_get_sint(VP56RangeCoder *c, int bits) {
     int v;
 
     if (!vp8_rac_get(c))
@@ -156,34 +150,27 @@ static wpd_unused int vp8_rac_get_sint(VP56RangeCoder *c, int bits)
  * on a node other than the root node, needed for coeff decode where this is
  * used to save a bit after a 0 token (by disallowing EOB to immediately follow.)
  */
-static wpd_always_inline
-int vp8_rac_get_tree_with_offset(VP56RangeCoder *c, const int8_t (*tree)[2],
-                                 const uint8_t *probs, int i)
-{
-    do {
-        i = tree[i][vp56_rac_get_prob(c, probs[i])];
-    } while (i > 0);
+static wpd_always_inline int vp8_rac_get_tree_with_offset(
+    VP56RangeCoder *c, const int8_t (*tree)[2], const uint8_t *probs, int i) {
+    do { i = tree[i][vp56_rac_get_prob(c, probs[i])]; } while (i > 0);
 
     return -i;
 }
 
 // how probabilities are associated with decisions is different I think
 // well, the new scheme fits in the old but this way has one fewer branches per decision
-static wpd_always_inline
-int vp8_rac_get_tree(VP56RangeCoder *c, const int8_t (*tree)[2],
-                     const uint8_t *probs)
-{
+static wpd_always_inline int vp8_rac_get_tree(VP56RangeCoder *c,
+                                              const int8_t (*tree)[2],
+                                              const uint8_t *probs) {
     return vp8_rac_get_tree_with_offset(c, tree, probs, 0);
 }
 
 // DCTextra
-static wpd_always_inline int vp8_rac_get_coeff(VP56RangeCoder *c, const uint8_t *prob)
-{
+static wpd_always_inline int vp8_rac_get_coeff(VP56RangeCoder *c,
+                                               const uint8_t  *prob) {
     int v = 0;
 
-    do {
-        v = (v<<1) + vp56_rac_get_prob(c, *prob++);
-    } while (*prob);
+    do { v = (v << 1) + vp56_rac_get_prob(c, *prob++); } while (*prob);
 
     return v;
 }

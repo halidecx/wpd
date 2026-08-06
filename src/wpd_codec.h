@@ -12,17 +12,17 @@ extern uint8_t wpd_crop_table[256 + 2 * WPD_MAX_NEG_CROP];
 typedef struct WpdFrame {
     uint8_t *data[3];
     uint8_t *allocation[3];
-    int linesize[3];
+    int      linesize[3];
 } WpdFrame;
 
 typedef struct WpdCodecContext {
     void *priv_data;
-    int width, height;
+    int   width, height;
 } WpdCodecContext;
 
 typedef struct WpdPacket {
     const uint8_t *data;
-    int size;
+    int            size;
 } WpdPacket;
 
 void wpd_dsp_data_init(void);
