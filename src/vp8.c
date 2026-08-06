@@ -1056,9 +1056,8 @@ static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
             nnz_total += nnz;
         }
 
-    // chroma blocks
-    // TODO: what to do about dimensions? 2nd dim for luma is x,
-    // but for chroma it's (y<<1)|x
+    // Chroma blocks. Note the second index is x for luma above but (y<<1)|x
+    // here, since each chroma plane is a single 2x2 grid of blocks.
     for (i = 4; i < 6; i++)
         for (y = 0; y < 2; y++)
             for (x = 0; x < 2; x++) {

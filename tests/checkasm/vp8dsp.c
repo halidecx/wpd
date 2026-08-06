@@ -23,8 +23,6 @@
 #include "checkasm.h"
 #include "vp8dsp.h"
 
-#define PIXEL_STRIDE 16
-
 #define randomize_buffers(src, dst, stride, coef)             \
     do {                                                      \
         int x, y;                                             \
@@ -430,12 +428,9 @@ static void check_all(VP8DSPContext *d) {
 }
 
 void checkasm_check_vp8dsp(void) {
-    // Needs to be zeroed because not all size 16 epel functions exist.
-    VP8DSPContext d = {0};
+    VP8DSPContext d;
 
     // The C loop filters index wpd_crop_table, which is only populated here.
     wpd_dsp_data_init();
-    ff_vp8dsp_init(&d);
-    report("mc");
     check_all(&d);
 }
