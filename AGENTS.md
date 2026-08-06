@@ -11,16 +11,14 @@ meson setup build
 meson compile -C build
 ```
 
-Test reference SSIM scores versus decodes:
+Test scripts:
 
 ```sh
-./tests/test.sh
-```
-
-Test speed:
-
-```sh
-./tests/bench.sh
+./scripts/bench.sh      # performance, wpd vs dwebp
+./scripts/test.sh       # correctness, vs FFmpeg
+./scripts/cmpbench.sh   # performance, old vs new wpd
+./scripts/md5check.sh   # correctness, old vs new wpd
+./scripts/stylecheck.sh # format codebase
 ```
 
 Inspect the structure of a WebP file (still or animated):
