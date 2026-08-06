@@ -36,6 +36,7 @@ lib_sources = files(
   'src/vp8dsp.c',
   'src/vp56rac.c',
   'src/vp8pred.c',
+  'src/vp8l_dsp.c',
   'src/wpd_compat.c',
   'src/wpd_cpu.c',
 )
@@ -95,6 +96,7 @@ if asm_enabled
 
     lib_objects += nasm_gen.process(
       files(
+        'src/x86/vp8l.asm',
         'src/x86/vp8dsp.asm',
         'src/x86/vp8_intrapred.asm',
       ),
@@ -102,6 +104,7 @@ if asm_enabled
     )
     lib_objects += nasm_gen.process(files('src/x86/vp8dsp_loopfilter.asm'))
     lib_sources += files(
+      'src/x86/vp8l_init.c',
       'src/x86/vp8dsp_init.c',
       'src/x86/vp8pred_init.c',
       'src/x86/wpd_simd_constants.c',
@@ -114,6 +117,8 @@ if asm_enabled
   elif cpu_family == 'aarch64'
     inc_dirs += [include_directories('src/aarch64')]
     lib_sources += files(
+      'src/aarch64/vp8l_neon.S',
+      'src/aarch64/vp8l_init.c',
       'src/aarch64/vp8dsp_neon.S',
       'src/aarch64/vp8dsp_init_aarch64.c',
       'src/aarch64/vp8pred_neon.S',
@@ -211,6 +216,7 @@ if asm_enabled and checkasm_dep.found()
     'checkasm',
     files(
       'tests/checkasm/main.c',
+      'tests/checkasm/lossless.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
     ),

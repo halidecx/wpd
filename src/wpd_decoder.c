@@ -7,18 +7,11 @@
 #include "wpd.h"
 
 #include "vp8.h"
+#include "vp8l_dsp.h"
 #include "wpd_codec.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-
-/* NEON inverse predictors are compiled in unconditionally on aarch64,
- * where the instruction set is part of the baseline. */
-#if WPD_HAVE_ASM && defined(__aarch64__) && defined(__ARM_NEON)
-#define WPD_PRED_NEON 1
-#else
-#define WPD_PRED_NEON 0
-#endif
 
 #define VP8X_FLAG_ANIMATION 0x02
 #define VP8X_FLAG_ALPHA 0x10
@@ -606,6 +599,7 @@ struct WPDDecoder {
     WpdCodecContext codec;
     VP8Context      vp8;
     int             vp8_initialized;
+    WPDLosslessDSP  ldsp;
 
     uint8_t *file; /* padded copy of the input */
     size_t   file_size;
@@ -1171,214 +1165,30 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
 }
 
 /*
- * Inverse prediction, operating on whole pixels held in a native word.
- * Every operation below treats the word as four independent bytes, so the
- * decoder's [A, R, G, B] byte order does not matter; only PRED_MODE_BLACK
- * names a specific channel, and it builds its constant from bytes.
- *
- * The SWAR helpers and the predictor set are ported from libwebp's
- * src/dsp/lossless.c.
- */
-
-/* per-byte (a + b) >> 1 */
-static wpd_always_inline uint32_t pred_avg2(uint32_t a, uint32_t b) {
-    return (((a ^ b) & 0xFEFEFEFEu) >> 1) + (a & b);
-}
-
-static wpd_always_inline uint32_t pred_avg3(uint32_t a, uint32_t b,
-                                            uint32_t c) {
-    return pred_avg2(pred_avg2(a, c), b);
-}
-
-static wpd_always_inline uint32_t pred_avg4(uint32_t a, uint32_t b, uint32_t c,
-                                            uint32_t d) {
-    return pred_avg2(pred_avg2(a, b), pred_avg2(c, d));
-}
-
-/* per-byte a + b, with the carries between bytes discarded */
-static wpd_always_inline uint32_t pred_add_pixels(uint32_t a, uint32_t b) {
-    const uint32_t ag = (a & 0xFF00FF00u) + (b & 0xFF00FF00u);
-    const uint32_t rb = (a & 0x00FF00FFu) + (b & 0x00FF00FFu);
-    return (ag & 0xFF00FF00u) | (rb & 0x00FF00FFu);
-}
-
-static wpd_always_inline int pred_sub3(int a, int b, int c) {
-    return WPD_ABS(b - c) - WPD_ABS(a - c);
-}
-
-/* PRED_MODE_SELECT: whichever of t and l is closer to tl, channel-summed */
-static wpd_always_inline uint32_t pred_select(uint32_t t, uint32_t l,
-                                              uint32_t tl) {
-    const int diff = pred_sub3(
-                         (int)(t >> 24), (int)(l >> 24), (int)(tl >> 24)) +
-        pred_sub3((int)((t >> 16) & 0xFF),
-                  (int)((l >> 16) & 0xFF),
-                  (int)((tl >> 16) & 0xFF)) +
-        pred_sub3((int)((t >> 8) & 0xFF),
-                  (int)((l >> 8) & 0xFF),
-                  (int)((tl >> 8) & 0xFF)) +
-        pred_sub3((int)(t & 0xFF), (int)(l & 0xFF), (int)(tl & 0xFF));
-    return diff <= 0 ? t : l;
-}
-
-static wpd_always_inline uint32_t pred_clamped_add_sub_full(uint32_t c0,
-                                                            uint32_t c1,
-                                                            uint32_t c2) {
-    const uint32_t a = wpd_clip_uint8((int)(c0 >> 24) + (int)(c1 >> 24) -
-                                      (int)(c2 >> 24));
-    const uint32_t r = wpd_clip_uint8((int)((c0 >> 16) & 0xFF) +
-                                      (int)((c1 >> 16) & 0xFF) -
-                                      (int)((c2 >> 16) & 0xFF));
-    const uint32_t g = wpd_clip_uint8((int)((c0 >> 8) & 0xFF) +
-                                      (int)((c1 >> 8) & 0xFF) -
-                                      (int)((c2 >> 8) & 0xFF));
-    const uint32_t b = wpd_clip_uint8((int)(c0 & 0xFF) + (int)(c1 & 0xFF) -
-                                      (int)(c2 & 0xFF));
-    return a << 24 | r << 16 | g << 8 | b;
-}
-
-static wpd_always_inline int pred_add_sub_half(int a, int b) {
-    return (int)wpd_clip_uint8(a + (a - b) / 2);
-}
-
-static wpd_always_inline uint32_t pred_clamped_add_sub_half(uint32_t c0,
-                                                            uint32_t c1,
-                                                            uint32_t c2) {
-    const uint32_t ave = pred_avg2(c0, c1);
-    const uint32_t a   = pred_add_sub_half((int)(ave >> 24), (int)(c2 >> 24));
-    const uint32_t r   = pred_add_sub_half((int)((ave >> 16) & 0xFF),
-                                           (int)((c2 >> 16) & 0xFF));
-    const uint32_t g   = pred_add_sub_half((int)((ave >> 8) & 0xFF),
-                                           (int)((c2 >> 8) & 0xFF));
-    const uint32_t b   = pred_add_sub_half((int)(ave & 0xFF), (int)(c2 & 0xFF));
-    return a << 24 | r << 16 | g << 8 | b;
-}
-
-/* opaque black (0xFF000000 in [A, R, G, B] order) as a native word */
-static wpd_always_inline uint32_t pred_black(void) {
-    const uint8_t bytes[4] = {0xFF, 0x00, 0x00, 0x00};
-    uint32_t      v;
-    memcpy(&v, bytes, 4);
-    return v;
-}
-
-/*
- * A predictor applied to a run of pixels. in and out alias each other: the
- * residual is read from out[x] and the reconstruction written back to it.
- * upper points at the pixel directly above out, so upper[-1] is top-left
- * and upper[+1] top-right.
- */
-typedef void (*pred_add_func)(const uint32_t *in, const uint32_t *upper,
-                              int num_pixels, uint32_t *out);
-
-#define PRED_ADD(name, expr)                         \
-    static void name(const uint32_t *in,             \
-                     const uint32_t *upper,          \
-                     int             num_pixels,     \
-                     uint32_t       *out) {          \
-        for (int x = 0; x < num_pixels; x++) {       \
-            const uint32_t l  = out[x - 1];          \
-            const uint32_t t  = upper[x];            \
-            const uint32_t tl = upper[x - 1];        \
-            const uint32_t tr = upper[x + 1];        \
-            (void)l;                                 \
-            (void)t;                                 \
-            (void)tl;                                \
-            (void)tr;                                \
-            out[x] = pred_add_pixels(in[x], (expr)); \
-        }                                            \
-    }
-
-/* PRED_MODE_BLACK */
-static void pred_add_0(const uint32_t *in, const uint32_t *upper,
-                       int num_pixels, uint32_t *out) {
-    const uint32_t black = pred_black();
-    for (int x = 0; x < num_pixels; x++) out[x] = pred_add_pixels(in[x], black);
-}
-
-/* PRED_MODE_L: each pixel predicts from the one just reconstructed */
-static void pred_add_1(const uint32_t *in, const uint32_t *upper,
-                       int num_pixels, uint32_t *out) {
-    uint32_t left = out[-1];
-    for (int x = 0; x < num_pixels; x++)
-        out[x] = left = pred_add_pixels(in[x], left);
-}
-
-PRED_ADD(pred_add_2, t) /* T          */
-PRED_ADD(pred_add_3, tr) /* TR         */
-PRED_ADD(pred_add_4, tl) /* TL         */
-PRED_ADD(pred_add_5, pred_avg3(l, t, tr))
-PRED_ADD(pred_add_6, pred_avg2(l, tl))
-PRED_ADD(pred_add_7, pred_avg2(l, t))
-PRED_ADD(pred_add_8, pred_avg2(tl, t))
-PRED_ADD(pred_add_9, pred_avg2(t, tr))
-PRED_ADD(pred_add_10, pred_avg4(l, tl, t, tr))
-PRED_ADD(pred_add_11, pred_select(t, l, tl))
-PRED_ADD(pred_add_12, pred_clamped_add_sub_full(l, t, tl))
-PRED_ADD(pred_add_13, pred_clamped_add_sub_half(l, t, tl))
-
-#if WPD_PRED_NEON
-#include "lossless_neon.h"
-#endif
-
-static const pred_add_func predictors_add[14] = {
-#if WPD_PRED_NEON
-    pred_add_0_neon,
-    pred_add_1_neon,
-    pred_add_2_neon,
-    pred_add_3_neon,
-    pred_add_4_neon,
-    pred_add_5_neon,
-    pred_add_6_neon,
-    pred_add_7_neon,
-    pred_add_8_neon,
-    pred_add_9_neon,
-    pred_add_10_neon,
-    pred_add_11_neon,
-    pred_add_12_neon,
-    pred_add_13_neon,
-#else
-    pred_add_0,
-    pred_add_1,
-    pred_add_2,
-    pred_add_3,
-    pred_add_4,
-    pred_add_5,
-    pred_add_6,
-    pred_add_7,
-    pred_add_8,
-    pred_add_9,
-    pred_add_10,
-    pred_add_11,
-    pred_add_12,
-    pred_add_13,
-#endif
-};
-
-/*
  * Undo the predictor transform in place. The predictor mode is constant
  * over a tile, so it is looked up (and the predictor dispatched) once per
  * run of pixels rather than once per pixel.
  */
 static int apply_predictor_transform(WPDDecoder *s) {
-    ImageContext *img       = &s->image[IMAGE_ROLE_ARGB];
-    ImageContext *pimg      = &s->image[IMAGE_ROLE_PREDICTOR];
-    const int     width     = s->reduced_width;
-    const int     height    = img->frame->height;
-    const int     stride    = img->frame->linesize[0] / 4;
-    const int     tile_bits = pimg->size_reduction;
-    const int     tile_size = 1 << tile_bits;
-    const int     tile_mask = tile_size - 1;
-    uint32_t     *row       = (uint32_t *)img->frame->data[0];
-    int           y;
+    ImageContext              *img       = &s->image[IMAGE_ROLE_ARGB];
+    ImageContext              *pimg      = &s->image[IMAGE_ROLE_PREDICTOR];
+    pred_add_func const *const pred_add  = s->ldsp.pred_add;
+    const int                  width     = s->reduced_width;
+    const int                  height    = img->frame->height;
+    const int                  stride    = img->frame->linesize[0] / 4;
+    const int                  tile_bits = pimg->size_reduction;
+    const int                  tile_size = 1 << tile_bits;
+    const int                  tile_mask = tile_size - 1;
+    uint32_t                  *row       = (uint32_t *)img->frame->data[0];
+    int                        y;
 
     if (width <= 0 || height <= 0)
         return 0;
 
     /* first row: opaque black for the corner pixel, L for the rest */
-    pred_add_0(row, NULL, 1, row);
+    pred_add[0](row, NULL, 1, row);
     if (width > 1)
-        pred_add_1(row + 1, NULL, width - 1, row + 1);
+        pred_add[1](row + 1, NULL, width - 1, row + 1);
 
     for (y = 1, row += stride; y < height; y++, row += stride) {
         const uint32_t *upper = row - stride;
@@ -1387,7 +1197,7 @@ static int apply_predictor_transform(WPDDecoder *s) {
         int x = 1;
 
         /* first pixel of every later row follows T */
-        pred_add_2(row, upper, 1, row);
+        pred_add[2](row, upper, 1, row);
 
         while (x < width) {
             /* the mode lives in the green channel of the predictor image */
@@ -1400,7 +1210,7 @@ static int apply_predictor_transform(WPDDecoder *s) {
             }
             if (x_end > width)
                 x_end = width;
-            predictors_add[m](row + x, upper + x, x_end - x, row + x);
+            pred_add[m](row + x, upper + x, x_end - x, row + x);
             x = x_end;
         }
     }
@@ -1768,23 +1578,6 @@ static void alpha_inverse_prediction(WebPImage *frame, enum AlphaFilter m) {
     }
 }
 
-/*
- * Gather the green byte of each ARGB pixel into a packed plane. A VP8L
- * alpha chunk carries the alpha values in green, so this runs over the
- * whole image and is worth deinterleaving a vector at a time.
- */
-static void extract_green(uint8_t *dst, const uint8_t *src, int num_pixels) {
-    int x = 0;
-
-#if WPD_PRED_NEON
-    for (; x + 16 <= num_pixels; x += 16, src += 64, dst += 16) {
-        const uint8x16x4_t argb = vld4q_u8(src);
-        vst1q_u8(dst, argb.val[2]);
-    }
-#endif
-    for (; x < num_pixels; x++, src += 4, dst++) *dst = src[2];
-}
-
 static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
                                   const uint8_t *data_start,
                                   unsigned int   data_size) {
@@ -1816,9 +1609,9 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
         /* copy green component of alpha image to alpha plane of primary image */
         if (!s->alpha_dst_used)
             for (y = 0; y < s->height; y++)
-                extract_green(p->data[3] + p->linesize[3] * y,
-                              GET_PIXEL(&s->alpha_argb, 0, y),
-                              s->width);
+                s->ldsp.extract_green(p->data[3] + p->linesize[3] * y,
+                                      GET_PIXEL(&s->alpha_argb, 0, y),
+                                      s->width);
         image_free(&s->alpha_argb);
     }
 
@@ -2416,6 +2209,7 @@ WPDDecoder *wpd_decoder_create(void) {
     if (!decoder)
         return NULL;
     wpd_dsp_data_init();
+    wpd_vp8l_dsp_init(&decoder->ldsp);
     return decoder;
 }
 
