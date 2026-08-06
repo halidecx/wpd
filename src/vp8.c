@@ -622,6 +622,12 @@ static int update_dimensions(VP8Context *s, int width, int height) {
     if (wpd_check_image_size(width, height))
         return WPD_ERROR_INVALID_DATA;
 
+    // keep the buffers and picture when the dimensions are unchanged;
+    // everything they carry is rewritten at the start of each frame
+    if (width == s->avctx->width && height == s->avctx->height &&
+        s->frame.allocation[0] && s->filter_strength)
+        return 0;
+
     free_buffers(s);
     wpd_release_picture(&s->frame);
     s->avctx->width  = width;
@@ -955,7 +961,7 @@ static int decode_block_coeffs_internal(
             }
             token_prob = probs[i + 1][2];
         }
-        block[zigzag_scan[i]] = (vp8_rac_get(c) ? -coeff : coeff) * qmul[!!i];
+        block[zigzag_scan[i]] = vp8_rac_get_signed(c, coeff) * qmul[!!i];
     } while (++i < 16);
 
     return i;
@@ -1447,7 +1453,8 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     if ((ret = decode_frame_header(s, avpkt->data, avpkt->size)) < 0)
         return ret;
 
-    if ((ret = wpd_alloc_picture(avctx, curframe)) < 0) {
+    if (!curframe->allocation[0] &&
+        (ret = wpd_alloc_picture(avctx, curframe)) < 0) {
         wpd_log(avctx, WPD_LOG_ERROR, "Frame allocation failed\n");
         return ret;
     }
@@ -1459,7 +1466,9 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     memset(s->top_nnz, 0, s->mb_width * sizeof(*s->top_nnz));
     memset(s->intra4x4_pred_mode_top, DC_PRED, s->mb_width * 4);
 
-    // top edge of 127 for intra prediction
+    // top edge of 127 for intra prediction; entry 0 is cleared in full since
+    // the picture is reused across frames and no longer freshly zeroed
+    memset(s->top_border[0], 0, sizeof(*s->top_border));
     s->top_border[0][15] = s->top_border[0][23] = 127;
     memset(
         &s->top_border[0][31], 127, s->mb_width * sizeof(*s->top_border) + 1);
