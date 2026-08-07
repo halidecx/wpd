@@ -6,7 +6,7 @@ NEW="${2:?usage: md5check.sh OLD_BIN NEW_BIN}"
 shopt -s nullglob
 for input in wpd-test-data/*.webp; do
     case "$input" in
-        *anim_rgb*|*lossless*) formats="argb" ;;
+        *rgb*|*lossless*)      formats="argb" ;;
         *anim_yuva*|*a_lossy*) formats="yuva420p yuv420p" ;;
         *)                     formats="yuv420p" ;;
     esac

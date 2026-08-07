@@ -5,6 +5,15 @@ SECTION_RODATA 32
 
 eg_perm: dd 0, 4, 1, 5, 2, 6, 3, 7
 
+; blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
+blend_scale:
+    dd 0
+%assign bsi 1
+%rep 255
+    dd (1 << 24) / bsi
+    %assign bsi bsi + 1
+%endrep
+
 SECTION .text
 
 ; pavgb rounds up; subtracting (a ^ b) & 1 yields VP8L's floor average.
@@ -438,6 +447,147 @@ cglobal extract_green, 3, 4, 6, dst, src, n
     mov        [dstq], r3b
     add        srcq, 4
     inc        dstq
+    dec        nd
+    jg .loop1
+.ret:
+    RET
+
+
+INIT_YMM avx2
+cglobal map_color32, 4, 5, 5, dst, src, pal, n
+    pcmpeqd    m3, m3
+    psrld      m3, 24
+    cmp        nd, 8
+    jl .tail1
+.loop8:
+    movu       m0, [srcq]
+    psrld      m0, 16
+    pand       m0, m0, m3
+    ; vpgatherdd clears its mask operand, so rebuild it every iteration.
+    pcmpeqd    m4, m4
+    vpgatherdd m1, [palq+m0*4], m4
+    movu       [dstq], m1
+    add        srcq, 32
+    add        dstq, 32
+    sub        nd, 8
+    cmp        nd, 8
+    jge .loop8
+.tail1:
+    test       nd, nd
+    jz .ret
+.loop1:
+    movzx      r4d, byte [srcq+2]
+    mov        r4d, [palq+r4*4]
+    mov        [dstq], r4d
+    add        srcq, 4
+    add        dstq, 4
+    dec        nd
+    jg .loop1
+.ret:
+    RET
+
+
+; Blend one 32-bit channel of m0 over m1 and OR the result into %1.
+; m2 = src alpha, m4 = dst factor, m6 = 2^24/blend_alpha, m7 = 0x000000ff.
+%macro BLEND_CH 2 ; acc, shift
+    psrld      m9, m0, %2
+    psrld      m10, m1, %2
+    pand       m9, m9, m7
+    pand       m10, m10, m7
+    pmulld     m9, m9, m2
+    pmulld     m10, m10, m4
+    paddd      m9, m9, m10
+    pmulld     m9, m9, m6
+    psrld      m9, m9, 24
+    pslld      m9, m9, %2
+    por        %1, %1, m9
+%endmacro
+
+INIT_YMM avx2
+cglobal blend_row_argb, 3, 5, 15, dst, src, n
+    pcmpeqd    m7, m7
+    psrld      m7, 24                  ; 0x000000ff, doubles as the opaque value
+    pcmpeqd    m8, m8
+    psrld      m8, 31
+    pslld      m8, 8                   ; 256
+    pxor       m11, m11
+    lea        r4q, [blend_scale]
+    cmp        nd, 8
+    jl .tail1
+.loop8:
+    movu       m0, [srcq]
+    pand       m2, m0, m7              ; src alpha
+    pcmpeqd    m14, m2, m7
+    movmskps   r3d, m14
+    cmp        r3d, 0xff
+    je .opaque                         ; whole vector opaque: copy src
+    ptest      m2, m2
+    jz .next8                          ; whole vector transparent: keep dst
+    movu       m1, [dstq]
+    pand       m3, m1, m7              ; dst alpha
+    psubd      m4, m8, m2
+    pmulld     m4, m4, m3
+    psrld      m4, m4, 8               ; (dst_a * (256 - src_a)) >> 8
+    paddd      m5, m2, m4              ; blend alpha
+    pcmpeqd    m12, m12                ; vpgatherdd consumes its mask
+    vpgatherdd m6, [r4q+m5*4], m12
+    mova       m13, m5
+    BLEND_CH   m13, 8
+    BLEND_CH   m13, 16
+    BLEND_CH   m13, 24
+    pblendvb   m13, m13, m0, m14       ; opaque lanes copy src verbatim
+    pcmpeqd    m9, m2, m11
+    pblendvb   m13, m13, m1, m9        ; transparent lanes keep dst
+    movu       [dstq], m13
+    jmp .next8
+.opaque:
+    movu       [dstq], m0
+.next8:
+    add        srcq, 32
+    add        dstq, 32
+    sub        nd, 8
+    cmp        nd, 8
+    jge .loop8
+.tail1:
+    test       nd, nd
+    jz .ret
+.loop1:
+    movzx      r3d, byte [srcq]
+    cmp        r3d, 0xff
+    je .copy1
+    test       r3d, r3d
+    jz .skip1
+    movd       xm0, [srcq]
+    movd       xm1, [dstq]
+    pmovzxbd   xm0, xm0
+    pmovzxbd   xm1, xm1
+    pshufd     xm2, xm0, 0
+    pshufd     xm3, xm1, 0
+    psubd      xm4, xm8, xm2
+    pmulld     xm4, xm4, xm3
+    psrld      xm4, xm4, 8
+    paddd      xm5, xm2, xm4
+    movd       r3d, xm5
+    mov        r3d, [r4q+r3*4]
+    movd       xm6, r3d
+    pshufd     xm6, xm6, 0
+    pmulld     xm0, xm0, xm2
+    pmulld     xm1, xm1, xm4
+    paddd      xm0, xm0, xm1
+    pmulld     xm0, xm0, xm6
+    psrld      xm0, xm0, 24
+    packusdw   xm0, xm0, xm0
+    packuswb   xm0, xm0, xm0
+    movd       [dstq], xm0
+    movd       r3d, xm5                ; lane 0 held alpha scratch, not a result
+    mov        [dstq], r3b
+    jmp .skip1
+.copy1:
+    mov        r3d, [srcq]
+    mov        [dstq], r3d
+.skip1:
+    add        srcq, 4
+    add        dstq, 4
     dec        nd
     jg .loop1
 .ret:
