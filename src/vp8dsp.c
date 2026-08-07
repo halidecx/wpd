@@ -1,6 +1,15 @@
 
 
 #include "vp8dsp.h"
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+#include "src/aarch64/vp8dsp_init.h"
+#elif WPD_ARCH_ARM
+#include "src/arm/vp8dsp_init.h"
+#elif WPD_ARCH_X86
+#include "src/x86/vp8dsp_init.h"
+#endif
+#endif
 #include "wpd_codec.h"
 
 uint8_t wpd_crop_table[256 + 2 * WPD_MAX_NEG_CROP];

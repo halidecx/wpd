@@ -1,4 +1,8 @@
-#include "vp8l_dsp.h"
+#ifndef WPD_AARCH64_VP8L_INIT_H
+#define WPD_AARCH64_VP8L_INIT_H
+
+#include "src/cpu.h"
+#include "src/vp8l_dsp.h"
 
 #define PRED_ADD_NEON(x)                                    \
     void ff_pred_add_##x##_neon(const uint32_t *in,         \
@@ -24,7 +28,9 @@ PRED_ADD_NEON(13)
 
 void ff_extract_green_neon(uint8_t *dst, const uint8_t *src, int num_pixels);
 
-wpd_cold void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp) {
+static wpd_always_inline void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp) {
+    if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
+        return;
     dsp->pred_add[0]  = ff_pred_add_0_neon;
     dsp->pred_add[1]  = ff_pred_add_1_neon;
     dsp->pred_add[2]  = ff_pred_add_2_neon;
@@ -42,3 +48,5 @@ wpd_cold void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp) {
 
     dsp->extract_green = ff_extract_green_neon;
 }
+
+#endif

@@ -1,5 +1,9 @@
-#include "vp8pred.h"
-#include "wpd_codec.h"
+#ifndef WPD_ARM_VP8PRED_INIT_H
+#define WPD_ARM_VP8PRED_INIT_H
+
+#include "src/cpu.h"
+#include "src/vp8pred.h"
+#include "src/wpd_codec.h"
 
 #define PRED8(name) void ff_pred8x8_##name##_neon(uint8_t *, int)
 #define PRED16(name) void ff_pred16x16_##name##_neon(uint8_t *, int)
@@ -13,8 +17,8 @@ PRED16(left_dc);
 PRED16(top_dc);
 PRED16(128_dc);
 
-wpd_cold void ff_vp8_pred_init_arm(VP8PredContext *pred) {
-    if (!wpd_have_neon(wpd_get_cpu_flags()))
+static wpd_always_inline void ff_vp8_pred_init_arm(VP8PredContext *pred) {
+    if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
         return;
     pred->pred8x8[VERT_PRED8x8]      = ff_pred8x8_vert_neon;
     pred->pred8x8[HOR_PRED8x8]       = ff_pred8x8_hor_neon;
@@ -26,3 +30,5 @@ wpd_cold void ff_vp8_pred_init_arm(VP8PredContext *pred) {
     pred->pred16x16[TOP_DC_PRED8x8]  = ff_pred16x16_top_dc_neon;
     pred->pred16x16[DC_128_PRED8x8]  = ff_pred16x16_128_dc_neon;
 }
+
+#endif

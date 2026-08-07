@@ -14,8 +14,8 @@ typedef int (*decode_block_coeffs_fn)(VP56RangeCoder *c, WpdDctElem block[16],
                                       int16_t qmul[2]);
 
 static decode_block_coeffs_fn get_decode_block_coeffs(void) {
-#if defined(__arm__)
-    if (wpd_have_armv6(wpd_get_cpu_flags()))
+#if WPD_ARM_ARMV6_ASM
+    if (wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_ARMV6)
         return ff_decode_block_coeffs_armv6;
 #endif
     return wpd_decode_block_coeffs_c;

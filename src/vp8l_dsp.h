@@ -14,7 +14,5 @@ typedef struct WPDLosslessDSP {
 } WPDLosslessDSP;
 
 void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp);
-void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp);
-void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp);
 
 #endif

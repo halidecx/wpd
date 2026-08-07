@@ -4,9 +4,6 @@
 
 #include "../vp8dsp.h"
 
-void ff_vp8dsp_init_armv6(VP8DSPContext *dsp);
-void ff_vp8dsp_init_neon(VP8DSPContext *dsp);
-
 #define VP8_LF_Y(hv, inner, opt)                                      \
     void ff_vp8_##hv##_loop_filter16##inner##_##opt(uint8_t  *dst,    \
                                                     ptrdiff_t stride, \

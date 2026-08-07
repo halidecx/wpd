@@ -89,8 +89,11 @@ static void check_idct(VP8DSPContext *d) {
     LOCAL_ALIGNED_16(int16_t, subcoef0, [4 * 4]);
     LOCAL_ALIGNED_16(int16_t, subcoef1, [4 * 4]);
     int dc;
-    declare_func_emms(
-        WPD_CPU_MMX, void, uint8_t *dst, int16_t *block, ptrdiff_t stride);
+    declare_func_emms(WPD_X86_CPU_FLAG_MMX,
+                      void,
+                      uint8_t  *dst,
+                      int16_t  *block,
+                      ptrdiff_t stride);
 
     randomize_buffers(src, dst, 4, coef);
 
@@ -130,7 +133,7 @@ static void check_idct_dc4(VP8DSPContext *d) {
     LOCAL_ALIGNED_16(int16_t, subcoef0, [4][4 * 4]);
     LOCAL_ALIGNED_16(int16_t, subcoef1, [4][4 * 4]);
     int i, chroma;
-    declare_func_emms(WPD_CPU_MMX,
+    declare_func_emms(WPD_X86_CPU_FLAG_MMX,
                       void,
                       uint8_t  *dst,
                       int16_t   block[4][16],
@@ -178,7 +181,7 @@ static void check_luma_dc_wht(VP8DSPContext *d) {
     int dc_only;
     int blockx, blocky;
     declare_func_emms(
-        WPD_CPU_MMX, void, int16_t block[4][4][16], int16_t dc[16]);
+        WPD_X86_CPU_FLAG_MMX, void, int16_t block[4][4][16], int16_t dc[16]);
 
     for (blocky = 0; blocky < 4; blocky++) {
         for (blockx = 0; blockx < 4; blockx++) {

@@ -7,18 +7,18 @@ void checkasm_check_vp8pred(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
 #if WPD_ARCH_X86
-    {"MMX", "mmx", WPD_CPU_MMX},
-    {"MMXEXT", "mmxext", WPD_CPU_MMX2},
-    {"SSE", "sse", WPD_CPU_SSE},
-    {"SSE2", "sse2", WPD_CPU_SSE2},
-    {"SSSE3", "ssse3", WPD_CPU_SSSE3},
-    {"SSE4.1", "sse4", WPD_CPU_SSE4},
-    {"AVX2", "avx2", WPD_CPU_AVX2},
+    {"MMX", "mmx", WPD_X86_CPU_FLAG_MMX},
+    {"MMXEXT", "mmxext", WPD_X86_CPU_FLAG_MMXEXT},
+    {"SSE", "sse", WPD_X86_CPU_FLAG_SSE},
+    {"SSE2", "sse2", WPD_X86_CPU_FLAG_SSE2},
+    {"SSSE3", "ssse3", WPD_X86_CPU_FLAG_SSSE3},
+    {"SSE4.1", "sse4", WPD_X86_CPU_FLAG_SSE41},
+    {"AVX2", "avx2", WPD_X86_CPU_FLAG_AVX2},
 #elif WPD_ARCH_ARM
-    {"ARMv6", "armv6", WPD_CPU_ARMV6},
-    {"NEON", "neon", WPD_CPU_NEON},
+    {"ARMv6", "armv6", WPD_ARM_CPU_FLAG_ARMV6},
+    {"NEON", "neon", WPD_ARM_CPU_FLAG_NEON},
 #elif WPD_ARCH_AARCH64
-    {"NEON", "neon", WPD_CPU_NEON},
+    {"NEON", "neon", WPD_ARM_CPU_FLAG_NEON},
 #endif
     {0}};
 
@@ -29,11 +29,14 @@ static const CheckasmTest tests[] = {{"lossless", checkasm_check_lossless},
                                      {0}};
 
 static void set_cpu_flags(CheckasmCpu flags) {
-    wpd_set_cpu_flags_for_test((int)flags);
+    wpd_set_cpu_flags_mask((unsigned)flags);
 }
 
 int main(int argc, const char *argv[]) {
-    CheckasmConfig config = {
+    CheckasmConfig config;
+
+    wpd_init_cpu();
+    config = (CheckasmConfig){
         .cpu_flags     = cpu_flags,
         .tests         = tests,
         .cpu           = (CheckasmCpu)wpd_get_cpu_flags(),

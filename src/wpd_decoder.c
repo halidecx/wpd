@@ -2015,6 +2015,7 @@ WPDDecoder *wpd_decoder_create(void) {
     WPDDecoder *decoder = calloc(1, sizeof(*decoder));
     if (!decoder)
         return NULL;
+    wpd_init_cpu();
     wpd_dsp_data_init();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     return decoder;

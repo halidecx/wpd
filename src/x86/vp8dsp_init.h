@@ -1,6 +1,9 @@
+#ifndef WPD_X86_VP8DSP_INIT_H
+#define WPD_X86_VP8DSP_INIT_H
 
-#include "vp8dsp.h"
-#include "wpd_codec.h"
+#include "src/cpu.h"
+#include "src/vp8dsp.h"
+#include "src/wpd_codec.h"
 
 void ff_vp8_idct_dc_add_sse2(uint8_t *dst, int16_t block[16], ptrdiff_t stride);
 void ff_vp8_idct_dc_add_sse4(uint8_t *dst, int16_t block[16], ptrdiff_t stride);
@@ -42,19 +45,19 @@ void ff_vp8_h_loop_filter16y_mbedge_sse4(uint8_t *dst, ptrdiff_t stride, int e,
 void ff_vp8_h_loop_filter8uv_mbedge_sse4(uint8_t *dstU, uint8_t *dstV,
                                          ptrdiff_t s, int e, int i, int hvt);
 
-wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c) {
-    int cpu_flags = wpd_get_cpu_flags();
+static wpd_always_inline void ff_vp8dsp_init_x86(VP8DSPContext *c) {
+    const unsigned flags = wpd_get_cpu_flags();
 
-    if (WPD_CPU_HAS_MMX(cpu_flags)) {
+    if (flags & WPD_X86_CPU_FLAG_MMX) {
         c->vp8_idct_dc_add4uv = ff_vp8_idct_dc_add4uv_mmx;
     }
 
-    if (WPD_CPU_HAS_SSE(cpu_flags)) {
+    if (flags & WPD_X86_CPU_FLAG_SSE) {
         c->vp8_idct_add    = ff_vp8_idct_add_sse;
         c->vp8_luma_dc_wht = ff_vp8_luma_dc_wht_sse;
     }
 
-    if (WPD_CPU_HAS_SSE2_SLOW(cpu_flags)) {
+    if (flags & WPD_X86_CPU_FLAG_SSE2) {
         c->vp8_v_loop_filter_simple = ff_vp8_v_loop_filter_simple_sse2;
 
         c->vp8_v_loop_filter16y_inner = ff_vp8_v_loop_filter16y_inner_sse2;
@@ -62,9 +65,7 @@ wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c) {
 
         c->vp8_v_loop_filter16y = ff_vp8_v_loop_filter16y_mbedge_sse2;
         c->vp8_v_loop_filter8uv = ff_vp8_v_loop_filter8uv_mbedge_sse2;
-    }
 
-    if (WPD_CPU_HAS_SSE2(cpu_flags)) {
         c->vp8_idct_dc_add   = ff_vp8_idct_dc_add_sse2;
         c->vp8_idct_dc_add4y = ff_vp8_idct_dc_add4y_sse2;
 
@@ -77,7 +78,7 @@ wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c) {
         c->vp8_h_loop_filter8uv = ff_vp8_h_loop_filter8uv_mbedge_sse2;
     }
 
-    if (WPD_CPU_HAS_SSSE3(cpu_flags)) {
+    if (flags & WPD_X86_CPU_FLAG_SSSE3) {
         c->vp8_v_loop_filter_simple = ff_vp8_v_loop_filter_simple_ssse3;
         c->vp8_h_loop_filter_simple = ff_vp8_h_loop_filter_simple_ssse3;
 
@@ -92,7 +93,7 @@ wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c) {
         c->vp8_h_loop_filter8uv = ff_vp8_h_loop_filter8uv_mbedge_ssse3;
     }
 
-    if (WPD_CPU_HAS_SSE4(cpu_flags)) {
+    if (flags & WPD_X86_CPU_FLAG_SSE41) {
         c->vp8_idct_dc_add = ff_vp8_idct_dc_add_sse4;
 
         c->vp8_h_loop_filter_simple = ff_vp8_h_loop_filter_simple_sse4;
@@ -100,3 +101,5 @@ wpd_cold void ff_vp8dsp_init_x86(VP8DSPContext *c) {
         c->vp8_h_loop_filter8uv     = ff_vp8_h_loop_filter8uv_mbedge_sse4;
     }
 }
+
+#endif

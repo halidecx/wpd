@@ -29,7 +29,7 @@ if not cc.has_function('getopt_long', prefix: '#include <getopt.h>')
   getopt_inc_dirs = include_directories('include/compat')
 endif
 
-inc_dirs = [include_directories('include', 'src')]
+inc_dirs = [include_directories('.', 'include', 'src')]
 lib_sources = files(
   'src/wpd_decoder.c',
   'src/vp8.c',
@@ -38,10 +38,15 @@ lib_sources = files(
   'src/vp8pred.c',
   'src/vp8l_dsp.c',
   'src/wpd_compat.c',
-  'src/wpd_cpu.c',
+  'src/cpu.c',
 )
 lib_objects = []
 lib_c_args = ['-Wno-unused-parameter']
+
+lib_c_args += '-DWPD_HAVE_GETAUXVAL=@0@'.format(
+  cc.has_function('getauxval', prefix: '#include <sys/auxv.h>') ? 1 : 0)
+lib_c_args += '-DWPD_HAVE_ELF_AUX_INFO=@0@'.format(
+  cc.has_function('elf_aux_info', prefix: '#include <sys/auxv.h>') ? 1 : 0)
 
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or
@@ -50,6 +55,11 @@ asm_enabled = get_option('enable_asm') and (
 )
 
 lib_c_args += '-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)
+
+# Eliminate DSP fallbacks the build target can never reach (dav1d's trim_dsp).
+trim_dsp = get_option('trim_dsp') == 'true' or (
+  get_option('trim_dsp') == 'if-release' and get_option('buildtype') == 'release')
+trim_c_args = trim_dsp ? ['-DWPD_TRIM_DSP_FUNCTIONS=1'] : []
 
 if asm_enabled
   if cpu_family.startswith('x86')
@@ -103,29 +113,26 @@ if asm_enabled
     )
     lib_objects += nasm_gen.process(files('src/x86/vp8dsp_loopfilter.asm'))
     lib_sources += files(
-      'src/x86/vp8l_init.c',
-      'src/x86/vp8dsp_init.c',
-      'src/x86/vp8pred_init.c',
+      'src/x86/cpu.c',
       'src/x86/wpd_simd_constants.c',
     )
-    lib_c_args += [
-      '-DHAVE_YASM=1',
-      '-DHAVE_AVX2_EXTERNAL=1',
-      '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
-    ]
   elif cpu_family == 'aarch64'
     inc_dirs += [include_directories('src/aarch64')]
     lib_sources += files(
+      'src/arm/cpu.c',
       'src/aarch64/vp8l_neon.S',
-      'src/aarch64/vp8l_init.c',
       'src/aarch64/vp8dsp_neon.S',
-      'src/aarch64/vp8dsp_init_aarch64.c',
       'src/aarch64/vp8pred_neon.S',
-      'src/aarch64/vp8pred_init.c',
     )
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 
+    armv6 = cc.compiles(
+      '''#if !defined(__ARM_ARCH) || __ARM_ARCH < 6
+         #error no ARMv6 on this target
+         #endif
+         int main(void) { return 0; }''',
+      name: 'ARMv6 target')
     armv6t2 = cc.compiles(
       '''#if !defined(__ARM_ARCH_6T2__) && (!defined(__ARM_ARCH) || __ARM_ARCH < 7)
          #error no Thumb-2 on this target
@@ -137,16 +144,17 @@ if asm_enabled
       name: 'ARMv6T2 assembler support')
 
     lib_sources += files(
-      'src/arm/vp8_armv6.S',
-      'src/arm/vp8dsp_armv6.S',
+      'src/arm/cpu.c',
       'src/arm/vp8dsp_neon.S',
-      'src/arm/vp8dsp_init_arm.c',
-      'src/arm/vp8dsp_init_armv6.c',
-      'src/arm/vp8dsp_init_neon.c',
       'src/arm/vp8pred_neon.S',
-      'src/arm/vp8pred_init.c',
     )
-    lib_c_args += ['-DWPD_ARM_NEON_ASM=1']
+    if armv6
+      lib_sources += files(
+        'src/arm/vp8_armv6.S',
+        'src/arm/vp8dsp_armv6.S',
+      )
+      lib_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
+    endif
     if armv6t2
       lib_c_args += ['-DWPD_ARM_ARMV6T2_ASM=1']
     endif
@@ -157,13 +165,14 @@ if asm_enabled
 endif
 
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
+message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
 
 libwpd = static_library(
   'wpd',
   lib_sources,
   lib_objects,
   include_directories: inc_dirs,
-  c_args: lib_c_args,
+  c_args: lib_c_args + trim_c_args,
   install: false,
 )
 

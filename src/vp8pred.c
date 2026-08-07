@@ -1,4 +1,13 @@
 #include "vp8pred.h"
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+#include "src/aarch64/vp8pred_init.h"
+#elif WPD_ARCH_ARM
+#include "src/arm/vp8pred_init.h"
+#elif WPD_ARCH_X86
+#include "src/x86/vp8pred_init.h"
+#endif
+#endif
 
 static void fill(uint8_t *src, int stride, int width, int height,
                  uint8_t value) {
