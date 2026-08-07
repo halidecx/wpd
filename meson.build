@@ -194,13 +194,27 @@ wpd_dep = declare_dependency(
 
 executable(
   'wpd',
-  'tools/wpd.c',
+  files(
+    'tools/md5.c',
+    'tools/wpd.c',
+  ),
   vcs_version,
   getopt_sources,
   dependencies: wpd_dep,
   include_directories: getopt_inc_dirs,
   install: false,
 )
+
+md5_test = executable(
+  'test_md5',
+  files(
+    'tests/md5.c',
+    'tools/md5.c',
+  ),
+  include_directories: include_directories('tools'),
+  install: false,
+)
+test('md5', md5_test, suite: 'md5')
 
 libwebpdecoder_path = get_option('libwebpdecoder')
 if libwebpdecoder_path != ''

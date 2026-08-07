@@ -30,6 +30,14 @@ picture:
 build/wpd input.webp /dev/null
 ```
 
+Use the MD5 muxer to hash the bytes that would be written as raw output, or
+verify them directly without an output argument:
+
+```sh
+build/wpd --muxer md5 input.webp -
+build/wpd --verify "$expected_md5" input.webp
+```
+
 Architecture-specific assembly is enabled automatically. Use
 `meson setup build -Denable_asm=false` for a portable C-only build.
 

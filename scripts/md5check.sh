@@ -1,8 +1,7 @@
 #!/bin/bash -eu
 
-BIN="${1:-./build/wpd}"
-OUT=$(mktemp -d)
-trap 'rm -rf "$OUT"' EXIT
+OLD="${1:?usage: md5check.sh OLD_BIN NEW_BIN}"
+NEW="${2:?usage: md5check.sh OLD_BIN NEW_BIN}"
 
 shopt -s nullglob
 for input in wpd-test-data/*.webp; do
@@ -12,7 +11,14 @@ for input in wpd-test-data/*.webp; do
         *)                     formats="yuv420p" ;;
     esac
     for fmt in $formats; do
-        "$BIN" -f "$fmt" "$input" "$OUT/out.raw"
-        printf '%s\t%s\t%s\n' "$input" "$fmt" "$(md5 -q "$OUT/out.raw")"
+        expected=$("$OLD" --muxer md5 -f "$fmt" "$input" -)
+        if "$NEW" --verify "$expected" -f "$fmt" "$input"; then
+            printf '%s\t%s\t%s\n' "$input" "$fmt" "$expected"
+        else
+            actual=$("$NEW" --muxer md5 -f "$fmt" "$input" -)
+            printf 'mismatch: %s (%s)\nold: %s\nnew: %s\n' \
+                "$input" "$fmt" "$expected" "$actual" >&2
+            exit 1
+        fi
     done
 done

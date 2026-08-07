@@ -1,4 +1,5 @@
 #include "wpd.h"
+#include "md5.h"
 #include "vcs_version.h"
 
 #include <errno.h>
@@ -9,12 +10,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+    ARG_MUXER = 256,
+    ARG_VERIFY,
+};
+
+typedef enum OutputType {
+    OUTPUT_RAW,
+    OUTPUT_MD5,
+    OUTPUT_NULL,
+} OutputType;
+
+typedef struct OutputContext {
+    OutputType    type;
+    FILE         *file;
+    WPDMD5Context md5;
+} OutputContext;
+
 static const char short_options[] = "hr:f:";
 
 static const struct option long_options[] = {
     {"help", no_argument, NULL, 'h'},
     {"repeat", required_argument, NULL, 'r'},
     {"fmt", required_argument, NULL, 'f'},
+    {"muxer", required_argument, NULL, ARG_MUXER},
+    {"verify", required_argument, NULL, ARG_VERIFY},
     {NULL, 0, NULL, 0},
 };
 
@@ -26,7 +46,7 @@ static void usage(const char *app, const char *reason) {
     if (reason)
         fprintf(stderr, "\n%s\n", reason);
     fprintf(stderr,
-            "\nusage:  %s [options] input output\n"
+            "\nusage:  %s [options] input [output]\n"
             "\noptions:\n"
             " -h, --help\n"
             "    view help menu\n"
@@ -34,7 +54,11 @@ static void usage(const char *app, const char *reason) {
             "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
             " -f, --fmt str\n"
             "    output pixel format (auto, yuv420p, yuva420p, argb); "
-            "default auto\n",
+            "default auto\n"
+            " --muxer str\n"
+            "    output muxer (raw, md5); default raw\n"
+            " --verify md5\n"
+            "    verify decoded md5; implies --muxer md5 and no output\n",
             app);
 }
 
@@ -63,10 +87,102 @@ static int parse_format(const char *value, const char **pixel_format) {
     return 0;
 }
 
-static int write_plane(FILE *output, const uint8_t *data, ptrdiff_t stride,
-                       int width, int height) {
+static int parse_md5(const char *value, uint8_t digest[16]) {
+    if (strlen(value) != 32)
+        return -1;
+    for (int i = 0; i < 16; i++) {
+        int hi = value[i * 2];
+        int lo = value[i * 2 + 1];
+        hi     = hi >= '0' && hi <= '9'  ? hi - '0'
+                : hi >= 'a' && hi <= 'f' ? hi - 'a' + 10
+                : hi >= 'A' && hi <= 'F' ? hi - 'A' + 10
+                                         : -1;
+        lo     = lo >= '0' && lo <= '9'  ? lo - '0'
+                : lo >= 'a' && lo <= 'f' ? lo - 'a' + 10
+                : lo >= 'A' && lo <= 'F' ? lo - 'A' + 10
+                                         : -1;
+        if (hi < 0 || lo < 0)
+            return -1;
+        digest[i] = hi << 4 | lo;
+    }
+    return 0;
+}
+
+static int output_open(OutputContext *output, const char *muxer,
+                       const char *filename) {
+    if (!muxer)
+        muxer = "raw";
+
+    output->file = NULL;
+    if (!strcmp(muxer, "md5")) {
+        output->type = OUTPUT_MD5;
+        wpd_md5_init(&output->md5);
+        if (!filename)
+            return 0;
+    } else if (!strcmp(filename, "/dev/null")) {
+        output->type = OUTPUT_NULL;
+        return 0;
+    } else {
+        output->type = OUTPUT_RAW;
+    }
+
+    output->file = !strcmp(filename, "-") ? stdout : fopen(filename, "wb");
+    return output->file ? 0 : -1;
+}
+
+static int output_write(OutputContext *output, const uint8_t *data,
+                        size_t size) {
+    if (output->type == OUTPUT_MD5) {
+        wpd_md5_update(&output->md5, data, size);
+    } else if (output->type == OUTPUT_RAW &&
+               fwrite(data, 1, size, output->file) != size) {
+        return -1;
+    }
+    return 0;
+}
+
+static int output_close_file(OutputContext *output) {
+    int ret;
+
+    if (!output->file)
+        return 0;
+    if (output->file == stdout) {
+        ret = fflush(output->file);
+    } else {
+        ret = fclose(output->file);
+    }
+    output->file = NULL;
+    return ret;
+}
+
+static int output_close(OutputContext *output) {
+    int status = 0;
+
+    if (output->type == OUTPUT_MD5) {
+        uint8_t digest[16];
+        wpd_md5_final(&output->md5, digest);
+        for (int i = 0; i < 16; i++)
+            if (fprintf(output->file, "%02x", digest[i]) < 0)
+                status = -1;
+        if (fputc('\n', output->file) == EOF)
+            status = -1;
+    }
+    if (output_close_file(output) < 0)
+        status = -1;
+    return status;
+}
+
+static int output_verify(OutputContext *output, const uint8_t expected[16]) {
+    uint8_t digest[16];
+
+    wpd_md5_final(&output->md5, digest);
+    return memcmp(digest, expected, sizeof(digest)) != 0;
+}
+
+static int write_plane(OutputContext *output, const uint8_t *data,
+                       ptrdiff_t stride, int width, int height) {
     for (int y = 0; y < height; y++)
-        if (fwrite(data + y * stride, 1, width, output) != (size_t)width)
+        if (output_write(output, data + y * stride, width) < 0)
             return -1;
     return 0;
 }
@@ -80,7 +196,7 @@ static const char *format_name(WPDPixelFormat format) {
     return "unknown";
 }
 
-static int write_frame(FILE *output, const WPDFrame *frame,
+static int write_frame(OutputContext *output, const WPDFrame *frame,
                        const char *pixel_format) {
     int planes;
 
@@ -157,14 +273,16 @@ static uint8_t *read_file(const char *name, FILE *input, size_t *size) {
 }
 
 int main(int argc, char **argv) {
-    FILE       *input = NULL, *output = NULL;
-    WPDDecoder *decoder = NULL;
-    uint8_t    *data    = NULL;
-    size_t      size;
-    const char *pixel_format = NULL;
-    const char *input_name, *output_name;
-    int         discard_output, frames = 0, repeat = 1, ret, status = 1;
-    WPDFrame    frame;
+    FILE         *input = NULL;
+    OutputContext output;
+    WPDDecoder   *decoder = NULL;
+    uint8_t      *data    = NULL;
+    uint8_t       expected_md5[16];
+    size_t        size;
+    const char   *muxer = NULL, *pixel_format = NULL, *verify = NULL;
+    const char   *input_name, *output_name;
+    int           frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
+    WPDFrame      frame;
 
     print_banner();
     opterr = 0;
@@ -186,35 +304,56 @@ int main(int argc, char **argv) {
                 return 2;
             }
             break;
+        case ARG_MUXER:
+            if (strcmp(optarg, "raw") && strcmp(optarg, "md5")) {
+                usage(argv[0], "invalid output muxer; expected raw or md5");
+                return 2;
+            }
+            muxer = optarg;
+            break;
+        case ARG_VERIFY: verify = optarg; break;
         default:
             usage(argv[0], "unknown option or missing option value");
             return 2;
         }
     }
-    if (argc - optind != 2) {
+    if (verify && muxer && strcmp(muxer, "md5")) {
+        usage(argv[0], "verification requires the md5 muxer");
+        return 2;
+    }
+    if (verify && parse_md5(verify, expected_md5) < 0) {
+        usage(argv[0], "invalid md5; expected exactly 32 hexadecimal digits");
+        return 2;
+    }
+    if (argc - optind != (verify ? 1 : 2)) {
         usage(argv[0],
-              argc - optind < 2 ? "input and output are required"
-                                : "unexpected argument");
+              verify ? argc - optind < 1 ? "input is required"
+                                         : "verification does not accept output"
+                  : argc - optind < 2 ? "input and output are required"
+                                      : "unexpected argument");
         return 2;
     }
 
-    input_name     = argv[optind];
-    output_name    = argv[optind + 1];
-    discard_output = !strcmp(output_name, "/dev/null");
-    input          = fopen(input_name, "rb");
-    if (!discard_output)
-        output = fopen(output_name, "wb");
-    if (!input || (!discard_output && !output)) {
-        perror(!input ? input_name : output_name);
+    input_name  = argv[optind];
+    output_name = verify ? NULL : argv[optind + 1];
+    input       = fopen(input_name, "rb");
+    if (!input) {
+        perror(input_name);
         goto done;
     }
+    if (output_open(&output, verify ? "md5" : muxer, output_name) < 0) {
+        perror(output_name);
+        goto done;
+    }
+    output_opened = 1;
 
     data = read_file(input_name, input, &size);
     if (!data)
         goto done;
 
     for (int iter = 0; iter < repeat; iter++) {
-        FILE *sink = iter == 0 ? output : NULL;
+        OutputContext *sink = iter == 0 && output.type != OUTPUT_NULL ? &output
+                                                                      : NULL;
 
         wpd_decoder_free(decoder);
         frames = 0;
@@ -230,7 +369,7 @@ int main(int argc, char **argv) {
         }
         while ((ret = wpd_decoder_next_frame(decoder, &frame)) > 0) {
             if (sink && write_frame(sink, &frame, pixel_format) < 0) {
-                if (ferror(sink))
+                if (sink->file && ferror(sink->file))
                     perror("write");
                 goto done;
             }
@@ -245,13 +384,21 @@ int main(int argc, char **argv) {
         fprintf(stderr, "%s: no image data found\n", input_name);
         goto done;
     }
-    status = 0;
+    if (verify) {
+        status        = output_verify(&output, expected_md5);
+        output_opened = 0;
+    } else if (output_close(&output) < 0) {
+        perror("write");
+    } else {
+        status = 0;
+    }
+    output_opened = 0;
 done:
     wpd_decoder_free(decoder);
     free(data);
     if (input)
         fclose(input);
-    if (output && fclose(output) && !status)
-        status = 1;
+    if (output_opened)
+        output_close_file(&output);
     return status;
 }
