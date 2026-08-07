@@ -5,6 +5,9 @@ SECTION_RODATA
 
 tm_shuf: times 8 db 0x03, 0x80
 
+tm_shuf2: times 4 db 0x03, 0x80
+          times 4 db 0x07, 0x80
+
 vl_shuf: db 0, 1, 2, 3, 8, 9, 10, 11, 1, 2, 3, 12, 9, 10, 11, 13
 
 SECTION .text
@@ -12,7 +15,14 @@ SECTION .text
 cextern_naked wpd_pb_1
 cextern_naked wpd_pb_3
 
-
+%macro PALIGNR_Q 4
+%ifnidn %4, %2
+    mova    %4, %2
+%endif
+    psllq   %1, (8-%3)*8
+    psrlq   %4, %3*8
+    por     %1, %4
+%endmacro
 
 INIT_XMM sse
 cglobal pred16x16_vertical_8, 2,3
@@ -33,14 +43,10 @@ cglobal pred16x16_vertical_8, 2,3
 
 %macro PRED16x16_H 0
 cglobal pred16x16_horizontal_8, 2,3
-%if cpuflag(ssse3) && notcpuflag(avx2)
+%if cpuflag(ssse3)
     mova      m2, [wpd_pb_3]
 %endif
 %rep 8
-%if cpuflag(avx2)
-    vpbroadcastb m0, [r0+r1*0-1]
-    vpbroadcastb m1, [r0+r1*1-1]
-%else
     movd      m0, [r0+r1*0-4]
     movd      m1, [r0+r1*1-4]
 
@@ -53,7 +59,6 @@ cglobal pred16x16_horizontal_8, 2,3
     SPLATW    m0, m0, 3
     SPLATW    m1, m1, 3
 %endif
-%endif
 
     mova [r0+r1*0], m0
     mova [r0+r1*1], m1
@@ -65,8 +70,6 @@ cglobal pred16x16_horizontal_8, 2,3
 INIT_XMM sse2
 PRED16x16_H
 INIT_XMM ssse3
-PRED16x16_H
-INIT_XMM avx2
 PRED16x16_H
 
 
@@ -85,14 +88,13 @@ PRED16x16_H
 cglobal pred16x16_dc_8, 2,7
     mov       r4, r0
     sub       r0, r1
-    pxor      mm0, mm0
-    pxor      mm1, mm1
-    psadbw    mm0, [r0+0]
-    psadbw    mm1, [r0+8]
+    pxor       m0, m0
+    psadbw     m0, [r0]
     dec        r0
     movzx     r5d, byte [r0+r1*1]
-    paddw     mm0, mm1
-    movd      r6d, mm0
+    movhlps    m1, m0
+    paddd      m0, m1
+    movd      r6d, m0
     lea        r0, [r0+r1*2]
 %rep 7
     movzx     r2d, byte [r0+r1*0]
@@ -215,42 +217,58 @@ cglobal pred16x16_tm_vp8_8, 2,6,6
     jg .loop
     RET
 
-%if HAVE_AVX2_EXTERNAL
-INIT_YMM avx2
+; Broadcast the byte at [%2] to every lane of %1.
+%macro TM_SPLATB 2
+%if cpuflag(avx2)
+    vpbroadcastb %1, [%2]
+%else
+    movd    %1, [%2]
+    pshufb  %1, m4
+%endif
+%endmacro
+
+; Bytewise TM: with a = top -us tl and b = tl -us top (one is always 0),
+; clip(top + left - tl) == (left +us a) -us b exactly.
+%macro PRED16x16_TM_BYTEWISE 0
 cglobal pred16x16_tm_vp8_8, 2, 4, 5, dst, stride, stride3, iteration
-    sub                       dstq, strideq
-    pmovzxbw                    m0, [dstq]
-    vpbroadcastb               xm1, [r0-1]
-    pmovzxbw                    m1, xm1
-    psubw                       m0, m1
-    mov                 iterationd, 4
-    lea                   stride3q, [strideq*3]
+    sub       dstq, strideq
+    mova        m0, [dstq]
+%if notcpuflag(avx2)
+    pxor        m4, m4
+%endif
+    TM_SPLATB   m2, dstq-1
+    mova        m1, m0
+    psubusb     m1, m2
+    psubusb     m2, m0
+    lea   stride3q, [strideq*3]
+    mov iterationd, 4
 .loop:
-    vpbroadcastb               xm1, [dstq+strideq*1-1]
-    vpbroadcastb               xm2, [dstq+strideq*2-1]
-    vpbroadcastb               xm3, [dstq+stride3q-1]
-    vpbroadcastb               xm4, [dstq+strideq*4-1]
-    pmovzxbw                    m1, xm1
-    pmovzxbw                    m2, xm2
-    pmovzxbw                    m3, xm3
-    pmovzxbw                    m4, xm4
-    paddw                       m1, m0
-    paddw                       m2, m0
-    paddw                       m3, m0
-    paddw                       m4, m0
-    vpackuswb                   m1, m1, m2
-    vpackuswb                   m3, m3, m4
-    vpermq                      m1, m1, q3120
-    vpermq                      m3, m3, q3120
-    movdqa        [dstq+strideq*1], xm1
-    vextracti128  [dstq+strideq*2], m1, 1
-    movdqa       [dstq+stride3q*1], xm3
-    vextracti128  [dstq+strideq*4], m3, 1
-    lea                       dstq, [dstq+strideq*4]
-    dec                 iterationd
+    TM_SPLATB   m3, dstq+strideq*1-1
+    paddusb     m3, m1
+    psubusb     m3, m2
+    mova [dstq+strideq*1], m3
+    TM_SPLATB   m3, dstq+strideq*2-1
+    paddusb     m3, m1
+    psubusb     m3, m2
+    mova [dstq+strideq*2], m3
+    TM_SPLATB   m3, dstq+stride3q-1
+    paddusb     m3, m1
+    psubusb     m3, m2
+    mova [dstq+stride3q], m3
+    TM_SPLATB   m3, dstq+strideq*4-1
+    paddusb     m3, m1
+    psubusb     m3, m2
+    mova [dstq+strideq*4], m3
+    lea       dstq, [dstq+strideq*4]
+    dec iterationd
     jg .loop
     RET
-%endif
+%endmacro
+
+INIT_XMM ssse3
+PRED16x16_TM_BYTEWISE
+INIT_XMM avx2
+PRED16x16_TM_BYTEWISE
 INIT_XMM sse2
 cglobal pred8x8_vertical_8, 2,2
     sub    r0, r1
@@ -267,17 +285,12 @@ cglobal pred8x8_vertical_8, 2,2
 
 %macro PRED8x8_H 0
 cglobal pred8x8_horizontal_8, 2,3,3
-%if cpuflag(ssse3) && notcpuflag(avx2)
+%if cpuflag(ssse3)
     mova      m2, [wpd_pb_3]
 %endif
 %rep 4
-%if cpuflag(avx2)
-    vpbroadcastb m0, [r0+r1*0-1]
-    vpbroadcastb m1, [r0+r1*1-1]
-%else
     SPLATB_LOAD m0, r0+r1*0-1, m2
     SPLATB_LOAD m1, r0+r1*1-1, m2
-%endif
     movq [r0+r1*0], m0
     movq [r0+r1*1], m1
     lea       r0, [r0+r1*2]
@@ -289,18 +302,17 @@ INIT_XMM sse2
 PRED8x8_H
 INIT_XMM ssse3
 PRED8x8_H
-INIT_XMM avx2
-PRED8x8_H
 
-INIT_MMX mmxext
+INIT_XMM sse2
 cglobal pred8x8_dc_vp8_8, 2,7
     mov       r4, r0
     sub       r0, r1
-    pxor      mm0, mm0
-    psadbw    mm0, [r0]
+    pxor       m0, m0
+    movq       m1, [r0]
+    psadbw     m0, m1
     dec        r0
     movzx     r5d, byte [r0+r1*1]
-    movd      r6d, mm0
+    movd      r6d, m0
     lea        r0, [r0+r1*2]
 %rep 3
     movzx     r2d, byte [r0+r1*0]
@@ -313,12 +325,12 @@ cglobal pred8x8_dc_vp8_8, 2,7
     add       r5d, r6d
     lea       r2d, [r2+r5+8]
     shr       r2d, 4
-    movd      mm0, r2d
-    punpcklbw mm0, mm0
-    pshufw    mm0, mm0, 0
+    movd       m0, r2d
+    punpcklbw  m0, m0
+    pshuflw    m0, m0, 0
 %rep 4
-    movq [r4+r1*0], mm0
-    movq [r4+r1*1], mm0
+    movq [r4+r1*0], m0
+    movq [r4+r1*1], m0
     lea   r4, [r4+r1*2]
 %endrep
     RET
@@ -439,15 +451,15 @@ cglobal pred8x8_tm_vp8_8, 2,3,6
     pavgb   %1, %2
 %endmacro
 
-INIT_MMX mmxext
+INIT_XMM sse2
 cglobal pred4x4_dc_8, 3,5
-    pxor   mm7, mm7
+    pxor    m7, m7
     mov     r4, r0
     sub     r0, r2
-    movd   mm0, [r0]
-    psadbw mm0, mm7
+    movd    m0, [r0]
+    psadbw  m0, m7
     movzx  r1d, byte [r0+r2*1-1]
-    movd   r3d, mm0
+    movd   r3d, m0
     add    r3d, r1d
     movzx  r1d, byte [r0+r2*2-1]
     lea     r0, [r0+r2*2]
@@ -466,75 +478,82 @@ cglobal pred4x4_dc_8, 3,5
     RET
 
 
-INIT_MMX mmxext
+; Two rows at a time: words 0-3 hold row y, words 4-7 hold row y+1.
+%macro PRED4x4_TM_STORE 3
+    packuswb   %1, %1
+    movd      [%2], %1
+    psrldq     %1, 4
+    movd      [%3], %1
+%endmacro
+
+INIT_XMM sse2
 cglobal pred4x4_tm_vp8_8, 3,6
-    sub        r0, r2
-    pxor      mm7, mm7
-    movd      mm0, [r0]
-    punpcklbw mm0, mm7
-    movzx     r4d, byte [r0-1]
-    mov       r5d, 2
-.loop:
-    movzx     r1d, byte [r0+r2*1-1]
-    movzx     r3d, byte [r0+r2*2-1]
-    sub       r1d, r4d
-    sub       r3d, r4d
-    movd      mm2, r1d
-    movd      mm4, r3d
-    pshufw    mm2, mm2, 0
-    pshufw    mm4, mm4, 0
-    paddw     mm2, mm0
-    paddw     mm4, mm0
-    packuswb  mm2, mm2
-    packuswb  mm4, mm4
-    movd [r0+r2*1], mm2
-    movd [r0+r2*2], mm4
-    lea        r0, [r0+r2*2]
-    dec       r5d
-    jg .loop
+    sub         r0, r2
+    pxor        m4, m4
+    movd        m0, [r0]
+    punpcklbw   m0, m4
+    punpcklqdq  m0, m0
+    movzx      r4d, byte [r0-1]
+    lea         r1, [r0+r2*2]
+    movzx      r3d, byte [r0+r2*1-1]
+    movzx      r5d, byte [r0+r2*2-1]
+    sub        r3d, r4d
+    sub        r5d, r4d
+    movd        m1, r3d
+    movd        m2, r5d
+    punpcklqdq  m1, m2
+    movzx      r3d, byte [r1+r2*1-1]
+    movzx      r5d, byte [r1+r2*2-1]
+    sub        r3d, r4d
+    sub        r5d, r4d
+    movd        m2, r3d
+    movd        m3, r5d
+    punpcklqdq  m2, m3
+    pshuflw     m1, m1, 0
+    pshufhw     m1, m1, 0
+    pshuflw     m2, m2, 0
+    pshufhw     m2, m2, 0
+    paddw       m1, m0
+    paddw       m2, m0
+    PRED4x4_TM_STORE m1, r0+r2*1, r0+r2*2
+    PRED4x4_TM_STORE m2, r1+r2*1, r1+r2*2
     RET
 
 INIT_XMM ssse3
-cglobal pred4x4_tm_vp8_8, 3,3
+cglobal pred4x4_tm_vp8_8, 3,3,6
     sub         r0, r2
-    movq       mm6, [tm_shuf]
-    pxor       mm1, mm1
-    movd       mm0, [r0]
-    punpcklbw  mm0, mm1
-    movd       mm7, [r0-4]
-    pshufb     mm7, mm6
+    mova        m5, [tm_shuf2]
+    pxor        m4, m4
+    movd        m0, [r0]
+    punpcklbw   m0, m4
+    punpcklqdq  m0, m0
+    movd        m4, [r0-4]
+    pshufb      m4, [tm_shuf]
+    psubw       m0, m4
     lea         r1, [r0+r2*2]
-    movd       mm2, [r0+r2*1-4]
-    movd       mm3, [r0+r2*2-4]
-    movd       mm4, [r1+r2*1-4]
-    movd       mm5, [r1+r2*2-4]
-    pshufb     mm2, mm6
-    pshufb     mm3, mm6
-    pshufb     mm4, mm6
-    pshufb     mm5, mm6
-    psubw      mm0, mm7
-    paddw      mm2, mm0
-    paddw      mm3, mm0
-    paddw      mm4, mm0
-    paddw      mm5, mm0
-    packuswb   mm2, mm2
-    packuswb   mm3, mm3
-    packuswb   mm4, mm4
-    packuswb   mm5, mm5
-    movd [r0+r2*1], mm2
-    movd [r0+r2*2], mm3
-    movd [r1+r2*1], mm4
-    movd [r1+r2*2], mm5
+    movd        m1, [r0+r2*1-4]
+    movd        m3, [r0+r2*2-4]
+    punpckldq   m1, m3
+    movd        m2, [r1+r2*1-4]
+    movd        m3, [r1+r2*2-4]
+    punpckldq   m2, m3
+    pshufb      m1, m5
+    pshufb      m2, m5
+    paddw       m1, m0
+    paddw       m2, m0
+    PRED4x4_TM_STORE m1, r0+r2*1, r0+r2*2
+    PRED4x4_TM_STORE m2, r1+r2*1, r1+r2*2
     RET
 
 
-INIT_MMX mmxext
-cglobal pred4x4_vertical_vp8_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_vertical_vp8_8, 3,3,5
     sub       r0, r2
     movd      m1, [r0-1]
     movd      m0, [r0]
+    movd      m3, [r1]
     mova      m2, m0
-    punpckldq m0, [r1]
+    punpckldq m0, m3
     lea       r1, [r0+r2*2]
     psrlq     m0, 8
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
@@ -606,13 +625,14 @@ cglobal pred4x4_vertical_left_vp8_8, 3,3
     movd [r1+r2*2], m3
     RET
 
-INIT_MMX mmxext
-cglobal pred4x4_down_left_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_down_left_8, 3,3,4
     sub       r0, r2
-    movq      m1, [r0]
-    punpckldq m1, [r1]
-    movq      m2, m1
-    movq      m0, m1
+    movd      m1, [r0]
+    movd      m3, [r1]
+    punpckldq m1, m3
+    mova      m2, m1
+    mova      m0, m1
     psllq     m1, 8
     pxor      m2, m1
     psrlq     m2, 8
@@ -630,115 +650,134 @@ cglobal pred4x4_down_left_8, 3,3
     RET
 
 
-INIT_MMX mmxext
-cglobal pred4x4_horizontal_up_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_horizontal_up_8, 3,3,6
     sub       r0, r2
     lea       r1, [r0+r2*2]
     movd      m0, [r0+r2*1-4]
-    punpcklbw m0, [r0+r2*2-4]
+    movd      m4, [r0+r2*2-4]
+    punpcklbw m0, m4
     movd      m1, [r1+r2*1-4]
-    punpcklbw m1, [r1+r2*2-4]
-    punpckhwd m0, m1
-    movq      m1, m0
-    punpckhbw m1, m1
-    pshufw    m1, m1, 0xFF
-    punpckhdq m0, m1
-    movq      m2, m0
-    movq      m3, m0
-    movq      m7, m0
+    movd      m4, [r1+r2*2-4]
+    punpcklbw m1, m4
+    psrldq    m0, 6
+    psrldq    m1, 6
+    punpcklwd m0, m1
+    punpcklbw m1, m0, m0
+    pshuflw   m1, m1, 0xFF
+    punpckldq m0, m1
+    mova      m2, m0
+    mova      m3, m0
+    mova      m4, m0
     psrlq     m2, 16
     psrlq     m3, 8
-    pavgb     m7, m3
+    pavgb     m4, m3
     PRED4x4_LOWPASS m3, m0, m2, m3, m5
-    punpcklbw m7, m3
-    movd    [r0+r2*1], m7
-    psrlq    m7, 16
-    movd    [r0+r2*2], m7
-    psrlq    m7, 16
-    movd    [r1+r2*1], m7
+    punpcklbw m4, m3
+    movd    [r0+r2*1], m4
+    psrlq    m4, 16
+    movd    [r0+r2*2], m4
+    psrlq    m4, 16
+    movd    [r1+r2*1], m4
     movd    [r1+r2*2], m1
     RET
 
 
-INIT_MMX mmxext
-cglobal pred4x4_horizontal_down_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_horizontal_down_8, 3,3,6
     sub       r0, r2
     lea       r1, [r0+r2*2]
-    movh      m0, [r0-4]
-    punpckldq m0, [r0]
+    movd      m0, [r0-4]
+    movd      m3, [r0]
+    punpckldq m0, m3
     psllq     m0, 8
+    psrldq    m0, 4
     movd      m1, [r1+r2*2-4]
-    punpcklbw m1, [r1+r2*1-4]
+    movd      m4, [r1+r2*1-4]
+    punpcklbw m1, m4
     movd      m2, [r0+r2*2-4]
-    punpcklbw m2, [r0+r2*1-4]
-    punpckhwd m1, m2
-    punpckhdq m1, m0
-    movq      m0, m1
-    movq      m2, m1
-    movq      m5, m1
+    movd      m4, [r0+r2*1-4]
+    punpcklbw m2, m4
+    psrldq    m1, 6
+    psrldq    m2, 6
+    punpcklwd m1, m2
+    punpckldq m1, m0
+    mova      m0, m1
+    mova      m2, m1
+    mova      m5, m1
     psrlq     m0, 16
     psrlq     m2, 8
     pavgb     m5, m2
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
     punpcklbw m5, m2
     psrlq     m2, 32
-    PALIGNR   m2, m5, 6, m4
-    movh      [r1+r2*2], m5
+    PALIGNR_Q m2, m5, 6, m4
+    movd      [r1+r2*2], m5
     psrlq     m5, 16
-    movh      [r1+r2*1], m5
+    movd      [r1+r2*1], m5
     psrlq     m5, 16
-    movh      [r0+r2*2], m5
-    movh      [r0+r2*1], m2
+    movd      [r0+r2*2], m5
+    movd      [r0+r2*1], m2
     RET
 
 
-INIT_MMX mmxext
-cglobal pred4x4_vertical_right_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_vertical_right_8, 3,3,6
     sub     r0, r2
     lea     r1, [r0+r2*2]
-    movh    m0, [r0]
-    movq    m5, m0
-    PALIGNR m0, [r0-8], 7, m1
+    movd    m0, [r0]
+    mova    m5, m0
+    movq    m1, [r0-8]
+    PALIGNR_Q m0, m1, 7, m1
     pavgb   m5, m0
-    PALIGNR m0, [r0+r2*1-8], 7, m1
-    movq    m1, m0
-    PALIGNR m0, [r0+r2*2-8], 7, m2
-    movq    m2, m0
-    PALIGNR m0, [r1+r2*1-8], 7, m3
+    movq    m1, [r0+r2*1-8]
+    PALIGNR_Q m0, m1, 7, m1
+    mova    m1, m0
+    movq    m2, [r0+r2*2-8]
+    PALIGNR_Q m0, m2, 7, m2
+    mova    m2, m0
+    movq    m3, [r1+r2*1-8]
+    PALIGNR_Q m0, m3, 7, m3
     PRED4x4_LOWPASS m2, m1, m0, m2, m4
-    movq    m1, m2
+    mova    m1, m2
     psrlq   m2, 16
     psllq   m1, 48
-    movh    [r0+r2*1], m5
-    movh    [r0+r2*2], m2
-    PALIGNR m5, m1, 7, m3
+    movd    [r0+r2*1], m5
+    movd    [r0+r2*2], m2
+    PALIGNR_Q m5, m1, 7, m3
     psllq   m1, 8
-    movh    [r1+r2*1], m5
-    PALIGNR m2, m1, 7, m1
-    movh    [r1+r2*2], m2
+    movd    [r1+r2*1], m5
+    PALIGNR_Q m2, m1, 7, m1
+    movd    [r1+r2*2], m2
     RET
 
 
-INIT_MMX mmxext
-cglobal pred4x4_down_right_8, 3,3
+INIT_XMM sse2
+cglobal pred4x4_down_right_8, 3,3,5
     sub       r0, r2
     lea       r1, [r0+r2*2]
-    movq      m1, [r1-8]
-    movq      m2, [r0+r2*1-8]
-    punpckhbw m2, [r0-8]
-    movh      m3, [r0]
-    punpckhwd m1, m2
-    PALIGNR   m3, m1, 5, m1
-    movq      m1, m3
-    PALIGNR   m3, [r1+r2*1-8], 7, m4
-    movq      m0, m3
-    PALIGNR   m3, [r1+r2*2-8], 7, m4
+    movd      m3, [r0-4]
+    movd      m4, [r0]
+    punpckldq m3, m4
+    psrldq    m3, 3
+    movd      m1, [r1-4]
+    movd      m2, [r0+r2*1-4]
+    punpcklbw m1, m2
+    psrldq    m1, 6
+    pslldq    m3, 2
+    por       m3, m1
+    mova      m1, m3
+    movq      m4, [r1+r2*1-8]
+    PALIGNR_Q m3, m4, 7, m4
+    mova      m0, m3
+    movq      m4, [r1+r2*2-8]
+    PALIGNR_Q m3, m4, 7, m4
     PRED4x4_LOWPASS m0, m3, m1, m0, m4
-    movh      [r1+r2*2], m0
+    movd      [r1+r2*2], m0
     psrlq     m0, 8
-    movh      [r1+r2*1], m0
+    movd      [r1+r2*1], m0
     psrlq     m0, 8
-    movh      [r0+r2*2], m0
+    movd      [r0+r2*2], m0
     psrlq     m0, 8
-    movh      [r0+r2*1], m0
+    movd      [r0+r2*1], m0
     RET

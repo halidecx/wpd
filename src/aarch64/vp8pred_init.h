@@ -1,4 +1,8 @@
-#include "vp8pred.h"
+#ifndef WPD_AARCH64_VP8PRED_INIT_H
+#define WPD_AARCH64_VP8PRED_INIT_H
+
+#include "src/cpu.h"
+#include "src/vp8pred.h"
 
 void ff_pred16x16_vert_neon(uint8_t *, int);
 void ff_pred16x16_hor_neon(uint8_t *, int);
@@ -20,8 +24,8 @@ void ff_pred4x4_hor_up_neon(uint8_t *, const uint8_t *, int);
 void ff_pred4x4_hor_down_neon(uint8_t *, const uint8_t *, int);
 void ff_pred8x8_vert_neon(uint8_t *, int);
 
-wpd_cold void ff_vp8_pred_init_aarch64(VP8PredContext *pred) {
-    if (!wpd_have_neon(wpd_get_cpu_flags()))
+static wpd_always_inline void ff_vp8_pred_init_aarch64(VP8PredContext *pred) {
+    if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
         return;
     pred->pred4x4[TM_VP8_PRED]          = ff_pred4x4_tm_neon;
     pred->pred4x4[DC_PRED]              = ff_pred4x4_dc_neon;
@@ -44,3 +48,5 @@ wpd_cold void ff_vp8_pred_init_aarch64(VP8PredContext *pred) {
     pred->pred16x16[HOR_PRED8x8]   = ff_pred16x16_hor_neon;
     pred->pred16x16[PLANE_PRED8x8] = ff_pred16x16_tm_neon;
 }
+
+#endif

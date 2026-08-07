@@ -39,8 +39,5 @@ typedef struct VP8DSPContext {
 } VP8DSPContext;
 
 void ff_vp8dsp_init(VP8DSPContext *c);
-void ff_vp8dsp_init_x86(VP8DSPContext *c);
-void ff_vp8dsp_init_arm(VP8DSPContext *c);
-void ff_vp8dsp_init_aarch64(VP8DSPContext *c);
 
 #endif

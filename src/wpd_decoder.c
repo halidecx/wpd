@@ -122,12 +122,12 @@ enum ImageRole {
         b_add = FIX(1.77200 * 255.0 / 224.0) * cb + ONE_HALF; \
     } while (0)
 
-#define YUV_TO_RGB2_CCIR(r, g, b, y1)         \
-    do {                                      \
-        y = ((y1) - 16) * FIX(255.0 / 219.0); \
-        r = cm[(y + r_add) >> SCALEBITS];     \
-        g = cm[(y + g_add) >> SCALEBITS];     \
-        b = cm[(y + b_add) >> SCALEBITS];     \
+#define YUV_TO_RGB2_CCIR(r, g, b, y1)                 \
+    do {                                              \
+        y = ((y1) - 16) * FIX(255.0 / 219.0);         \
+        r = wpd_clip_uint8((y + r_add) >> SCALEBITS); \
+        g = wpd_clip_uint8((y + g_add) >> SCALEBITS); \
+        b = wpd_clip_uint8((y + b_add) >> SCALEBITS); \
     } while (0)
 
 #define RGB_TO_Y_CCIR(r, g, b)                                                \
@@ -267,6 +267,7 @@ static wpd_always_inline unsigned br_bit(LEBitReader *br) {
 typedef struct WebPImage {
     uint8_t       *data[4];
     uint8_t       *alloc[4];
+    size_t         alloc_size[4];
     int            linesize[4];
     int            width, height;
     WPDPixelFormat format;
@@ -277,32 +278,48 @@ static void image_free(WebPImage *img) {
     memset(img, 0, sizeof(*img));
 }
 
+static uint8_t *image_alloc_plane(WebPImage *img, int p, size_t size) {
+    if (img->alloc[p] && img->alloc_size[p] >= size) {
+        memset(img->alloc[p], 0, size);
+        return img->alloc[p];
+    }
+    wpd_free(img->alloc[p]);
+    img->alloc[p]      = wpd_mallocz(size);
+    img->alloc_size[p] = img->alloc[p] ? size : 0;
+    return img->alloc[p];
+}
+
 static int image_alloc_argb(WebPImage *img, int w, int h) {
-    image_free(img);
+    const size_t size = (size_t)w * 4 * h + WPD_FILE_PADDING;
+
+    for (int p = 1; p < 4; p++) {
+        wpd_free(img->alloc[p]);
+        img->alloc[p]      = NULL;
+        img->alloc_size[p] = 0;
+        img->data[p]       = NULL;
+        img->linesize[p]   = 0;
+    }
     img->linesize[0] = w * 4;
-    img->alloc[0]    = wpd_mallocz((size_t)img->linesize[0] * h +
-                                   WPD_FILE_PADDING);
-    if (!img->alloc[0])
+    img->data[0]     = image_alloc_plane(img, 0, size);
+    if (!img->data[0])
         return WPD_ERROR(ENOMEM);
-    img->data[0] = img->alloc[0];
-    img->width   = w;
-    img->height  = h;
-    img->format  = WPD_PIX_FMT_ARGB;
+    img->width  = w;
+    img->height = h;
+    img->format = WPD_PIX_FMT_ARGB;
     return 0;
 }
 
 static int image_alloc_yuva(WebPImage *img, int w, int h) {
-    image_free(img);
     for (int p = 0; p < 4; p++) {
         int pw           = (p == 1 || p == 2) ? (w + 1) / 2 : w;
         int ph           = (p == 1 || p == 2) ? (h + 1) / 2 : h;
         img->linesize[p] = pw;
-        img->alloc[p]    = wpd_mallocz((size_t)pw * ph + WPD_FILE_PADDING);
-        if (!img->alloc[p]) {
+        img->data[p]     = image_alloc_plane(
+            img, p, (size_t)pw * ph + WPD_FILE_PADDING);
+        if (!img->data[p]) {
             image_free(img);
             return WPD_ERROR(ENOMEM);
         }
-        img->data[p] = img->alloc[p];
     }
     img->width  = w;
     img->height = h;
@@ -473,9 +490,8 @@ static int huff_build_table(HuffCode *root_table, int root_bits,
 }
 
 static int huff_reader_build(HuffReader *r, const uint8_t *code_lengths,
-                             int alphabet_size) {
-    uint16_t *sorted;
-    int       total_size;
+                             int alphabet_size, uint16_t *sorted) {
+    int total_size;
 
     huff_reader_free(r);
 
@@ -485,16 +501,11 @@ static int huff_reader_build(HuffReader *r, const uint8_t *code_lengths,
         return WPD_ERROR_INVALID_DATA;
 
     r->table = malloc((size_t)total_size * sizeof(*r->table));
-    sorted   = malloc((size_t)alphabet_size * sizeof(*sorted));
-    if (!r->table || !sorted) {
-        free(sorted);
-        huff_reader_free(r);
+    if (!r->table)
         return WPD_ERROR(ENOMEM);
-    }
 
     huff_build_table(
         r->table, HUFF_TABLE_BITS, code_lengths, alphabet_size, sorted);
-    free(sorted);
     return 0;
 }
 
@@ -611,10 +622,12 @@ static void read_huffman_code_simple(WPDDecoder *s, uint8_t *code_lengths,
 
 static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
                                     int alphabet_size) {
-    HuffReader code_len_hc                                     = {0};
-    uint8_t    code_length_code_lengths[NUM_CODE_LENGTH_CODES] = {0};
-    int        symbol, max_symbol, prev_code_len, ret;
-    int        num_codes = 4 + br_bits(&s->gb, 4);
+    /* Code lengths are 3 bits wide, so this table never needs a second level. */
+    HuffCode code_len_table[1 << HUFF_TABLE_BITS];
+    uint16_t sorted[NUM_CODE_LENGTH_CODES];
+    uint8_t  code_length_code_lengths[NUM_CODE_LENGTH_CODES] = {0};
+    int      symbol, max_symbol, prev_code_len, ret;
+    int      num_codes = 4 + br_bits(&s->gb, 4);
 
     for (int i = 0; i < num_codes; i++)
         code_length_code_lengths[code_length_code_order[i]] = br_bits(&s->gb,
@@ -635,10 +648,17 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
         max_symbol = alphabet_size;
     }
 
-    ret = huff_reader_build(
-        &code_len_hc, code_length_code_lengths, NUM_CODE_LENGTH_CODES);
-    if (ret < 0)
-        return ret;
+    if (huff_build_table(NULL,
+                         HUFF_TABLE_BITS,
+                         code_length_code_lengths,
+                         NUM_CODE_LENGTH_CODES,
+                         NULL) != 1 << HUFF_TABLE_BITS)
+        return WPD_ERROR_INVALID_DATA;
+    huff_build_table(code_len_table,
+                     HUFF_TABLE_BITS,
+                     code_length_code_lengths,
+                     NUM_CODE_LENGTH_CODES,
+                     sorted);
 
     prev_code_len = 8;
     symbol        = 0;
@@ -650,7 +670,7 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
         if (br_is_eos(&s->gb))
             break;
         br_fill(&s->gb);
-        code_len = huff_read_symbol(code_len_hc.table, &s->gb);
+        code_len = huff_read_symbol(code_len_table, &s->gb);
         if (code_len < 16) {
             code_lengths[symbol++] = code_len;
             if (code_len)
@@ -683,7 +703,6 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
     ret = 0;
 
 finish:
-    huff_reader_free(&code_len_hc);
     return ret;
 }
 
@@ -807,11 +826,44 @@ static wpd_always_inline void color_cache_put(ImageContext *img, uint32_t c) {
     img->color_cache[cache_idx] = c;
 }
 
+static wpd_always_inline const uint8_t *color_cache_fill(ImageContext  *img,
+                                                         const uint8_t *from,
+                                                         const uint8_t *to) {
+    for (; from < to; from += 4) color_cache_put(img, rb32(from));
+    return from;
+}
+
+static wpd_always_inline void copy_block32(uint8_t *dst, int dist, int length) {
+    const uint8_t *src = dst - 4 * (ptrdiff_t)dist;
+    const size_t   n   = (size_t)length * 4;
+    size_t         i;
+
+    if (dist >= length) {
+        memcpy(dst, src, n);
+    } else if (dist <= 2) {
+        uint64_t pattern;
+
+        if (dist == 1) {
+            uint32_t v;
+            memcpy(&v, src, 4);
+            pattern = (uint64_t)v << 32 | v;
+        } else {
+            memcpy(&pattern, src, 8);
+        }
+        for (i = 0; i + 8 <= n; i += 8) memcpy(dst + i, &pattern, 8);
+        if (i < n)
+            memcpy(dst + i, &pattern, 4);
+    } else {
+        for (i = 0; i < n; i += 4) memcpy(dst + i, src + i, 4);
+    }
+}
+
 static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                                       int h) {
     ImageContext *img;
     HTreeGroup   *hg;
     uint8_t      *code_lengths;
+    uint16_t     *sorted;
     int           i, j, ret, x, y, width, max_alphabet_size;
 
     img       = &s->image[role];
@@ -856,9 +908,10 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
     max_alphabet_size = alphabet_sizes[HUFF_IDX_GREEN];
     if (img->color_cache_bits > 0)
         max_alphabet_size += 1 << img->color_cache_bits;
-    code_lengths = malloc(max_alphabet_size);
-    if (!code_lengths)
+    sorted = malloc((size_t)max_alphabet_size * (sizeof(uint16_t) + 1));
+    if (!sorted)
         return WPD_ERROR(ENOMEM);
+    code_lengths = (uint8_t *)(sorted + max_alphabet_size);
 
     for (i = 0; i < img->nb_huffman_groups; i++) {
         hg = &img->huffman_groups[i];
@@ -874,9 +927,9 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 ret = read_huffman_code_normal(s, code_lengths, alphabet_size);
             if (ret >= 0)
                 ret = huff_reader_build(
-                    &hg->trees[j], code_lengths, alphabet_size);
+                    &hg->trees[j], code_lengths, alphabet_size, sorted);
             if (ret < 0) {
-                free(code_lengths);
+                free(sorted);
                 return ret;
             }
         }
@@ -890,172 +943,136 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
             hg->literal[3] = hg->trees[HUFF_IDX_BLUE].table[0].value;
         }
     }
-    free(code_lengths);
+    free(sorted);
 
     width = img->frame->width;
-    if (role == IMAGE_ROLE_ARGB)
-        width = s->reduced_width;
+    if (role == IMAGE_ROLE_ARGB && s->reduced_width < width) {
+        /* Decode packed palette rows contiguously; expansion re-strides. */
+        width                   = s->reduced_width;
+        img->frame->linesize[0] = width * 4;
+    }
 
-    x = 0;
-    y = 0;
-    while (y < img->frame->height) {
-        int v;
+    {
+        const int      multi_group = img->nb_huffman_groups > 1;
+        const int      huff_bits   = multi_group
+            ? s->image[IMAGE_ROLE_ENTROPY].size_reduction
+            : 0;
+        const int      huff_mask   = huff_bits ? (1 << huff_bits) - 1 : ~0;
+        uint8_t       *base        = img->frame->data[0];
+        const size_t   total       = (size_t)width * img->frame->height;
+        const uint8_t *cached      = base;
+        size_t         pos         = 0;
 
-        if (br_is_eos(&s->gb))
-            return WPD_ERROR_INVALID_DATA;
+        hg = &img->huffman_groups[0];
+        x  = 0;
+        y  = 0;
+        while (pos < total) {
+            uint8_t *p = base + 4 * pos;
+            int      v;
 
-        hg = get_huffman_group(s, img, x, y);
-        br_fill(&s->gb);
-        v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
-        if (v < NUM_LITERAL_CODES) {
-            uint8_t *p = GET_PIXEL(img->frame, x, y);
+            if (br_is_eos(&s->gb))
+                return WPD_ERROR_INVALID_DATA;
 
-            if (hg->trivial_literal) {
-                copy32(p, hg->literal);
-                p[2] = v;
-            } else {
-                int r = huff_read_symbol(hg->trees[HUFF_IDX_RED].table, &s->gb);
-                int b, a;
-                br_fill(&s->gb);
-                b = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table, &s->gb);
-                a = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table, &s->gb);
-                p[0] = a;
-                p[1] = r;
-                p[2] = v;
-                p[3] = b;
-            }
-            if (img->color_cache_bits)
-                color_cache_put(img, rb32(p));
-            x++;
-            if (x == width) {
-                x = 0;
-                y++;
-            }
-        } else if (v < NUM_LITERAL_CODES + NUM_LENGTH_CODES) {
-            int prefix_code, length, distance, ref_x, ref_y;
-
-            prefix_code = v - NUM_LITERAL_CODES;
-            if (prefix_code < 4) {
-                length = prefix_code + 1;
-            } else {
-                int extra_bits = (prefix_code - 2) >> 1;
-                int offset     = (2 + (prefix_code & 1)) << extra_bits;
-                length         = offset + br_bits(&s->gb, extra_bits) + 1;
-            }
-            prefix_code = huff_read_symbol(hg->trees[HUFF_IDX_DIST].table,
-                                           &s->gb);
+            if ((x & huff_mask) == 0)
+                hg = get_huffman_group(s, img, x, y);
             br_fill(&s->gb);
-            if (prefix_code > 39) {
-                wpd_log(NULL,
-                        WPD_LOG_ERROR,
-                        "distance prefix code too large: %d\n",
-                        prefix_code);
-                return WPD_ERROR_INVALID_DATA;
-            }
-            if (prefix_code < 4) {
-                distance = prefix_code + 1;
-            } else {
-                int extra_bits = (prefix_code - 2) >> 1;
-                int offset     = (2 + (prefix_code & 1)) << extra_bits;
-                distance       = offset + br_bits(&s->gb, extra_bits) + 1;
-            }
-
-            if (distance <= NUM_SHORT_DISTANCES) {
-                int xi   = lz77_distance_offsets[distance - 1][0];
-                int yi   = lz77_distance_offsets[distance - 1][1];
-                distance = WPD_MAX(1, xi + yi * width);
-            } else {
-                distance -= NUM_SHORT_DISTANCES;
-            }
-            ref_x = x;
-            ref_y = y;
-            if (distance <= x) {
-                ref_x -= distance;
-                distance = 0;
-            } else {
-                ref_x = 0;
-                distance -= x;
-            }
-            while (distance >= width) {
-                ref_y--;
-                distance -= width;
-            }
-            if (distance > 0) {
-                ref_x = width - distance;
-                ref_y--;
-            }
-            ref_x = WPD_MAX(0, ref_x);
-            ref_y = WPD_MAX(0, ref_y);
-
-            if (ref_y == y && ref_x >= x)
-                return WPD_ERROR_INVALID_DATA;
-
-            {
-                const int height = img->frame->height;
-                uint8_t  *p      = GET_PIXEL(img->frame, x, y);
-                uint8_t  *p_ref  = GET_PIXEL(img->frame, ref_x, ref_y);
-
-                if (img->color_cache_bits) {
-                    for (i = 0; i < length; i++) {
-                        copy32(p, p_ref);
-                        color_cache_put(img, rb32(p));
-                        p += 4;
-                        p_ref += 4;
-                        x++;
-                        ref_x++;
-                        if (x == width) {
-                            x = 0;
-                            if (++y == height)
-                                break;
-                            p = GET_PIXEL(img->frame, 0, y);
-                        }
-                        if (ref_x == width) {
-                            ref_x = 0;
-                            if (++ref_y == height)
-                                break;
-                            p_ref = GET_PIXEL(img->frame, 0, ref_y);
-                        }
-                    }
+            v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
+            if (v < NUM_LITERAL_CODES) {
+                if (hg->trivial_literal) {
+                    copy32(p, hg->literal);
+                    p[2] = v;
                 } else {
-                    for (i = 0; i < length; i++) {
-                        copy32(p, p_ref);
-                        p += 4;
-                        p_ref += 4;
-                        x++;
-                        ref_x++;
-                        if (x == width) {
-                            x = 0;
-                            if (++y == height)
-                                break;
-                            p = GET_PIXEL(img->frame, 0, y);
-                        }
-                        if (ref_x == width) {
-                            ref_x = 0;
-                            if (++ref_y == height)
-                                break;
-                            p_ref = GET_PIXEL(img->frame, 0, ref_y);
-                        }
-                    }
+                    int r = huff_read_symbol(hg->trees[HUFF_IDX_RED].table,
+                                             &s->gb);
+                    int b, a;
+                    br_fill(&s->gb);
+                    b    = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table,
+                                            &s->gb);
+                    a    = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table,
+                                            &s->gb);
+                    p[0] = a;
+                    p[1] = r;
+                    p[2] = v;
+                    p[3] = b;
                 }
-            }
-        } else {
-            uint8_t *p         = GET_PIXEL(img->frame, x, y);
-            int      cache_idx = v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES);
+                pos++;
+                if (++x == width) {
+                    x = 0;
+                    y++;
+                    if (img->color_cache_bits)
+                        cached = color_cache_fill(img, cached, base + 4 * pos);
+                }
+            } else if (v < NUM_LITERAL_CODES + NUM_LENGTH_CODES) {
+                int prefix_code, length, distance;
 
-            if (!img->color_cache_bits) {
-                wpd_log(NULL, WPD_LOG_ERROR, "color cache not found\n");
-                return WPD_ERROR_INVALID_DATA;
-            }
-            if (cache_idx >= 1 << img->color_cache_bits) {
-                wpd_log(
-                    NULL, WPD_LOG_ERROR, "color cache index out-of-bounds\n");
-                return WPD_ERROR_INVALID_DATA;
-            }
-            wb32(p, img->color_cache[cache_idx]);
-            x++;
-            if (x == width) {
-                x = 0;
-                y++;
+                prefix_code = v - NUM_LITERAL_CODES;
+                if (prefix_code < 4) {
+                    length = prefix_code + 1;
+                } else {
+                    int extra_bits = (prefix_code - 2) >> 1;
+                    int offset     = (2 + (prefix_code & 1)) << extra_bits;
+                    length         = offset + br_bits(&s->gb, extra_bits) + 1;
+                }
+                prefix_code = huff_read_symbol(hg->trees[HUFF_IDX_DIST].table,
+                                               &s->gb);
+                br_fill(&s->gb);
+                if (prefix_code > 39) {
+                    wpd_log(NULL,
+                            WPD_LOG_ERROR,
+                            "distance prefix code too large: %d\n",
+                            prefix_code);
+                    return WPD_ERROR_INVALID_DATA;
+                }
+                if (prefix_code < 4) {
+                    distance = prefix_code + 1;
+                } else {
+                    int extra_bits = (prefix_code - 2) >> 1;
+                    int offset     = (2 + (prefix_code & 1)) << extra_bits;
+                    distance       = offset + br_bits(&s->gb, extra_bits) + 1;
+                }
+
+                if (distance <= NUM_SHORT_DISTANCES) {
+                    int xi   = lz77_distance_offsets[distance - 1][0];
+                    int yi   = lz77_distance_offsets[distance - 1][1];
+                    distance = WPD_MAX(1, xi + yi * width);
+                } else {
+                    distance -= NUM_SHORT_DISTANCES;
+                }
+
+                if ((size_t)distance > pos || (size_t)length > total - pos)
+                    return WPD_ERROR_INVALID_DATA;
+
+                copy_block32(p, distance, length);
+                pos += length;
+                x += length;
+                while (x >= width) {
+                    x -= width;
+                    y++;
+                }
+                if (multi_group && (x & huff_mask))
+                    hg = get_huffman_group(s, img, x, y);
+                if (img->color_cache_bits)
+                    cached = color_cache_fill(img, cached, base + 4 * pos);
+            } else {
+                int cache_idx = v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES);
+
+                if (!img->color_cache_bits) {
+                    wpd_log(NULL, WPD_LOG_ERROR, "color cache not found\n");
+                    return WPD_ERROR_INVALID_DATA;
+                }
+                if (cache_idx >= 1 << img->color_cache_bits) {
+                    wpd_log(NULL,
+                            WPD_LOG_ERROR,
+                            "color cache index out-of-bounds\n");
+                    return WPD_ERROR_INVALID_DATA;
+                }
+                cached = color_cache_fill(img, cached, p);
+                wb32(p, img->color_cache[cache_idx]);
+                pos++;
+                if (++x == width) {
+                    x = 0;
+                    y++;
+                }
             }
         }
     }
@@ -1206,9 +1223,36 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
         }
     }
 
-    s->alpha_dst_used = 1;
-    s->reduced_width  = s->width;
+    img->frame->linesize[0] = width * 4;
+    s->alpha_dst_used       = 1;
+    s->reduced_width        = s->width;
     return 0;
+}
+
+static wpd_always_inline void expand_palette_rows(uint8_t *base, int dst_stride,
+                                                  int src_stride, int width,
+                                                  int            height,
+                                                  const uint8_t *expand,
+                                                  int            ppb) {
+    const int group_bytes = ppb * 4;
+    const int full        = width / ppb;
+    const int tail        = width - full * ppb;
+
+    /* Bottom-up, right-to-left: dst_stride >= src_stride, so every write
+       lands at or past the not-yet-read indices it derives from. */
+    for (int y = height - 1; y >= 0; y--) {
+        uint8_t       *dst = base + (size_t)y * dst_stride;
+        const uint8_t *src = base + (size_t)y * src_stride;
+
+        if (tail)
+            memcpy(dst + 4 * (full * ppb),
+                   expand + (size_t)src[4 * full + 2] * group_bytes,
+                   (size_t)tail * 4);
+        for (int b = full - 1; b >= 0; b--)
+            memcpy(dst + 4 * (b * ppb),
+                   expand + (size_t)src[4 * b + 2] * group_bytes,
+                   (size_t)group_bytes);
+    }
 }
 
 static int apply_color_indexing_transform(WPDDecoder *s) {
@@ -1227,56 +1271,58 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
         const int      width           = img->frame->width;
         const int      pal_size        = pal->frame->width * 4;
         uint8_t        palette[256 * 4];
-        uint8_t       *line;
+        uint8_t        expand[256 * 8 * 4];
+        uint8_t       *base       = GET_PIXEL(img->frame, 0, 0);
+        const int      src_stride = img->frame->linesize[0];
+        const int      dst_stride = width * 4;
+        const int      height     = img->frame->height;
 
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), pal_size);
         memset(palette + pal_size, 0, sizeof(palette) - pal_size);
 
-        line = malloc(img->frame->linesize[0] + WPD_FILE_PADDING);
-        if (!line)
-            return WPD_ERROR(ENOMEM);
+        for (i = 0; i < 256; i++) {
+            unsigned packed = (unsigned)i;
+            uint8_t *entry  = expand + (size_t)i * pixels_per_byte * 4;
 
-        for (y = 0; y < img->frame->height; y++) {
-            const uint8_t *src;
-            uint8_t       *dst = GET_PIXEL(img->frame, 0, y);
-
-            memcpy(line, dst, img->frame->linesize[0]);
-            src = line + 2;
-
-            for (x = 0; x + pixels_per_byte <= width; x += pixels_per_byte) {
-                unsigned packed = *src;
-                src += 4;
-                for (i = 0; i < pixels_per_byte; i++) {
-                    copy32(dst, &palette[(packed & bit_mask) * 4]);
-                    packed >>= pixel_bits;
-                    dst += 4;
-                }
-            }
-            if (x < width) {
-                unsigned packed = *src;
-                for (; x < width; x++) {
-                    copy32(dst, &palette[(packed & bit_mask) * 4]);
-                    packed >>= pixel_bits;
-                    dst += 4;
-                }
+            for (x = 0; x < pixels_per_byte; x++) {
+                copy32(entry + x * 4, &palette[(packed & bit_mask) * 4]);
+                packed >>= pixel_bits;
             }
         }
-        free(line);
-        s->reduced_width = s->width;
+
+        switch (pixels_per_byte) {
+        case 2:
+            expand_palette_rows(
+                base, dst_stride, src_stride, width, height, expand, 2);
+            break;
+        case 4:
+            expand_palette_rows(
+                base, dst_stride, src_stride, width, height, expand, 4);
+            break;
+        default:
+            expand_palette_rows(
+                base, dst_stride, src_stride, width, height, expand, 8);
+            break;
+        }
+        img->frame->linesize[0] = dst_stride;
+        s->reduced_width        = s->width;
         return 0;
     }
 
     if (img->frame->height * img->frame->width > 300) {
-        uint8_t   palette[256 * 4];
-        const int size = pal->frame->width * 4;
+        uint32_t       palette[256];
+        const int      size     = pal->frame->width * 4;
+        const int      w        = img->frame->width;
+        const int      h        = img->frame->height;
+        const int      linesize = img->frame->linesize[0];
+        uint8_t *const base     = GET_PIXEL(img->frame, 0, 0);
+
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), size);
-        memset(palette + size, 0, 256 * 4 - size);
-        for (y = 0; y < img->frame->height; y++) {
-            for (x = 0; x < img->frame->width; x++) {
-                p = GET_PIXEL(img->frame, x, y);
-                i = p[2];
-                copy32(p, &palette[i * 4]);
-            }
+        memset((uint8_t *)palette + size, 0, sizeof(palette) - size);
+        for (y = 0; y < h; y++) {
+            uint8_t *row = base + (size_t)y * linesize;
+
+            s->ldsp.map_color32(row, row, palette, w);
         }
     } else {
         for (y = 0; y < img->frame->height; y++) {
@@ -1398,6 +1444,7 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
     ret = 0;
 
 free_and_return:
+    out->linesize[0] = out->width * 4;
     for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
 
     return ret;
@@ -1542,41 +1589,14 @@ static int image_nb_components(const WebPImage *img) {
     }
 }
 
-static void blend_alpha_argb(WebPImage *dst, const WebPImage *src, int pos_x,
-                             int pos_y) {
+static void blend_alpha_argb(WPDDecoder *s, WebPImage *dst,
+                             const WebPImage *src, int pos_x, int pos_y) {
     for (int y = 0; y < src->height; y++) {
         const uint8_t *src_argb = src->data[0] + y * src->linesize[0];
         uint8_t *dst_argb = dst->data[0] + (pos_y + y) * dst->linesize[0] +
             pos_x * 4;
-        for (int x = 0; x < src->width; x++) {
-            int src_alpha = src_argb[0];
-            int dst_alpha = dst_argb[0];
 
-            if (src_alpha == 255) {
-                memcpy(dst_argb, src_argb, 4);
-            } else if (src_alpha == 0) {
-            } else {
-                int tmp_alpha   = (dst_alpha * (256 - src_alpha)) >> 8;
-                int blend_alpha = src_alpha + tmp_alpha;
-                int scale       = (1UL << 24) / blend_alpha;
-
-                dst_argb[0] = blend_alpha;
-                dst_argb[1] = (((uint32_t)(src_argb[1] * src_alpha +
-                                           dst_argb[1] * tmp_alpha)) *
-                               scale) >>
-                    24;
-                dst_argb[2] = (((uint32_t)(src_argb[2] * src_alpha +
-                                           dst_argb[2] * tmp_alpha)) *
-                               scale) >>
-                    24;
-                dst_argb[3] = (((uint32_t)(src_argb[3] * src_alpha +
-                                           dst_argb[3] * tmp_alpha)) *
-                               scale) >>
-                    24;
-            }
-            src_argb += 4;
-            dst_argb += 4;
-        }
+        s->ldsp.blend_row_argb(dst_argb, src_argb, src->width);
     }
 }
 
@@ -1664,10 +1684,9 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
 
 static wpd_always_inline void webp_yuva2argb(uint8_t *out, int Y, int U, int V,
                                              int A) {
-    const uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
-    uint8_t        r, g, b;
-    int            y, cb, cr;
-    int            r_add, g_add, b_add;
+    uint8_t r, g, b;
+    int     y, cb, cr;
+    int     r_add, g_add, b_add;
 
     YUV_TO_RGB1_CCIR(U, V);
     YUV_TO_RGB2_CCIR(r, g, b, Y);
@@ -1800,14 +1819,12 @@ static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
         }
     } else {
         if (canvas->format == WPD_PIX_FMT_ARGB) {
-            if (canvas->format == frame->format) {
-                blend_alpha_argb(canvas, frame, s->pos_x, s->pos_y);
-            } else {
+            if (canvas->format == frame->format)
+                blend_alpha_argb(s, canvas, frame, s->pos_x, s->pos_y);
+            else
                 blend_yuva2argb(canvas, frame, s->pos_x, s->pos_y);
-            }
-        } else {
+        } else
             blend_alpha_yuva(canvas, frame, s->pos_x, s->pos_y);
-        }
     }
 }
 
@@ -1816,11 +1833,17 @@ static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
     WebPImage *canvas = &s->canvas;
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
-        const uint8_t *bg = s->background_argb;
+        uint8_t *const base     = canvas->data[0];
+        const int      linesize = canvas->linesize[0];
+        uint32_t       bg;
+
+        memcpy(&bg, s->background_argb, 4);
         for (int y = 0; y < height; y++) {
-            uint8_t *dst = canvas->data[0] + (pos_y + y) * canvas->linesize[0] +
-                pos_x * 4;
-            for (int x = 0; x < width; x++, dst += 4) copy32(dst, bg);
+            uint32_t *dst = (uint32_t *)(base +
+                                         (size_t)(pos_y + y) * linesize) +
+                pos_x;
+
+            for (int x = 0; x < width; x++) dst[x] = bg;
         }
     } else {
         for (int comp = 0; comp < 4; comp++) {
@@ -2015,7 +2038,7 @@ WPDDecoder *wpd_decoder_create(void) {
     WPDDecoder *decoder = calloc(1, sizeof(*decoder));
     if (!decoder)
         return NULL;
-    wpd_dsp_data_init();
+    wpd_init_cpu();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     return decoder;
 }

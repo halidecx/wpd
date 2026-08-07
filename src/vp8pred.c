@@ -1,4 +1,13 @@
 #include "vp8pred.h"
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+#include "src/aarch64/vp8pred_init.h"
+#elif WPD_ARCH_ARM
+#include "src/arm/vp8pred_init.h"
+#elif WPD_ARCH_X86
+#include "src/x86/vp8pred_init.h"
+#endif
+#endif
 
 static void fill(uint8_t *src, int stride, int width, int height,
                  uint8_t value) {
@@ -176,11 +185,11 @@ static void pred4x4_horizontal_down(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_tm(uint8_t *src, const uint8_t *topright, int stride) {
-    uint8_t *cm  = wpd_crop_table + WPD_MAX_NEG_CROP - src[-1 - stride];
-    uint8_t *top = src - stride;
+    const int top_left = src[-1 - stride];
+    uint8_t  *top      = src - stride;
     for (int y = 0; y < 4; y++) {
-        uint8_t *cm_in = cm + src[-1];
-        for (int x = 0; x < 4; x++) src[x] = cm_in[top[x]];
+        for (int x = 0; x < 4; x++)
+            src[x] = wpd_clip_uint8(src[-1] + top[x] - top_left);
         src += stride;
     }
 }

@@ -7,3 +7,9 @@ option('libwebpdecoder',
     type: 'string',
     value: '',
     description: 'Path to a static libwebpdecoder.a for libwebpdec')
+
+option('trim_dsp',
+  type: 'combo',
+  choices: ['true', 'false', 'if-release'],
+  value: 'if-release',
+  description: 'Eliminate DSP functions the build target cannot reach')

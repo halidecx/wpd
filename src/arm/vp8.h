@@ -6,7 +6,9 @@
 
 #include "wpd_codec.h"
 
-#if defined(__arm__)
+/* The ARMv6 range coder is part of the compile-time baseline (see meson.build),
+ * so it is bound directly rather than dispatched through a function pointer. */
+#if WPD_ARM_ARMV6_ASM
 #define decode_block_coeffs_internal ff_decode_block_coeffs_armv6
 int ff_decode_block_coeffs_armv6(VP56RangeCoder *rc, WpdDctElem block[16],
                                  uint8_t probs[16][3][NUM_DCT_TOKENS - 1],

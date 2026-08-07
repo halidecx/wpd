@@ -68,6 +68,80 @@ static void check_extract_green(WPDLosslessDSP *dsp) {
     }
 }
 
+static void check_map_color32(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, palette, [256]);
+    LOCAL_ALIGNED_16(uint8_t, src, [4 * BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * BUF_PIXELS]);
+    declare_func(void, uint8_t *, const uint8_t *, const uint32_t *, int);
+
+    if (check_func(dsp->map_color32, "map_color32")) {
+        for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+            const int n = lengths[i];
+
+            for (int x = 0; x < 256; x++) palette[x] = (uint32_t)rnd();
+            for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
+                WPD_WN32A(src + x, rnd());
+                WPD_WN32A(dst0 + x, rnd());
+                memcpy(dst1 + x, dst0 + x, 4);
+            }
+
+            call_ref(dst0, src, palette, n);
+            call_new(dst1, src, palette, n);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+
+            /* dst may alias src. */
+            memcpy(dst0, src, sizeof(dst0));
+            memcpy(dst1, src, sizeof(dst1));
+            call_ref(dst0, dst0, palette, n);
+            call_new(dst1, dst1, palette, n);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+        }
+        bench_new(dst1, src, palette, MAX_PIXELS);
+    }
+}
+
+static void check_blend_row_argb(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, src, [4 * BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * BUF_PIXELS]);
+    declare_func(void, uint8_t *, const uint8_t *, int);
+
+    if (check_func(dsp->blend_row_argb, "blend_row_argb")) {
+        /* 0: fully random, 1: mostly opaque, 2: mostly transparent. */
+        for (int mode = 0; mode < 3; mode++) {
+            for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+                const int n = lengths[i];
+
+                for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
+                    WPD_WN32A(src + x, rnd());
+                    WPD_WN32A(dst0 + x, rnd());
+                    if (mode == 1 && (rnd() & 7))
+                        src[x] = 255;
+                    else if (mode == 2 && (rnd() & 7))
+                        src[x] = 0;
+                    memcpy(dst1 + x, dst0 + x, 4);
+                }
+
+                call_ref(dst0, src, n);
+                call_new(dst1, src, n);
+                if (memcmp(dst0, dst1, sizeof(dst0)))
+                    fail();
+            }
+        }
+
+        /* Bench on sprite-like content: long uniform runs, mixed edges. */
+        for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
+            WPD_WN32A(src + x, rnd());
+            WPD_WN32A(dst1 + x, rnd());
+            src[x] = (x & 0x3F) < 8 ? (uint8_t)rnd() : (x & 0x80) ? 255 : 0;
+        }
+        bench_new(dst1, src, MAX_PIXELS);
+    }
+}
+
 void checkasm_check_lossless(void) {
     WPDLosslessDSP dsp;
 
@@ -76,4 +150,8 @@ void checkasm_check_lossless(void) {
     report("pred_add");
     check_extract_green(&dsp);
     report("extract_green");
+    check_map_color32(&dsp);
+    report("map_color32");
+    check_blend_row_argb(&dsp);
+    report("blend_row_argb");
 }

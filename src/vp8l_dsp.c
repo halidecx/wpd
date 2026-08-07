@@ -1,5 +1,12 @@
 
 #include "vp8l_dsp.h"
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+#include "src/aarch64/vp8l_init.h"
+#elif WPD_ARCH_X86
+#include "src/x86/vp8l_init.h"
+#endif
+#endif
 
 #include <string.h>
 
@@ -130,6 +137,41 @@ static void extract_green_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
     for (int x = 0; x < num_pixels; x++, src += 4, dst++) *dst = src[2];
 }
 
+static void map_color32_c(uint8_t *dst, const uint8_t *src,
+                          const uint32_t *palette, int num_pixels) {
+    for (int x = 0; x < num_pixels; x++, dst += 4, src += 4)
+        memcpy(dst, &palette[src[2]], 4);
+}
+
+static void blend_row_argb_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
+    for (int x = 0; x < num_pixels; x++, dst += 4, src += 4) {
+        const int src_alpha = src[0];
+        int       tmp_alpha, blend_alpha, scale;
+
+        if (src_alpha == 255) {
+            memcpy(dst, src, 4);
+            continue;
+        }
+        if (src_alpha == 0)
+            continue;
+
+        tmp_alpha   = (dst[0] * (256 - src_alpha)) >> 8;
+        blend_alpha = src_alpha + tmp_alpha;
+        scale       = (1 << 24) / blend_alpha;
+
+        dst[1] = ((uint32_t)(src[1] * src_alpha + dst[1] * tmp_alpha) *
+                  scale) >>
+            24;
+        dst[2] = ((uint32_t)(src[2] * src_alpha + dst[2] * tmp_alpha) *
+                  scale) >>
+            24;
+        dst[3] = ((uint32_t)(src[3] * src_alpha + dst[3] * tmp_alpha) *
+                  scale) >>
+            24;
+        dst[0] = blend_alpha;
+    }
+}
+
 wpd_cold void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp) {
     const WPDLosslessDSP c = {
         .pred_add =
@@ -149,15 +191,18 @@ wpd_cold void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp) {
                 pred_add_12,
                 pred_add_13,
             },
-        .extract_green = extract_green_c,
+        .extract_green  = extract_green_c,
+        .map_color32    = map_color32_c,
+        .blend_row_argb = blend_row_argb_c,
     };
 
     *dsp = c;
 
-#if WPD_HAVE_ASM && WPD_ARCH_AARCH64
-    if (wpd_have_neon(wpd_get_cpu_flags()))
-        wpd_vp8l_dsp_init_aarch64(dsp);
-#elif WPD_HAVE_ASM && WPD_ARCH_X86
+#if WPD_HAVE_ASM
+#if WPD_ARCH_AARCH64
+    wpd_vp8l_dsp_init_aarch64(dsp);
+#elif WPD_ARCH_X86
     wpd_vp8l_dsp_init_x86(dsp);
+#endif
 #endif
 }

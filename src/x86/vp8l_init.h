@@ -1,4 +1,8 @@
-#include "vp8l_dsp.h"
+#ifndef WPD_X86_VP8L_INIT_H
+#define WPD_X86_VP8L_INIT_H
+
+#include "src/cpu.h"
+#include "src/vp8l_dsp.h"
 
 #define PRED_ADD_AVX2(x)                                    \
     void ff_pred_add_##x##_avx2(const uint32_t *in,         \
@@ -23,11 +27,14 @@ PRED_ADD_AVX2(13)
 #undef PRED_ADD_AVX2
 
 void ff_extract_green_avx2(uint8_t *dst, const uint8_t *src, int num_pixels);
+void ff_map_color32_avx2(uint8_t *dst, const uint8_t *src,
+                         const uint32_t *palette, int num_pixels);
+void ff_blend_row_argb_avx2(uint8_t *dst, const uint8_t *src, int num_pixels);
 
-wpd_cold void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp) {
-    int flags = wpd_get_cpu_flags();
+static wpd_always_inline void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp) {
+    const unsigned flags = wpd_get_cpu_flags();
 
-    if (WPD_CPU_HAS_AVX2(flags)) {
+    if (flags & WPD_X86_CPU_FLAG_AVX2) {
         dsp->pred_add[0]  = ff_pred_add_0_avx2;
         dsp->pred_add[1]  = ff_pred_add_1_avx2;
         dsp->pred_add[2]  = ff_pred_add_2_avx2;
@@ -43,6 +50,10 @@ wpd_cold void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp) {
         dsp->pred_add[12] = ff_pred_add_12_avx2;
         dsp->pred_add[13] = ff_pred_add_13_avx2;
 
-        dsp->extract_green = ff_extract_green_avx2;
+        dsp->extract_green  = ff_extract_green_avx2;
+        dsp->map_color32    = ff_map_color32_avx2;
+        dsp->blend_row_argb = ff_blend_row_argb_avx2;
     }
 }
+
+#endif

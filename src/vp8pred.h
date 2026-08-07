@@ -36,8 +36,5 @@ typedef struct VP8PredContext {
 } VP8PredContext;
 
 void ff_vp8_pred_init(VP8PredContext *pred);
-void ff_vp8_pred_init_x86(VP8PredContext *pred);
-void ff_vp8_pred_init_arm(VP8PredContext *pred);
-void ff_vp8_pred_init_aarch64(VP8PredContext *pred);
 
 #endif

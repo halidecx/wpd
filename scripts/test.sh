@@ -34,3 +34,8 @@ for input in "${inputs[@]}"; do
         -lavfi "[0:v]settb=AVTB,setpts=N[webp];[1:v]settb=AVTB,setpts=N[raw];[webp][raw]ssim=shortest=1" \
         -f null - 2>&1 | grep "SSIM"
 done
+
+outputs=(wpd-test-data/*.yuv)
+for output in "${outputs[@]}"; do
+    rm "$output"
+done
