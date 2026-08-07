@@ -598,15 +598,22 @@ static int wpd_alloc_picture(WpdCodecContext *context, WpdFrame *frame) {
         context->height, (context->height + 1) / 2, (context->height + 1) / 2};
 
     for (int p = 0; p < 3; p++) {
-        int    stride        = (widths[p] + 63) & ~31;
-        size_t size          = (size_t)(heights[p] + 64) * stride;
+        int    stride = (widths[p] + 64 + 63) & ~63;
+        size_t size;
+
+        /* Strides that are a multiple of 1024 alias in L1/L2; pad them. */
+        if (!(stride & 1023))
+            stride += WPD_ALLOC_ALIGNMENT;
+
+        size = (size_t)(heights[p] + 64) * stride + WPD_ALLOC_ALIGNMENT;
         frame->allocation[p] = wpd_mallocz(size);
         if (!frame->allocation[p]) {
             wpd_release_picture(frame);
             return WPD_ERROR(ENOMEM);
         }
         frame->linesize[p] = stride;
-        frame->data[p]     = frame->allocation[p] + 32 * stride + 32;
+        frame->data[p]     = (uint8_t *)wpd_align_ptr(frame->allocation[p]) +
+            32 * stride + 64;
     }
     return 0;
 }

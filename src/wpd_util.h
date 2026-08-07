@@ -26,6 +26,13 @@ static wpd_always_inline unsigned wpd_clip_uintp2(int value, int bits) {
     return value < 0 ? 0 : value > max ? max : value;
 }
 
+#define WPD_ALLOC_ALIGNMENT 64
+
+static wpd_always_inline void *wpd_align_ptr(void *p) {
+    uintptr_t v = (uintptr_t)p + (WPD_ALLOC_ALIGNMENT - 1);
+    return (void *)(v & ~(uintptr_t)(WPD_ALLOC_ALIGNMENT - 1));
+}
+
 static wpd_always_inline uint64_t wpd_r64(const void *p) {
     uint64_t v;
     memcpy(&v, p, 8);

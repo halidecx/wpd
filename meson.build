@@ -15,6 +15,17 @@ cc = meson.get_compiler('c')
 source_root = meson.current_source_dir()
 cpu_family = host_machine.cpu_family()
 
+optional_c_args = [
+  '-fvisibility=hidden',
+  '-Werror=vla',
+  '-Werror=missing-prototypes',
+  '-Wshorten-64-to-32',
+]
+if get_option('buildtype') not in ['debug', 'plain']
+  optional_c_args += '-fomit-frame-pointer'
+endif
+add_project_arguments(cc.get_supported_arguments(optional_c_args), language: 'c')
+
 vcs_version = vcs_tag(
   command: ['git', '-C', source_root, 'rev-parse', '--short=7', 'HEAD'],
   fallback: 'unknown',
@@ -253,4 +264,6 @@ if asm_enabled and checkasm_dep.found()
     install: false,
   )
   test('checkasm', checkasm, suite: 'checkasm', timeout: 180)
+  benchmark('checkasm', checkasm, suite: 'checkasm', timeout: 3600,
+            args: '--bench')
 endif

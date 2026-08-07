@@ -1211,6 +1211,28 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
     return 0;
 }
 
+static wpd_always_inline void expand_palette_rows(uint8_t *base, int linesize,
+                                                  int width, int height,
+                                                  const uint8_t *expand,
+                                                  int            ppb) {
+    const int group_bytes = ppb * 4;
+    const int full        = width / ppb;
+    const int tail        = width - full * ppb;
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = base + (size_t)y * linesize;
+
+        if (tail)
+            memcpy(row + 4 * (full * ppb),
+                   expand + (size_t)row[4 * full + 2] * group_bytes,
+                   (size_t)tail * 4);
+        for (int b = full - 1; b >= 0; b--)
+            memcpy(row + 4 * (b * ppb),
+                   expand + (size_t)row[4 * b + 2] * group_bytes,
+                   (size_t)group_bytes);
+    }
+}
+
 static int apply_color_indexing_transform(WPDDecoder *s) {
     ImageContext *img;
     ImageContext *pal;
@@ -1227,56 +1249,54 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
         const int      width           = img->frame->width;
         const int      pal_size        = pal->frame->width * 4;
         uint8_t        palette[256 * 4];
-        uint8_t       *line;
+        uint8_t        expand[256 * 8 * 4];
+        uint8_t       *base     = GET_PIXEL(img->frame, 0, 0);
+        const int      linesize = img->frame->linesize[0];
+        const int      height   = img->frame->height;
 
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), pal_size);
         memset(palette + pal_size, 0, sizeof(palette) - pal_size);
 
-        line = malloc(img->frame->linesize[0] + WPD_FILE_PADDING);
-        if (!line)
-            return WPD_ERROR(ENOMEM);
+        for (i = 0; i < 256; i++) {
+            unsigned packed = (unsigned)i;
+            uint8_t *entry  = expand + (size_t)i * pixels_per_byte * 4;
 
-        for (y = 0; y < img->frame->height; y++) {
-            const uint8_t *src;
-            uint8_t       *dst = GET_PIXEL(img->frame, 0, y);
-
-            memcpy(line, dst, img->frame->linesize[0]);
-            src = line + 2;
-
-            for (x = 0; x + pixels_per_byte <= width; x += pixels_per_byte) {
-                unsigned packed = *src;
-                src += 4;
-                for (i = 0; i < pixels_per_byte; i++) {
-                    copy32(dst, &palette[(packed & bit_mask) * 4]);
-                    packed >>= pixel_bits;
-                    dst += 4;
-                }
-            }
-            if (x < width) {
-                unsigned packed = *src;
-                for (; x < width; x++) {
-                    copy32(dst, &palette[(packed & bit_mask) * 4]);
-                    packed >>= pixel_bits;
-                    dst += 4;
-                }
+            for (x = 0; x < pixels_per_byte; x++) {
+                copy32(entry + x * 4, &palette[(packed & bit_mask) * 4]);
+                packed >>= pixel_bits;
             }
         }
-        free(line);
+
+        /* Expand right to left so writes stay above not-yet-read indices. */
+        switch (pixels_per_byte) {
+        case 2:
+            expand_palette_rows(base, linesize, width, height, expand, 2);
+            break;
+        case 4:
+            expand_palette_rows(base, linesize, width, height, expand, 4);
+            break;
+        default:
+            expand_palette_rows(base, linesize, width, height, expand, 8);
+            break;
+        }
         s->reduced_width = s->width;
         return 0;
     }
 
     if (img->frame->height * img->frame->width > 300) {
-        uint8_t   palette[256 * 4];
-        const int size = pal->frame->width * 4;
+        uint8_t        palette[256 * 4];
+        const int      size     = pal->frame->width * 4;
+        const int      w        = img->frame->width;
+        const int      h        = img->frame->height;
+        const int      linesize = img->frame->linesize[0];
+        uint8_t *const base     = GET_PIXEL(img->frame, 0, 0);
+
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), size);
         memset(palette + size, 0, 256 * 4 - size);
-        for (y = 0; y < img->frame->height; y++) {
-            for (x = 0; x < img->frame->width; x++) {
-                p = GET_PIXEL(img->frame, x, y);
-                i = p[2];
-                copy32(p, &palette[i * 4]);
-            }
+        for (y = 0; y < h; y++) {
+            uint8_t *row = base + (size_t)y * linesize;
+
+            for (x = 0; x < w; x++, row += 4) copy32(row, &palette[row[2] * 4]);
         }
     } else {
         for (y = 0; y < img->frame->height; y++) {
@@ -1816,11 +1836,15 @@ static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
     WebPImage *canvas = &s->canvas;
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
-        const uint8_t *bg = s->background_argb;
+        uint8_t *const base     = canvas->data[0];
+        const int      linesize = canvas->linesize[0];
+        uint32_t       bg;
+
+        memcpy(&bg, s->background_argb, 4);
         for (int y = 0; y < height; y++) {
-            uint8_t *dst = canvas->data[0] + (pos_y + y) * canvas->linesize[0] +
-                pos_x * 4;
-            for (int x = 0; x < width; x++, dst += 4) copy32(dst, bg);
+            uint8_t *dst = base + (size_t)(pos_y + y) * linesize + pos_x * 4;
+
+            for (int x = 0; x < width; x++, dst += 4) memcpy(dst, &bg, 4);
         }
     } else {
         for (int comp = 0; comp < 4; comp++) {

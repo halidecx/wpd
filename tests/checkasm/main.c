@@ -1,10 +1,5 @@
 #include "checkasm.h"
 
-void checkasm_check_lossless(void);
-void checkasm_check_vp8coeffs(void);
-void checkasm_check_vp8dsp(void);
-void checkasm_check_vp8pred(void);
-
 static const CheckasmCpuInfo cpu_flags[] = {
 #if WPD_ARCH_X86
     {"SSE", "sse", WPD_X86_CPU_FLAG_SSE},
