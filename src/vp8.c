@@ -1497,7 +1497,6 @@ wpd_cold int vp8_decode_init(WpdCodecContext *avctx) {
     s->avctx = avctx;
 
     wpd_init_cpu();
-    wpd_dsp_data_init();
     ff_vp8_pred_init(&s->pred);
     ff_vp8dsp_init(&s->vp8dsp);
 

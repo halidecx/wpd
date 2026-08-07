@@ -394,7 +394,5 @@ static void check_all(VP8DSPContext *d) {
 
 void checkasm_check_vp8dsp(void) {
     VP8DSPContext d;
-
-    wpd_dsp_data_init();
     check_all(&d);
 }

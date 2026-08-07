@@ -12,18 +12,6 @@
 #endif
 #include "wpd_codec.h"
 
-uint8_t wpd_crop_table[256 + 2 * WPD_MAX_NEG_CROP];
-
-void wpd_dsp_data_init(void) {
-    static int initialized;
-
-    if (!initialized) {
-        for (int i = -WPD_MAX_NEG_CROP; i < 256 + WPD_MAX_NEG_CROP; i++)
-            wpd_crop_table[i + WPD_MAX_NEG_CROP] = wpd_clip_uint8(i);
-        initialized = 1;
-    }
-}
-
 static void vp8_luma_dc_wht_c(WpdDctElem block[4][4][16], WpdDctElem dc[16]) {
     int i, t0, t1, t2, t3;
 
@@ -147,13 +135,14 @@ static void vp8_idct_dc_add4y_c(uint8_t *dst, WpdDctElem block[4][16],
     int wpd_unused q2 = p[2 * stride];  \
     int wpd_unused q3 = p[3 * stride];
 
-#define clip_int8(n) (cm[n + 0x80] - 0x80)
+static wpd_always_inline int clip_int8(int value) {
+    return (int)wpd_clip_uint8(value + 0x80) - 0x80;
+}
 
 static wpd_always_inline void filter_common(uint8_t *p, ptrdiff_t stride,
                                             int is4tap) {
     LOAD_PIXELS
-    int      a, f1, f2;
-    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
+    int a, f1, f2;
 
     a = 3 * (q0 - p0);
 
@@ -167,13 +156,13 @@ static wpd_always_inline void filter_common(uint8_t *p, ptrdiff_t stride,
     f2 = WPD_MIN(a + 3, 127) >> 3;
 
     /* Clamping here is required for libvpx bit-exact output. */
-    p[-1 * stride] = cm[p0 + f2];
-    p[0 * stride]  = cm[q0 - f1];
+    p[-1 * stride] = wpd_clip_uint8(p0 + f2);
+    p[0 * stride]  = wpd_clip_uint8(q0 - f1);
 
     if (!is4tap) {
         a              = (f1 + 1) >> 1;
-        p[-2 * stride] = cm[p1 + a];
-        p[1 * stride]  = cm[q1 - a];
+        p[-2 * stride] = wpd_clip_uint8(p1 + a);
+        p[1 * stride]  = wpd_clip_uint8(q1 - a);
     }
 }
 
@@ -197,8 +186,7 @@ static wpd_always_inline int hev(uint8_t *p, ptrdiff_t stride, int thresh) {
 }
 
 static wpd_always_inline void filter_mbedge(uint8_t *p, ptrdiff_t stride) {
-    int      a0, a1, a2, w;
-    uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
+    int a0, a1, a2, w;
 
     LOAD_PIXELS
 
@@ -209,12 +197,12 @@ static wpd_always_inline void filter_mbedge(uint8_t *p, ptrdiff_t stride) {
     a1 = (18 * w + 63) >> 7;
     a2 = (9 * w + 63) >> 7;
 
-    p[-3 * stride] = cm[p2 + a2];
-    p[-2 * stride] = cm[p1 + a1];
-    p[-1 * stride] = cm[p0 + a0];
-    p[0 * stride]  = cm[q0 - a0];
-    p[1 * stride]  = cm[q1 - a1];
-    p[2 * stride]  = cm[q2 - a2];
+    p[-3 * stride] = wpd_clip_uint8(p2 + a2);
+    p[-2 * stride] = wpd_clip_uint8(p1 + a1);
+    p[-1 * stride] = wpd_clip_uint8(p0 + a0);
+    p[0 * stride]  = wpd_clip_uint8(q0 - a0);
+    p[1 * stride]  = wpd_clip_uint8(q1 - a1);
+    p[2 * stride]  = wpd_clip_uint8(q2 - a2);
 }
 
 #define LOOP_FILTER(dir, size, stridea, strideb, maybe_inline)              \

@@ -122,12 +122,12 @@ enum ImageRole {
         b_add = FIX(1.77200 * 255.0 / 224.0) * cb + ONE_HALF; \
     } while (0)
 
-#define YUV_TO_RGB2_CCIR(r, g, b, y1)         \
-    do {                                      \
-        y = ((y1) - 16) * FIX(255.0 / 219.0); \
-        r = cm[(y + r_add) >> SCALEBITS];     \
-        g = cm[(y + g_add) >> SCALEBITS];     \
-        b = cm[(y + b_add) >> SCALEBITS];     \
+#define YUV_TO_RGB2_CCIR(r, g, b, y1)                 \
+    do {                                              \
+        y = ((y1) - 16) * FIX(255.0 / 219.0);         \
+        r = wpd_clip_uint8((y + r_add) >> SCALEBITS); \
+        g = wpd_clip_uint8((y + g_add) >> SCALEBITS); \
+        b = wpd_clip_uint8((y + b_add) >> SCALEBITS); \
     } while (0)
 
 #define RGB_TO_Y_CCIR(r, g, b)                                                \
@@ -1684,10 +1684,9 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
 
 static wpd_always_inline void webp_yuva2argb(uint8_t *out, int Y, int U, int V,
                                              int A) {
-    const uint8_t *cm = wpd_crop_table + WPD_MAX_NEG_CROP;
-    uint8_t        r, g, b;
-    int            y, cb, cr;
-    int            r_add, g_add, b_add;
+    uint8_t r, g, b;
+    int     y, cb, cr;
+    int     r_add, g_add, b_add;
 
     YUV_TO_RGB1_CCIR(U, V);
     YUV_TO_RGB2_CCIR(r, g, b, Y);
@@ -2040,7 +2039,6 @@ WPDDecoder *wpd_decoder_create(void) {
     if (!decoder)
         return NULL;
     wpd_init_cpu();
-    wpd_dsp_data_init();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     return decoder;
 }

@@ -95,8 +95,6 @@ void checkasm_check_vp8pred(void) {
     LOCAL_ALIGNED_16(uint8_t, buf0, [BUF_SIZE]);
     LOCAL_ALIGNED_16(uint8_t, buf1, [BUF_SIZE]);
     VP8PredContext pred;
-
-    wpd_dsp_data_init();
     ff_vp8_pred_init(&pred);
     check_pred4x4(&pred, buf0, buf1);
     report("pred4x4");
