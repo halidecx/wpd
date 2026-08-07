@@ -48,17 +48,14 @@ wpd_cold unsigned wpd_get_cpu_flags_x86(void) {
     if (!cpuid(&r, 1, 0))
         return flags;
 
-    if (X(r.edx, 0x00800000)) /* MMX */ {
-        flags |= WPD_X86_CPU_FLAG_MMX;
-        if (X(r.edx, 0x02000000)) /* SSE, implies the MMX extensions */ {
-            flags |= WPD_X86_CPU_FLAG_MMXEXT | WPD_X86_CPU_FLAG_SSE;
-            if (X(r.edx, 0x04008000)) /* CMOV/SSE2 */ {
-                flags |= WPD_X86_CPU_FLAG_SSE2;
-                if (X(r.ecx, 0x00000201)) /* SSE3/SSSE3 */ {
-                    flags |= WPD_X86_CPU_FLAG_SSSE3;
-                    if (X(r.ecx, 0x00080000)) /* SSE4.1 */
-                        flags |= WPD_X86_CPU_FLAG_SSE41;
-                }
+    if (X(r.edx, 0x02000000)) /* SSE */ {
+        flags |= WPD_X86_CPU_FLAG_SSE;
+        if (X(r.edx, 0x04008000)) /* CMOV/SSE2 */ {
+            flags |= WPD_X86_CPU_FLAG_SSE2;
+            if (X(r.ecx, 0x00000201)) /* SSE3/SSSE3 */ {
+                flags |= WPD_X86_CPU_FLAG_SSSE3;
+                if (X(r.ecx, 0x00080000)) /* SSE4.1 */
+                    flags |= WPD_X86_CPU_FLAG_SSE41;
             }
         }
     }

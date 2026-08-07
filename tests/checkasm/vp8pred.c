@@ -43,11 +43,7 @@ static const char *const pred8x8_modes[VP8_PRED8X8_COUNT] = {
 
 static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
     uint8_t *topright = buf0 + 2 * 16;
-    declare_func_emms(WPD_X86_CPU_FLAG_MMX | WPD_X86_CPU_FLAG_MMXEXT,
-                      void,
-                      uint8_t       *src,
-                      const uint8_t *topright,
-                      ptrdiff_t      stride);
+    declare_func(void, uint8_t *src, const uint8_t *topright, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED4X4_COUNT; mode++) {
         if (check_func(
@@ -63,10 +59,7 @@ static void check_pred4x4(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
 }
 
 static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
-    declare_func_emms(WPD_X86_CPU_FLAG_MMX | WPD_X86_CPU_FLAG_MMXEXT,
-                      void,
-                      uint8_t  *src,
-                      ptrdiff_t stride);
+    declare_func(void, uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
         if (check_func(
@@ -83,10 +76,7 @@ static void check_pred8x8(VP8PredContext *pred, uint8_t *buf0, uint8_t *buf1) {
 
 static void check_pred16x16(VP8PredContext *pred, uint8_t *buf0,
                             uint8_t *buf1) {
-    declare_func_emms(WPD_X86_CPU_FLAG_MMX | WPD_X86_CPU_FLAG_MMXEXT,
-                      void,
-                      uint8_t  *src,
-                      ptrdiff_t stride);
+    declare_func(void, uint8_t *src, ptrdiff_t stride);
 
     for (int mode = 0; mode < VP8_PRED8X8_COUNT; mode++) {
         if (check_func(

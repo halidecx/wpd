@@ -60,24 +60,18 @@ static wpd_always_inline unsigned wpd_get_default_cpu_flags(void) {
 #elif WPD_ARCH_X86
 #if defined(__AVX2__)
     flags |= WPD_X86_CPU_FLAG_AVX2 | WPD_X86_CPU_FLAG_SSE41 |
-        WPD_X86_CPU_FLAG_SSSE3 | WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE |
-        WPD_X86_CPU_FLAG_MMXEXT | WPD_X86_CPU_FLAG_MMX;
+        WPD_X86_CPU_FLAG_SSSE3 | WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE;
 #elif defined(__SSE4_1__) || defined(__AVX__)
     flags |= WPD_X86_CPU_FLAG_SSE41 | WPD_X86_CPU_FLAG_SSSE3 |
-        WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE | WPD_X86_CPU_FLAG_MMXEXT |
-        WPD_X86_CPU_FLAG_MMX;
+        WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE;
 #elif defined(__SSSE3__)
     flags |= WPD_X86_CPU_FLAG_SSSE3 | WPD_X86_CPU_FLAG_SSE2 |
-        WPD_X86_CPU_FLAG_SSE | WPD_X86_CPU_FLAG_MMXEXT | WPD_X86_CPU_FLAG_MMX;
+        WPD_X86_CPU_FLAG_SSE;
 #elif WPD_ARCH_X86_64 || defined(__SSE2__) || \
     (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
-    flags |= WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE |
-        WPD_X86_CPU_FLAG_MMXEXT | WPD_X86_CPU_FLAG_MMX;
+    flags |= WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE;
 #elif defined(__SSE__) || (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
-    flags |= WPD_X86_CPU_FLAG_SSE | WPD_X86_CPU_FLAG_MMXEXT |
-        WPD_X86_CPU_FLAG_MMX;
-#elif defined(__MMX__)
-    flags |= WPD_X86_CPU_FLAG_MMX;
+    flags |= WPD_X86_CPU_FLAG_SSE;
 #endif
 #endif
 

@@ -7,8 +7,6 @@ void checkasm_check_vp8pred(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
 #if WPD_ARCH_X86
-    {"MMX", "mmx", WPD_X86_CPU_FLAG_MMX},
-    {"MMXEXT", "mmxext", WPD_X86_CPU_FLAG_MMXEXT},
     {"SSE", "sse", WPD_X86_CPU_FLAG_SSE},
     {"SSE2", "sse2", WPD_X86_CPU_FLAG_SSE2},
     {"SSSE3", "ssse3", WPD_X86_CPU_FLAG_SSSE3},
