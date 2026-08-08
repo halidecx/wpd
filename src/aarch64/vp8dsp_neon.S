@@ -232,24 +232,33 @@ function ff_vp8_idct_dc_add4y_neon, export=1
         ret
 endfunc
 
+// Saturating the rounded DC to [0,255] and its negation to [0,255] makes a
+// byte-wide uqadd/uqsub pair exact, avoiding any widening of the pixels.
 function ff_vp8_idct_dc_add_neon, export=1
-        mov             w3,       #0
         ld1r            {v2.8h},  [x1]
-        strh            w3,       [x1]
-        srshr           v2.8h,  v2.8h,  #3
-        ld1             {v0.s}[0],  [x0], x2
-        ld1             {v0.s}[1],  [x0], x2
-        uaddw           v3.8h,  v2.8h,  v0.8b
-        ld1             {v1.s}[0],  [x0], x2
-        ld1             {v1.s}[1],  [x0], x2
-        uaddw           v4.8h,  v2.8h,  v1.8b
-        sqxtun          v0.8b,  v3.8h
-        sqxtun          v1.8b,  v4.8h
-        sub             x0,  x0,  x2, lsl #2
-        st1             {v0.s}[0],  [x0], x2
-        st1             {v0.s}[1],  [x0], x2
-        st1             {v1.s}[0],  [x0], x2
-        st1             {v1.s}[1],  [x0], x2
+        add             x3,  x0,  x2
+        strh            wzr,      [x1]
+        add             x4,  x0,  x2,  lsl #1
+        mvn             v3.16b,  v2.16b
+        add             x5,  x3,  x2,  lsl #1
+        ldr             s16,  [x0]
+        sqrshrun        v2.8b,  v2.8h,  #3
+        ldr             s17,  [x3]
+        sqrshrun        v3.8b,  v3.8h,  #3
+        ldr             s18,  [x4]
+        ldr             s19,  [x5]
+        uqadd           v16.8b,  v16.8b,  v2.8b
+        uqadd           v17.8b,  v17.8b,  v2.8b
+        uqadd           v18.8b,  v18.8b,  v2.8b
+        uqadd           v19.8b,  v19.8b,  v2.8b
+        uqsub           v16.8b,  v16.8b,  v3.8b
+        uqsub           v17.8b,  v17.8b,  v3.8b
+        uqsub           v18.8b,  v18.8b,  v3.8b
+        uqsub           v19.8b,  v19.8b,  v3.8b
+        str             s16,  [x0]
+        str             s17,  [x3]
+        str             s18,  [x4]
+        str             s19,  [x5]
         ret
 endfunc
 
