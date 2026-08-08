@@ -50,16 +50,16 @@ build/wpd --cpumask sse2 --muxer md5 input.webp -
 build/wpd --cpumask none --muxer md5 input.webp -
 ```
 
-Accepted names on x86 are `sse`, `sse2`, `ssse3`, `sse41`, `avx2` and `none`,
-on 32-bit Arm `armv6`, `neon` and `none`, and on AArch64 `neon` and `none`.
-Each name enables that instruction set and everything below it; a decimal or
+Accepted names on x86 are `sse`, `sse2`, `ssse3`, `sse41`, `avx2` and `none`, on
+32-bit Arm `armv6`, `neon` and `none`, and on AArch64 `neon` and `none`. Each
+name enables that instruction set and everything below it; a decimal or
 hexadecimal number sets the flag mask directly.
 
 A mask cannot drop below the instruction set the binary was compiled for when
 `trim_dsp` is enabled, since unreachable fallbacks are then optimized out.
-`trim_dsp` defaults to `if-release`, so use
-`meson setup build -Dtrim_dsp=false` to exercise every level; `wpd` warns when
-a mask cannot be honored for this reason.
+`trim_dsp` defaults to `if-release`, so use `meson setup build -Dtrim_dsp=false`
+to exercise every level; `wpd` warns when a mask cannot be honored for this
+reason.
 
 For benchmarks against libwebp, install its development libraries and build the
 optional statically linked comparison binary explicitly:
