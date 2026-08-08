@@ -68,3 +68,20 @@ meson test -C build
 The checkasm dependency is detected through pkg-config or built as a Meson
 subproject. The checkasm executable and test are enabled when assembly is
 enabled.
+
+Decode conformance tests against the `wpd-test-data` files are opt-in, since
+that directory is not part of this repository:
+
+```sh
+meson configure build -Dtestdata_tests=true
+meson test -C build --suite testdata
+```
+
+Each test decodes one file to one pixel format and compares the MD5 of the
+decoded frames against the reference in `tests/meson.build`. Use
+`-Dtestdata_dir=/path/to/wpd-test-data` if the data lives outside the source
+root. Reference MD5s are regenerated with:
+
+```sh
+./build/wpd --muxer md5 -f FORMAT wpd-test-data/FILE.webp -
+```

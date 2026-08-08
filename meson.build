@@ -192,7 +192,7 @@ wpd_dep = declare_dependency(
   include_directories: inc_dirs,
 )
 
-executable(
+wpd = executable(
   'wpd',
   files(
     'tools/md5.c',
@@ -281,3 +281,5 @@ if asm_enabled and checkasm_dep.found()
   benchmark('checkasm', checkasm, suite: 'checkasm', timeout: 3600,
             args: '--bench')
 endif
+
+subdir('tests')

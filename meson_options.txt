@@ -8,6 +8,16 @@ option('libwebpdecoder',
     value: '',
     description: 'Path to a static libwebpdecoder.a for libwebpdec')
 
+option('testdata_tests',
+    type: 'boolean',
+    value: false,
+    description: 'Run tests requiring the wpd-test-data directory')
+
+option('testdata_dir',
+    type: 'string',
+    value: '',
+    description: 'Path to wpd-test-data; defaults to wpd-test-data in the source root')
+
 option('trim_dsp',
   type: 'combo',
   choices: ['true', 'false', 'if-release'],
