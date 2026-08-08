@@ -486,7 +486,7 @@ endfunc
 vp8_v_loop_filter8uv
 vp8_v_loop_filter8uv _inner, inner=1
 
-.macro  vp8_h_loop_filter16 name, inner=0, simple=0
+.macro  vp8_h_loop_filter16 name, inner=0
 function ff_vp8_h_loop_filter16\name\()_neon, export=1
 
         sub             x0,  x0,  #4
@@ -510,11 +510,9 @@ function ff_vp8_h_loop_filter16\name\()_neon, export=1
         transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
 
         dup             v22.16b, w2
-    .if !\simple
         dup             v23.16b, w3
-    .endif
 
-        vp8_loop_filter inner=\inner, simple=\simple, hev_thresh=w4
+        vp8_loop_filter inner=\inner, hev_thresh=w4
 
         sub             x0,  x0,  x1, lsl #4
 
@@ -543,7 +541,255 @@ endfunc
 
 vp8_h_loop_filter16
 vp8_h_loop_filter16 _inner,  inner=1
-vp8_h_loop_filter16 _simple, simple=1
+
+// The simple filter only reads p1..q1 and only writes p0/q0, so load 4 columns
+// per row and transpose 16x4 instead of touching and transposing an 8x16 block.
+function ff_vp8_h_loop_filter16_simple_neon, export=1
+        dup             v22.16b, w2
+        sub             x0,  x0,  #2
+        add             x2,  x0,  x1
+        add             x3,  x0,  x1, lsl #1
+        add             x4,  x2,  x1, lsl #1
+        lsl             x5,  x1,  #2
+        add             x6,  x0,  #1
+        add             x7,  x2,  #1
+        add             x8,  x3,  #1
+        add             x9,  x4,  #1
+
+        ld1             {v16.s}[0], [x0], x5
+        ld1             {v17.s}[0], [x2], x5
+        ld1             {v18.s}[0], [x3], x5
+        ld1             {v19.s}[0], [x4], x5
+        ld1             {v16.s}[1], [x0], x5
+        ld1             {v17.s}[1], [x2], x5
+        ld1             {v18.s}[1], [x3], x5
+        ld1             {v19.s}[1], [x4], x5
+        ld1             {v16.s}[2], [x0], x5
+        ld1             {v17.s}[2], [x2], x5
+        ld1             {v18.s}[2], [x3], x5
+        ld1             {v19.s}[2], [x4], x5
+        ld1             {v16.s}[3], [x0]
+        ld1             {v17.s}[3], [x2]
+        ld1             {v18.s}[3], [x3]
+        ld1             {v19.s}[3], [x4]
+
+        trn1            v24.16b, v16.16b, v17.16b
+        trn2            v25.16b, v16.16b, v17.16b
+        trn1            v26.16b, v18.16b, v19.16b
+        trn2            v27.16b, v18.16b, v19.16b
+        trn1            v2.8h,   v24.8h,  v26.8h
+        trn2            v4.8h,   v24.8h,  v26.8h
+        trn1            v3.8h,   v25.8h,  v27.8h
+        trn2            v5.8h,   v25.8h,  v27.8h
+
+        vp8_loop_filter simple=1
+
+        zip1            v24.16b, v3.16b, v4.16b
+        zip2            v25.16b, v3.16b, v4.16b
+
+        st1             {v24.h}[0], [x6], x5
+        st1             {v24.h}[1], [x7], x5
+        st1             {v24.h}[2], [x8], x5
+        st1             {v24.h}[3], [x9], x5
+        st1             {v24.h}[4], [x6], x5
+        st1             {v24.h}[5], [x7], x5
+        st1             {v24.h}[6], [x8], x5
+        st1             {v24.h}[7], [x9], x5
+        st1             {v25.h}[0], [x6], x5
+        st1             {v25.h}[1], [x7], x5
+        st1             {v25.h}[2], [x8], x5
+        st1             {v25.h}[3], [x9], x5
+        st1             {v25.h}[4], [x6], x5
+        st1             {v25.h}[5], [x7], x5
+        st1             {v25.h}[6], [x8], x5
+        st1             {v25.h}[7], [x9]
+
+        ret
+endfunc
+
+// Transposes the 16x16 byte block held in v0-v15, clobbering v16-v31.
+.macro  transpose_16x16B
+        trn1            v16.16b, v0.16b,  v1.16b
+        trn2            v17.16b, v0.16b,  v1.16b
+        trn1            v18.16b, v2.16b,  v3.16b
+        trn2            v19.16b, v2.16b,  v3.16b
+        trn1            v20.16b, v4.16b,  v5.16b
+        trn2            v21.16b, v4.16b,  v5.16b
+        trn1            v22.16b, v6.16b,  v7.16b
+        trn2            v23.16b, v6.16b,  v7.16b
+        trn1            v24.16b, v8.16b,  v9.16b
+        trn2            v25.16b, v8.16b,  v9.16b
+        trn1            v26.16b, v10.16b, v11.16b
+        trn2            v27.16b, v10.16b, v11.16b
+        trn1            v28.16b, v12.16b, v13.16b
+        trn2            v29.16b, v12.16b, v13.16b
+        trn1            v30.16b, v14.16b, v15.16b
+        trn2            v31.16b, v14.16b, v15.16b
+
+        trn1            v0.8h,   v16.8h,  v18.8h
+        trn2            v2.8h,   v16.8h,  v18.8h
+        trn1            v1.8h,   v17.8h,  v19.8h
+        trn2            v3.8h,   v17.8h,  v19.8h
+        trn1            v4.8h,   v20.8h,  v22.8h
+        trn2            v6.8h,   v20.8h,  v22.8h
+        trn1            v5.8h,   v21.8h,  v23.8h
+        trn2            v7.8h,   v21.8h,  v23.8h
+        trn1            v8.8h,   v24.8h,  v26.8h
+        trn2            v10.8h,  v24.8h,  v26.8h
+        trn1            v9.8h,   v25.8h,  v27.8h
+        trn2            v11.8h,  v25.8h,  v27.8h
+        trn1            v12.8h,  v28.8h,  v30.8h
+        trn2            v14.8h,  v28.8h,  v30.8h
+        trn1            v13.8h,  v29.8h,  v31.8h
+        trn2            v15.8h,  v29.8h,  v31.8h
+
+        trn1            v16.4s,  v0.4s,   v4.4s
+        trn2            v20.4s,  v0.4s,   v4.4s
+        trn1            v17.4s,  v1.4s,   v5.4s
+        trn2            v21.4s,  v1.4s,   v5.4s
+        trn1            v18.4s,  v2.4s,   v6.4s
+        trn2            v22.4s,  v2.4s,   v6.4s
+        trn1            v19.4s,  v3.4s,   v7.4s
+        trn2            v23.4s,  v3.4s,   v7.4s
+        trn1            v24.4s,  v8.4s,   v12.4s
+        trn2            v28.4s,  v8.4s,   v12.4s
+        trn1            v25.4s,  v9.4s,   v13.4s
+        trn2            v29.4s,  v9.4s,   v13.4s
+        trn1            v26.4s,  v10.4s,  v14.4s
+        trn2            v30.4s,  v10.4s,  v14.4s
+        trn1            v27.4s,  v11.4s,  v15.4s
+        trn2            v31.4s,  v11.4s,  v15.4s
+
+        trn1            v0.2d,   v16.2d,  v24.2d
+        trn2            v8.2d,   v16.2d,  v24.2d
+        trn1            v1.2d,   v17.2d,  v25.2d
+        trn2            v9.2d,   v17.2d,  v25.2d
+        trn1            v2.2d,   v18.2d,  v26.2d
+        trn2            v10.2d,  v18.2d,  v26.2d
+        trn1            v3.2d,   v19.2d,  v27.2d
+        trn2            v11.2d,  v19.2d,  v27.2d
+        trn1            v4.2d,   v20.2d,  v28.2d
+        trn2            v12.2d,  v20.2d,  v28.2d
+        trn1            v5.2d,   v21.2d,  v29.2d
+        trn2            v13.2d,  v21.2d,  v29.2d
+        trn1            v6.2d,   v22.2d,  v30.2d
+        trn2            v14.2d,  v22.2d,  v30.2d
+        trn1            v7.2d,   v23.2d,  v31.2d
+        trn2            v15.2d,  v23.2d,  v31.2d
+.endm
+
+// One vertical edge, with the four columns already transposed into rows.
+// v16 = 0x80, v17 = #4, v18 = #3.
+.macro  vp8_simple_filter p1, p0, q0, q1, flim, t0, t1, t2
+        uabd            \t0\().16b, \p0\().16b, \q0\().16b
+        uabd            \t1\().16b, \p1\().16b, \q1\().16b
+        uqadd           \t0\().16b, \t0\().16b, \t0\().16b
+        ushr            \t1\().16b, \t1\().16b, #1
+        uqadd           \t0\().16b, \t0\().16b, \t1\().16b
+        cmhs            \t0\().16b, \flim\().16b, \t0\().16b
+
+        eor             \p1\().16b, \p1\().16b, v16.16b
+        eor             \p0\().16b, \p0\().16b, v16.16b
+        eor             \q0\().16b, \q0\().16b, v16.16b
+        eor             \q1\().16b, \q1\().16b, v16.16b
+
+        // 3*(q0-p0) saturates monotonically, so the byte-wise chain matches
+        // clamping the widened sum
+        sqsub           \t1\().16b, \q0\().16b, \p0\().16b
+        sqsub           \t2\().16b, \p1\().16b, \q1\().16b
+        sqadd           \t2\().16b, \t2\().16b, \t1\().16b
+        sqadd           \t2\().16b, \t2\().16b, \t1\().16b
+        sqadd           \t2\().16b, \t2\().16b, \t1\().16b
+        and             \t2\().16b, \t2\().16b, \t0\().16b
+
+        sqadd           \t0\().16b, \t2\().16b, v17.16b
+        sqadd           \t1\().16b, \t2\().16b, v18.16b
+        sshr            \t0\().16b, \t0\().16b, #3
+        sshr            \t1\().16b, \t1\().16b, #3
+        sqsub           \q0\().16b, \q0\().16b, \t0\().16b
+        sqadd           \p0\().16b, \p0\().16b, \t1\().16b
+
+        eor             \p1\().16b, \p1\().16b, v16.16b
+        eor             \p0\().16b, \p0\().16b, v16.16b
+        eor             \q0\().16b, \q0\().16b, v16.16b
+        eor             \q1\().16b, \q1\().16b, v16.16b
+.endm
+
+// Filters all four vertical edges of a luma macroblock in one pass: the
+// four edges cover columns -2..13, so the whole block is read and written
+// full width instead of four strided lane-wise passes over it.
+function ff_vp8_h_loop_filter_simple_mb_neon, export=1
+        stp             d8,  d9,  [sp, #-64]!
+        stp             d10, d11, [sp, #16]
+        stp             d12, d13, [sp, #32]
+        stp             d14, d15, [sp, #48]
+
+        sub             x0,  x0,  #2
+        add             x4,  x0,  x1
+        add             x5,  x0,  x1, lsl #1
+        add             x6,  x4,  x1, lsl #1
+        lsl             x7,  x1,  #2
+        mov             x8,  x0
+        mov             x9,  x4
+        mov             x10, x5
+        mov             x11, x6
+
+        ld1             {v0.16b},  [x0], x7
+        ld1             {v1.16b},  [x4], x7
+        ld1             {v2.16b},  [x5], x7
+        ld1             {v3.16b},  [x6], x7
+        ld1             {v4.16b},  [x0], x7
+        ld1             {v5.16b},  [x4], x7
+        ld1             {v6.16b},  [x5], x7
+        ld1             {v7.16b},  [x6], x7
+        ld1             {v8.16b},  [x0], x7
+        ld1             {v9.16b},  [x4], x7
+        ld1             {v10.16b}, [x5], x7
+        ld1             {v11.16b}, [x6], x7
+        ld1             {v12.16b}, [x0]
+        ld1             {v13.16b}, [x4]
+        ld1             {v14.16b}, [x5]
+        ld1             {v15.16b}, [x6]
+
+        transpose_16x16B
+
+        movi            v16.16b, #0x80
+        movi            v17.16b, #4
+        movi            v18.16b, #3
+        dup             v19.16b, w2
+        dup             v20.16b, w3
+
+        vp8_simple_filter v0,  v1,  v2,  v3,  v19, v21, v22, v23
+        vp8_simple_filter v4,  v5,  v6,  v7,  v20, v24, v25, v26
+        vp8_simple_filter v8,  v9,  v10, v11, v20, v27, v28, v29
+        vp8_simple_filter v12, v13, v14, v15, v20, v30, v31, v19
+
+        transpose_16x16B
+
+        st1             {v0.16b},  [x8], x7
+        st1             {v1.16b},  [x9], x7
+        st1             {v2.16b},  [x10], x7
+        st1             {v3.16b},  [x11], x7
+        st1             {v4.16b},  [x8], x7
+        st1             {v5.16b},  [x9], x7
+        st1             {v6.16b},  [x10], x7
+        st1             {v7.16b},  [x11], x7
+        st1             {v8.16b},  [x8], x7
+        st1             {v9.16b},  [x9], x7
+        st1             {v10.16b}, [x10], x7
+        st1             {v11.16b}, [x11], x7
+        st1             {v12.16b}, [x8]
+        st1             {v13.16b}, [x9]
+        st1             {v14.16b}, [x10]
+        st1             {v15.16b}, [x11]
+
+        ldp             d10, d11, [sp, #16]
+        ldp             d12, d13, [sp, #32]
+        ldp             d14, d15, [sp, #48]
+        ldp             d8,  d9,  [sp], #64
+
+        ret
+endfunc
 
 .macro  vp8_h_loop_filter8uv name, inner=0
 function ff_vp8_h_loop_filter8uv\name\()_neon, export=1
