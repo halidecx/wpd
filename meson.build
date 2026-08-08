@@ -65,7 +65,8 @@ asm_enabled = get_option('enable_asm') and (
   cpu_family.startswith('x86')
 )
 
-lib_c_args += '-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)
+asm_c_args = ['-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)]
+lib_c_args += asm_c_args
 
 # Eliminate DSP fallbacks the build target can never reach (dav1d's trim_dsp).
 trim_dsp = get_option('trim_dsp') == 'true' or (
@@ -190,6 +191,7 @@ libwpd = static_library(
 wpd_dep = declare_dependency(
   link_with: libwpd,
   include_directories: inc_dirs,
+  compile_args: asm_c_args + trim_c_args,
 )
 
 wpd = executable(

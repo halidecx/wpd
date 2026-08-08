@@ -1,4 +1,5 @@
 #include "wpd.h"
+#include "cpu.h"
 #include "md5.h"
 #include "vcs_version.h"
 
@@ -13,6 +14,43 @@
 enum {
     ARG_MUXER = 256,
     ARG_VERIFY,
+    ARG_CPUMASK,
+};
+
+typedef struct CpuMask {
+    const char *name;
+    unsigned    mask;
+} CpuMask;
+
+#if WPD_ARCH_X86
+#define CPU_MASK_NAMES "sse, sse2, ssse3, sse41, avx2, none"
+#elif WPD_ARCH_ARM
+#define CPU_MASK_NAMES "armv6, neon, none"
+#elif WPD_ARCH_AARCH64
+#define CPU_MASK_NAMES "neon, none"
+#else
+#define CPU_MASK_NAMES "none"
+#endif
+
+static const CpuMask cpu_masks[] = {
+#if WPD_ARCH_X86
+    {"sse", WPD_X86_CPU_FLAG_SSE},
+    {"sse2", WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE},
+    {"ssse3",
+     WPD_X86_CPU_FLAG_SSSE3 | WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE},
+    {"sse41",
+     WPD_X86_CPU_FLAG_SSE41 | WPD_X86_CPU_FLAG_SSSE3 | WPD_X86_CPU_FLAG_SSE2 |
+         WPD_X86_CPU_FLAG_SSE},
+    {"avx2",
+     WPD_X86_CPU_FLAG_AVX2 | WPD_X86_CPU_FLAG_SSE41 | WPD_X86_CPU_FLAG_SSSE3 |
+         WPD_X86_CPU_FLAG_SSE2 | WPD_X86_CPU_FLAG_SSE},
+#elif WPD_ARCH_ARM
+    {"armv6", WPD_ARM_CPU_FLAG_ARMV6},
+    {"neon", WPD_ARM_CPU_FLAG_NEON | WPD_ARM_CPU_FLAG_ARMV6},
+#elif WPD_ARCH_AARCH64
+    {"neon", WPD_ARM_CPU_FLAG_NEON},
+#endif
+    {"none", 0},
 };
 
 typedef enum OutputType {
@@ -35,6 +73,7 @@ static const struct option long_options[] = {
     {"fmt", required_argument, NULL, 'f'},
     {"muxer", required_argument, NULL, ARG_MUXER},
     {"verify", required_argument, NULL, ARG_VERIFY},
+    {"cpumask", required_argument, NULL, ARG_CPUMASK},
     {NULL, 0, NULL, 0},
 };
 
@@ -58,7 +97,11 @@ static void usage(const char *app, const char *reason) {
             " --muxer str\n"
             "    output muxer (raw, md5); default raw\n"
             " --verify md5\n"
-            "    verify decoded md5; implies --muxer md5 and no output\n",
+            "    verify decoded md5; implies --muxer md5 and no output\n"
+            " --cpumask str\n"
+            "    restrict the instruction sets used; " CPU_MASK_NAMES
+            ",\n"
+            "    or a number; default all detected\n",
             app);
 }
 
@@ -85,6 +128,40 @@ static int parse_format(const char *value, const char **pixel_format) {
         return -1;
     }
     return 0;
+}
+
+static int parse_cpumask(const char *value, unsigned *mask) {
+    char         *end;
+    unsigned long parsed;
+
+    for (size_t i = 0; i < sizeof(cpu_masks) / sizeof(*cpu_masks); i++) {
+        if (!strcmp(cpu_masks[i].name, value)) {
+            *mask = cpu_masks[i].mask;
+            return 0;
+        }
+    }
+
+    errno  = 0;
+    parsed = strtoul(value, &end, 0);
+    if (errno == ERANGE || end == value || *end || value[0] == '-' ||
+        parsed != (unsigned long)(unsigned)parsed)
+        return -1;
+    *mask = (unsigned)parsed;
+    return 0;
+}
+
+static void warn_baseline_cpumask(unsigned mask) {
+#if WPD_TRIM_DSP_FUNCTIONS
+    unsigned forced = wpd_get_default_cpu_flags() & ~mask;
+
+    if (forced)
+        fprintf(stderr,
+                "warning: cannot disable flags 0x%x below the build target; "
+                "reconfigure with -Dtrim_dsp=false\n",
+                forced);
+#else
+    (void)mask;
+#endif
 }
 
 static int parse_md5(const char *value, uint8_t digest[16]) {
@@ -282,6 +359,7 @@ int main(int argc, char **argv) {
     const char   *muxer = NULL, *pixel_format = NULL, *verify = NULL;
     const char   *input_name, *output_name;
     int           frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
+    unsigned      cpumask;
     WPDFrame      frame;
 
     print_banner();
@@ -312,6 +390,16 @@ int main(int argc, char **argv) {
             muxer = optarg;
             break;
         case ARG_VERIFY: verify = optarg; break;
+        case ARG_CPUMASK:
+            if (parse_cpumask(optarg, &cpumask) < 0) {
+                usage(argv[0],
+                      "invalid cpu mask; expected " CPU_MASK_NAMES
+                      ", or a number");
+                return 2;
+            }
+            warn_baseline_cpumask(cpumask);
+            wpd_set_cpu_flags_mask(cpumask);
+            break;
         default:
             usage(argv[0], "unknown option or missing option value");
             return 2;
