@@ -414,3 +414,161 @@ function ff_extract_green_neon, export=1
         b.gt            3b
 9:      ret
 endfunc
+
+// NEON has no gather, so index in general registers; ubfx beats a per-pixel
+// byte load, and pairing results into stp halves the stores.
+function ff_map_color32_neon, export=1
+        cmp             w3,  #8
+        b.lt            2f
+        // dst may alias src, so every load of a block precedes its stores.
+1:      ldp             x4,  x5,  [x1]
+        ldp             x6,  x7,  [x1, #16]
+        ubfx            x8,  x4,  #16, #8
+        ubfx            x9,  x4,  #48, #8
+        ubfx            x10, x5,  #16, #8
+        ubfx            x11, x5,  #48, #8
+        ubfx            x12, x6,  #16, #8
+        ubfx            x13, x6,  #48, #8
+        ubfx            x14, x7,  #16, #8
+        ubfx            x15, x7,  #48, #8
+        ldr             w8,  [x2,  x8, lsl #2]
+        ldr             w9,  [x2,  x9, lsl #2]
+        ldr             w10, [x2, x10, lsl #2]
+        ldr             w11, [x2, x11, lsl #2]
+        ldr             w12, [x2, x12, lsl #2]
+        ldr             w13, [x2, x13, lsl #2]
+        ldr             w14, [x2, x14, lsl #2]
+        ldr             w15, [x2, x15, lsl #2]
+        orr             x8,  x8,  x9,  lsl #32
+        orr             x10, x10, x11, lsl #32
+        orr             x12, x12, x13, lsl #32
+        orr             x14, x14, x15, lsl #32
+        add             x1,  x1,  #32
+        sub             w3,  w3,  #8
+        stp             x8,  x10, [x0]
+        stp             x12, x14, [x0, #16]
+        add             x0,  x0,  #32
+        cmp             w3,  #8
+        b.ge            1b
+2:      cbz             w3,  9f
+3:      ldrb            w4,  [x1, #2]
+        add             x1,  x1,  #4
+        subs            w3,  w3,  #1
+        ldr             w4,  [x2, x4, lsl #2]
+        str             w4,  [x0], #4
+        b.gt            3b
+9:      ret
+endfunc
+
+// blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
+const blend_scale
+        .long           0
+        .set            bsi, 1
+        .rept           255
+        .long           (1 << 24) / bsi
+        .set            bsi, bsi + 1
+        .endr
+endconst
+
+// Blend one plane of 8 pixels. v0 = src alpha, v24 = dst factor,
+// v26/v27 = 2^24/blend_alpha, v16 = transparent lanes.
+.macro  blend_ch        dc, sc
+        umull           v28.8h,  \sc\().8b,  v0.8b
+        umull           v29.8h,  \dc\().8b,  v24.8b
+        uaddl           v30.4s,  v28.4h,  v29.4h
+        uaddl2          v31.4s,  v28.8h,  v29.8h
+        mul             v30.4s,  v30.4s,  v26.4s
+        mul             v31.4s,  v31.4s,  v27.4s
+        ushr            v30.4s,  v30.4s,  #24
+        ushr            v31.4s,  v31.4s,  #24
+        uzp1            v30.8h,  v30.8h,  v31.8h
+        xtn             v28.8b,  v30.8h
+        bit             v28.8b,  \dc\().8b,  v16.8b
+        mov             \dc\().8b,  v28.8b
+.endm
+
+.macro  blend_scale_lane idx
+        umov            w4,  v23.h[\idx]
+        ldr             w4,  [x3, x4, lsl #2]
+    .if \idx < 4
+        mov             v26.s[\idx], w4
+    .else
+        mov             v27.s[\idx - 4], w4
+    .endif
+.endm
+
+.macro  blend_tail_ch   off
+        ldrb            w9,  [x1, #\off]
+        ldrb            w10, [x0, #\off]
+        mul             w9,  w9,  w4
+        madd            w9,  w10, w6,  w9
+        mul             w9,  w9,  w8
+        lsr             w9,  w9,  #24
+        strb            w9,  [x0, #\off]
+.endm
+
+function ff_blend_row_argb_neon, export=1
+        movrel          x3,  blend_scale
+        movi            v17.8b,  #255
+        cmp             w2,  #8
+        b.lt            4f
+        // Planar lanes keep the per-pixel alpha broadcast-free.
+1:      ld4             {v0.8b-v3.8b}, [x1], #32
+        ld4             {v4.8b-v7.8b}, [x0]
+        cmeq            v16.8b,  v0.8b,  #0
+        cmeq            v18.8b,  v0.8b,  v17.8b
+        orr             v19.8b,  v16.8b, v18.8b
+        fmov            x4,  d19
+        cmn             x4,  #1
+        b.eq            2f              // no lane needs the blend
+        uxtl            v20.8h,  v0.8b
+        movi            v21.8h,  #1,  lsl #8
+        sub             v21.8h,  v21.8h, v20.8h
+        uxtl            v22.8h,  v4.8b
+        mul             v21.8h,  v21.8h, v22.8h
+        ushr            v21.8h,  v21.8h, #8
+        add             v23.8h,  v20.8h, v21.8h
+        xtn             v24.8b,  v21.8h
+.irp    idx, 0, 1, 2, 3, 4, 5, 6, 7
+        blend_scale_lane \idx
+.endr
+        blend_ch        v5,  v1
+        blend_ch        v6,  v2
+        blend_ch        v7,  v3
+        xtn             v28.8b,  v23.8h
+        bit             v28.8b,  v4.8b,  v16.8b
+        mov             v4.8b,   v28.8b
+        // Opaque lanes take src verbatim; a no-op on the blended lanes.
+2:      bit             v4.8b,   v0.8b,   v18.8b
+        bit             v5.8b,   v1.8b,   v18.8b
+        bit             v6.8b,   v2.8b,   v18.8b
+        bit             v7.8b,   v3.8b,   v18.8b
+        sub             w2,  w2,  #8
+        st4             {v4.8b-v7.8b}, [x0], #32
+        cmp             w2,  #8
+        b.ge            1b
+4:      cbz             w2,  9f
+        mov             w11, #256
+5:      ldrb            w4,  [x1]
+        cmp             w4,  #255
+        b.eq            7f
+        cbz             w4,  8f
+        ldrb            w5,  [x0]
+        sub             w6,  w11, w4
+        mul             w6,  w6,  w5
+        lsr             w6,  w6,  #8
+        add             w7,  w4,  w6
+        ldr             w8,  [x3, x7, lsl #2]
+        blend_tail_ch   1
+        blend_tail_ch   2
+        blend_tail_ch   3
+        strb            w7,  [x0]
+        b               8f
+7:      ldr             w4,  [x1]
+        str             w4,  [x0]
+8:      add             x1,  x1,  #4
+        add             x0,  x0,  #4
+        subs            w2,  w2,  #1
+        b.gt            5b
+9:      ret
+endfunc

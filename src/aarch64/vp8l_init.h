@@ -27,6 +27,9 @@ PRED_ADD_NEON(13)
 #undef PRED_ADD_NEON
 
 void ff_extract_green_neon(uint8_t *dst, const uint8_t *src, int num_pixels);
+void ff_map_color32_neon(uint8_t *dst, const uint8_t *src,
+                         const uint32_t *palette, int num_pixels);
+void ff_blend_row_argb_neon(uint8_t *dst, const uint8_t *src, int num_pixels);
 
 static wpd_always_inline void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp) {
     if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
@@ -46,7 +49,9 @@ static wpd_always_inline void wpd_vp8l_dsp_init_aarch64(WPDLosslessDSP *dsp) {
     dsp->pred_add[12] = ff_pred_add_12_neon;
     dsp->pred_add[13] = ff_pred_add_13_neon;
 
-    dsp->extract_green = ff_extract_green_neon;
+    dsp->extract_green  = ff_extract_green_neon;
+    dsp->map_color32    = ff_map_color32_neon;
+    dsp->blend_row_argb = ff_blend_row_argb_neon;
 }
 
 #endif

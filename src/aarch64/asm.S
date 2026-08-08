@@ -191,6 +191,33 @@ FUNC    .func   \name
     .endif
 .endm
 
+.macro  const   name, align=2
+    .macro endconst
+ELF     .size   \name, . - \name
+        .purgem endconst
+    .endm
+#if defined(__MACH__)
+        .const_data
+#elif defined(_WIN32)
+        .section        .rdata
+#else
+        .section        .rodata
+#endif
+        .align          \align
+\name:
+.endm
+
+// adrp is PC-relative, so this needs no fixups whether or not PIC is on.
+.macro  movrel rd, val
+#if defined(__MACH__)
+        adrp            \rd, \val@PAGE
+        add             \rd, \rd, \val@PAGEOFF
+#else
+        adrp            \rd, \val
+        add             \rd, \rd, :lo12:\val
+#endif
+.endm
+
 #define GLUE(a, b) a ## b
 #define JOIN(a, b) GLUE(a, b)
 #define X(s) JOIN(EXTERN_ASM, s)
