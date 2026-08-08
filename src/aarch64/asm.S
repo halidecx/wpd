@@ -207,7 +207,6 @@ ELF     .size   \name, . - \name
 \name:
 .endm
 
-// adrp is PC-relative, so this needs no fixups whether or not PIC is on.
 .macro  movrel rd, val
 #if defined(__MACH__)
         adrp            \rd, \val@PAGE
