@@ -1,10 +1,10 @@
 # wpd
 
-A fast WebP decoder based on ffvp8 and FFmpeg's WebP decoder.
+A fast WebP decoder.
 
 ## Code
 
-- Comments should be added only when necessary, maximum 2 lines
+- **No comments**
 - No intrinsics; you may add them to test performance, but they should
   ultimately be re-written to handwritten assembly that matches or exceeds their
   performance
@@ -22,6 +22,20 @@ meson setup build
 meson compile -C build
 ```
 
+Compile libwebp test harness:
+
+```sh
+meson setup build -Dlibwebpdecoder=/path/to/libwebpdecoder.a
+meson compile -C build libwebpdec
+```
+
+Testdata:
+
+```sh
+meson configure build -Dtestdata_tests=true
+meson test -C build --suite testdata
+```
+
 Test scripts:
 
 ```sh
@@ -29,6 +43,7 @@ Test scripts:
 ./scripts/test.sh       # correctness, vs FFmpeg
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
+./scripts/testdata.sh   # asm vs c E2E correctness
 ./scripts/stylecheck.sh # format codebase
 ```
 
@@ -37,6 +52,3 @@ Inspect the structure of a WebP file (still or animated):
 ```sh
 webpmux -info [i.webp]
 ```
-
-When testing, decode into the `wpd-test-data` dir. **Never** delete the WebP
-reference files in there.

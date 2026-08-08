@@ -7,7 +7,9 @@ project(
     'buildtype=release',
     'c_std=c11',
     'warning_level=2',
-    'b_ndebug=if-release'
+    'b_ndebug=if-release',
+    'default_library=both',
+    'prefer_static=true'
   ],
 )
 

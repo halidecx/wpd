@@ -106,13 +106,9 @@ root. Reference MD5s are regenerated with:
 ./build/wpd --muxer md5 -f FORMAT wpd-test-data/FILE.webp -
 ```
 
-Since the references are independent of the code path taken, the suite doubles
-as an end-to-end check of the assembly against the C fallback when run once per
-instruction set:
+Detect the host architecture & run end-to-end tests with the corresponding
+masks:
 
 ```sh
-meson setup build -Dtrim_dsp=false -Dtestdata_tests=true
-for mask in none sse2 ssse3 sse41 avx2; do
-    meson test -C build --suite testdata --test-args "--cpumask $mask"
-done
+./scripts/testdata.sh
 ```
