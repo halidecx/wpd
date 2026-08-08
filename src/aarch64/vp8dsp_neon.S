@@ -486,7 +486,7 @@ endfunc
 vp8_v_loop_filter8uv
 vp8_v_loop_filter8uv _inner, inner=1
 
-.macro  vp8_h_loop_filter16 name, inner=0, simple=0
+.macro  vp8_h_loop_filter16 name, inner=0
 function ff_vp8_h_loop_filter16\name\()_neon, export=1
 
         sub             x0,  x0,  #4
@@ -510,11 +510,9 @@ function ff_vp8_h_loop_filter16\name\()_neon, export=1
         transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
 
         dup             v22.16b, w2
-    .if !\simple
         dup             v23.16b, w3
-    .endif
 
-        vp8_loop_filter inner=\inner, simple=\simple, hev_thresh=w4
+        vp8_loop_filter inner=\inner, hev_thresh=w4
 
         sub             x0,  x0,  x1, lsl #4
 
@@ -543,7 +541,71 @@ endfunc
 
 vp8_h_loop_filter16
 vp8_h_loop_filter16 _inner,  inner=1
-vp8_h_loop_filter16 _simple, simple=1
+
+// The simple filter only reads p1..q1 and only writes p0/q0, so load 4 columns
+// per row and transpose 16x4 instead of touching and transposing an 8x16 block.
+function ff_vp8_h_loop_filter16_simple_neon, export=1
+        dup             v22.16b, w2
+        sub             x0,  x0,  #2
+        add             x2,  x0,  x1
+        add             x3,  x0,  x1, lsl #1
+        add             x4,  x2,  x1, lsl #1
+        lsl             x5,  x1,  #2
+        add             x6,  x0,  #1
+        add             x7,  x2,  #1
+        add             x8,  x3,  #1
+        add             x9,  x4,  #1
+
+        ld1             {v16.s}[0], [x0], x5
+        ld1             {v17.s}[0], [x2], x5
+        ld1             {v18.s}[0], [x3], x5
+        ld1             {v19.s}[0], [x4], x5
+        ld1             {v16.s}[1], [x0], x5
+        ld1             {v17.s}[1], [x2], x5
+        ld1             {v18.s}[1], [x3], x5
+        ld1             {v19.s}[1], [x4], x5
+        ld1             {v16.s}[2], [x0], x5
+        ld1             {v17.s}[2], [x2], x5
+        ld1             {v18.s}[2], [x3], x5
+        ld1             {v19.s}[2], [x4], x5
+        ld1             {v16.s}[3], [x0]
+        ld1             {v17.s}[3], [x2]
+        ld1             {v18.s}[3], [x3]
+        ld1             {v19.s}[3], [x4]
+
+        trn1            v24.16b, v16.16b, v17.16b
+        trn2            v25.16b, v16.16b, v17.16b
+        trn1            v26.16b, v18.16b, v19.16b
+        trn2            v27.16b, v18.16b, v19.16b
+        trn1            v2.8h,   v24.8h,  v26.8h
+        trn2            v4.8h,   v24.8h,  v26.8h
+        trn1            v3.8h,   v25.8h,  v27.8h
+        trn2            v5.8h,   v25.8h,  v27.8h
+
+        vp8_loop_filter simple=1
+
+        zip1            v24.16b, v3.16b, v4.16b
+        zip2            v25.16b, v3.16b, v4.16b
+
+        st1             {v24.h}[0], [x6], x5
+        st1             {v24.h}[1], [x7], x5
+        st1             {v24.h}[2], [x8], x5
+        st1             {v24.h}[3], [x9], x5
+        st1             {v24.h}[4], [x6], x5
+        st1             {v24.h}[5], [x7], x5
+        st1             {v24.h}[6], [x8], x5
+        st1             {v24.h}[7], [x9], x5
+        st1             {v25.h}[0], [x6], x5
+        st1             {v25.h}[1], [x7], x5
+        st1             {v25.h}[2], [x8], x5
+        st1             {v25.h}[3], [x9], x5
+        st1             {v25.h}[4], [x6], x5
+        st1             {v25.h}[5], [x7], x5
+        st1             {v25.h}[6], [x8], x5
+        st1             {v25.h}[7], [x9]
+
+        ret
+endfunc
 
 .macro  vp8_h_loop_filter8uv name, inner=0
 function ff_vp8_h_loop_filter8uv\name\()_neon, export=1
