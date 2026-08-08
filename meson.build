@@ -7,7 +7,9 @@ project(
     'buildtype=release',
     'c_std=c11',
     'warning_level=2',
-    'b_ndebug=if-release'
+    'b_ndebug=if-release',
+    'default_library=both',
+    'prefer_static=true'
   ],
 )
 
@@ -65,7 +67,9 @@ asm_enabled = get_option('enable_asm') and (
   cpu_family.startswith('x86')
 )
 
-lib_c_args += '-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)
+asm_c_args = ['-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)]
+cpu_baseline_c_args = []
+lib_c_args += asm_c_args
 
 # Eliminate DSP fallbacks the build target can never reach (dav1d's trim_dsp).
 trim_dsp = get_option('trim_dsp') == 'true' or (
@@ -164,7 +168,7 @@ if asm_enabled
         'src/arm/vp8_armv6.S',
         'src/arm/vp8dsp_armv6.S',
       )
-      lib_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
+      cpu_baseline_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
     endif
     if armv6t2
       lib_c_args += ['-DWPD_ARM_ARMV6T2_ASM=1']
@@ -174,6 +178,8 @@ if asm_enabled
     endif
   endif
 endif
+
+lib_c_args += cpu_baseline_c_args
 
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
@@ -190,9 +196,10 @@ libwpd = static_library(
 wpd_dep = declare_dependency(
   link_with: libwpd,
   include_directories: inc_dirs,
+  compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args,
 )
 
-executable(
+wpd = executable(
   'wpd',
   files(
     'tools/md5.c',
@@ -281,3 +288,5 @@ if asm_enabled and checkasm_dep.found()
   benchmark('checkasm', checkasm, suite: 'checkasm', timeout: 3600,
             args: '--bench')
 endif
+
+subdir('tests')
