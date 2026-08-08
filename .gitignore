@@ -23,6 +23,9 @@ target
 # clang-format, I guess?
 .cache/
 
+# test data
+wpd-test-data/
+
 .DS_Store
 
 build/
