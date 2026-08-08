@@ -1,20 +1,21 @@
 
 %include "asm/x86/x86util.asm"
 
-SECTION_RODATA
+SECTION_RODATA 32
 
 pw_27:    times 8 dw 27
 pw_63:    times 8 dw 63
 
-pb_4:     times 16 db 4
-pb_F8:    times 16 db 0xF8
-pb_FE:    times 16 db 0xFE
+; 32 bytes wide so the avx2 filters can use them as memory operands
+pb_3:     times 32 db 3
+pb_4:     times 32 db 4
+pb_F8:    times 32 db 0xF8
+pb_FE:    times 32 db 0xFE
 pb_27_63: times 8 db 27, 63
 pb_18_63: times 8 db 18, 63
 pb_9_63:  times 8 db  9, 63
 
 cextern_naked wpd_pb_1
-cextern_naked wpd_pb_3
 cextern_naked wpd_pw_9
 cextern_naked wpd_pw_18
 cextern_naked wpd_pb_80
@@ -205,7 +206,7 @@ cglobal vp8_%1_loop_filter_simple, 3, %2, 8, dst, stride, flim, cntr
     mova           m3, [pb_F8]
     mova           m1, m2
     paddsb         m2, [pb_4]
-    paddsb         m1, [wpd_pb_3]
+    paddsb         m1, [pb_3]
     pand           m2, m3
     pand           m1, m3
 
@@ -260,6 +261,234 @@ SIMPLE_LOOPFILTER v, 3
 SIMPLE_LOOPFILTER h, 5
 INIT_XMM sse4
 SIMPLE_LOOPFILTER h, 5
+
+
+; SIMPLE_FILTER p1, p0, q0, q1, flim, t0, t1, t2, t3, pb_80
+; One edge in place, with the four sides already in registers: p0 and q0 are
+; updated, p1 and q1 are left alone so a caller can write the block back whole.
+%macro SIMPLE_FILTER 10
+    psubusb        %6, %2, %3
+    psubusb        %7, %3, %2
+    por            %6, %6, %7
+    paddusb        %6, %6, %6           ; 2 * |p0 - q0|
+
+    psubusb        %7, %1, %4
+    psubusb        %8, %4, %1
+    por            %7, %7, %8
+    pand           %7, %7, [pb_FE]
+    psrlq          %7, 1                ; |p1 - q1| >> 1
+    paddusb        %6, %6, %7
+    psubusb        %6, %6, %5
+    pxor           %7, %7, %7
+    pcmpeqb        %6, %6, %7           ; 2*|p0-q0| + |p1-q1|/2 <= flim
+
+    pxor           %7, %1, %10
+    pxor           %8, %4, %10
+    psubsb         %7, %7, %8
+    pxor           %8, %3, %10
+    pxor           %9, %2, %10
+    psubsb         %8, %8, %9
+    paddsb         %7, %7, %8
+    paddsb         %7, %7, %8
+    paddsb         %7, %7, %8           ; f = p1 - q1 + 3 * (q0 - p0)
+    pand           %7, %7, %6
+
+    paddsb         %8, %7, [pb_4]
+    paddsb         %7, %7, [pb_3]
+    pand           %8, %8, [pb_F8]      ; clearing the low 3 bits lets the
+    pand           %7, %7, [pb_F8]      ; shifts below stay inside each byte
+
+    pxor           %6, %6, %6
+    pxor           %9, %9, %9
+    pcmpgtb        %6, %6, %8
+    psubb          %9, %9, %8
+    psrlq          %8, 3
+    psrlq          %9, 3
+    pand           %9, %9, %6
+    pandn          %6, %6, %8
+    psubusb        %3, %3, %6
+    paddusb        %3, %3, %9           ; q0 -= (f + 4) >> 3
+
+    pxor           %6, %6, %6
+    pxor           %8, %8, %8
+    pcmpgtb        %6, %6, %7
+    psubb          %8, %8, %7
+    psrlq          %7, 3
+    psrlq          %8, 3
+    pand           %8, %8, %6
+    pandn          %6, %6, %7
+    paddusb        %2, %2, %6
+    psubusb        %2, %2, %8           ; p0 += (f + 3) >> 3
+%endmacro
+
+; Two horizontal edges four rows apart, one per 128-bit lane. flim is passed
+; per lane, so the macroblock edge and an inner edge can share a pass.
+%macro V_SIMPLE_FILTER_PAIR 1
+    movu          xm0, [dstq+mstrideq*2]
+    vinserti128    m0, m0, [dst4q+mstrideq*2], 1
+    movu          xm1, [dstq+mstrideq]
+    vinserti128    m1, m1, [dst4q+mstrideq], 1
+    movu          xm2, [dstq]
+    vinserti128    m2, m2, [dst4q], 1
+    movu          xm3, [dstq+strideq]
+    vinserti128    m3, m3, [dst4q+strideq], 1
+
+    SIMPLE_FILTER  m0, m1, m2, m3, %1, m6, m7, m8, m9, m10
+
+    movu   [dstq+mstrideq], xm1
+    vextracti128 [dst4q+mstrideq], m1, 1
+    movu           [dstq], xm2
+    vextracti128  [dst4q], m2, 1
+%endmacro
+
+; All four horizontal edges of a luma macroblock. The edges are disjoint and
+; none of them needs a transpose, so avx2 can put two edges in the two lanes
+; of a register and halve the filter work.
+INIT_YMM avx2
+cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
+    movd          xm4, mbedged
+    movd          xm5, bedged
+    vpbroadcastb  xm4, xm4
+    vpbroadcastb   m5, xm5              ; edges 2 and 3, both inner
+    vinserti128    m4, m4, xm5, 1       ; edge 0 is the macroblock edge
+    vbroadcasti128 m10, [wpd_pb_80]
+
+    DEFINE_ARGS dst, stride, mstride, dst4
+    mov      mstrideq, strideq
+    neg      mstrideq
+    lea         dst4q, [dstq+strideq*4]
+
+    V_SIMPLE_FILTER_PAIR m4
+
+    lea          dstq, [dst4q+strideq*4]
+    lea         dst4q, [dstq+strideq*4]
+
+    V_SIMPLE_FILTER_PAIR m5
+    RET
+
+
+; Transposes the 16x16 byte block held in m0-m7 packed as [row i | row i+8],
+; clobbering m8-m15. The result is packed the same way ([col j | col j+8]), so
+; the macro is its own inverse.
+%macro TRANSPOSE_16x16B 0
+    punpcklbw      m8, m0, m1
+    punpckhbw      m9, m0, m1
+    punpcklbw     m10, m2, m3
+    punpckhbw     m11, m2, m3
+    punpcklbw     m12, m4, m5
+    punpckhbw     m13, m4, m5
+    punpcklbw     m14, m6, m7
+    punpckhbw     m15, m6, m7
+
+    punpcklwd      m0, m8, m10
+    punpckhwd      m1, m8, m10
+    punpcklwd      m2, m12, m14
+    punpckhwd      m3, m12, m14
+    punpcklwd      m4, m9, m11
+    punpckhwd      m5, m9, m11
+    punpcklwd      m6, m13, m15
+    punpckhwd      m7, m13, m15
+
+    punpckldq      m8, m0, m2
+    punpckhdq      m9, m0, m2
+    punpckldq     m10, m1, m3
+    punpckhdq     m11, m1, m3
+    punpckldq     m12, m4, m6
+    punpckhdq     m13, m4, m6
+    punpckldq     m14, m5, m7
+    punpckhdq     m15, m5, m7
+
+    ; each register now holds two columns per lane; 0xd8 reorders the qwords to
+    ; [0 2 1 3], which joins the two row halves of a column into one lane
+    punpcklqdq     m0, m8, m12
+    punpckhqdq     m1, m8, m12
+    punpcklqdq     m2, m9, m13
+    punpckhqdq     m3, m9, m13
+    punpcklqdq     m4, m10, m14
+    punpckhqdq     m5, m10, m14
+    punpcklqdq     m6, m11, m15
+    punpckhqdq     m7, m11, m15
+
+    vpermq         m0, m0, 0xd8
+    vpermq         m1, m1, 0xd8
+    vpermq         m2, m2, 0xd8
+    vpermq         m3, m3, 0xd8
+    vpermq         m4, m4, 0xd8
+    vpermq         m5, m5, 0xd8
+    vpermq         m6, m6, 0xd8
+    vpermq         m7, m7, 0xd8
+%endmacro
+
+%macro LOAD_16x16B 0
+    movu          xm0, [dstq]
+    movu          xm1, [dstq+strideq]
+    movu          xm2, [dstq+strideq*2]
+    movu          xm3, [dst4q+mstrideq]
+    movu          xm4, [dst4q]
+    movu          xm5, [dst4q+strideq]
+    movu          xm6, [dst4q+strideq*2]
+    movu          xm7, [dst8q+mstrideq]
+    vinserti128    m0, m0, [dst8q], 1
+    vinserti128    m1, m1, [dst8q+strideq], 1
+    vinserti128    m2, m2, [dst8q+strideq*2], 1
+    vinserti128    m3, m3, [dst12q+mstrideq], 1
+    vinserti128    m4, m4, [dst12q], 1
+    vinserti128    m5, m5, [dst12q+strideq], 1
+    vinserti128    m6, m6, [dst12q+strideq*2], 1
+    vinserti128    m7, m7, [dst16q+mstrideq], 1
+%endmacro
+
+%macro STORE_16x16B 0
+    movu         [dstq], xm0
+    movu [dstq+strideq], xm1
+    movu [dstq+strideq*2], xm2
+    movu [dst4q+mstrideq], xm3
+    movu        [dst4q], xm4
+    movu [dst4q+strideq], xm5
+    movu [dst4q+strideq*2], xm6
+    movu [dst8q+mstrideq], xm7
+    vextracti128 [dst8q], m0, 1
+    vextracti128 [dst8q+strideq], m1, 1
+    vextracti128 [dst8q+strideq*2], m2, 1
+    vextracti128 [dst12q+mstrideq], m3, 1
+    vextracti128 [dst12q], m4, 1
+    vextracti128 [dst12q+strideq], m5, 1
+    vextracti128 [dst12q+strideq*2], m6, 1
+    vextracti128 [dst16q+mstrideq], m7, 1
+%endmacro
+
+; All four vertical edges of a luma macroblock. They cover dst[-2..13], so the
+; block is read and written whole instead of in four strided lane-wise passes,
+; and after the transpose each register holds one column of two edges at once.
+INIT_YMM avx2
+cglobal vp8_h_loop_filter_simple_mb, 4, 9, 16, dst, stride, mbedge, bedge
+    ; the transpose clobbers m8-m15, so the limits stay in gprs until after it
+    DEFINE_ARGS dst, stride, mbedge, bedge, mstride, dst4, dst8, dst12, dst16
+    mov      mstrideq, strideq
+    neg      mstrideq
+    sub          dstq, 2
+    lea         dst4q, [dstq+strideq*4]
+    lea         dst8q, [dstq+strideq*8]
+    lea        dst12q, [dst4q+strideq*8]
+    lea        dst16q, [dst8q+strideq*8]
+
+    LOAD_16x16B
+    TRANSPOSE_16x16B
+
+    movd         xm10, mbedged
+    movd          xm9, bedged
+    vpbroadcastb xm10, xm10
+    vpbroadcastb   m9, xm9               ; edges 1 and 3, both inner
+    vinserti128   m10, m10, xm9, 1       ; edge 0 is the macroblock edge, edge 2
+                                         ; rides along in the other lane
+    vbroadcasti128 m8, [wpd_pb_80]
+
+    SIMPLE_FILTER  m0, m1, m2, m3, m10, m11, m12, m13, m14, m8
+    SIMPLE_FILTER  m4, m5, m6, m7,  m9, m11, m12, m13, m14, m8
+
+    TRANSPOSE_16x16B
+    STORE_16x16B
+    RET
 
 
 %macro INNER_LOOPFILTER 2
@@ -538,7 +767,7 @@ cglobal vp8_%1_loop_filter16y_inner, 5, 5, 13, stack_size, dst, stride, flimE, f
     pand             m7, m0
     mova             m1, [pb_F8]
     mova             m6, m7
-    paddsb           m7, [wpd_pb_3]
+    paddsb           m7, [pb_3]
     paddsb           m6, [pb_4]
     pand             m7, m1
     pand             m6, m1
@@ -908,7 +1137,7 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 
     mova             m1, [pb_F8]
     mova             m6, m7
-    paddsb           m7, [wpd_pb_3]
+    paddsb           m7, [pb_3]
     paddsb           m6, [pb_4]
     pand             m7, m1
     pand             m6, m1

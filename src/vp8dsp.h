@@ -37,9 +37,9 @@ typedef struct VP8DSPContext {
     void (*vp8_v_loop_filter_simple)(uint8_t *dst, ptrdiff_t stride, int flim);
     void (*vp8_h_loop_filter_simple)(uint8_t *dst, ptrdiff_t stride, int flim);
 
-    // All four vertical edges of a luma macroblock; reads dst[-2..13] per row,
-    // so it is only valid away from the left picture edge.
     void (*vp8_h_loop_filter_simple_mb)(uint8_t *dst, ptrdiff_t stride,
+                                        int mbedge_lim, int bedge_lim);
+    void (*vp8_v_loop_filter_simple_mb)(uint8_t *dst, ptrdiff_t stride,
                                         int mbedge_lim, int bedge_lim);
 } VP8DSPContext;
 
@@ -50,6 +50,15 @@ typedef struct VP8DSPContext {
         SINGLE(dst + 4, stride, bedge_lim);                              \
         SINGLE(dst + 8, stride, bedge_lim);                              \
         SINGLE(dst + 12, stride, bedge_lim);                             \
+    }
+
+#define VP8_V_LOOP_FILTER_SIMPLE_MB(NAME, SINGLE)                        \
+    static void NAME(                                                    \
+        uint8_t *dst, ptrdiff_t stride, int mbedge_lim, int bedge_lim) { \
+        SINGLE(dst, stride, mbedge_lim);                                 \
+        SINGLE(dst + 4 * stride, stride, bedge_lim);                     \
+        SINGLE(dst + 8 * stride, stride, bedge_lim);                     \
+        SINGLE(dst + 12 * stride, stride, bedge_lim);                    \
     }
 
 void ff_vp8dsp_init(VP8DSPContext *c);

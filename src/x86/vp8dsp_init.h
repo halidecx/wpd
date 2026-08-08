@@ -53,6 +53,16 @@ VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_ssse3,
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_sse4,
                             ff_vp8_h_loop_filter_simple_sse4)
 
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_sse2,
+                            ff_vp8_v_loop_filter_simple_sse2)
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_ssse3,
+                            ff_vp8_v_loop_filter_simple_ssse3)
+
+void ff_vp8_v_loop_filter_simple_mb_avx2(uint8_t *dst, ptrdiff_t stride,
+                                         int mbedge_lim, int bedge_lim);
+void ff_vp8_h_loop_filter_simple_mb_avx2(uint8_t *dst, ptrdiff_t stride,
+                                         int mbedge_lim, int bedge_lim);
+
 static wpd_always_inline void ff_vp8dsp_init_x86(VP8DSPContext *c) {
     const unsigned flags = wpd_get_cpu_flags();
 
@@ -61,7 +71,8 @@ static wpd_always_inline void ff_vp8dsp_init_x86(VP8DSPContext *c) {
         c->vp8_luma_dc_wht    = ff_vp8_luma_dc_wht_sse2;
         c->vp8_idct_dc_add4uv = ff_vp8_idct_dc_add4uv_sse2;
 
-        c->vp8_v_loop_filter_simple = ff_vp8_v_loop_filter_simple_sse2;
+        c->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter_simple_sse2;
+        c->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_sse2;
 
         c->vp8_v_loop_filter16y_inner = ff_vp8_v_loop_filter16y_inner_sse2;
         c->vp8_v_loop_filter8uv_inner = ff_vp8_v_loop_filter8uv_inner_sse2;
@@ -84,6 +95,7 @@ static wpd_always_inline void ff_vp8dsp_init_x86(VP8DSPContext *c) {
 
     if (flags & WPD_X86_CPU_FLAG_SSSE3) {
         c->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter_simple_ssse3;
+        c->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_ssse3;
         c->vp8_h_loop_filter_simple    = ff_vp8_h_loop_filter_simple_ssse3;
         c->vp8_h_loop_filter_simple_mb = vp8_h_loop_filter_simple_mb_ssse3;
 
@@ -106,6 +118,11 @@ static wpd_always_inline void ff_vp8dsp_init_x86(VP8DSPContext *c) {
         c->vp8_h_loop_filter_simple_mb = vp8_h_loop_filter_simple_mb_sse4;
         c->vp8_h_loop_filter16y        = ff_vp8_h_loop_filter16y_mbedge_sse4;
         c->vp8_h_loop_filter8uv        = ff_vp8_h_loop_filter8uv_mbedge_sse4;
+    }
+
+    if (flags & WPD_X86_CPU_FLAG_AVX2) {
+        c->vp8_v_loop_filter_simple_mb = ff_vp8_v_loop_filter_simple_mb_avx2;
+        c->vp8_h_loop_filter_simple_mb = ff_vp8_h_loop_filter_simple_mb_avx2;
     }
 }
 

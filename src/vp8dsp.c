@@ -288,6 +288,8 @@ static void vp8_h_loop_filter_simple_c(uint8_t *dst, ptrdiff_t stride,
 
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_c,
                             vp8_h_loop_filter_simple_c)
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_c,
+                            vp8_v_loop_filter_simple_c)
 
 wpd_cold void ff_vp8dsp_init(VP8DSPContext *dsp) {
     dsp->vp8_luma_dc_wht    = vp8_luma_dc_wht_c;
@@ -311,6 +313,7 @@ wpd_cold void ff_vp8dsp_init(VP8DSPContext *dsp) {
     dsp->vp8_h_loop_filter_simple = vp8_h_loop_filter_simple_c;
 
     dsp->vp8_h_loop_filter_simple_mb = vp8_h_loop_filter_simple_mb_c;
+    dsp->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_c;
 
 #if WPD_HAVE_ASM
 #if WPD_ARCH_AARCH64

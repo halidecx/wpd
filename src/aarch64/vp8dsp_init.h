@@ -20,6 +20,9 @@ VP8_LF(neon);
 void ff_vp8_h_loop_filter_simple_mb_neon(uint8_t *dst, ptrdiff_t stride,
                                          int mbedge_lim, int bedge_lim);
 
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_neon,
+                            ff_vp8_v_loop_filter16_simple_neon)
+
 static wpd_always_inline void ff_vp8dsp_init_aarch64(VP8DSPContext *dsp) {
     if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
         return;
@@ -43,6 +46,7 @@ static wpd_always_inline void ff_vp8dsp_init_aarch64(VP8DSPContext *dsp) {
     dsp->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter16_simple_neon;
     dsp->vp8_h_loop_filter_simple    = ff_vp8_h_loop_filter16_simple_neon;
     dsp->vp8_h_loop_filter_simple_mb = ff_vp8_h_loop_filter_simple_mb_neon;
+    dsp->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_neon;
 }
 
 #endif

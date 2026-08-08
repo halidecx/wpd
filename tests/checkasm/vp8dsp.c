@@ -380,8 +380,6 @@ static void check_loopfilter_simple(VP8DSPContext *d) {
     }
 }
 
-// The four edges of a macroblock span dst[-2..13], so give the block a stride
-// wide enough to hold that plus a left margin.
 #define MB_STRIDE 32
 
 static void fill_smooth_buffer(uint8_t *buf, int spread) {
@@ -397,31 +395,39 @@ static void check_loopfilter_simple_mb(VP8DSPContext *d) {
     // mbedge_lim, bedge_lim; 193 is the largest limit a stream can produce
     static const int lims[][2] = {
         {20, 12}, {193, 63}, {0, 20}, {40, 0}, {24, 24}};
-    int i;
+    int dir, i;
     declare_func(void, uint8_t *, ptrdiff_t, int, int);
 
-    if (check_func(d->vp8_h_loop_filter_simple_mb,
-                   "vp8_loop_filter_simple_mb")) {
-        for (i = 0; i < 5; i++) {
-            // low contrast, so most columns are actually filtered
-            fill_smooth_buffer(buf0, 8);
-            memcpy(buf1, buf0, 16 * MB_STRIDE);
-            call_ref(buf0 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
-            call_new(buf1 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
-            if (memcmp(buf0, buf1, 16 * MB_STRIDE))
-                fail();
+    for (dir = 0; dir < 2; dir++) {
+        // the v filters load whole rows with mova, so dst has to stay aligned
+        int      midoff = dir ? 2 * MB_STRIDE + 16 : 8;
+        uint8_t *dst0 = buf0 + midoff, *dst1 = buf1 + midoff;
+        void (*func)(uint8_t *, ptrdiff_t, int, int) = dir
+            ? d->vp8_v_loop_filter_simple_mb
+            : d->vp8_h_loop_filter_simple_mb;
 
-            // full range, to exercise the limit test and the clamps
-            fill_loopfilter_buffers(buf0, MB_STRIDE, MB_STRIDE, 16);
-            memcpy(buf1, buf0, 16 * MB_STRIDE);
-            call_ref(buf0 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
-            call_new(buf1 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
-            if (memcmp(buf0, buf1, 16 * MB_STRIDE))
-                fail();
+        if (check_func(func, "vp8_loop_filter_simple_mb_%s", dir ? "v" : "h")) {
+            for (i = 0; i < 5; i++) {
+                // low contrast, so most edges are actually filtered
+                fill_smooth_buffer(buf0, 8);
+                memcpy(buf1, buf0, 16 * MB_STRIDE);
+                call_ref(dst0, MB_STRIDE, lims[i][0], lims[i][1]);
+                call_new(dst1, MB_STRIDE, lims[i][0], lims[i][1]);
+                if (memcmp(buf0, buf1, 16 * MB_STRIDE))
+                    fail();
+
+                // full range, to exercise the limit test and the clamps
+                fill_loopfilter_buffers(buf0, MB_STRIDE, MB_STRIDE, 16);
+                memcpy(buf1, buf0, 16 * MB_STRIDE);
+                call_ref(dst0, MB_STRIDE, lims[i][0], lims[i][1]);
+                call_new(dst1, MB_STRIDE, lims[i][0], lims[i][1]);
+                if (memcmp(buf0, buf1, 16 * MB_STRIDE))
+                    fail();
+            }
+
+            fill_smooth_buffer(buf1, 8);
+            bench_new(dst1, MB_STRIDE, 20, 12);
         }
-
-        fill_smooth_buffer(buf1, 8);
-        bench_new(buf1 + 8, MB_STRIDE, 20, 12);
     }
 }
 

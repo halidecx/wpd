@@ -23,6 +23,8 @@ VP8_LF(armv6);
 
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_armv6,
                             ff_vp8_h_loop_filter16_simple_armv6)
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_armv6,
+                            ff_vp8_v_loop_filter16_simple_armv6)
 
 static wpd_always_inline void ff_vp8dsp_init_armv6(VP8DSPContext *dsp) {
     dsp->vp8_luma_dc_wht    = ff_vp8_luma_dc_wht_armv6;
@@ -46,6 +48,7 @@ static wpd_always_inline void ff_vp8dsp_init_armv6(VP8DSPContext *dsp) {
     dsp->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter16_simple_armv6;
     dsp->vp8_h_loop_filter_simple    = ff_vp8_h_loop_filter16_simple_armv6;
     dsp->vp8_h_loop_filter_simple_mb = vp8_h_loop_filter_simple_mb_armv6;
+    dsp->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_armv6;
 }
 #endif
 
@@ -63,6 +66,8 @@ VP8_LF(neon);
 
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_neon,
                             ff_vp8_h_loop_filter16_simple_neon)
+VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_neon,
+                            ff_vp8_v_loop_filter16_simple_neon)
 
 static wpd_always_inline void ff_vp8dsp_init_neon(VP8DSPContext *dsp) {
     dsp->vp8_luma_dc_wht = ff_vp8_luma_dc_wht_neon;
@@ -85,6 +90,7 @@ static wpd_always_inline void ff_vp8dsp_init_neon(VP8DSPContext *dsp) {
     dsp->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter16_simple_neon;
     dsp->vp8_h_loop_filter_simple    = ff_vp8_h_loop_filter16_simple_neon;
     dsp->vp8_h_loop_filter_simple_mb = vp8_h_loop_filter_simple_mb_neon;
+    dsp->vp8_v_loop_filter_simple_mb = vp8_v_loop_filter_simple_mb_neon;
 }
 
 static wpd_always_inline void ff_vp8dsp_init_arm(VP8DSPContext *dsp) {
