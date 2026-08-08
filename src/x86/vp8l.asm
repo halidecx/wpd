@@ -29,6 +29,14 @@ SECTION .text
     pabsb      %1, %1
 %endmacro
 
+%macro ROW_INDEX 0
+    movsxdifnidn nq, nd
+    lea        srcq, [srcq+nq*4]
+    lea        upperq, [upperq+nq*4]
+    lea        dstq, [dstq+nq*4]
+    neg        nq
+%endmacro
+
 
 INIT_YMM avx2
 cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
@@ -236,19 +244,20 @@ INIT_XMM avx2
 cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
     test       nd, nd
     jz .ret
-    SET_ONES   m4
-    movd       m0, [dstq-4]
+    ROW_INDEX
+    pcmpeqb    m4, m4
+    movd       m0, [dstq+nq*4-4]
+    pxor       m0, m0, m4
 .loop:
-    movd       m2, [upperq+%2]
-    AVG2       m0, m0, m2, m3, m4
-    movd       m1, [srcq]
-    paddb      m0, m0, m1
-    movd       [dstq], m0
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
+    movd       m1, [upperq+nq*4+%2]
+    pxor       m1, m1, m4
+    pavgb      m0, m0, m1
+    movd       m2, [srcq+nq*4]
+    psubb      m0, m0, m2
+    pxor       m3, m0, m4
+    movd       [dstq+nq*4], m3
+    inc        nq
+    jl .loop
 .ret:
     RET
 %endmacro
@@ -258,24 +267,25 @@ PRED_AVGLEFT 7, 0
 
 
 INIT_XMM avx2
-cglobal pred_add_5, 4, 4, 6, src, upper, n, dst
+cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
     test       nd, nd
     jz .ret
-    SET_ONES   m4
-    movd       m0, [dstq-4]
+    ROW_INDEX
+    pcmpeqb    m4, m4
+    movd       m0, [dstq+nq*4-4]
+    pxor       m0, m0, m4
 .loop:
-    movd       m2, [upperq]
-    movd       m5, [upperq+4]
-    AVG2       m0, m0, m5, m3, m4
-    AVG2       m0, m0, m2, m3, m4
-    movd       m1, [srcq]
-    paddb      m0, m0, m1
-    movd       [dstq], m0
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
+    movq       m1, [upperq+nq*4]      ; t | tr
+    pxor       m1, m1, m4
+    psrldq     m2, m1, 4
+    pavgb      m0, m0, m2
+    pavgb      m0, m0, m1
+    movd       m3, [srcq+nq*4]
+    psubb      m0, m0, m3
+    pxor       m3, m0, m4
+    movd       [dstq+nq*4], m3
+    inc        nq
+    jl .loop
 .ret:
     RET
 
@@ -284,108 +294,137 @@ INIT_XMM avx2
 cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
     test       nd, nd
     jz .ret
-    SET_ONES   m4
-    movd       m0, [dstq-4]
+    ROW_INDEX
+    pcmpeqb    m5, m5
+    movd       m0, [dstq+nq*4-4]
+    pxor       m0, m0, m5
 .loop:
-    movd       m2, [upperq-4]
-    movd       m3, [upperq]
-    movd       m5, [upperq+4]
-    AVG2       m3, m3, m5, m1, m4
-    AVG2       m0, m0, m2, m5, m4
-    AVG2       m0, m0, m3, m5, m4
-    movd       m1, [srcq]
-    paddb      m0, m0, m1
-    movd       [dstq], m0
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
+    movq       m1, [upperq+nq*4-4]    ; tl | t
+    movd       m2, [upperq+nq*4+4]    ; tr
+    pxor       m1, m1, m5
+    pxor       m2, m2, m5
+    psrldq     m3, m1, 4
+    pavgb      m2, m2, m3             ; off the carried chain
+    pavgb      m0, m0, m1
+    pavgb      m0, m0, m2
+    movd       m4, [srcq+nq*4]
+    psubb      m0, m0, m4
+    pxor       m4, m0, m5
+    movd       [dstq+nq*4], m4
+    inc        nq
+    jl .loop
 .ret:
     RET
 
 
 INIT_XMM avx2
-cglobal pred_add_11, 4, 4, 6, src, upper, n, dst
+cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     test       nd, nd
     jz .ret
-    movd       m0, [dstq-4]
-.loop:
-    movd       m2, [upperq]
-    movd       m3, [upperq-4]
-    movd       m1, [srcq]
-    psadbw     m4, m0, m3
-    psadbw     m5, m2, m3
-    paddb      m2, m2, m1
-    paddb      m0, m0, m1
-    pcmpgtd    m4, m4, m5
-    vpblendvb  m0, m2, m0, m4
-    movd       [dstq], m0
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
+    ROW_INDEX
+    movd       m0, [dstq+nq*4-4]
+    test       nq, 1
+    jz .loop2
+    movd       m1, [upperq+nq*4-4]
+    movd       m2, [upperq+nq*4]
+    movd       m4, [srcq+nq*4]
+    psadbw     m11, m0, m1
+    psadbw     m8, m2, m1
+    paddb      m6, m2, m4
+    paddb      m0, m0, m4
+    pcmpgtd    m11, m11, m8
+    vpblendvb  m0, m6, m0, m11
+    movd       [dstq+nq*4], m0
+    inc        nq
+    jz .ret
+.loop2:
+    movd       m1, [upperq+nq*4-4]    ; tl
+    movd       m2, [upperq+nq*4]      ; t, doubles as the next pixel's tl
+    movd       m3, [upperq+nq*4+4]
+    movd       m4, [srcq+nq*4]
+    movd       m5, [srcq+nq*4+4]
+    paddb      m6, m2, m4             ; top candidate for this pixel
+    paddb      m7, m3, m5             ; top candidate for the next one
+    psadbw     m8, m2, m1
+    psadbw     m9, m3, m2
+    ; The next pixel, assuming this one takes top: independent of left.
+    psadbw     m12, m6, m2
+    pcmpgtd    m12, m12, m9
+    paddb      m14, m6, m5
+    vpblendvb  m12, m7, m14, m12
+    paddb      m10, m0, m4            ; left candidate for this pixel
+    psadbw     m11, m0, m1
+    psadbw     m13, m10, m2
+    pcmpgtd    m11, m11, m8
+    pcmpgtd    m13, m13, m9
+    paddb      m15, m10, m5
+    pand       m14, m7, m11
+    pandn      m2, m11, m12
+    por        m14, m14, m2
+    vpblendvb  m6, m6, m10, m11
+    movd       [dstq+nq*4], m6
+    pand       m13, m13, m11          ; both pixels chained left
+    pand       m15, m15, m13
+    pandn      m13, m13, m14
+    por        m0, m15, m13
+    movd       [dstq+nq*4+4], m0
+    add        nq, 2
+    jl .loop2
 .ret:
     RET
 
 
 INIT_XMM avx2
-cglobal pred_add_12, 4, 4, 4, src, upper, n, dst
+cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
     test       nd, nd
     jz .ret
-    movd       m0, [dstq-4]
+    ROW_INDEX
+    movd       m0, [dstq+nq*4-4]
+.loop:
+    movq       m1, [upperq+nq*4-4]    ; tl | t
+    psrldq     m2, m1, 4
+    psubusb    m3, m2, m1
+    psubusb    m4, m1, m2
+    paddusb    m0, m0, m3
+    psubusb    m0, m0, m4
+    movd       m5, [srcq+nq*4]
+    paddb      m0, m0, m5
+    movd       [dstq+nq*4], m0
+    inc        nq
+    jl .loop
+.ret:
+    RET
+
+
+INIT_XMM avx2
+cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
+    test       nd, nd
+    jz .ret
+    ROW_INDEX
+    pcmpeqw    m6, m6
+    psrlw      m6, 8                  ; complements a channel, keeps it in-word
+    movd       m0, [dstq+nq*4-4]
     pmovzxbw   m0, m0
+    pxor       m0, m0, m6
 .loop:
-    movd       m2, [upperq]
-    pmovzxbw   m2, m2
-    movd       m3, [upperq-4]
-    pmovzxbw   m3, m3
-    psubw      m2, m2, m3
-    paddw      m2, m2, m0
-    packuswb   m2, m2, m2
-    movd       m1, [srcq]
-    paddb      m2, m2, m1
-    movd       [dstq], m2
-    pmovzxbw   m0, m2
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
-.ret:
-    RET
-
-
-INIT_XMM avx2
-cglobal pred_add_13, 4, 4, 5, src, upper, n, dst
-    ; Bias negative differences before shifting to match C's truncation toward zero.
-    test       nd, nd
-    jz .ret
-    movd       m0, [dstq-4]
-    pmovzxbw   m0, m0
-.loop:
-    movd       m2, [upperq]
-    pmovzxbw   m2, m2
-    movd       m3, [upperq-4]
-    pmovzxbw   m3, m3
-    paddw      m2, m2, m0
-    psrlw      m2, 1
-    psubw      m3, m2, m3
-    psrlw      m4, m3, 15
-    paddw      m3, m3, m4
-    psraw      m3, 1
-    paddw      m2, m2, m3
-    packuswb   m2, m2, m2
-    movd       m1, [srcq]
-    paddb      m2, m2, m1
-    movd       [dstq], m2
-    pmovzxbw   m0, m2
-    add        srcq, 4
-    add        upperq, 4
-    add        dstq, 4
-    dec        nd
-    jg .loop
+    pmovzxbw   m1, [upperq+nq*4-4]    ; tl | t
+    pxor       m1, m1, m6
+    psrldq     m2, m1, 8
+    pavgb      m0, m0, m2             ; ~ave
+    psubusb    m3, m1, m0
+    psubusb    m4, m0, m1
+    psrlw      m3, m3, 1
+    psrlw      m4, m4, 1
+    psubusb    m0, m0, m3
+    paddusb    m0, m0, m4
+    movd       m5, [srcq+nq*4]
+    pmovzxbw   m5, m5
+    psubb      m0, m0, m5
+    pxor       m5, m0, m6
+    packuswb   m5, m5, m5
+    movd       [dstq+nq*4], m5
+    inc        nq
+    jl .loop
 .ret:
     RET
 
@@ -487,16 +526,22 @@ cglobal map_color32, 4, 5, 5, dst, src, pal, n
     RET
 
 
-; Blend one 32-bit channel of m0 over m1 and OR the result into %1.
-; m2 = src alpha, m4 = dst factor, m6 = 2^24/blend_alpha, m7 = 0x000000ff.
 %macro BLEND_CH 2 ; acc, shift
     psrld      m9, m0, %2
-    psrld      m10, m1, %2
+%if %2 != 24
     pand       m9, m9, m7
-    pand       m10, m10, m7
-    pmulld     m9, m9, m2
-    pmulld     m10, m10, m4
-    paddd      m9, m9, m10
+%endif
+%if %2 == 8
+    pslld      m10, m1, 8
+    pand       m10, m10, m15
+%elif %2 == 16
+    pand       m10, m1, m15
+%else
+    psrld      m10, m1, 8
+    pand       m10, m10, m15
+%endif
+    por        m9, m9, m10
+    pmaddwd    m9, m9, m3
     pmulld     m9, m9, m6
     psrld      m9, m9, 24
     pslld      m9, m9, %2
@@ -504,9 +549,10 @@ cglobal map_color32, 4, 5, 5, dst, src, pal, n
 %endmacro
 
 INIT_YMM avx2
-cglobal blend_row_argb, 3, 5, 15, dst, src, n
+cglobal blend_row_argb, 3, 5, 16, dst, src, n
     pcmpeqd    m7, m7
     psrld      m7, 24                  ; 0x000000ff, doubles as the opaque value
+    pslld      m15, m7, 16             ; 0x00ff0000
     pcmpeqd    m8, m8
     psrld      m8, 31
     pslld      m8, 8                   ; 256
@@ -526,11 +572,13 @@ cglobal blend_row_argb, 3, 5, 15, dst, src, n
     movu       m1, [dstq]
     pand       m3, m1, m7              ; dst alpha
     psubd      m4, m8, m2
-    pmulld     m4, m4, m3
+    pmullw     m4, m4, m3              ; 256 * 255 still fits a word
     psrld      m4, m4, 8               ; (dst_a * (256 - src_a)) >> 8
     paddd      m5, m2, m4              ; blend alpha
     pcmpeqd    m12, m12                ; vpgatherdd consumes its mask
     vpgatherdd m6, [r4q+m5*4], m12
+    pslld      m3, m4, 16
+    por        m3, m3, m2
     mova       m13, m5
     BLEND_CH   m13, 8
     BLEND_CH   m13, 16
