@@ -380,6 +380,51 @@ static void check_loopfilter_simple(VP8DSPContext *d) {
     }
 }
 
+// The four edges of a macroblock span dst[-2..13], so give the block a stride
+// wide enough to hold that plus a left margin.
+#define MB_STRIDE 32
+
+static void fill_smooth_buffer(uint8_t *buf, int spread) {
+    int x, y;
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < MB_STRIDE; x++)
+            buf[y * MB_STRIDE + x] = 128 + (rnd() % (2 * spread + 1)) - spread;
+}
+
+static void check_loopfilter_simple_mb(VP8DSPContext *d) {
+    LOCAL_ALIGNED_16(uint8_t, buf0, [16 * MB_STRIDE]);
+    LOCAL_ALIGNED_16(uint8_t, buf1, [16 * MB_STRIDE]);
+    // mbedge_lim, bedge_lim; 193 is the largest limit a stream can produce
+    static const int lims[][2] = {
+        {20, 12}, {193, 63}, {0, 20}, {40, 0}, {24, 24}};
+    int i;
+    declare_func(void, uint8_t *, ptrdiff_t, int, int);
+
+    if (check_func(d->vp8_h_loop_filter_simple_mb,
+                   "vp8_loop_filter_simple_mb")) {
+        for (i = 0; i < 5; i++) {
+            // low contrast, so most columns are actually filtered
+            fill_smooth_buffer(buf0, 8);
+            memcpy(buf1, buf0, 16 * MB_STRIDE);
+            call_ref(buf0 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
+            call_new(buf1 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
+            if (memcmp(buf0, buf1, 16 * MB_STRIDE))
+                fail();
+
+            // full range, to exercise the limit test and the clamps
+            fill_loopfilter_buffers(buf0, MB_STRIDE, MB_STRIDE, 16);
+            memcpy(buf1, buf0, 16 * MB_STRIDE);
+            call_ref(buf0 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
+            call_new(buf1 + 8, MB_STRIDE, lims[i][0], lims[i][1]);
+            if (memcmp(buf0, buf1, 16 * MB_STRIDE))
+                fail();
+        }
+
+        fill_smooth_buffer(buf1, 8);
+        bench_new(buf1 + 8, MB_STRIDE, 20, 12);
+    }
+}
+
 static void check_all(VP8DSPContext *d) {
     ff_vp8dsp_init(d);
     check_idct(d);
@@ -389,6 +434,7 @@ static void check_all(VP8DSPContext *d) {
     check_loopfilter_16y(d);
     check_loopfilter_8uv(d);
     check_loopfilter_simple(d);
+    check_loopfilter_simple_mb(d);
     report("loopfilter");
 }
 

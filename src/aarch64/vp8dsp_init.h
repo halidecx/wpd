@@ -17,6 +17,9 @@ void ff_vp8_idct_dc_add4uv_neon(uint8_t *dst, int16_t block[4][16],
 
 VP8_LF(neon);
 
+void ff_vp8_h_loop_filter_simple_mb_neon(uint8_t *dst, ptrdiff_t stride,
+                                         int mbedge_lim, int bedge_lim);
+
 static wpd_always_inline void ff_vp8dsp_init_aarch64(VP8DSPContext *dsp) {
     if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
         return;
@@ -37,8 +40,9 @@ static wpd_always_inline void ff_vp8dsp_init_aarch64(VP8DSPContext *dsp) {
     dsp->vp8_v_loop_filter8uv_inner = ff_vp8_v_loop_filter8uv_inner_neon;
     dsp->vp8_h_loop_filter8uv_inner = ff_vp8_h_loop_filter8uv_inner_neon;
 
-    dsp->vp8_v_loop_filter_simple = ff_vp8_v_loop_filter16_simple_neon;
-    dsp->vp8_h_loop_filter_simple = ff_vp8_h_loop_filter16_simple_neon;
+    dsp->vp8_v_loop_filter_simple    = ff_vp8_v_loop_filter16_simple_neon;
+    dsp->vp8_h_loop_filter_simple    = ff_vp8_h_loop_filter16_simple_neon;
+    dsp->vp8_h_loop_filter_simple_mb = ff_vp8_h_loop_filter_simple_mb_neon;
 }
 
 #endif
