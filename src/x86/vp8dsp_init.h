@@ -43,11 +43,6 @@ DECLARE_LOOP_FILTER(ssse3)
 void ff_vp8_v_loop_filter8uv_inner_avx2(uint8_t *dstU, uint8_t *dstV,
                                         ptrdiff_t s, int e, int i, int hvt);
 
-void ff_vp8_h_loop_filter16y_mbedge_sse4(uint8_t *dst, ptrdiff_t stride, int e,
-                                         int i, int hvt);
-void ff_vp8_h_loop_filter8uv_mbedge_sse4(uint8_t *dstU, uint8_t *dstV,
-                                         ptrdiff_t s, int e, int i, int hvt);
-
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_sse2,
                             ff_vp8_h_loop_filter_simple_sse2)
 VP8_H_LOOP_FILTER_SIMPLE_MB(vp8_h_loop_filter_simple_mb_ssse3,

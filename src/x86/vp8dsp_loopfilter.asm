@@ -109,16 +109,6 @@ SECTION .text
 %endmacro
 
 %macro WRITE_8W 5
-%if cpuflag(sse4)
-    pextrw    [%3+%4*4], %1, 0
-    pextrw    [%2+%4*4], %1, 1
-    pextrw    [%3+%4*2], %1, 2
-    pextrw    [%3+%4  ], %1, 3
-    pextrw    [%3     ], %1, 4
-    pextrw    [%2     ], %1, 5
-    pextrw    [%2+%5  ], %1, 6
-    pextrw    [%2+%5*2], %1, 7
-%else
     movd            %2d, %1
     psrldq           %1, 4
     mov       [%3+%4*4], %2w
@@ -144,7 +134,6 @@ SECTION .text
     mov       [%3+%5  ], %2w
     shr              %2, 16
     mov       [%3+%5*2], %2w
-%endif
 %endmacro
 
 %macro SIMPLE_LOOPFILTER 2
@@ -241,14 +230,8 @@ cglobal vp8_%1_loop_filter_simple, 3, %2, 8, dst, stride, flim, cntr
     inc        dst1q
     SBUTTERFLY    bw, 6, 4, 0
 
-%if cpuflag(sse4)
-    inc         dst2q
-%endif
     WRITE_8W       m6, dst2q, dst1q, mstrideq, strideq
     lea         dst2q, [dst3q+mstrideq+1]
-%if cpuflag(sse4)
-    inc         dst3q
-%endif
     WRITE_8W       m4, dst3q, dst2q, mstrideq, strideq
 %endif
 
@@ -1439,13 +1422,7 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     WRITE_4x4D       1, 2, 3, 4, dst1q, dst2q, dst8q, mstrideq, strideq, %2
     lea          dst1q, [dst2q+mstrideq+4]
     lea          dst8q, [dst8q+mstrideq+4]
-%if cpuflag(sse4)
-    add          dst2q, 4
-%endif
     WRITE_8W        m5, dst2q, dst1q,  mstrideq, strideq
-%if cpuflag(sse4)
-    lea          dst2q, [dst8q+ strideq  ]
-%endif
     WRITE_8W        m6, dst2q, dst8q, mstrideq, strideq
 %endif
 
@@ -1462,8 +1439,4 @@ INIT_XMM ssse3
 MBEDGE_LOOPFILTER v, 16
 MBEDGE_LOOPFILTER h, 16
 MBEDGE_LOOPFILTER v,  8
-MBEDGE_LOOPFILTER h,  8
-
-INIT_XMM sse4
-MBEDGE_LOOPFILTER h, 16
 MBEDGE_LOOPFILTER h,  8
