@@ -232,29 +232,27 @@ function ff_vp8_idct_dc_add4y_neon, export=1
         ret
 endfunc
 
-// Saturating the rounded DC to [0,255] and its negation to [0,255] makes a
-// byte-wide uqadd/uqsub pair exact, avoiding any widening of the pixels.
+// Computing the four row addresses up front keeps each row an independent
+// ldr/str pair; lane inserts serialize and lane stores cost extra.
 function ff_vp8_idct_dc_add_neon, export=1
         ld1r            {v2.8h},  [x1]
         add             x3,  x0,  x2
         strh            wzr,      [x1]
         add             x4,  x0,  x2,  lsl #1
-        mvn             v3.16b,  v2.16b
+        srshr           v2.8h,  v2.8h,  #3
         add             x5,  x3,  x2,  lsl #1
         ldr             s16,  [x0]
-        sqrshrun        v2.8b,  v2.8h,  #3
         ldr             s17,  [x3]
-        sqrshrun        v3.8b,  v3.8h,  #3
         ldr             s18,  [x4]
         ldr             s19,  [x5]
-        uqadd           v16.8b,  v16.8b,  v2.8b
-        uqadd           v17.8b,  v17.8b,  v2.8b
-        uqadd           v18.8b,  v18.8b,  v2.8b
-        uqadd           v19.8b,  v19.8b,  v2.8b
-        uqsub           v16.8b,  v16.8b,  v3.8b
-        uqsub           v17.8b,  v17.8b,  v3.8b
-        uqsub           v18.8b,  v18.8b,  v3.8b
-        uqsub           v19.8b,  v19.8b,  v3.8b
+        uaddw           v16.8h,  v2.8h,  v16.8b
+        uaddw           v17.8h,  v2.8h,  v17.8b
+        uaddw           v18.8h,  v2.8h,  v18.8b
+        uaddw           v19.8h,  v2.8h,  v19.8b
+        sqxtun          v16.8b,  v16.8h
+        sqxtun          v17.8b,  v17.8h
+        sqxtun          v18.8b,  v18.8h
+        sqxtun          v19.8b,  v19.8h
         str             s16,  [x0]
         str             s17,  [x3]
         str             s18,  [x4]
