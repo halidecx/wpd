@@ -142,6 +142,7 @@ if asm_enabled
       'src/aarch64/vp8l_neon.S',
       'src/aarch64/vp8dsp_neon.S',
       'src/aarch64/vp8pred_neon.S',
+      'src/aarch64/yuvdsp_neon.S',
     )
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
