@@ -8,11 +8,14 @@
 
 #define WPD_UPSAMPLE_BLOCK 32
 
-/* Four-byte output layouts the upsampler can emit directly. */
+/* Packed output layouts the upsampler can emit directly. The three-byte ones
+   drop alpha, as libwebp's RGB and BGR colorspaces do. */
 enum {
     WPD_LAYOUT_ARGB,
     WPD_LAYOUT_RGBA,
     WPD_LAYOUT_BGRA,
+    WPD_LAYOUT_RGB,
+    WPD_LAYOUT_BGR,
     WPD_LAYOUT_NB,
 };
 

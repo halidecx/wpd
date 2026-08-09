@@ -165,6 +165,8 @@ void checkasm_check_yuvdsp(void) {
     check_upsample_block(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_upsample_block(&dsp, WPD_LAYOUT_RGBA, "rgba");
     check_upsample_block(&dsp, WPD_LAYOUT_BGRA, "bgra");
+    check_upsample_block(&dsp, WPD_LAYOUT_RGB, "rgb");
+    check_upsample_block(&dsp, WPD_LAYOUT_BGR, "bgr");
     report("upsample_block");
     check_dispatch_alpha(&dsp);
     report("dispatch_alpha");

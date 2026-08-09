@@ -1635,13 +1635,15 @@ static pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
     }
 }
 
-/* The four-byte layouts the upsampler can emit without a second pass. */
+/* The byte layouts the upsampler can emit without a second pass. */
 static int format_layout(WPDPixelFormat format) {
     switch (format) {
     case WPD_PIX_FMT_RGBA:
     case WPD_PIX_FMT_RGBA_PRE: return WPD_LAYOUT_RGBA;
     case WPD_PIX_FMT_BGRA:
     case WPD_PIX_FMT_BGRA_PRE: return WPD_LAYOUT_BGRA;
+    case WPD_PIX_FMT_RGB: return WPD_LAYOUT_RGB;
+    case WPD_PIX_FMT_BGR: return WPD_LAYOUT_BGR;
     default: return WPD_LAYOUT_ARGB;
     }
 }
@@ -1796,7 +1798,8 @@ static void copy_yuva_region(WPDDecoder *s, WebPImage *dst,
 static int convert_to_packed(WPDDecoder *s, WebPImage *dst,
                              const WebPImage *src, WPDPixelFormat format) {
     const int layout = format_layout(format);
-    int       ret = image_alloc_packed(dst, src->width, src->height, 4, format);
+    int       ret    = image_alloc_packed(
+        dst, src->width, src->height, format_bpp(format), format);
 
     if (ret < 0)
         return ret;
@@ -2184,9 +2187,7 @@ static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
                 img->width);
 
     pack = format_packer(s, format);
-    if (!pack ||
-        (format_bpp(format) == 4 &&
-         format_layout(img->format) == format_layout(format))) {
+    if (!pack || format_layout(img->format) == format_layout(format)) {
         export_frame(s, img, format, frame);
         return 0;
     }
@@ -2421,9 +2422,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                 ret = convert_to_packed(decoder,
                                         &decoder->converted,
                                         &decoder->subframe,
-                                        format_bpp(decoder->out_format) == 4
-                                            ? decoder->out_format
-                                            : WPD_PIX_FMT_ARGB);
+                                        decoder->out_format);
                 if (ret < 0)
                     return set_error(decoder, "out of memory", ret);
                 ret = export_packed(decoder, &decoder->converted, frame);

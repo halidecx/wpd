@@ -46,14 +46,25 @@ static wpd_always_inline int yuv_to_b(int y, int u) {
         out[ib] = (uint8_t)yuv_to_b(y, u);       \
     }
 
+#define YUV_TO_OUT3(name, ir, ig, ib)            \
+    static wpd_always_inline void yuv_to_##name( \
+        int y, int u, int v, uint8_t *out) {     \
+        out[ir] = (uint8_t)yuv_to_r(y, v);       \
+        out[ig] = (uint8_t)yuv_to_g(y, u, v);    \
+        out[ib] = (uint8_t)yuv_to_b(y, u);       \
+    }
+
 YUV_TO_OUT(argb, 0, 1, 2, 3)
 YUV_TO_OUT(rgba, 3, 0, 1, 2)
 YUV_TO_OUT(bgra, 3, 2, 1, 0)
+YUV_TO_OUT3(rgb, 0, 1, 2)
+YUV_TO_OUT3(bgr, 2, 1, 0)
 #undef YUV_TO_OUT
+#undef YUV_TO_OUT3
 
 #define LOAD_UV(u, v) ((u) | ((v) << 16))
 
-#define UPSAMPLE_PAIRS(name)                                                   \
+#define UPSAMPLE_PAIRS(name, bpp)                                              \
     static wpd_always_inline void upsample_pairs_##name(                       \
         const uint8_t *top_y,                                                  \
         const uint8_t *bottom_y,                                               \
@@ -77,10 +88,12 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
             const uint32_t uv0     = (diag_12 + tl_uv) >> 1;                   \
             const uint32_t uv1     = (diag_03 + t_uv) >> 1;                    \
                                                                                \
+            yuv_to_##name(top_y[2 * x - 1],                                    \
+                          uv0 & 0xff,                                          \
+                          uv0 >> 16,                                           \
+                          top_dst + 2 * (bpp) * x - (bpp));                    \
             yuv_to_##name(                                                     \
-                top_y[2 * x - 1], uv0 & 0xff, uv0 >> 16, top_dst + 8 * x - 4); \
-            yuv_to_##name(                                                     \
-                top_y[2 * x], uv1 & 0xff, uv1 >> 16, top_dst + 8 * x);         \
+                top_y[2 * x], uv1 & 0xff, uv1 >> 16, top_dst + 2 * (bpp) * x); \
             if (bottom_y) {                                                    \
                 const uint32_t b0 = (diag_03 + l_uv) >> 1;                     \
                 const uint32_t b1 = (diag_12 + uv) >> 1;                       \
@@ -88,9 +101,11 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
                 yuv_to_##name(bottom_y[2 * x - 1],                             \
                               b0 & 0xff,                                       \
                               b0 >> 16,                                        \
-                              bottom_dst + 8 * x - 4);                         \
-                yuv_to_##name(                                                 \
-                    bottom_y[2 * x], b1 & 0xff, b1 >> 16, bottom_dst + 8 * x); \
+                              bottom_dst + 2 * (bpp) * x - (bpp));             \
+                yuv_to_##name(bottom_y[2 * x],                                 \
+                              b1 & 0xff,                                       \
+                              b1 >> 16,                                        \
+                              bottom_dst + 2 * (bpp) * x);                     \
             }                                                                  \
             tl_uv = t_uv;                                                      \
             l_uv  = uv;                                                        \
@@ -112,8 +127,8 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
                               top_v,                                           \
                               cur_u,                                           \
                               cur_v,                                           \
-                              top_dst - 4,                                     \
-                              bottom_dst ? bottom_dst - 4 : NULL,              \
+                              top_dst - (bpp),                                 \
+                              bottom_dst ? bottom_dst - (bpp) : NULL,          \
                               1,                                               \
                               num_blocks * (WPD_UPSAMPLE_BLOCK / 2));          \
     }                                                                          \
@@ -150,8 +165,8 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
                 top_v,                                                         \
                 cur_u,                                                         \
                 cur_v,                                                         \
-                top_dst + 4,                                                   \
-                bottom_dst ? bottom_dst + 4 : NULL,                            \
+                top_dst + (bpp),                                               \
+                bottom_dst ? bottom_dst + (bpp) : NULL,                        \
                 blocks);                                                       \
         upsample_pairs_##name(top_y,                                           \
                               bottom_y,                                        \
@@ -170,13 +185,13 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
             yuv_to_##name(top_y[len - 1],                                      \
                           uv0 & 0xff,                                          \
                           uv0 >> 16,                                           \
-                          top_dst + 4 * (len - 1));                            \
+                          top_dst + (bpp) * (len - 1));                        \
             if (bottom_y) {                                                    \
                 uv0 = (3 * l_uv + tl_uv + 0x00020002u) >> 2;                   \
                 yuv_to_##name(bottom_y[len - 1],                               \
                               uv0 & 0xff,                                      \
                               uv0 >> 16,                                       \
-                              bottom_dst + 4 * (len - 1));                     \
+                              bottom_dst + (bpp) * (len - 1));                 \
             }                                                                  \
         }                                                                      \
     }
@@ -184,10 +199,14 @@ YUV_TO_OUT(bgra, 3, 2, 1, 0)
 #define WPD_LAYOUT_argb WPD_LAYOUT_ARGB
 #define WPD_LAYOUT_rgba WPD_LAYOUT_RGBA
 #define WPD_LAYOUT_bgra WPD_LAYOUT_BGRA
+#define WPD_LAYOUT_rgb WPD_LAYOUT_RGB
+#define WPD_LAYOUT_bgr WPD_LAYOUT_BGR
 
-UPSAMPLE_PAIRS(argb)
-UPSAMPLE_PAIRS(rgba)
-UPSAMPLE_PAIRS(bgra)
+UPSAMPLE_PAIRS(argb, 4)
+UPSAMPLE_PAIRS(rgba, 4)
+UPSAMPLE_PAIRS(bgra, 4)
+UPSAMPLE_PAIRS(rgb, 3)
+UPSAMPLE_PAIRS(bgr, 3)
 #undef UPSAMPLE_PAIRS
 
 static void dispatch_alpha_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
@@ -300,6 +319,8 @@ static void premultiply_row_c(uint8_t *rgba, int alpha_first, int num_pixels) {
 UPSAMPLE_IMAGE(argb)
 UPSAMPLE_IMAGE(rgba)
 UPSAMPLE_IMAGE(bgra)
+UPSAMPLE_IMAGE(rgb)
+UPSAMPLE_IMAGE(bgr)
 #undef UPSAMPLE_IMAGE
 
 void wpd_yuv420_to_packed(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
@@ -311,17 +332,30 @@ void wpd_yuv420_to_packed(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
     if (width <= 0 || height <= 0)
         return;
 
-    if (layout == WPD_LAYOUT_RGBA)
+    switch (layout) {
+    case WPD_LAYOUT_RGBA:
         yuv420_to_rgba(
             dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-    else if (layout == WPD_LAYOUT_BGRA)
+        break;
+    case WPD_LAYOUT_BGRA:
         yuv420_to_bgra(
             dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-    else
+        break;
+    case WPD_LAYOUT_RGB:
+        yuv420_to_rgb(
+            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
+        break;
+    case WPD_LAYOUT_BGR:
+        yuv420_to_bgr(
+            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
+        break;
+    default:
         yuv420_to_argb(
             dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
+        break;
+    }
 
-    if (!a)
+    if (!a || layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR)
         return;
     dst += layout == WPD_LAYOUT_ARGB ? 0 : 3;
     for (int j = 0; j < height; j++)
@@ -334,7 +368,9 @@ wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {
     const WPDYUVDSP c = {
         .upsample_block  = {upsample_block_argb_c,
                             upsample_block_rgba_c,
-                            upsample_block_bgra_c},
+                            upsample_block_bgra_c,
+                            upsample_block_rgb_c,
+                            upsample_block_bgr_c},
         .dispatch_alpha  = dispatch_alpha_c,
         .pack_rgba       = pack_rgba_c,
         .pack_bgra       = pack_bgra_c,

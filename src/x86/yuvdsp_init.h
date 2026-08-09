@@ -19,9 +19,15 @@
 UPSAMPLE_ARGB_BLOCK(argb_sse2)
 UPSAMPLE_ARGB_BLOCK(rgba_sse2)
 UPSAMPLE_ARGB_BLOCK(bgra_sse2)
+UPSAMPLE_ARGB_BLOCK(rgb_sse2)
+UPSAMPLE_ARGB_BLOCK(bgr_sse2)
+UPSAMPLE_ARGB_BLOCK(rgb_ssse3)
+UPSAMPLE_ARGB_BLOCK(bgr_ssse3)
 UPSAMPLE_ARGB_BLOCK(argb_avx2)
 UPSAMPLE_ARGB_BLOCK(rgba_avx2)
 UPSAMPLE_ARGB_BLOCK(bgra_avx2)
+UPSAMPLE_ARGB_BLOCK(rgb_avx2)
+UPSAMPLE_ARGB_BLOCK(bgr_avx2)
 #endif
 #undef UPSAMPLE_ARGB_BLOCK
 
@@ -50,10 +56,16 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_ARGB] = ff_upsample_block_argb_sse2;
         dsp->upsample_block[WPD_LAYOUT_RGBA] = ff_upsample_block_rgba_sse2;
         dsp->upsample_block[WPD_LAYOUT_BGRA] = ff_upsample_block_bgra_sse2;
+        dsp->upsample_block[WPD_LAYOUT_RGB]  = ff_upsample_block_rgb_sse2;
+        dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_sse2;
 #endif
         dsp->dispatch_alpha = ff_dispatch_alpha_sse2;
     }
     if (flags & WPD_X86_CPU_FLAG_SSSE3) {
+#if WPD_ARCH_X86_64
+        dsp->upsample_block[WPD_LAYOUT_RGB] = ff_upsample_block_rgb_ssse3;
+        dsp->upsample_block[WPD_LAYOUT_BGR] = ff_upsample_block_bgr_ssse3;
+#endif
         dsp->pack_rgba       = ff_pack_rgba_ssse3;
         dsp->pack_bgra       = ff_pack_bgra_ssse3;
         dsp->pack_rgb        = ff_pack_rgb_ssse3;
@@ -65,6 +77,8 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_ARGB] = ff_upsample_block_argb_avx2;
         dsp->upsample_block[WPD_LAYOUT_RGBA] = ff_upsample_block_rgba_avx2;
         dsp->upsample_block[WPD_LAYOUT_BGRA] = ff_upsample_block_bgra_avx2;
+        dsp->upsample_block[WPD_LAYOUT_RGB]  = ff_upsample_block_rgb_avx2;
+        dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_avx2;
 #endif
         dsp->dispatch_alpha  = ff_dispatch_alpha_avx2;
         dsp->pack_rgba       = ff_pack_rgba_avx2;
