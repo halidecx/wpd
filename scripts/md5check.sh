@@ -6,10 +6,17 @@ NEW="${2:?usage: md5check.sh OLD_BIN NEW_BIN}"
 shopt -s nullglob
 for input in wpd-test-data/*.webp; do
     case "$("$NEW" --info "$input" 2>/dev/null |
-            awk '/^frame 0:/ { print $4; exit }')" in
-        argb)      formats="argb" ;;
-        yuva420p)  formats="yuva420p yuv420p" ;;
-        yuv420p)   formats="yuv420p" ;;
+            awk '/^frame /{ seen[$4] = 1 }
+                 END { for (f in seen) printf "%s ", f }' |
+            tr ' ' '\n' | sort | tr '\n' ' ')" in
+        'argb ')      formats="argb" ;;
+        'yuva420p ')  formats="yuva420p yuv420p" ;;
+        'yuv420p ')   formats="yuv420p" ;;
+        *' '*' ')
+            # Animations mixing lossy and lossless frames have no single
+            # planar format; auto writes each frame in its own.
+            formats="auto"
+            ;;
         *)
             echo "$input: cannot determine pixel format" >&2
             exit 1

@@ -94,8 +94,12 @@ static void usage(const char *app, const char *reason) {
             " -r, --repeat u32\n"
             "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
             " -f, --fmt str\n"
-            "    output pixel format (auto, yuv420p, yuva420p, argb); "
-            "default auto\n"
+            "    output pixel format; default auto. one of\n"
+            "    auto, yuv420p, yuva420p,\n"
+            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
+            "    the packed formats convert lossy frames and match the\n"
+            "    like-named libwebp colorspace bit-exactly; a lowercase\n"
+            "    letter marks the channels alpha is multiplied into\n"
             " --muxer str\n"
             "    output muxer (raw, md5); default raw\n"
             " --verify md5\n"
@@ -122,16 +126,36 @@ static int parse_repeat(const char *value, int *repeat) {
     return 0;
 }
 
-static int parse_format(const char *value, const char **pixel_format) {
+static const struct {
+    const char    *name;
+    WPDPixelFormat format;
+} pixel_formats[] = {
+    {"yuv420p", WPD_PIX_FMT_YUV420P},
+    {"yuva420p", WPD_PIX_FMT_YUVA420P},
+    {"argb", WPD_PIX_FMT_ARGB},
+    {"rgba", WPD_PIX_FMT_RGBA},
+    {"bgra", WPD_PIX_FMT_BGRA},
+    {"rgb", WPD_PIX_FMT_RGB},
+    {"bgr", WPD_PIX_FMT_BGR},
+    {"Argb", WPD_PIX_FMT_ARGB_PRE},
+    {"rgbA", WPD_PIX_FMT_RGBA_PRE},
+    {"bgrA", WPD_PIX_FMT_BGRA_PRE},
+};
+
+static int parse_format(const char *value, const char **pixel_format,
+                        WPDPixelFormat *format) {
     if (!strcmp(value, "auto")) {
         *pixel_format = NULL;
-    } else if (!strcmp(value, "yuv420p") || !strcmp(value, "yuva420p") ||
-               !strcmp(value, "argb")) {
-        *pixel_format = value;
-    } else {
-        return -1;
+        *format       = WPD_PIX_FMT_NONE;
+        return 0;
     }
-    return 0;
+    for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
+        if (!strcmp(pixel_formats[i].name, value)) {
+            *pixel_format = pixel_formats[i].name;
+            *format       = pixel_formats[i].format;
+            return 0;
+        }
+    return -1;
 }
 
 static int parse_cpumask(const char *value, unsigned *mask) {
@@ -269,11 +293,9 @@ static int write_plane(OutputContext *output, const uint8_t *data,
 }
 
 static const char *format_name(WPDPixelFormat format) {
-    switch (format) {
-    case WPD_PIX_FMT_YUV420P: return "yuv420p";
-    case WPD_PIX_FMT_YUVA420P: return "yuva420p";
-    case WPD_PIX_FMT_ARGB: return "argb";
-    }
+    for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
+        if (pixel_formats[i].format == format)
+            return pixel_formats[i].name;
     return "unknown";
 }
 
@@ -284,15 +306,23 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
     if (!pixel_format)
         pixel_format = format_name(frame->format);
 
-    if (frame->format == WPD_PIX_FMT_ARGB) {
-        if (strcmp(pixel_format, "argb")) {
-            fprintf(stderr, "cannot convert argb frame to %s\n", pixel_format);
+    if (frame->format >= WPD_PIX_FMT_ARGB) {
+        const int bpp = frame->format == WPD_PIX_FMT_RGB ||
+                frame->format == WPD_PIX_FMT_BGR
+            ? 3
+            : 4;
+
+        if (strcmp(pixel_format, format_name(frame->format))) {
+            fprintf(stderr,
+                    "cannot convert %s frame to %s\n",
+                    format_name(frame->format),
+                    pixel_format);
             return -1;
         }
         return write_plane(output,
                            frame->data[0],
                            frame->stride[0],
-                           frame->width * 4,
+                           frame->width * bpp,
                            frame->height);
     }
 
@@ -354,18 +384,19 @@ static uint8_t *read_file(const char *name, FILE *input, size_t *size) {
 }
 
 int main(int argc, char **argv) {
-    FILE         *input = NULL;
-    OutputContext output;
-    WPDDecoder   *decoder = NULL;
-    uint8_t      *data    = NULL;
-    uint8_t       expected_md5[16];
-    size_t        size;
-    const char   *muxer = NULL, *pixel_format = NULL, *verify = NULL;
-    const char   *input_name, *output_name;
-    int           info   = 0;
-    int           frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
-    unsigned      cpumask;
-    WPDFrame      frame;
+    FILE          *input = NULL;
+    OutputContext  output;
+    WPDDecoder    *decoder = NULL;
+    uint8_t       *data    = NULL;
+    uint8_t        expected_md5[16];
+    size_t         size;
+    const char    *muxer = NULL, *pixel_format = NULL, *verify = NULL;
+    WPDPixelFormat out_format = WPD_PIX_FMT_NONE;
+    const char    *input_name, *output_name;
+    int            info   = 0;
+    int            frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
+    unsigned       cpumask;
+    WPDFrame       frame;
 
     print_banner();
     opterr = 0;
@@ -382,7 +413,7 @@ int main(int argc, char **argv) {
             }
             break;
         case 'f':
-            if (parse_format(optarg, &pixel_format) < 0) {
+            if (parse_format(optarg, &pixel_format, &out_format) < 0) {
                 usage(argv[0], "invalid output pixel format");
                 return 2;
             }
@@ -461,6 +492,11 @@ int main(int argc, char **argv) {
         decoder = wpd_decoder_create();
         if (!decoder) {
             fprintf(stderr, "out of memory\n");
+            goto done;
+        }
+        if (out_format >= WPD_PIX_FMT_ARGB &&
+            wpd_decoder_set_output_format(decoder, out_format) < 0) {
+            fprintf(stderr, "cannot select %s output\n", pixel_format);
             goto done;
         }
         if (wpd_decoder_open(decoder, data, size) < 0) {

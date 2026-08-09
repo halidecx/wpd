@@ -21,9 +21,46 @@ static const struct option long_options[] = {
 typedef enum PixelFormat {
     PIX_FMT_YUV420P,
     PIX_FMT_YUVA420P,
-    PIX_FMT_ARGB,
-    PIX_FMT_RGBA,
+    PIX_FMT_PACKED,
 } PixelFormat;
+
+/* Byte offset of A, R, G and B within a pixel; -1 when the channel is
+   absent. WebPAnimDecoder only accepts RGBA, BGRA, rgbA and bgrA, so the
+   other layouts are decoded in the closest one it does accept and permuted
+   here. Permuting is lossless, but dropping alpha for rgb and bgr is our
+   definition, not libwebp's: it has no RGB animation mode. */
+typedef struct Layout {
+    const char   *name;
+    WEBP_CSP_MODE still_mode;
+    WEBP_CSP_MODE anim_mode;
+    int           bpp;
+    int           off[4];
+} Layout;
+
+static const Layout layouts[] = {
+    {"argb", MODE_ARGB, MODE_RGBA, 4, {0, 1, 2, 3}},
+    {"rgba", MODE_RGBA, MODE_RGBA, 4, {3, 0, 1, 2}},
+    {"bgra", MODE_BGRA, MODE_BGRA, 4, {3, 2, 1, 0}},
+    {"rgb", MODE_RGB, MODE_RGBA, 3, {-1, 0, 1, 2}},
+    {"bgr", MODE_BGR, MODE_BGRA, 3, {-1, 2, 1, 0}},
+    {"Argb", MODE_Argb, MODE_rgbA, 4, {0, 1, 2, 3}},
+    {"rgbA", MODE_rgbA, MODE_rgbA, 4, {3, 0, 1, 2}},
+    {"bgrA", MODE_bgrA, MODE_bgrA, 4, {3, 2, 1, 0}},
+};
+
+static const Layout *find_layout(const char *name) {
+    for (size_t i = 0; i < sizeof(layouts) / sizeof(*layouts); i++)
+        if (!strcmp(layouts[i].name, name))
+            return &layouts[i];
+    return NULL;
+}
+
+static const Layout *layout_for_mode(WEBP_CSP_MODE mode) {
+    for (size_t i = 0; i < sizeof(layouts) / sizeof(*layouts); i++)
+        if (layouts[i].still_mode == mode)
+            return &layouts[i];
+    return NULL;
+}
 
 typedef struct Frame {
     const uint8_t *data[4];
@@ -31,6 +68,7 @@ typedef struct Frame {
     int            width;
     int            height;
     PixelFormat    format;
+    const Layout  *layout;
 } Frame;
 
 static void print_banner(void) {
@@ -54,8 +92,9 @@ static void usage(const char *app, const char *reason) {
             " -r, --repeat u32\n"
             "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
             " -f, --fmt str\n"
-            "    output pixel format (auto, yuv420p, yuva420p, argb); "
-            "default auto\n",
+            "    output pixel format; default auto. one of\n"
+            "    auto, yuv420p, yuva420p,\n"
+            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n",
             app);
 }
 
@@ -76,7 +115,7 @@ static int parse_format(const char *value, const char **pixel_format) {
     if (!strcmp(value, "auto")) {
         *pixel_format = NULL;
     } else if (!strcmp(value, "yuv420p") || !strcmp(value, "yuva420p") ||
-               !strcmp(value, "argb")) {
+               find_layout(value)) {
         *pixel_format = value;
     } else {
         return -1;
@@ -92,9 +131,11 @@ static int write_plane(FILE *output, const uint8_t *data, ptrdiff_t stride,
     return 0;
 }
 
-static int write_rgba_as_argb(FILE *output, const Frame *frame) {
-    size_t   row_size = (size_t)frame->width * 4;
-    uint8_t *row      = malloc(row_size);
+static int write_converted(FILE *output, const Frame *frame,
+                           const Layout *want) {
+    const Layout *have     = frame->layout;
+    size_t        row_size = (size_t)frame->width * want->bpp;
+    uint8_t      *row      = malloc(row_size);
 
     if (!row) {
         fprintf(stderr, "out of memory\n");
@@ -103,12 +144,14 @@ static int write_rgba_as_argb(FILE *output, const Frame *frame) {
     for (int y = 0; y < frame->height; y++) {
         const uint8_t *src = frame->data[0] + y * frame->stride[0];
 
-        for (int x = 0; x < frame->width; x++) {
-            row[4 * x + 0] = src[4 * x + 3];
-            row[4 * x + 1] = src[4 * x + 0];
-            row[4 * x + 2] = src[4 * x + 1];
-            row[4 * x + 3] = src[4 * x + 2];
-        }
+        for (int x = 0; x < frame->width; x++)
+            for (int c = 0; c < 4; c++) {
+                if (want->off[c] < 0)
+                    continue;
+                row[want->bpp * x + want->off[c]] = have->off[c] < 0
+                    ? 0xff
+                    : src[have->bpp * x + have->off[c]];
+            }
         if (fwrite(row, 1, row_size, output) != row_size) {
             free(row);
             return -1;
@@ -118,12 +161,11 @@ static int write_rgba_as_argb(FILE *output, const Frame *frame) {
     return 0;
 }
 
-static const char *format_name(PixelFormat format) {
-    switch (format) {
+static const char *format_name(const Frame *frame) {
+    switch (frame->format) {
     case PIX_FMT_YUV420P: return "yuv420p";
     case PIX_FMT_YUVA420P: return "yuva420p";
-    case PIX_FMT_ARGB:
-    case PIX_FMT_RGBA: return "argb";
+    case PIX_FMT_PACKED: return frame->layout->name;
     }
     return "unknown";
 }
@@ -133,20 +175,25 @@ static int write_frame(FILE *output, const Frame *frame,
     int planes;
 
     if (!pixel_format)
-        pixel_format = format_name(frame->format);
+        pixel_format = format_name(frame);
 
-    if (frame->format == PIX_FMT_ARGB || frame->format == PIX_FMT_RGBA) {
-        if (strcmp(pixel_format, "argb")) {
-            fprintf(stderr, "cannot convert argb frame to %s\n", pixel_format);
+    if (frame->format == PIX_FMT_PACKED) {
+        const Layout *want = find_layout(pixel_format);
+
+        if (!want) {
+            fprintf(stderr,
+                    "cannot convert %s frame to %s\n",
+                    format_name(frame),
+                    pixel_format);
             return -1;
         }
-        if (frame->format == PIX_FMT_RGBA)
-            return write_rgba_as_argb(output, frame);
-        return write_plane(output,
-                           frame->data[0],
-                           frame->stride[0],
-                           frame->width * 4,
-                           frame->height);
+        if (want == frame->layout)
+            return write_plane(output,
+                               frame->data[0],
+                               frame->stride[0],
+                               frame->width * want->bpp,
+                               frame->height);
+        return write_converted(output, frame, want);
     }
 
     if (!strcmp(pixel_format, "yuv420p")) {
@@ -156,7 +203,7 @@ static int write_frame(FILE *output, const Frame *frame,
     } else {
         fprintf(stderr,
                 "cannot convert %s frame to %s\n",
-                format_name(frame->format),
+                format_name(frame),
                 pixel_format);
         return -1;
     }
@@ -201,9 +248,14 @@ static int decode_still(const char *input_name, const uint8_t *data,
         return -1;
     }
     config.input = *features;
-    if (features->format == 2) {
+    if (pixel_format && find_layout(pixel_format)) {
+        frame.layout             = find_layout(pixel_format);
+        config.output.colorspace = frame.layout->still_mode;
+        frame.format             = PIX_FMT_PACKED;
+    } else if (features->format == 2) {
+        frame.layout             = find_layout("argb");
         config.output.colorspace = MODE_ARGB;
-        frame.format             = PIX_FMT_ARGB;
+        frame.format             = PIX_FMT_PACKED;
     } else if (features->has_alpha) {
         config.output.colorspace = MODE_YUVA;
         frame.format             = PIX_FMT_YUVA420P;
@@ -221,7 +273,7 @@ static int decode_still(const char *input_name, const uint8_t *data,
 
     frame.width  = config.output.width;
     frame.height = config.output.height;
-    if (frame.format == PIX_FMT_ARGB) {
+    if (frame.format == PIX_FMT_PACKED) {
         frame.data[0]   = config.output.u.RGBA.rgba;
         frame.stride[0] = config.output.u.RGBA.stride;
     } else {
@@ -252,13 +304,22 @@ static int decode_animation(const char *input_name, const uint8_t *data,
     WebPAnimDecoder       *decoder = NULL;
     WebPAnimInfo           info;
     Frame                  frame = {0};
-    int                    ret   = -1;
+    const Layout          *layout;
+    int                    ret = -1;
 
     if (!WebPAnimDecoderOptionsInit(&options)) {
         fprintf(stderr, "libwebp demux ABI mismatch\n");
         return -1;
     }
-    options.color_mode = MODE_RGBA;
+    layout = pixel_format ? find_layout(pixel_format) : find_layout("rgba");
+    if (!layout) {
+        fprintf(stderr,
+                "%s: animations have no %s output\n",
+                input_name,
+                pixel_format);
+        return -1;
+    }
+    options.color_mode = layout->anim_mode;
     decoder            = WebPAnimDecoderNew(&webp_data, &options);
     if (!decoder) {
         fprintf(stderr, "%s: cannot create animation decoder\n", input_name);
@@ -275,7 +336,8 @@ static int decode_animation(const char *input_name, const uint8_t *data,
 
     frame.width     = (int)info.canvas_width;
     frame.height    = (int)info.canvas_height;
-    frame.format    = PIX_FMT_RGBA;
+    frame.format    = PIX_FMT_PACKED;
+    frame.layout    = layout_for_mode(layout->anim_mode);
     frame.stride[0] = frame.width * 4;
     while (WebPAnimDecoderHasMoreFrames(decoder)) {
         uint8_t *rgba;

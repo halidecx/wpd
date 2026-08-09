@@ -44,7 +44,7 @@ Test scripts:
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/testdata.sh   # asm vs c E2E correctness
-./scripts/animcheck.sh  # correctness, animation, wpd vs libwebp
+./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp
 ./scripts/stylecheck.sh # format codebase
 ```
 
