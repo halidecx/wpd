@@ -2,14 +2,36 @@
 #include "asm.S"
 
 const yuv_coeffs, align=4
-        .short          19077, 26149, 14234, 6419
-        .short          13320, 8708, 33050, 17685
+        .short          19077, 26149, 6419, 13320
+        .short          282, 14234, 8708, 17685
 endconst
 
 const pack_rgba_tbl, align=4
         .byte           1, 2, 3, 0, 5, 6, 7, 4
         .byte           9, 10, 11, 8, 13, 14, 15, 12
 endconst
+
+.macro  finish_r dst
+        add             v\dst\().8h, v3.8h, v4.8h
+        sub             v\dst\().8h, v\dst\().8h, v29.8h
+        sshr            v\dst\().8h, v\dst\().8h, #6
+        sqxtun          v\dst\().8b, v\dst\().8h
+.endm
+
+.macro  finish_g dst
+        sub             v\dst\().8h, v3.8h, v5.8h
+        sub             v\dst\().8h, v\dst\().8h, v6.8h
+        add             v\dst\().8h, v\dst\().8h, v30.8h
+        sshr            v\dst\().8h, v\dst\().8h, #6
+        sqxtun          v\dst\().8b, v\dst\().8h
+.endm
+
+.macro  finish_b dst
+        uqadd           v\dst\().8h, v3.8h, v7.8h
+        uqsub           v\dst\().8h, v\dst\().8h, v31.8h
+        ushr            v\dst\().8h, v\dst\().8h, #6
+        uqxtn           v\dst\().8b, v\dst\().8h
+.endm
 
 .macro  recon_uv top, cur, top_off, bottom_off
         ldr             q0,  [\top]
@@ -66,14 +88,6 @@ endconst
         str             q4,  [sp, #(\bottom_off + 16)]
 .endm
 
-.macro  mul8 dst, src, lane
-        dup             v19.8h,     v31.h[\lane]
-        umull           v\dst\().4s, v\src\().4h, v19.4h
-        umull2          v17.4s,     v\src\().8h, v19.8h
-        shrn            v\dst\().4h, v\dst\().4s, #8
-        shrn2           v\dst\().8h, v17.4s, #8
-.endm
-
 .macro  convert8 y, dst, uoff, voff, layout
         ldr             d0,  [\y], #8
         ldr             d1,  [sp, #\uoff]
@@ -81,60 +95,57 @@ endconst
         uxtl            v0.8h,   v0.8b
         uxtl            v1.8h,   v1.8b
         uxtl            v2.8h,   v2.8b
-        mul8            3, 0, 0
-        mul8            4, 2, 1
-        dup             v18.8h,  v31.h[2]
-        add             v20.8h,  v3.8h,  v4.8h
-        sub             v20.8h,  v20.8h, v18.8h
-        sshr            v20.8h,  v20.8h, #6
-        sqxtun          v20.8b,  v20.8h
-        mul8            5, 1, 3
-        mul8            6, 2, 4
-        dup             v18.8h,  v31.h[5]
-        sub             v21.8h,  v3.8h,  v5.8h
-        sub             v21.8h,  v21.8h, v6.8h
-        add             v21.8h,  v21.8h, v18.8h
-        sshr            v21.8h,  v21.8h, #6
-        sqxtun          v21.8b,  v21.8h
-        mul8            16, 1, 6
-        dup             v18.8h,  v31.h[7]
-        uqadd           v22.8h,  v3.8h,  v16.8h
-        uqsub           v22.8h,  v22.8h, v18.8h
-        ushr            v22.8h,  v22.8h, #6
-        uqxtn           v22.8b,  v22.8h
-        movi            v23.8b,  #255
+        shl             v0.8h,   v0.8h,  #7
+        shl             v1.8h,   v1.8h,  #7
+        shl             v2.8h,   v2.8h,  #7
+        sqdmulh         v3.8h,   v0.8h,  v24.8h
+        sqdmulh         v4.8h,   v2.8h,  v25.8h
 .ifc \layout,argb
-        mov             v24.8b,  v23.8b
-        mov             v25.8b,  v20.8b
-        mov             v26.8b,  v21.8b
-        mov             v27.8b,  v22.8b
-        st4             {v24.8b-v27.8b}, [\dst], #32
+        finish_r        17
 .endif
 .ifc \layout,rgba
-        mov             v24.8b,  v20.8b
-        mov             v25.8b,  v21.8b
-        mov             v26.8b,  v22.8b
-        mov             v27.8b,  v23.8b
-        st4             {v24.8b-v27.8b}, [\dst], #32
+        finish_r        16
 .endif
 .ifc \layout,bgra
-        mov             v24.8b,  v22.8b
-        mov             v25.8b,  v21.8b
-        mov             v26.8b,  v20.8b
-        mov             v27.8b,  v23.8b
-        st4             {v24.8b-v27.8b}, [\dst], #32
+        finish_r        18
 .endif
 .ifc \layout,rgb
-        mov             v24.8b,  v20.8b
-        mov             v25.8b,  v21.8b
-        mov             v26.8b,  v22.8b
-        st3             {v24.8b-v26.8b}, [\dst], #24
+        finish_r        16
 .endif
 .ifc \layout,bgr
-        mov             v24.8b,  v22.8b
-        mov             v25.8b,  v21.8b
-        mov             v26.8b,  v20.8b
-        st3             {v24.8b-v26.8b}, [\dst], #24
+        finish_r        18
+.endif
+        sqdmulh         v5.8h,   v1.8h,  v26.8h
+        sqdmulh         v6.8h,   v2.8h,  v27.8h
+.ifc \layout,argb
+        finish_g        18
+.else
+        finish_g        17
+.endif
+        sqdmulh         v7.8h,   v1.8h,  v28.8h
+        add             v7.8h,   v7.8h,  v1.8h
+.ifc \layout,argb
+        finish_b        19
+        movi            v16.8b,  #255
+        st4             {v16.8b-v19.8b}, [\dst], #32
+.endif
+.ifc \layout,rgba
+        finish_b        18
+        movi            v19.8b,  #255
+        st4             {v16.8b-v19.8b}, [\dst], #32
+.endif
+.ifc \layout,bgra
+        finish_b        16
+        movi            v19.8b,  #255
+        st4             {v16.8b-v19.8b}, [\dst], #32
+.endif
+.ifc \layout,rgb
+        finish_b        18
+        st3             {v16.8b-v18.8b}, [\dst], #24
+.endif
+.ifc \layout,bgr
+        finish_b        16
+        st3             {v16.8b-v18.8b}, [\dst], #24
 .endif
 .endm
 
@@ -143,7 +154,14 @@ function ff_upsample_block_\layout\()_neon, export=1
         ldr             w8,  [sp]
         sub             sp,  sp,  #128
         movrel          x9,  yuv_coeffs
-        ldr             q31, [x9]
+        ld1r            {v24.8h}, [x9], #2
+        ld1r            {v25.8h}, [x9], #2
+        ld1r            {v26.8h}, [x9], #2
+        ld1r            {v27.8h}, [x9], #2
+        ld1r            {v28.8h}, [x9], #2
+        ld1r            {v29.8h}, [x9], #2
+        ld1r            {v30.8h}, [x9], #2
+        ld1r            {v31.8h}, [x9]
 1:      recon_uv        x2, x4, 0, 32
         recon_uv        x3, x5, 64, 96
         convert8        x0, x6, 0, 64, \layout
