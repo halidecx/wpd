@@ -22,12 +22,12 @@ void ff_vp8_h_loop_filter_simple_mb_neon(uint8_t *dst, ptrdiff_t stride,
 
 VP8_V_LOOP_FILTER_SIMPLE_MB(vp8_v_loop_filter_simple_mb_neon,
                             ff_vp8_v_loop_filter16_simple_neon)
-VP8_H_LOOP_FILTER16Y_MB(vp8_h_loop_filter16y_mb_neon,
-                        ff_vp8_h_loop_filter16_neon,
-                        ff_vp8_h_loop_filter16_inner_neon)
-VP8_H_LOOP_FILTER8UV_MB(vp8_h_loop_filter8uv_mb_neon,
-                        ff_vp8_h_loop_filter8uv_neon,
-                        ff_vp8_h_loop_filter8uv_inner_neon)
+void ff_vp8_h_loop_filter16y_mb_neon(uint8_t *dst, ptrdiff_t stride,
+                                     int mbedge_E, int bedge_E, int flim_I,
+                                     int hev_thresh);
+void ff_vp8_h_loop_filter8uv_mb_neon(uint8_t *dstU, uint8_t *dstV,
+                                     ptrdiff_t stride, int mbedge_E,
+                                     int bedge_E, int flim_I, int hev_thresh);
 VP8_V_LOOP_FILTER16Y_MB(vp8_v_loop_filter16y_mb_neon,
                         ff_vp8_v_loop_filter16_neon,
                         ff_vp8_v_loop_filter16_inner_neon)
@@ -55,8 +55,8 @@ static wpd_always_inline void ff_vp8dsp_init_aarch64(VP8DSPContext *dsp) {
     dsp->vp8_v_loop_filter8uv_inner = ff_vp8_v_loop_filter8uv_inner_neon;
     dsp->vp8_h_loop_filter8uv_inner = ff_vp8_h_loop_filter8uv_inner_neon;
 
-    dsp->vp8_h_loop_filter16y_mb = vp8_h_loop_filter16y_mb_neon;
-    dsp->vp8_h_loop_filter8uv_mb = vp8_h_loop_filter8uv_mb_neon;
+    dsp->vp8_h_loop_filter16y_mb = ff_vp8_h_loop_filter16y_mb_neon;
+    dsp->vp8_h_loop_filter8uv_mb = ff_vp8_h_loop_filter8uv_mb_neon;
     dsp->vp8_v_loop_filter16y_mb = vp8_v_loop_filter16y_mb_neon;
     dsp->vp8_v_loop_filter8uv_mb = vp8_v_loop_filter8uv_mb_neon;
 

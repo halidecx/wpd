@@ -800,6 +800,245 @@ function ff_vp8_h_loop_filter_simple_mb_neon, export=1
         ret
 endfunc
 
+function ff_vp8_h_loop_filter16y_mb_neon, export=1
+        AARCH64_SIGN_LINK_REGISTER
+        stp             x29, x30, [sp, #-128]!
+        stp             x19, x20, [sp, #16]
+        stp             x21, x22, [sp, #32]
+        stp             x23, x24, [sp, #48]
+        stp             d8,  d9,  [sp, #64]
+        stp             d10, d11, [sp, #80]
+        stp             d12, d13, [sp, #96]
+        stp             d14, d15, [sp, #112]
+        sub             sp,  sp,  #256
+
+        mov             x19, x0
+        mov             x20, x1
+        mov             w21, w2
+        mov             w22, w3
+        mov             w23, w4
+        mov             w24, w5
+
+        sub             x0,  x19, #4
+        add             x4,  x0,  x20
+        add             x5,  x0,  x20, lsl #1
+        add             x6,  x4,  x20, lsl #1
+        lsl             x7,  x20, #2
+
+        ld1             {v0.16b},  [x0], x7
+        ld1             {v1.16b},  [x4], x7
+        ld1             {v2.16b},  [x5], x7
+        ld1             {v3.16b},  [x6], x7
+        ld1             {v4.16b},  [x0], x7
+        ld1             {v5.16b},  [x4], x7
+        ld1             {v6.16b},  [x5], x7
+        ld1             {v7.16b},  [x6], x7
+        ld1             {v8.16b},  [x0], x7
+        ld1             {v9.16b},  [x4], x7
+        ld1             {v10.16b}, [x5], x7
+        ld1             {v11.16b}, [x6], x7
+        ld1             {v12.16b}, [x0]
+        ld1             {v13.16b}, [x4]
+        ld1             {v14.16b}, [x5]
+        ld1             {v15.16b}, [x6]
+
+        transpose_16x16B
+
+        stp             q0,  q1,  [sp]
+        stp             q2,  q3,  [sp, #32]
+        stp             q4,  q5,  [sp, #64]
+        stp             q6,  q7,  [sp, #96]
+        stp             q8,  q9,  [sp, #128]
+        stp             q10, q11, [sp, #160]
+        stp             q12, q13, [sp, #192]
+        stp             q14, q15, [sp, #224]
+
+        add             x0,  sp,  #64
+        mov             x1,  #16
+        mov             w2,  w21
+        mov             w3,  w23
+        mov             w4,  w24
+        bl              X(ff_vp8_v_loop_filter16_neon)
+
+        add             x0,  sp,  #128
+        mov             x1,  #16
+        mov             w2,  w22
+        mov             w3,  w23
+        mov             w4,  w24
+        bl              X(ff_vp8_v_loop_filter16_inner_neon)
+
+        add             x0,  sp,  #192
+        mov             x1,  #16
+        mov             w2,  w22
+        mov             w3,  w23
+        mov             w4,  w24
+        bl              X(ff_vp8_v_loop_filter16_inner_neon)
+
+        ldp             q0,  q1,  [sp]
+        ldp             q2,  q3,  [sp, #32]
+        ldp             q4,  q5,  [sp, #64]
+        ldp             q6,  q7,  [sp, #96]
+        ldp             q8,  q9,  [sp, #128]
+        ldp             q10, q11, [sp, #160]
+        ldp             q12, q13, [sp, #192]
+        ldp             q14, q15, [sp, #224]
+
+        transpose_16x16B
+
+        sub             x0,  x19, #4
+        add             x4,  x0,  x20
+        add             x5,  x0,  x20, lsl #1
+        add             x6,  x4,  x20, lsl #1
+        lsl             x7,  x20, #2
+
+        st1             {v0.16b},  [x0], x7
+        st1             {v1.16b},  [x4], x7
+        st1             {v2.16b},  [x5], x7
+        st1             {v3.16b},  [x6], x7
+        st1             {v4.16b},  [x0], x7
+        st1             {v5.16b},  [x4], x7
+        st1             {v6.16b},  [x5], x7
+        st1             {v7.16b},  [x6], x7
+        st1             {v8.16b},  [x0], x7
+        st1             {v9.16b},  [x4], x7
+        st1             {v10.16b}, [x5], x7
+        st1             {v11.16b}, [x6], x7
+        st1             {v12.16b}, [x0]
+        st1             {v13.16b}, [x4]
+        st1             {v14.16b}, [x5]
+        st1             {v15.16b}, [x6]
+
+        add             x0,  x19, #12
+        mov             x1,  x20
+        mov             w2,  w22
+        mov             w3,  w23
+        mov             w4,  w24
+        bl              X(ff_vp8_h_loop_filter16_inner_neon)
+
+        add             sp,  sp,  #256
+        ldp             d8,  d9,  [sp, #64]
+        ldp             d10, d11, [sp, #80]
+        ldp             d12, d13, [sp, #96]
+        ldp             d14, d15, [sp, #112]
+        ldp             x19, x20, [sp, #16]
+        ldp             x21, x22, [sp, #32]
+        ldp             x23, x24, [sp, #48]
+        ldp             x29, x30, [sp], #128
+        AARCH64_VALIDATE_LINK_REGISTER
+        ret
+endfunc
+
+function ff_vp8_h_loop_filter8uv_mb_neon, export=1
+        AARCH64_SIGN_LINK_REGISTER
+        stp             x29, x30, [sp, #-144]!
+        stp             x19, x20, [sp, #16]
+        stp             x21, x22, [sp, #32]
+        stp             x23, x24, [sp, #48]
+        stp             x25, x26, [sp, #64]
+        stp             d8,  d9,  [sp, #80]
+        stp             d10, d11, [sp, #96]
+        stp             d12, d13, [sp, #112]
+        stp             d14, d15, [sp, #128]
+        sub             sp,  sp,  #256
+
+        mov             x19, x0
+        mov             x20, x1
+        mov             x21, x2
+        mov             w22, w3
+        mov             w23, w4
+        mov             w24, w5
+        mov             w25, w6
+
+        sub             x0,  x19, #4
+        sub             x1,  x20, #4
+
+        ld1             {v0.16b},  [x0], x21
+        ld1             {v1.16b},  [x0], x21
+        ld1             {v2.16b},  [x0], x21
+        ld1             {v3.16b},  [x0], x21
+        ld1             {v4.16b},  [x0], x21
+        ld1             {v5.16b},  [x0], x21
+        ld1             {v6.16b},  [x0], x21
+        ld1             {v7.16b},  [x0]
+        ld1             {v8.16b},  [x1], x21
+        ld1             {v9.16b},  [x1], x21
+        ld1             {v10.16b}, [x1], x21
+        ld1             {v11.16b}, [x1], x21
+        ld1             {v12.16b}, [x1], x21
+        ld1             {v13.16b}, [x1], x21
+        ld1             {v14.16b}, [x1], x21
+        ld1             {v15.16b}, [x1]
+
+        transpose_16x16B
+
+        stp             q0,  q1,  [sp]
+        stp             q2,  q3,  [sp, #32]
+        stp             q4,  q5,  [sp, #64]
+        stp             q6,  q7,  [sp, #96]
+        stp             q8,  q9,  [sp, #128]
+        stp             q10, q11, [sp, #160]
+        stp             q12, q13, [sp, #192]
+        stp             q14, q15, [sp, #224]
+
+        add             x0,  sp,  #64
+        mov             x1,  #16
+        mov             w2,  w22
+        mov             w3,  w24
+        mov             w4,  w25
+        bl              X(ff_vp8_v_loop_filter16_neon)
+
+        add             x0,  sp,  #128
+        mov             x1,  #16
+        mov             w2,  w23
+        mov             w3,  w24
+        mov             w4,  w25
+        bl              X(ff_vp8_v_loop_filter16_inner_neon)
+
+        ldp             q0,  q1,  [sp]
+        ldp             q2,  q3,  [sp, #32]
+        ldp             q4,  q5,  [sp, #64]
+        ldp             q6,  q7,  [sp, #96]
+        ldp             q8,  q9,  [sp, #128]
+        ldp             q10, q11, [sp, #160]
+        ldp             q12, q13, [sp, #192]
+        ldp             q14, q15, [sp, #224]
+
+        transpose_16x16B
+
+        sub             x0,  x19, #4
+        sub             x1,  x20, #4
+
+        st1             {v0.16b},  [x0], x21
+        st1             {v1.16b},  [x0], x21
+        st1             {v2.16b},  [x0], x21
+        st1             {v3.16b},  [x0], x21
+        st1             {v4.16b},  [x0], x21
+        st1             {v5.16b},  [x0], x21
+        st1             {v6.16b},  [x0], x21
+        st1             {v7.16b},  [x0]
+        st1             {v8.16b},  [x1], x21
+        st1             {v9.16b},  [x1], x21
+        st1             {v10.16b}, [x1], x21
+        st1             {v11.16b}, [x1], x21
+        st1             {v12.16b}, [x1], x21
+        st1             {v13.16b}, [x1], x21
+        st1             {v14.16b}, [x1], x21
+        st1             {v15.16b}, [x1]
+
+        add             sp,  sp,  #256
+        ldp             d8,  d9,  [sp, #80]
+        ldp             d10, d11, [sp, #96]
+        ldp             d12, d13, [sp, #112]
+        ldp             d14, d15, [sp, #128]
+        ldp             x19, x20, [sp, #16]
+        ldp             x21, x22, [sp, #32]
+        ldp             x23, x24, [sp, #48]
+        ldp             x25, x26, [sp, #64]
+        ldp             x29, x30, [sp], #144
+        AARCH64_VALIDATE_LINK_REGISTER
+        ret
+endfunc
+
 .macro  vp8_h_loop_filter8uv name, inner=0
 function ff_vp8_h_loop_filter8uv\name\()_neon, export=1
         sub             x0,  x0,  #4
