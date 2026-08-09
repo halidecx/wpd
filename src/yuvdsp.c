@@ -10,6 +10,8 @@
 #if WPD_HAVE_ASM
 #if WPD_ARCH_X86
 #include "src/x86/yuvdsp_init.h"
+#elif WPD_ARCH_AARCH64
+#include "src/aarch64/yuvdsp_init.h"
 #endif
 #endif
 
@@ -384,6 +386,8 @@ wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {
 #if WPD_HAVE_ASM
 #if WPD_ARCH_X86
     wpd_yuv_dsp_init_x86(dsp);
+#elif WPD_ARCH_AARCH64
+    wpd_yuv_dsp_init_aarch64(dsp);
 #endif
 #endif
 }

@@ -46,6 +46,49 @@ function ff_pred_add_0_neon, export=1
 9:      ret
 endfunc
 
+.macro  blend_premult_ch dst, src, tmp
+        uxtl            v\tmp\().8h, v\dst\().8b
+        mul             v\tmp\().8h, v\tmp\().8h, v16.8h
+        ushr            v\tmp\().8h, v\tmp\().8h, #8
+        xtn             v\dst\().8b, v\tmp\().8h
+        add             v\dst\().8b, v\dst\().8b, v\src\().8b
+.endm
+
+function ff_blend_row_argb_premult_neon, export=1
+        cmp             w2,  #8
+        b.lt            2f
+        movi            v17.8h,  #1, lsl #8
+1:      ld4             {v0.8b-v3.8b}, [x1], #32
+        ld4             {v4.8b-v7.8b}, [x0]
+        uxtl            v16.8h, v0.8b
+        sub             v16.8h,  v17.8h, v16.8h
+        blend_premult_ch 4, 0, 18
+        blend_premult_ch 5, 1, 19
+        blend_premult_ch 6, 2, 20
+        blend_premult_ch 7, 3, 21
+        sub             w2,  w2,  #8
+        st4             {v4.8b-v7.8b}, [x0], #32
+        cmp             w2,  #8
+        b.ge            1b
+2:      cbz             w2,  9f
+        mov             w5,  #256
+3:      ldrb            w3,  [x1]
+        sub             w3,  w5,  w3
+.irp    off, 0, 1, 2, 3
+        ldrb            w4,  [x0, #\off]
+        ldrb            w6,  [x1, #\off]
+        lsl             w6,  w6,  #8
+        madd            w4,  w4,  w3,  w6
+        lsr             w4,  w4,  #8
+        strb            w4,  [x0, #\off]
+.endr
+        add             x1,  x1,  #4
+        add             x0,  x0,  #4
+        subs            w2,  w2,  #1
+        b.gt            3b
+9:      ret
+endfunc
+
 function ff_pred_add_1_neon, export=1
         // Retain left in a lane; its recurrence prevents wider independent work.
         ldur            s0,  [x3, #-4]
