@@ -34,6 +34,19 @@ typedef struct VP8DSPContext {
                                        ptrdiff_t stride, int flim_E, int flim_I,
                                        int hev_thresh);
 
+    void (*vp8_h_loop_filter16y_mb)(uint8_t *dst, ptrdiff_t stride,
+                                    int mbedge_E, int bedge_E, int flim_I,
+                                    int hev_thresh);
+    void (*vp8_h_loop_filter8uv_mb)(uint8_t *dstU, uint8_t *dstV,
+                                    ptrdiff_t stride, int mbedge_E, int bedge_E,
+                                    int flim_I, int hev_thresh);
+    void (*vp8_v_loop_filter16y_mb)(uint8_t *dst, ptrdiff_t stride,
+                                    int mbedge_E, int bedge_E, int flim_I,
+                                    int hev_thresh);
+    void (*vp8_v_loop_filter8uv_mb)(uint8_t *dstU, uint8_t *dstV,
+                                    ptrdiff_t stride, int mbedge_E, int bedge_E,
+                                    int flim_I, int hev_thresh);
+
     void (*vp8_v_loop_filter_simple)(uint8_t *dst, ptrdiff_t stride, int flim);
     void (*vp8_h_loop_filter_simple)(uint8_t *dst, ptrdiff_t stride, int flim);
 
@@ -59,6 +72,61 @@ typedef struct VP8DSPContext {
         SINGLE(dst + 4 * stride, stride, bedge_lim);                     \
         SINGLE(dst + 8 * stride, stride, bedge_lim);                     \
         SINGLE(dst + 12 * stride, stride, bedge_lim);                    \
+    }
+
+#define VP8_H_LOOP_FILTER16Y_MB(NAME, MBEDGE, INNER)          \
+    static void NAME(uint8_t  *dst,                           \
+                     ptrdiff_t stride,                        \
+                     int       mbedge_E,                      \
+                     int       bedge_E,                       \
+                     int       flim_I,                        \
+                     int       hev_thresh) {                  \
+        MBEDGE(dst, stride, mbedge_E, flim_I, hev_thresh);    \
+        INNER(dst + 4, stride, bedge_E, flim_I, hev_thresh);  \
+        INNER(dst + 8, stride, bedge_E, flim_I, hev_thresh);  \
+        INNER(dst + 12, stride, bedge_E, flim_I, hev_thresh); \
+    }
+
+#define VP8_H_LOOP_FILTER8UV_MB(NAME, MBEDGE, INNER)                    \
+    static void NAME(uint8_t  *dstU,                                    \
+                     uint8_t  *dstV,                                    \
+                     ptrdiff_t stride,                                  \
+                     int       mbedge_E,                                \
+                     int       bedge_E,                                 \
+                     int       flim_I,                                  \
+                     int       hev_thresh) {                            \
+        MBEDGE(dstU, dstV, stride, mbedge_E, flim_I, hev_thresh);       \
+        INNER(dstU + 4, dstV + 4, stride, bedge_E, flim_I, hev_thresh); \
+    }
+
+#define VP8_V_LOOP_FILTER16Y_MB(NAME, MBEDGE, INNER)                   \
+    static void NAME(uint8_t  *dst,                                    \
+                     ptrdiff_t stride,                                 \
+                     int       mbedge_E,                               \
+                     int       bedge_E,                                \
+                     int       flim_I,                                 \
+                     int       hev_thresh) {                           \
+        MBEDGE(dst, stride, mbedge_E, flim_I, hev_thresh);             \
+        INNER(dst + 4 * stride, stride, bedge_E, flim_I, hev_thresh);  \
+        INNER(dst + 8 * stride, stride, bedge_E, flim_I, hev_thresh);  \
+        INNER(dst + 12 * stride, stride, bedge_E, flim_I, hev_thresh); \
+    }
+
+#define VP8_V_LOOP_FILTER8UV_MB(NAME, MBEDGE, INNER)              \
+    static void NAME(uint8_t  *dstU,                              \
+                     uint8_t  *dstV,                              \
+                     ptrdiff_t stride,                            \
+                     int       mbedge_E,                          \
+                     int       bedge_E,                           \
+                     int       flim_I,                            \
+                     int       hev_thresh) {                      \
+        MBEDGE(dstU, dstV, stride, mbedge_E, flim_I, hev_thresh); \
+        INNER(dstU + 4 * stride,                                  \
+              dstV + 4 * stride,                                  \
+              stride,                                             \
+              bedge_E,                                            \
+              flim_I,                                             \
+              hev_thresh);                                        \
     }
 
 void ff_vp8dsp_init(VP8DSPContext *c);

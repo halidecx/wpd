@@ -268,6 +268,15 @@ LOOP_FILTER(h, 16, stride, 1, )
 UV_LOOP_FILTER(v, 1, stride)
 UV_LOOP_FILTER(h, stride, 1)
 
+VP8_H_LOOP_FILTER16Y_MB(vp8_h_loop_filter16y_mb_c, vp8_h_loop_filter16_c,
+                        vp8_h_loop_filter16_inner_c)
+VP8_H_LOOP_FILTER8UV_MB(vp8_h_loop_filter8uv_mb_c, vp8_h_loop_filter8uv_c,
+                        vp8_h_loop_filter8uv_inner_c)
+VP8_V_LOOP_FILTER16Y_MB(vp8_v_loop_filter16y_mb_c, vp8_v_loop_filter16_c,
+                        vp8_v_loop_filter16_inner_c)
+VP8_V_LOOP_FILTER8UV_MB(vp8_v_loop_filter8uv_mb_c, vp8_v_loop_filter8uv_c,
+                        vp8_v_loop_filter8uv_inner_c)
+
 static void vp8_v_loop_filter_simple_c(uint8_t *dst, ptrdiff_t stride,
                                        int flim) {
     int i;
@@ -308,6 +317,10 @@ wpd_cold void ff_vp8dsp_init(VP8DSPContext *dsp) {
     dsp->vp8_h_loop_filter16y_inner = vp8_h_loop_filter16_inner_c;
     dsp->vp8_v_loop_filter8uv_inner = vp8_v_loop_filter8uv_inner_c;
     dsp->vp8_h_loop_filter8uv_inner = vp8_h_loop_filter8uv_inner_c;
+    dsp->vp8_v_loop_filter16y_mb    = vp8_v_loop_filter16y_mb_c;
+    dsp->vp8_h_loop_filter16y_mb    = vp8_h_loop_filter16y_mb_c;
+    dsp->vp8_v_loop_filter8uv_mb    = vp8_v_loop_filter8uv_mb_c;
+    dsp->vp8_h_loop_filter8uv_mb    = vp8_h_loop_filter8uv_mb_c;
 
     dsp->vp8_v_loop_filter_simple = vp8_v_loop_filter_simple_c;
     dsp->vp8_h_loop_filter_simple = vp8_h_loop_filter_simple_c;
