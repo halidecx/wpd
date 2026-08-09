@@ -9,15 +9,12 @@ fi
 
 for input in "${inputs[@]}"; do
     echo -ne "$input\t"
-    case "$input" in
-        *yuva*)               pixel_format=yuva420p ;;
-        *yuv*|*lossy.webp)    pixel_format=yuv420p ;;
-        *rgb*|*lossless.webp) pixel_format=argb ;;
-        *)
-            echo "$input: cannot determine pixel format from filename" >&2
-            exit 1
-            ;;
-    esac
+    pixel_format=$(./build/wpd --info "$input" 2>/dev/null |
+                   awk '/^frame 0:/ { print $4; exit }')
+    if [[ -z "$pixel_format" ]]; then
+        echo "$input: cannot determine pixel format" >&2
+        exit 1
+    fi
 
     video_size=$(webpmux -info "$input" | awk '/^Canvas size:/ { print $3 "x" $5; exit }')
     if [[ -z "$video_size" ]]; then

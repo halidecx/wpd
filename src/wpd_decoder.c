@@ -584,9 +584,16 @@ struct WPDDecoder {
 
     WebPImage canvas;
     int       anmf_flags, pos_x, pos_y;
+    int       frame_has_alpha, key_frame;
     int       prev_anmf_flags, prev_width, prev_height, prev_pos_x, prev_pos_y;
-    uint8_t   background_argb[4];
-    uint8_t   background_yuva[4];
+    int       prev_key_frame;
+    uint8_t   clear_argb[4];
+    uint8_t   clear_yuva[4];
+
+    int      anim_loop_count, anim_frame_count;
+    uint32_t anim_background_argb;
+    int      frame_duration;
+    int64_t  frame_timestamp;
 
     char error[128];
 };
@@ -1589,38 +1596,60 @@ static int image_nb_components(const WebPImage *img) {
     }
 }
 
-static void blend_alpha_argb(WPDDecoder *s, WebPImage *dst,
-                             const WebPImage *src, int pos_x, int pos_y) {
-    for (int y = 0; y < src->height; y++) {
-        const uint8_t *src_argb = src->data[0] + y * src->linesize[0];
-        uint8_t *dst_argb = dst->data[0] + (pos_y + y) * dst->linesize[0] +
-            pos_x * 4;
+typedef struct SubRect {
+    int x, y, w, h;
+} SubRect;
 
-        s->ldsp.blend_row_argb(dst_argb, src_argb, src->width);
+static void blend_argb_region(WPDDecoder *s, WebPImage *dst,
+                              const WebPImage *src, SubRect r) {
+    for (int y = 0; y < r.h; y++) {
+        const uint8_t *src_argb = src->data[0] + (r.y + y) * src->linesize[0] +
+            r.x * 4;
+        uint8_t *dst_argb = dst->data[0] +
+            (s->pos_y + r.y + y) * dst->linesize[0] + (s->pos_x + r.x) * 4;
+
+        s->ldsp.blend_row_argb(dst_argb, src_argb, r.w);
     }
 }
 
-static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
-                             int pos_y) {
-    for (int y = 0; y < CEIL_RSHIFT(src->height, 1); y++) {
-        int            tile_h = WPD_MIN(src->height - y * 2, 2);
-        const uint8_t *src_u  = src->data[1] + y * src->linesize[1];
-        const uint8_t *src_v  = src->data[2] + y * src->linesize[2];
-        uint8_t *dst_u = dst->data[1] + ((pos_y >> 1) + y) * dst->linesize[1] +
-            (pos_x >> 1);
-        uint8_t *dst_v = dst->data[2] + ((pos_y >> 1) + y) * dst->linesize[2] +
-            (pos_x >> 1);
-        for (int x = 0; x < CEIL_RSHIFT(src->width, 1); x++) {
-            int tile_w    = WPD_MIN(src->width - x * 2, 2);
+static void copy_argb_region(WPDDecoder *s, WebPImage *dst,
+                             const WebPImage *src, SubRect r) {
+    for (int y = 0; y < r.h; y++) {
+        const uint8_t *src_argb = src->data[0] + (r.y + y) * src->linesize[0] +
+            r.x * 4;
+        uint8_t *dst_argb = dst->data[0] +
+            (s->pos_y + r.y + y) * dst->linesize[0] + (s->pos_x + r.x) * 4;
+
+        memcpy(dst_argb, src_argb, (size_t)r.w * 4);
+    }
+}
+
+static void blend_yuva_region(WPDDecoder *s, WebPImage *dst,
+                              const WebPImage *src, SubRect r) {
+    int base_x = s->pos_x + r.x, base_y = s->pos_y + r.y;
+
+    for (int y = 0; y < CEIL_RSHIFT(r.h, 1); y++) {
+        int            tile_h = WPD_MIN(r.h - y * 2, 2);
+        const uint8_t *src_u  = src->data[1] +
+            ((r.y >> 1) + y) * src->linesize[1] + (r.x >> 1);
+        const uint8_t *src_v = src->data[2] +
+            ((r.y >> 1) + y) * src->linesize[2] + (r.x >> 1);
+        uint8_t *dst_u = dst->data[1] + ((base_y >> 1) + y) * dst->linesize[1] +
+            (base_x >> 1);
+        uint8_t *dst_v = dst->data[2] + ((base_y >> 1) + y) * dst->linesize[2] +
+            (base_x >> 1);
+        for (int x = 0; x < CEIL_RSHIFT(r.w, 1); x++) {
+            int tile_w    = WPD_MIN(r.w - x * 2, 2);
             int src_alpha = 0;
             int dst_alpha = 0;
             for (int yy = 0; yy < tile_h; yy++) {
                 for (int xx = 0; xx < tile_w; xx++) {
-                    src_alpha += src->data[3][(y * 2 + yy) * src->linesize[3] +
-                                              (x * 2 + xx)];
-                    dst_alpha += dst->data[3][(((pos_y >> 1) + y) * 2 + yy) *
-                                                  dst->linesize[3] +
-                                              (((pos_x >> 1) + x) * 2 + xx)];
+                    src_alpha +=
+                        src->data[3][(r.y + y * 2 + yy) * src->linesize[3] +
+                                     (r.x + x * 2 + xx)];
+                    dst_alpha +=
+                        dst->data[3][(base_y + y * 2 + yy) * dst->linesize[3] +
+                                     (base_x + x * 2 + xx)];
                 }
             }
             int shift = (tile_h == 2) + (tile_w == 2);
@@ -1651,12 +1680,16 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
         }
     }
 
-    for (int y = 0; y < src->height; y++) {
-        const uint8_t *src_y = src->data[0] + y * src->linesize[0];
-        const uint8_t *src_a = src->data[3] + y * src->linesize[3];
-        uint8_t *dst_y = dst->data[0] + (pos_y + y) * dst->linesize[0] + pos_x;
-        uint8_t *dst_a = dst->data[3] + (pos_y + y) * dst->linesize[3] + pos_x;
-        for (int x = 0; x < src->width; x++) {
+    for (int y = 0; y < r.h; y++) {
+        const uint8_t *src_y = src->data[0] + (r.y + y) * src->linesize[0] +
+            r.x;
+        const uint8_t *src_a = src->data[3] + (r.y + y) * src->linesize[3] +
+            r.x;
+        uint8_t *dst_y = dst->data[0] + (base_y + y) * dst->linesize[0] +
+            base_x;
+        uint8_t *dst_a = dst->data[3] + (base_y + y) * dst->linesize[3] +
+            base_x;
+        for (int x = 0; x < r.w; x++) {
             int src_alpha = *src_a;
             int dst_alpha = *dst_a;
 
@@ -1682,6 +1715,35 @@ static void blend_alpha_yuva(WebPImage *dst, const WebPImage *src, int pos_x,
     }
 }
 
+static void copy_yuva_region(WPDDecoder *s, WebPImage *dst,
+                             const WebPImage *src, SubRect r) {
+    int nb_components = image_nb_components(src);
+    int base_x = s->pos_x + r.x, base_y = s->pos_y + r.y;
+
+    for (int comp = 0; comp < nb_components; comp++) {
+        int            shift = (comp == 1 || comp == 2) ? 1 : 0;
+        const uint8_t *src_p = src->data[comp] +
+            (r.y >> shift) * src->linesize[comp] + (r.x >> shift);
+        uint8_t *dst_p = dst->data[comp] +
+            (base_y >> shift) * dst->linesize[comp] + (base_x >> shift);
+
+        for (int y = 0; y < CEIL_RSHIFT(r.h, shift); y++) {
+            memcpy(dst_p, src_p, CEIL_RSHIFT(r.w, shift));
+            src_p += src->linesize[comp];
+            dst_p += dst->linesize[comp];
+        }
+    }
+
+    if (nb_components < 4) {
+        uint8_t *dst_a = dst->data[3] + base_y * dst->linesize[3] + base_x;
+
+        for (int y = 0; y < r.h; y++) {
+            memset(dst_a, 255, r.w);
+            dst_a += dst->linesize[3];
+        }
+    }
+}
+
 static wpd_always_inline void webp_yuva2argb(uint8_t *out, int Y, int U, int V,
                                              int A) {
     uint8_t r, g, b;
@@ -1698,20 +1760,23 @@ static wpd_always_inline void webp_yuva2argb(uint8_t *out, int Y, int U, int V,
 }
 
 static void copy_yuva2argb(WebPImage *dst, const WebPImage *src, int pos_x,
-                           int pos_y) {
+                           int pos_y, SubRect r) {
     int alpha = image_nb_components(src) > 3;
 
-    for (int y = 0; y < src->height; y++) {
-        const uint8_t *src_y = src->data[0] + y * src->linesize[0];
-        const uint8_t *src_u = src->data[1] + (y >> 1) * src->linesize[1];
-        const uint8_t *src_v = src->data[2] + (y >> 1) * src->linesize[2];
-        const uint8_t *src_a = NULL;
-        uint8_t *dst_argb    = dst->data[0] + (pos_y + y) * dst->linesize[0] +
-            pos_x * 4;
+    for (int y = 0; y < r.h; y++) {
+        const uint8_t *src_y = src->data[0] + (r.y + y) * src->linesize[0] +
+            r.x;
+        const uint8_t *src_u = src->data[1] +
+            ((r.y + y) >> 1) * src->linesize[1] + (r.x >> 1);
+        const uint8_t *src_v = src->data[2] +
+            ((r.y + y) >> 1) * src->linesize[2] + (r.x >> 1);
+        const uint8_t *src_a    = NULL;
+        uint8_t       *dst_argb = dst->data[0] +
+            (pos_y + r.y + y) * dst->linesize[0] + (pos_x + r.x) * 4;
         if (alpha)
-            src_a = src->data[3] + y * src->linesize[3];
+            src_a = src->data[3] + (r.y + y) * src->linesize[3] + r.x;
 
-        for (int x = 0; x < src->width; x++) {
+        for (int x = r.x; x < r.x + r.w; x++) {
             webp_yuva2argb(
                 dst_argb, *src_y, *src_u, *src_v, (alpha ? *src_a : 255));
             src_y += 1;
@@ -1725,16 +1790,20 @@ static void copy_yuva2argb(WebPImage *dst, const WebPImage *src, int pos_x,
 }
 
 static void blend_yuva2argb(WebPImage *dst, const WebPImage *src, int pos_x,
-                            int pos_y) {
-    for (int y = 0; y < src->height; y++) {
-        const uint8_t *src_y = src->data[0] + y * src->linesize[0];
-        const uint8_t *src_u = src->data[1] + (y >> 1) * src->linesize[1];
-        const uint8_t *src_v = src->data[2] + (y >> 1) * src->linesize[2];
-        const uint8_t *src_a = src->data[3] + y * src->linesize[3];
-        uint8_t *dst_argb    = dst->data[0] + (pos_y + y) * dst->linesize[0] +
-            pos_x * 4;
+                            int pos_y, SubRect r) {
+    for (int y = 0; y < r.h; y++) {
+        const uint8_t *src_y = src->data[0] + (r.y + y) * src->linesize[0] +
+            r.x;
+        const uint8_t *src_u = src->data[1] +
+            ((r.y + y) >> 1) * src->linesize[1] + (r.x >> 1);
+        const uint8_t *src_v = src->data[2] +
+            ((r.y + y) >> 1) * src->linesize[2] + (r.x >> 1);
+        const uint8_t *src_a = src->data[3] + (r.y + y) * src->linesize[3] +
+            r.x;
+        uint8_t *dst_argb = dst->data[0] +
+            (pos_y + r.y + y) * dst->linesize[0] + (pos_x + r.x) * 4;
 
-        for (int x = 0; x < src->width; x++) {
+        for (int x = r.x; x < r.x + r.w; x++) {
             int src_alpha = *src_a;
             int dst_alpha = dst_argb[0];
 
@@ -1773,63 +1842,84 @@ static void blend_yuva2argb(WebPImage *dst, const WebPImage *src, int pos_x,
     }
 }
 
-static void blend_subframe_into_canvas(WPDDecoder *s, const WebPImage *frame) {
+static void composite_region(WPDDecoder *s, const WebPImage *frame, SubRect r,
+                             int blend) {
     WebPImage *canvas = &s->canvas;
 
-    if ((s->anmf_flags & ANMF_FLAG_NO_BLEND) ||
-        frame->format == WPD_PIX_FMT_YUV420P) {
-        if (canvas->format == WPD_PIX_FMT_ARGB) {
-            if (canvas->format == frame->format) {
-                const uint8_t *src = frame->data[0];
-                uint8_t       *dst = canvas->data[0] +
-                    s->pos_y * canvas->linesize[0] + s->pos_x * 4;
-                for (int y = 0; y < frame->height; y++) {
-                    memcpy(dst, src, (size_t)frame->width * 4);
-                    src += frame->linesize[0];
-                    dst += canvas->linesize[0];
-                }
-            } else {
-                copy_yuva2argb(canvas, frame, s->pos_x, s->pos_y);
-            }
-        } else {
-            int nb_components = image_nb_components(frame);
+    if (r.w <= 0 || r.h <= 0)
+        return;
 
-            for (int comp = 0; comp < nb_components; comp++) {
-                int            plane = comp;
-                int            shift = (comp == 1 || comp == 2) ? 1 : 0;
-                const uint8_t *src   = frame->data[plane];
-                uint8_t       *dst   = canvas->data[plane] +
-                    (s->pos_y >> shift) * canvas->linesize[plane] +
-                    (s->pos_x >> shift);
-                for (int y = 0; y < CEIL_RSHIFT(frame->height, shift); y++) {
-                    memcpy(dst, src, CEIL_RSHIFT(frame->width, shift));
-                    src += frame->linesize[plane];
-                    dst += canvas->linesize[plane];
-                }
-            }
-
-            if (nb_components < 4) {
-                uint8_t *dst = canvas->data[3] +
-                    s->pos_y * canvas->linesize[3] + s->pos_x;
-                for (int y = 0; y < frame->height; y++) {
-                    memset(dst, 255, frame->width);
-                    dst += canvas->linesize[3];
-                }
-            }
-        }
+    if (canvas->format != WPD_PIX_FMT_ARGB) {
+        if (blend)
+            blend_yuva_region(s, canvas, frame, r);
+        else
+            copy_yuva_region(s, canvas, frame, r);
+    } else if (canvas->format == frame->format) {
+        if (blend)
+            blend_argb_region(s, canvas, frame, r);
+        else
+            copy_argb_region(s, canvas, frame, r);
     } else {
-        if (canvas->format == WPD_PIX_FMT_ARGB) {
-            if (canvas->format == frame->format)
-                blend_alpha_argb(s, canvas, frame, s->pos_x, s->pos_y);
-            else
-                blend_yuva2argb(canvas, frame, s->pos_x, s->pos_y);
-        } else
-            blend_alpha_yuva(canvas, frame, s->pos_x, s->pos_y);
+        if (blend)
+            blend_yuva2argb(canvas, frame, s->pos_x, s->pos_y, r);
+        else
+            copy_yuva2argb(canvas, frame, s->pos_x, s->pos_y, r);
     }
 }
 
-static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
-                             int height) {
+// libwebp overwrites the frame rect and alpha-blends only where the prev
+// canvas can be non-transparent, blending elsewhere would round down
+static void composite_subframe(WPDDecoder *s, const WebPImage *frame) {
+    SubRect full = {0, 0, frame->width, frame->height};
+    SubRect keep = {0, 0, 0, 0};
+
+    // frames w no alpha plane cannot blend
+    if (!s->key_frame && !(s->anmf_flags & ANMF_FLAG_NO_BLEND) &&
+        frame->format != WPD_PIX_FMT_YUV420P) {
+        if (!(s->prev_anmf_flags & ANMF_FLAG_DISPOSE)) {
+            composite_region(s, frame, full, 1);
+            return;
+        }
+        keep.x = WPD_MAX(s->pos_x, s->prev_pos_x) - s->pos_x;
+        keep.y = WPD_MAX(s->pos_y, s->prev_pos_y) - s->pos_y;
+        keep.w = WPD_MIN(s->pos_x + frame->width,
+                         s->prev_pos_x + s->prev_width) -
+            s->pos_x - keep.x;
+        keep.h = WPD_MIN(s->pos_y + frame->height,
+                         s->prev_pos_y + s->prev_height) -
+            s->pos_y - keep.y;
+        if (keep.w <= 0 || keep.h <= 0) {
+            composite_region(s, frame, full, 1);
+            return;
+        }
+        if (s->canvas.format != WPD_PIX_FMT_ARGB) {
+            keep.w &= ~1;
+            keep.h &= ~1;
+            if (!keep.w || !keep.h) {
+                composite_region(s, frame, full, 1);
+                return;
+            }
+        }
+
+        SubRect top    = {0, 0, full.w, keep.y};
+        SubRect bottom = {0, keep.y + keep.h, full.w, full.h - keep.y - keep.h};
+        SubRect left   = {0, keep.y, keep.x, keep.h};
+        SubRect right  = {
+            keep.x + keep.w, keep.y, full.w - keep.x - keep.w, keep.h};
+
+        composite_region(s, frame, top, 1);
+        composite_region(s, frame, bottom, 1);
+        composite_region(s, frame, left, 1);
+        composite_region(s, frame, right, 1);
+        composite_region(s, frame, keep, 0);
+        return;
+    }
+
+    composite_region(s, frame, full, 0);
+}
+
+static void clear_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
+                              int height) {
     WebPImage *canvas = &s->canvas;
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
@@ -1837,7 +1927,7 @@ static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
         const int      linesize = canvas->linesize[0];
         uint32_t       bg;
 
-        memcpy(&bg, s->background_argb, 4);
+        memcpy(&bg, s->clear_argb, 4);
         for (int y = 0; y < height; y++) {
             uint32_t *dst = (uint32_t *)(base +
                                          (size_t)(pos_y + y) * linesize) +
@@ -1851,8 +1941,7 @@ static void fill_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
             uint8_t *dst   = canvas->data[comp] +
                 (pos_y >> shift) * canvas->linesize[comp] + (pos_x >> shift);
             for (int y = 0; y < CEIL_RSHIFT(height, shift); y++) {
-                memset(
-                    dst, s->background_yuva[comp], CEIL_RSHIFT(width, shift));
+                memset(dst, s->clear_yuva[comp], CEIL_RSHIFT(width, shift));
                 dst += canvas->linesize[comp];
             }
         }
@@ -1869,35 +1958,55 @@ static int allocate_canvas(WPDDecoder *s, WPDPixelFormat format) {
     return ret;
 }
 
-static int prepare_canvas(WPDDecoder *s, int key_frame, WPDPixelFormat format) {
+static int is_full_frame(const WPDDecoder *s, int width, int height) {
+    return width == s->canvas_width && height == s->canvas_height;
+}
+
+static int is_key_frame(const WPDDecoder *s, const WebPImage *frame) {
+    if (s->frame_index == 0)
+        return 1;
+    if ((!s->frame_has_alpha || (s->anmf_flags & ANMF_FLAG_NO_BLEND)) &&
+        s->pos_x == 0 && s->pos_y == 0 &&
+        is_full_frame(s, frame->width, frame->height))
+        return 1;
+    return (s->prev_anmf_flags & ANMF_FLAG_DISPOSE) &&
+        (is_full_frame(s, s->prev_width, s->prev_height) || s->prev_key_frame);
+}
+
+static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
+                          WPDPixelFormat format) {
+    int covers_canvas = s->pos_x == 0 && s->pos_y == 0 &&
+        is_full_frame(s, frame->width, frame->height);
     int ret;
 
-    if (key_frame ||
-        ((s->anmf_flags & ANMF_FLAG_NO_BLEND) && (s->pos_x == 0) &&
-         (s->pos_x + s->width == s->canvas_width) && (s->pos_y == 0) &&
-         (s->pos_y + s->height == s->canvas_height)))
+    if (s->key_frame && s->canvas.data[0] && s->canvas.format != format)
         image_free(&s->canvas);
 
     if (!s->canvas.data[0]) {
         ret = allocate_canvas(s, format);
         if (ret < 0)
             return ret;
-        fill_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
+        if (!covers_canvas)
+            clear_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
+    } else if (s->key_frame) {
+        if (!covers_canvas)
+            clear_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
     } else {
         if (format == WPD_PIX_FMT_ARGB &&
             s->canvas.format == WPD_PIX_FMT_YUVA420P) {
             WebPImage yuva_canvas = s->canvas;
+            SubRect canvas_rect = {0, 0, yuva_canvas.width, yuva_canvas.height};
             memset(&s->canvas, 0, sizeof(s->canvas));
             ret = allocate_canvas(s, WPD_PIX_FMT_ARGB);
             if (ret < 0) {
                 image_free(&yuva_canvas);
                 return ret;
             }
-            copy_yuva2argb(&s->canvas, &yuva_canvas, 0, 0);
+            copy_yuva2argb(&s->canvas, &yuva_canvas, 0, 0, canvas_rect);
             image_free(&yuva_canvas);
         }
         if (s->prev_anmf_flags & ANMF_FLAG_DISPOSE)
-            fill_canvas_rect(
+            clear_canvas_rect(
                 s, s->prev_pos_x, s->prev_pos_y, s->prev_width, s->prev_height);
     }
 
@@ -1906,23 +2015,40 @@ static int prepare_canvas(WPDDecoder *s, int key_frame, WPDPixelFormat format) {
 
 static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
     const uint8_t   *p = data, *end = data + size;
-    const WebPImage *sub       = NULL;
-    int              key_frame = s->frame_index == 0;
+    const WebPImage *sub = NULL;
+    int              declared_width, declared_height;
     int              ret;
 
     if (size < 16)
         return WPD_ERROR_INVALID_DATA;
 
-    s->pos_x      = WPD_RL24(p) * 2;
-    s->pos_y      = WPD_RL24(p + 3) * 2;
-    s->anmf_flags = p[15];
+    s->pos_x          = WPD_RL24(p) * 2;
+    s->pos_y          = WPD_RL24(p + 3) * 2;
+    declared_width    = WPD_RL24(p + 6) + 1;
+    declared_height   = WPD_RL24(p + 9) + 1;
+    s->frame_duration = WPD_RL24(p + 12);
+    s->anmf_flags     = p[15];
     p += 16;
+
+    if (s->pos_x + declared_width > s->canvas_width ||
+        s->pos_y + declared_height > s->canvas_height) {
+        wpd_log(NULL,
+                WPD_LOG_ERROR,
+                "Frame (%dx%d at pos %dx%d) does not fit into canvas (%dx%d)\n",
+                declared_width,
+                declared_height,
+                s->pos_x,
+                s->pos_y,
+                s->canvas_width,
+                s->canvas_height);
+        return WPD_ERROR_INVALID_DATA;
+    }
 
     s->has_alpha = 0;
     s->width     = 0;
     s->height    = 0;
 
-    while (end - p > 8) {
+    while (end - p >= 8) {
         uint32_t chunk_type   = WPD_RL32(p);
         uint32_t payload_size = WPD_RL32(p + 4);
         uint32_t padded_size;
@@ -1966,10 +2092,8 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
             ret = vp8_lossy_decode_frame(s, &s->subframe, p, payload_size);
             if (ret < 0)
                 return ret;
-            sub = &s->subframe;
-            ret = prepare_canvas(s, key_frame, WPD_PIX_FMT_YUVA420P);
-            if (ret < 0)
-                return ret;
+            sub                = &s->subframe;
+            s->frame_has_alpha = s->has_alpha;
             break;
         case MKTAG('V', 'P', '8', 'L'):
             if (sub)
@@ -1977,10 +2101,8 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
             ret = vp8_lossless_decode_frame(s, &s->argb, p, payload_size, 0);
             if (ret < 0)
                 return ret;
-            sub = &s->argb;
-            ret = prepare_canvas(s, key_frame, WPD_PIX_FMT_ARGB);
-            if (ret < 0)
-                return ret;
+            sub                = &s->argb;
+            s->frame_has_alpha = s->lossless_has_alpha;
             break;
         default: break;
         }
@@ -1991,6 +2113,15 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         wpd_log(NULL, WPD_LOG_ERROR, "image data not found\n");
         return WPD_ERROR_INVALID_DATA;
     }
+
+    if (sub->width != declared_width || sub->height != declared_height)
+        wpd_log(NULL,
+                WPD_LOG_WARNING,
+                "ANMF declares %dx%d but the image is %dx%d\n",
+                declared_width,
+                declared_height,
+                sub->width,
+                sub->height);
 
     if (s->pos_x + sub->width > s->canvas_width ||
         s->pos_y + sub->height > s->canvas_height) {
@@ -2006,27 +2137,41 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         return WPD_ERROR_INVALID_DATA;
     }
 
-    blend_subframe_into_canvas(s, sub);
+    s->key_frame = is_key_frame(s, sub);
+    ret          = prepare_canvas(s,
+                                  sub,
+                                  sub->format == WPD_PIX_FMT_ARGB
+                                      ? WPD_PIX_FMT_ARGB
+                                      : WPD_PIX_FMT_YUVA420P);
+    if (ret < 0)
+        return ret;
 
+    composite_subframe(s, sub);
+
+    s->frame_timestamp += s->frame_duration;
     s->prev_anmf_flags = s->anmf_flags;
     s->prev_width      = sub->width;
     s->prev_height     = sub->height;
     s->prev_pos_x      = s->pos_x;
     s->prev_pos_y      = s->pos_y;
+    s->prev_key_frame  = s->key_frame;
     s->frame_index++;
 
     return 0;
 }
 
-static void export_frame(const WebPImage *img, WPDFrame *frame) {
+static void export_frame(const WPDDecoder *s, const WebPImage *img,
+                         WPDFrame *frame) {
     memset(frame, 0, sizeof(*frame));
     for (int p = 0; p < 4; p++) {
         frame->data[p]   = img->data[p];
         frame->stride[p] = img->linesize[p];
     }
-    frame->width  = img->width;
-    frame->height = img->height;
-    frame->format = img->format;
+    frame->width     = img->width;
+    frame->height    = img->height;
+    frame->format    = img->format;
+    frame->duration  = s->frame_duration;
+    frame->timestamp = s->frame_timestamp - s->frame_duration;
 }
 
 static int set_error(WPDDecoder *decoder, const char *message, int code) {
@@ -2041,6 +2186,66 @@ WPDDecoder *wpd_decoder_create(void) {
     wpd_init_cpu();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     return decoder;
+}
+
+static void scan_still_size(WPDDecoder *s, uint32_t tag, const uint8_t *p,
+                            uint32_t size) {
+    if (tag == MKTAG('V', 'P', '8', 'L')) {
+        if (size >= 5 && p[0] == 0x2f) {
+            uint32_t bits = WPD_RL32(p + 1);
+
+            s->canvas_width  = (bits & 0x3fff) + 1;
+            s->canvas_height = ((bits >> 14) & 0x3fff) + 1;
+        }
+    } else if (size >= 10 && p[3] == 0x9d && p[4] == 0x01 && p[5] == 0x2a) {
+        s->canvas_width  = WPD_RL16(p + 6) & 0x3fff;
+        s->canvas_height = WPD_RL16(p + 8) & 0x3fff;
+    }
+}
+
+static void scan_headers(WPDDecoder *s) {
+    size_t pos    = 12;
+    int    images = 0;
+
+    while (pos + 8 <= s->end) {
+        const uint8_t *chunk = s->file + pos;
+        uint32_t       tag   = WPD_RL32(chunk);
+        uint32_t       size  = WPD_RL32(chunk + 4);
+        uint32_t       padded_size;
+
+        if (size == UINT32_MAX)
+            break;
+        padded_size = size + (size & 1);
+        if (s->end - (pos + 8) < padded_size)
+            break;
+
+        switch (tag) {
+        case MKTAG('V', 'P', '8', 'X'):
+            if (size >= 10) {
+                s->canvas_width  = WPD_RL24(chunk + 12) + 1;
+                s->canvas_height = WPD_RL24(chunk + 15) + 1;
+            }
+            break;
+        case MKTAG('A', 'N', 'I', 'M'):
+            s->animation = 1;
+            if (size >= 6) {
+                s->anim_background_argb = WPD_RL32(chunk + 8);
+                s->anim_loop_count      = WPD_RL16(chunk + 12);
+            }
+            break;
+        case MKTAG('A', 'N', 'M', 'F'): s->anim_frame_count++; break;
+        case MKTAG('V', 'P', '8', ' '):
+        case MKTAG('V', 'P', '8', 'L'):
+            if (!images++ && !s->canvas_width)
+                scan_still_size(s, tag, chunk + 8, size);
+            break;
+        default: break;
+        }
+        pos += 8 + padded_size;
+    }
+
+    if (!s->animation)
+        s->anim_frame_count = images ? 1 : 0;
 }
 
 int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
@@ -2058,15 +2263,21 @@ int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
     decoder->canvas_width = decoder->canvas_height = 0;
     decoder->width = decoder->height = 0;
     decoder->has_alpha               = 0;
+    decoder->frame_has_alpha         = 0;
+    decoder->key_frame = decoder->prev_key_frame = 0;
     decoder->prev_anmf_flags = decoder->anmf_flags = 0;
     decoder->prev_width = decoder->prev_height = 0;
     decoder->prev_pos_x = decoder->prev_pos_y = 0;
-    memset(decoder->background_argb, 0, sizeof(decoder->background_argb));
-    decoder->background_yuva[0] = RGB_TO_Y_CCIR(0, 0, 0);
-    decoder->background_yuva[1] = RGB_TO_U_CCIR(0, 0, 0, 0);
-    decoder->background_yuva[2] = RGB_TO_V_CCIR(0, 0, 0, 0);
-    decoder->background_yuva[3] = 0;
-    decoder->error[0]           = 0;
+    decoder->anim_loop_count = decoder->anim_frame_count = 0;
+    decoder->anim_background_argb                        = 0;
+    decoder->frame_duration                              = 0;
+    decoder->frame_timestamp                             = 0;
+    memset(decoder->clear_argb, 0, sizeof(decoder->clear_argb));
+    decoder->clear_yuva[0] = RGB_TO_Y_CCIR(0, 0, 0);
+    decoder->clear_yuva[1] = RGB_TO_U_CCIR(0, 0, 0, 0);
+    decoder->clear_yuva[2] = RGB_TO_V_CCIR(0, 0, 0, 0);
+    decoder->clear_yuva[3] = 0;
+    decoder->error[0]      = 0;
 
     if (size < 12 || size > INT_MAX - WPD_FILE_PADDING)
         return set_error(decoder, "not a WebP file", WPD_ERROR_INVALID_DATA);
@@ -2088,6 +2299,20 @@ int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
     riff_size    = WPD_RL32(decoder->file + 4);
     decoder->pos = 12;
     decoder->end = WPD_MIN((size_t)riff_size + 8, size);
+    scan_headers(decoder);
+    return 0;
+}
+
+int wpd_decoder_anim_info(const WPDDecoder *decoder, WPDAnimInfo *info) {
+    if (!decoder || !info || !decoder->file)
+        return -1;
+
+    info->canvas_width    = decoder->canvas_width;
+    info->canvas_height   = decoder->canvas_height;
+    info->frame_count     = decoder->anim_frame_count;
+    info->loop_count      = decoder->anim_loop_count;
+    info->background_argb = decoder->anim_background_argb;
+    info->is_animation    = decoder->animation;
     return 0;
 }
 
@@ -2116,11 +2341,6 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
         decoder->pos += 8 + padded_size;
 
         switch (chunk_type) {
-        case MKTAG('V', 'P', '8', 'X'):
-            decoder->canvas_width  = WPD_RL24(payload + 4) + 1;
-            decoder->canvas_height = WPD_RL24(payload + 7) + 1;
-            break;
-        case MKTAG('A', 'N', 'I', 'M'): decoder->animation = 1; break;
         case MKTAG('A', 'L', 'P', 'H'): {
             int alpha_header, filter_m, compression;
 
@@ -2155,7 +2375,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             if (ret < 0)
                 return set_error(decoder, "VP8 decode failed", ret);
             decoder->still_done = 1;
-            export_frame(&decoder->subframe, frame);
+            export_frame(decoder, &decoder->subframe, frame);
             return 1;
         case MKTAG('V', 'P', '8', 'L'):
             if (decoder->animation || decoder->still_done)
@@ -2166,7 +2386,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
             decoder->still_done = 1;
-            export_frame(&decoder->argb, frame);
+            export_frame(decoder, &decoder->argb, frame);
             return 1;
         case MKTAG('A', 'N', 'M', 'F'):
             if (!decoder->animation || !decoder->canvas_width ||
@@ -2177,7 +2397,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             ret = decode_anmf(decoder, payload, size);
             if (ret < 0)
                 return set_error(decoder, "animation frame decode failed", ret);
-            export_frame(&decoder->canvas, frame);
+            export_frame(decoder, &decoder->canvas, frame);
             return 1;
         default: break;
         }

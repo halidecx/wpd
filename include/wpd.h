@@ -22,12 +22,33 @@ typedef struct WPDFrame {
     int            width;
     int            height;
     WPDPixelFormat format;
+    /* Milliseconds this frame is shown, and since the animation started.
+       Both are 0 for still images. */
+    int     duration;
+    int64_t timestamp;
 } WPDFrame;
+
+typedef struct WPDAnimInfo {
+    int canvas_width;
+    int canvas_height;
+    int frame_count;
+    int loop_count; /* 0 repeats forever */
+    /* Advisory only: frames are composited onto transparent black, matching
+       libwebp. */
+    uint32_t background_argb;
+    int      is_animation;
+} WPDAnimInfo;
 
 WPDDecoder *wpd_decoder_create(void);
 
 int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size);
 
+/* Valid after a successful wpd_decoder_open(). Returns 0, or -1 if no file
+   is open. */
+int wpd_decoder_anim_info(const WPDDecoder *decoder, WPDAnimInfo *info);
+
+/* Returns 1 and fills 'frame', 0 at end of stream, or -1 on error. The frame
+   borrows decoder memory that the next call invalidates. */
 int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame);
 
 const char *wpd_decoder_error(const WPDDecoder *decoder);

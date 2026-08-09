@@ -4,7 +4,7 @@ A fast WebP decoder.
 
 ## Code
 
-- **No comments**
+- **Do not add comments**, unless they are for a public header file
 - No intrinsics; you may add them to test performance, but they should
   ultimately be re-written to handwritten assembly that matches or exceeds their
   performance
@@ -44,6 +44,7 @@ Test scripts:
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/testdata.sh   # asm vs c E2E correctness
+./scripts/animcheck.sh  # correctness, animation, wpd vs libwebp
 ./scripts/stylecheck.sh # format codebase
 ```
 
@@ -52,3 +53,6 @@ Inspect the structure of a WebP file (still or animated):
 ```sh
 webpmux -info [i.webp]
 ```
+
+When testing, decode into the `wpd-test-data` dir. **Never** delete the WebP
+reference files in there.

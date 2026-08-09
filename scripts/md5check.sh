@@ -5,10 +5,15 @@ NEW="${2:?usage: md5check.sh OLD_BIN NEW_BIN}"
 
 shopt -s nullglob
 for input in wpd-test-data/*.webp; do
-    case "$input" in
-        *rgb*|*lossless*)      formats="argb" ;;
-        *anim_yuva*|*a_lossy*) formats="yuva420p yuv420p" ;;
-        *)                     formats="yuv420p" ;;
+    case "$("$NEW" --info "$input" 2>/dev/null |
+            awk '/^frame 0:/ { print $4; exit }')" in
+        argb)      formats="argb" ;;
+        yuva420p)  formats="yuva420p yuv420p" ;;
+        yuv420p)   formats="yuv420p" ;;
+        *)
+            echo "$input: cannot determine pixel format" >&2
+            exit 1
+            ;;
     esac
     for fmt in $formats; do
         expected=$("$OLD" --muxer md5 -f "$fmt" "$input" -)
