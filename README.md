@@ -18,10 +18,26 @@ writes raw frames:
 build/wpd [options] input.webp output.raw
 ```
 
-Use `-f` or `--fmt` to select `auto`, `yuv420p`, `yuva420p`, or `argb` output;
-the default `auto` uses the decoded frame format. Use `-r` or `--repeat` to
-decode the input multiple times in-process for benchmarking. Animated input
-writes its frames sequentially to the output.
+Use `-f` or `--fmt` to select the output pixel format; the default `auto` uses
+the decoded frame format. Use `-r` or `--repeat` to decode the input multiple
+times in-process for benchmarking. Animated input writes its frames
+sequentially to the output.
+
+Besides `auto`, `yuv420p` and `yuva420p`, every packed format libwebp offers at
+eight bits per channel is available, named after its byte order in memory:
+`argb`, `rgba`, `bgra`, `rgb`, `bgr`, and the alpha-premultiplied `Argb`,
+`rgbA` and `bgrA`. A lowercase letter marks the channels alpha has been
+multiplied into.
+
+The packed formats convert lossy frames with the same fixed-point BT.601
+coefficients and fancy chroma upsampler libwebp uses, so the result is
+bit-exact with the like-named libwebp colorspace. They are the only formats in
+which an animation can be compared against libwebp, whose `WebPAnimDecoder`
+composites in RGB only, and the only ones that give a lossy/lossless animation
+a single output format. `rgb` and `bgr` drop transparency rather than
+compositing it onto a background, matching libwebp; libwebp has no RGB
+animation mode, so for animated input wpd composites in ARGB and drops alpha
+last. Converting is not free, so `auto` remains the default.
 
 Using `/dev/null` selects decode-only output and avoids serializing the decoded
 picture:

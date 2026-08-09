@@ -50,6 +50,7 @@ lib_sources = files(
   'src/vp56rac.c',
   'src/vp8pred.c',
   'src/vp8l_dsp.c',
+  'src/yuvdsp.c',
   'src/wpd_compat.c',
   'src/cpu.c',
 )
@@ -126,7 +127,10 @@ if asm_enabled
       ),
       extra_args: ['-DHAVE_AVX2_EXTERNAL=1'],
     )
-    lib_objects += nasm_gen.process(files('src/x86/vp8dsp_loopfilter.asm'))
+    lib_objects += nasm_gen.process(files(
+      'src/x86/vp8dsp_loopfilter.asm',
+      'src/x86/yuvdsp.asm',
+    ))
     lib_sources += files(
       'src/x86/cpu.c',
       'src/x86/wpd_simd_constants.c',
@@ -277,6 +281,7 @@ if asm_enabled and checkasm_dep.found()
       'tests/checkasm/vp8coeffs.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
+      'tests/checkasm/yuvdsp.c',
     ),
     dependencies: [wpd_checkasm_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),

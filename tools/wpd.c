@@ -15,6 +15,7 @@ enum {
     ARG_MUXER = 256,
     ARG_VERIFY,
     ARG_CPUMASK,
+    ARG_INFO,
 };
 
 typedef struct CpuMask {
@@ -74,6 +75,7 @@ static const struct option long_options[] = {
     {"muxer", required_argument, NULL, ARG_MUXER},
     {"verify", required_argument, NULL, ARG_VERIFY},
     {"cpumask", required_argument, NULL, ARG_CPUMASK},
+    {"info", no_argument, NULL, ARG_INFO},
     {NULL, 0, NULL, 0},
 };
 
@@ -92,8 +94,12 @@ static void usage(const char *app, const char *reason) {
             " -r, --repeat u32\n"
             "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
             " -f, --fmt str\n"
-            "    output pixel format (auto, yuv420p, yuva420p, argb); "
-            "default auto\n"
+            "    output pixel format; default auto. one of\n"
+            "    auto, yuv420p, yuva420p,\n"
+            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
+            "    the packed formats convert lossy frames and match the\n"
+            "    like-named libwebp colorspace bit-exactly; a lowercase\n"
+            "    letter marks the channels alpha is multiplied into\n"
             " --muxer str\n"
             "    output muxer (raw, md5); default raw\n"
             " --verify md5\n"
@@ -101,7 +107,9 @@ static void usage(const char *app, const char *reason) {
             " --cpumask str\n"
             "    restrict the instruction sets used; " CPU_MASK_NAMES
             ",\n"
-            "    or a number; default all detected\n",
+            "    or a number; default all detected\n"
+            " --info\n"
+            "    print canvas, animation and per-frame timing to stdout\n",
             app);
 }
 
@@ -118,16 +126,36 @@ static int parse_repeat(const char *value, int *repeat) {
     return 0;
 }
 
-static int parse_format(const char *value, const char **pixel_format) {
+static const struct {
+    const char    *name;
+    WPDPixelFormat format;
+} pixel_formats[] = {
+    {"yuv420p", WPD_PIX_FMT_YUV420P},
+    {"yuva420p", WPD_PIX_FMT_YUVA420P},
+    {"argb", WPD_PIX_FMT_ARGB},
+    {"rgba", WPD_PIX_FMT_RGBA},
+    {"bgra", WPD_PIX_FMT_BGRA},
+    {"rgb", WPD_PIX_FMT_RGB},
+    {"bgr", WPD_PIX_FMT_BGR},
+    {"Argb", WPD_PIX_FMT_ARGB_PRE},
+    {"rgbA", WPD_PIX_FMT_RGBA_PRE},
+    {"bgrA", WPD_PIX_FMT_BGRA_PRE},
+};
+
+static int parse_format(const char *value, const char **pixel_format,
+                        WPDPixelFormat *format) {
     if (!strcmp(value, "auto")) {
         *pixel_format = NULL;
-    } else if (!strcmp(value, "yuv420p") || !strcmp(value, "yuva420p") ||
-               !strcmp(value, "argb")) {
-        *pixel_format = value;
-    } else {
-        return -1;
+        *format       = WPD_PIX_FMT_NONE;
+        return 0;
     }
-    return 0;
+    for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
+        if (!strcmp(pixel_formats[i].name, value)) {
+            *pixel_format = pixel_formats[i].name;
+            *format       = pixel_formats[i].format;
+            return 0;
+        }
+    return -1;
 }
 
 static int parse_cpumask(const char *value, unsigned *mask) {
@@ -265,11 +293,9 @@ static int write_plane(OutputContext *output, const uint8_t *data,
 }
 
 static const char *format_name(WPDPixelFormat format) {
-    switch (format) {
-    case WPD_PIX_FMT_YUV420P: return "yuv420p";
-    case WPD_PIX_FMT_YUVA420P: return "yuva420p";
-    case WPD_PIX_FMT_ARGB: return "argb";
-    }
+    for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
+        if (pixel_formats[i].format == format)
+            return pixel_formats[i].name;
     return "unknown";
 }
 
@@ -280,15 +306,23 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
     if (!pixel_format)
         pixel_format = format_name(frame->format);
 
-    if (frame->format == WPD_PIX_FMT_ARGB) {
-        if (strcmp(pixel_format, "argb")) {
-            fprintf(stderr, "cannot convert argb frame to %s\n", pixel_format);
+    if (frame->format >= WPD_PIX_FMT_ARGB) {
+        const int bpp = frame->format == WPD_PIX_FMT_RGB ||
+                frame->format == WPD_PIX_FMT_BGR
+            ? 3
+            : 4;
+
+        if (strcmp(pixel_format, format_name(frame->format))) {
+            fprintf(stderr,
+                    "cannot convert %s frame to %s\n",
+                    format_name(frame->format),
+                    pixel_format);
             return -1;
         }
         return write_plane(output,
                            frame->data[0],
                            frame->stride[0],
-                           frame->width * 4,
+                           frame->width * bpp,
                            frame->height);
     }
 
@@ -350,17 +384,19 @@ static uint8_t *read_file(const char *name, FILE *input, size_t *size) {
 }
 
 int main(int argc, char **argv) {
-    FILE         *input = NULL;
-    OutputContext output;
-    WPDDecoder   *decoder = NULL;
-    uint8_t      *data    = NULL;
-    uint8_t       expected_md5[16];
-    size_t        size;
-    const char   *muxer = NULL, *pixel_format = NULL, *verify = NULL;
-    const char   *input_name, *output_name;
-    int           frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
-    unsigned      cpumask;
-    WPDFrame      frame;
+    FILE          *input = NULL;
+    OutputContext  output;
+    WPDDecoder    *decoder = NULL;
+    uint8_t       *data    = NULL;
+    uint8_t        expected_md5[16];
+    size_t         size;
+    const char    *muxer = NULL, *pixel_format = NULL, *verify = NULL;
+    WPDPixelFormat out_format = WPD_PIX_FMT_NONE;
+    const char    *input_name, *output_name;
+    int            info   = 0;
+    int            frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
+    unsigned       cpumask;
+    WPDFrame       frame;
 
     print_banner();
     opterr = 0;
@@ -377,7 +413,7 @@ int main(int argc, char **argv) {
             }
             break;
         case 'f':
-            if (parse_format(optarg, &pixel_format) < 0) {
+            if (parse_format(optarg, &pixel_format, &out_format) < 0) {
                 usage(argv[0], "invalid output pixel format");
                 return 2;
             }
@@ -390,6 +426,7 @@ int main(int argc, char **argv) {
             muxer = optarg;
             break;
         case ARG_VERIFY: verify = optarg; break;
+        case ARG_INFO: info = 1; break;
         case ARG_CPUMASK:
             if (parse_cpumask(optarg, &cpumask) < 0) {
                 usage(argv[0],
@@ -413,27 +450,33 @@ int main(int argc, char **argv) {
         usage(argv[0], "invalid md5; expected exactly 32 hexadecimal digits");
         return 2;
     }
-    if (argc - optind != (verify ? 1 : 2)) {
+    if (argc - optind < 1 || argc - optind > (verify ? 1 : 2) ||
+        (!verify && !info && argc - optind != 2)) {
         usage(argv[0],
               verify ? argc - optind < 1 ? "input is required"
                                          : "verification does not accept output"
-                  : argc - optind < 2 ? "input and output are required"
+                  : argc - optind < 1 ? "input is required"
                                       : "unexpected argument");
         return 2;
     }
 
     input_name  = argv[optind];
-    output_name = verify ? NULL : argv[optind + 1];
+    output_name = verify || argc - optind < 2 ? NULL : argv[optind + 1];
     input       = fopen(input_name, "rb");
     if (!input) {
         perror(input_name);
         goto done;
     }
-    if (output_open(&output, verify ? "md5" : muxer, output_name) < 0) {
-        perror(output_name);
-        goto done;
+    if (verify || output_name) {
+        if (output_open(&output, verify ? "md5" : muxer, output_name) < 0) {
+            perror(output_name);
+            goto done;
+        }
+        output_opened = 1;
+    } else {
+        output.type = OUTPUT_NULL;
+        output.file = NULL;
     }
-    output_opened = 1;
 
     data = read_file(input_name, input, &size);
     if (!data)
@@ -451,11 +494,37 @@ int main(int argc, char **argv) {
             fprintf(stderr, "out of memory\n");
             goto done;
         }
+        if (out_format >= WPD_PIX_FMT_ARGB &&
+            wpd_decoder_set_output_format(decoder, out_format) < 0) {
+            fprintf(stderr, "cannot select %s output\n", pixel_format);
+            goto done;
+        }
         if (wpd_decoder_open(decoder, data, size) < 0) {
             fprintf(stderr, "%s: %s\n", input_name, wpd_decoder_error(decoder));
             goto done;
         }
+        if (info && iter == 0) {
+            WPDAnimInfo anim;
+
+            if (wpd_decoder_anim_info(decoder, &anim) < 0) {
+                fprintf(stderr, "%s: cannot read info\n", input_name);
+                goto done;
+            }
+            printf("canvas: %dx%d\n", anim.canvas_width, anim.canvas_height);
+            printf("animation: %d\n", anim.is_animation);
+            printf("frames: %d\n", anim.frame_count);
+            printf("loops: %d\n", anim.loop_count);
+            printf("background: 0x%08x\n", anim.background_argb);
+        }
         while ((ret = wpd_decoder_next_frame(decoder, &frame)) > 0) {
+            if (info && iter == 0)
+                printf("frame %d: %dx%d %s duration %d timestamp %lld\n",
+                       frames,
+                       frame.width,
+                       frame.height,
+                       format_name(frame.format),
+                       frame.duration,
+                       (long long)frame.timestamp);
             if (sink && write_frame(sink, &frame, pixel_format) < 0) {
                 if (sink->file && ferror(sink->file))
                     perror("write");
@@ -475,11 +544,12 @@ int main(int argc, char **argv) {
     if (verify) {
         status        = output_verify(&output, expected_md5);
         output_opened = 0;
-    } else if (output_close(&output) < 0) {
-        perror("write");
-    } else {
+    } else if (!output_opened)
         status = 0;
-    }
+    else if (output_close(&output) < 0)
+        perror("write");
+    else
+        status = 0;
     output_opened = 0;
 done:
     wpd_decoder_free(decoder);

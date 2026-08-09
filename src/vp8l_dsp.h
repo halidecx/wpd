@@ -16,6 +16,9 @@ typedef struct WPDLosslessDSP {
                         const uint32_t *palette, int num_pixels);
     /* Alpha-blend an ARGB row of src over dst; alpha is the low byte. */
     void (*blend_row_argb)(uint8_t *dst, const uint8_t *src, int num_pixels);
+    /* The same, for rows whose alpha is already multiplied in. */
+    void (*blend_row_argb_premult)(uint8_t *dst, const uint8_t *src,
+                                   int num_pixels);
 } WPDLosslessDSP;
 
 void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp);

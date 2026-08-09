@@ -30,9 +30,16 @@ void ff_extract_green_avx2(uint8_t *dst, const uint8_t *src, int num_pixels);
 void ff_map_color32_avx2(uint8_t *dst, const uint8_t *src,
                          const uint32_t *palette, int num_pixels);
 void ff_blend_row_argb_avx2(uint8_t *dst, const uint8_t *src, int num_pixels);
+void ff_blend_row_argb_premult_ssse3(uint8_t *dst, const uint8_t *src,
+                                     int num_pixels);
+void ff_blend_row_argb_premult_avx2(uint8_t *dst, const uint8_t *src,
+                                    int num_pixels);
 
 static wpd_always_inline void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp) {
     const unsigned flags = wpd_get_cpu_flags();
+
+    if (flags & WPD_X86_CPU_FLAG_SSSE3)
+        dsp->blend_row_argb_premult = ff_blend_row_argb_premult_ssse3;
 
     if (flags & WPD_X86_CPU_FLAG_AVX2) {
         dsp->pred_add[0]  = ff_pred_add_0_avx2;
@@ -50,9 +57,10 @@ static wpd_always_inline void wpd_vp8l_dsp_init_x86(WPDLosslessDSP *dsp) {
         dsp->pred_add[12] = ff_pred_add_12_avx2;
         dsp->pred_add[13] = ff_pred_add_13_avx2;
 
-        dsp->extract_green  = ff_extract_green_avx2;
-        dsp->map_color32    = ff_map_color32_avx2;
-        dsp->blend_row_argb = ff_blend_row_argb_avx2;
+        dsp->extract_green          = ff_extract_green_avx2;
+        dsp->map_color32            = ff_map_color32_avx2;
+        dsp->blend_row_argb         = ff_blend_row_argb_avx2;
+        dsp->blend_row_argb_premult = ff_blend_row_argb_premult_avx2;
     }
 }
 

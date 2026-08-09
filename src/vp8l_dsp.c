@@ -172,6 +172,22 @@ static void blend_row_argb_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
     }
 }
 
+static void blend_row_argb_premult_c(uint8_t *dst, const uint8_t *src,
+                                     int num_pixels) {
+    for (int x = 0; x < num_pixels; x++, dst += 4, src += 4) {
+        const uint32_t scale = 256 - src[0];
+
+        if (src[0] == 255) {
+            memcpy(dst, src, 4);
+            continue;
+        }
+        dst[0] = src[0] + ((dst[0] * scale) >> 8);
+        dst[1] = src[1] + ((dst[1] * scale) >> 8);
+        dst[2] = src[2] + ((dst[2] * scale) >> 8);
+        dst[3] = src[3] + ((dst[3] * scale) >> 8);
+    }
+}
+
 wpd_cold void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp) {
     const WPDLosslessDSP c = {
         .pred_add =
@@ -191,9 +207,10 @@ wpd_cold void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp) {
                 pred_add_12,
                 pred_add_13,
             },
-        .extract_green  = extract_green_c,
-        .map_color32    = map_color32_c,
-        .blend_row_argb = blend_row_argb_c,
+        .extract_green          = extract_green_c,
+        .map_color32            = map_color32_c,
+        .blend_row_argb         = blend_row_argb_c,
+        .blend_row_argb_premult = blend_row_argb_premult_c,
     };
 
     *dsp = c;

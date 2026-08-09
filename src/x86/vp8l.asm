@@ -5,6 +5,11 @@ SECTION_RODATA 32
 
 eg_perm: dd 0, 4, 1, 5, 2, 6, 3, 7
 
+pw_256: times 16 dw 256
+; Broadcasts each pixel's alpha over its four bytes.
+bcast_alpha: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
+             db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
+
 ; blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
 blend_scale:
     dd 0
@@ -640,3 +645,64 @@ cglobal blend_row_argb, 3, 5, 16, dst, src, n
     jg .loop1
 .ret:
     RET
+
+; dst = src + ((dst * (256 - src_a)) >> 8) per channel. An opaque src leaves
+; a scale of 1, which already reproduces src, so no branch is needed.
+%macro BLEND_ROW_ARGB_PREMULT 0
+cglobal blend_row_argb_premult, 3, 3, 10, dst, src, n
+    mova      m5, [bcast_alpha]
+    mova      m6, [pw_256]
+    pxor      m7, m7
+    sub       nd, mmsize / 4
+    jl        .tail
+.loop:
+    movu      m0, [srcq]
+    movu      m1, [dstq]
+    pshufb    m2, m0, m5
+    punpcklbw m3, m1, m7
+    punpckhbw m4, m1, m7
+    punpcklbw m1, m2, m7
+    punpckhbw m2, m7
+    mova      m8, m6
+    psubw     m8, m1
+    mova      m9, m6
+    psubw     m9, m2
+    pmullw    m3, m8
+    pmullw    m4, m9
+    psrlw     m3, 8
+    psrlw     m4, 8
+    packuswb  m3, m4
+    paddb     m3, m0
+    movu      [dstq], m3
+    add       srcq, mmsize
+    add       dstq, mmsize
+    sub       nd, mmsize / 4
+    jge       .loop
+.tail:
+    add       nd, mmsize / 4
+    jz        .end
+.tail_loop:
+    movd      xmm0, [srcq]
+    movd      xmm1, [dstq]
+    pshufb    xmm2, xmm0, xmm5
+    punpcklbw xmm1, xmm7
+    punpcklbw xmm2, xmm7
+    mova      xmm8, xmm6
+    psubw     xmm8, xmm2
+    pmullw    xmm1, xmm8
+    psrlw     xmm1, 8
+    packuswb  xmm1, xmm1
+    paddb     xmm1, xmm0
+    movd      [dstq], xmm1
+    add       srcq, 4
+    add       dstq, 4
+    dec       nd
+    jg        .tail_loop
+.end:
+    RET
+%endmacro
+
+INIT_XMM ssse3
+BLEND_ROW_ARGB_PREMULT
+INIT_YMM avx2
+BLEND_ROW_ARGB_PREMULT

@@ -11,6 +11,7 @@ void checkasm_check_lossless(void);
 void checkasm_check_vp8coeffs(void);
 void checkasm_check_vp8dsp(void);
 void checkasm_check_vp8pred(void);
+void checkasm_check_yuvdsp(void);
 
 #define rnd checkasm_rand
 #define LOCAL_ALIGNED_16(type, name, ...) \
