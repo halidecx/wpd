@@ -335,9 +335,10 @@ elif libwebp_source in ['auto', 'subproject']
   )
   if libwebp_subproject.found()
     libwebp_dec_dep = libwebp_subproject.dependency('webpdecoder')
-    # webpdemux pulls in the full webp library, which already decodes; adding
-    # webpdecoder alongside it would only offer the linker a second copy.
-    libwebpdec_deps = [libwebp_subproject.dependency('webpdemux')]
+    libwebpdec_deps = [
+      libwebp_subproject.dependency('webpdemux'),
+      libwebp_dec_dep,
+    ]
     have_libwebp = true
     libwebp_origin = 'subproject'
   endif
