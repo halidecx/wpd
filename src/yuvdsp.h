@@ -34,6 +34,10 @@ typedef void (*pack_row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
 typedef void (*premultiply_row_func)(uint8_t *rgba, int alpha_first,
                                      int num_pixels);
 
+/* The same in the packed 4-bit layout, which libwebp multiplies in its own
+   precision rather than in 8-bit and then truncating. */
+typedef void (*premultiply_4444_row_func)(uint8_t *rgba4444, int num_pixels);
+
 typedef struct WPDYUVDSP {
     upsample_argb_block_func upsample_block[WPD_LAYOUT_NB];
     dispatch_alpha_func      dispatch_alpha;
@@ -41,7 +45,11 @@ typedef struct WPDYUVDSP {
     pack_row_func            pack_bgra;
     pack_row_func            pack_rgb;
     pack_row_func            pack_bgr;
-    premultiply_row_func     premultiply_row;
+    /* These two write two bytes per pixel, not three or four. */
+    pack_row_func             pack_rgb565;
+    pack_row_func             pack_rgba4444;
+    premultiply_row_func      premultiply_row;
+    premultiply_4444_row_func premultiply_row_4444;
 } WPDYUVDSP;
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);

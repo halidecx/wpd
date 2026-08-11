@@ -130,6 +130,32 @@ static void check_pack_row(pack_row_func func, const char *name, int bpp) {
     }
 }
 
+static void check_premultiply_row_4444(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, rgba0, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
+    LOCAL_ALIGNED_16(uint8_t, rgba1, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
+    declare_func(void, uint8_t *, int);
+
+    if (check_func(dsp->premultiply_row_4444, "premultiply_row_4444")) {
+        for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
+             i++) {
+            const int n = row_lengths[i];
+
+            for (int x = 0; x < 2 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                rgba0[x] = rgba1[x] = (uint8_t)rnd();
+            /* Opaque and fully transparent pixels bound the multiply. */
+            rgba0[1] = rgba1[1] = (uint8_t)(rnd() | 0x0f);
+            if (n > 1)
+                rgba0[3] = rgba1[3] = (uint8_t)(rnd() & 0xf0);
+
+            call_ref(rgba0, n);
+            call_new(rgba1, n);
+            if (memcmp(rgba0, rgba1, sizeof(rgba0)))
+                fail();
+        }
+        bench_new(rgba1, MAX_PIXELS);
+    }
+}
+
 static void check_premultiply_row(WPDYUVDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, argb0, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
     LOCAL_ALIGNED_16(uint8_t, argb1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
@@ -354,8 +380,11 @@ void checkasm_check_yuvdsp(void) {
     check_pack_row(dsp.pack_bgra, "pack_bgra", 4);
     check_pack_row(dsp.pack_rgb, "pack_rgb", 3);
     check_pack_row(dsp.pack_bgr, "pack_bgr", 3);
+    check_pack_row(dsp.pack_rgb565, "pack_rgb565", 2);
+    check_pack_row(dsp.pack_rgba4444, "pack_rgba4444", 2);
     report("pack_row");
     check_premultiply_row(&dsp);
+    check_premultiply_row_4444(&dsp);
     report("premultiply_row");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_RGBA, "rgba");

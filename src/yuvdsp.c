@@ -249,6 +249,39 @@ static void pack_bgr_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
     }
 }
 
+static void pack_rgb565_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
+    for (int i = 0; i < num_pixels; i++) {
+        const int r = src[4 * i + 1];
+        const int g = src[4 * i + 2];
+        const int b = src[4 * i + 3];
+
+        dst[2 * i]     = (uint8_t)((r & 0xf8) | g >> 5);
+        dst[2 * i + 1] = (uint8_t)((g << 3 & 0xe0) | b >> 3);
+    }
+}
+
+static void pack_rgba4444_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
+    for (int i = 0; i < num_pixels; i++) {
+        dst[2 * i] = (uint8_t)((src[4 * i + 1] & 0xf0) | src[4 * i + 2] >> 4);
+        dst[2 * i + 1] = (uint8_t)((src[4 * i + 3] & 0xf0) | src[4 * i] >> 4);
+    }
+}
+
+static void premultiply_row_4444_c(uint8_t *rgba4444, int num_pixels) {
+    for (int i = 0; i < num_pixels; i++) {
+        const unsigned rg   = rgba4444[2 * i];
+        const unsigned ba   = rgba4444[2 * i + 1];
+        const unsigned a    = ba & 0x0f;
+        const unsigned mult = a * 0x1111u;
+        const unsigned r    = (((rg & 0xf0) | rg >> 4) * mult) >> 16;
+        const unsigned g    = (((rg & 0x0f) | (rg << 4 & 0xf0)) * mult) >> 16;
+        const unsigned b    = (((ba & 0xf0) | ba >> 4) * mult) >> 16;
+
+        rgba4444[2 * i]     = (uint8_t)((r & 0xf0) | (g >> 4 & 0x0f));
+        rgba4444[2 * i + 1] = (uint8_t)((b & 0xf0) | a);
+    }
+}
+
 /* (x * a * 32897) >> 23 is bit-exact with (int)(x * a / 255.) for 8-bit x,a. */
 #define WPD_PREMULTIPLY(x, m) (uint8_t)(((x) * (m)) >> 23)
 
@@ -368,17 +401,20 @@ void wpd_yuv420_to_packed(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
 
 wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {
     const WPDYUVDSP c = {
-        .upsample_block  = {upsample_block_argb_c,
-                            upsample_block_rgba_c,
-                            upsample_block_bgra_c,
-                            upsample_block_rgb_c,
-                            upsample_block_bgr_c},
-        .dispatch_alpha  = dispatch_alpha_c,
-        .pack_rgba       = pack_rgba_c,
-        .pack_bgra       = pack_bgra_c,
-        .pack_rgb        = pack_rgb_c,
-        .pack_bgr        = pack_bgr_c,
-        .premultiply_row = premultiply_row_c,
+        .upsample_block       = {upsample_block_argb_c,
+                                 upsample_block_rgba_c,
+                                 upsample_block_bgra_c,
+                                 upsample_block_rgb_c,
+                                 upsample_block_bgr_c},
+        .dispatch_alpha       = dispatch_alpha_c,
+        .pack_rgba            = pack_rgba_c,
+        .pack_bgra            = pack_bgra_c,
+        .pack_rgb             = pack_rgb_c,
+        .pack_bgr             = pack_bgr_c,
+        .pack_rgb565          = pack_rgb565_c,
+        .pack_rgba4444        = pack_rgba4444_c,
+        .premultiply_row      = premultiply_row_c,
+        .premultiply_row_4444 = premultiply_row_4444_c,
     };
 
     *dsp = c;
