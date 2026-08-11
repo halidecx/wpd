@@ -10,6 +10,9 @@ void  wpd_freep(void *pointer) {
     *p = NULL;
 }
 
+unsigned    wpd_version(void) { return WPD_VERSION_NUM; }
+const char *wpd_version_string(void) { return WPD_VERSION_STR; }
+
 void wpd_log(void *context, int level, const char *format, ...) {
     va_list args;
     (void)context;

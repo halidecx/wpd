@@ -1,7 +1,7 @@
 project(
   'wpd',
   'c',
-  version: '0.0.0',
+  version: '0.1.0',
   meson_version: '>= 0.57.0',
   default_options: [
     'buildtype=release',
@@ -16,6 +16,26 @@ project(
 cc = meson.get_compiler('c')
 source_root = meson.current_source_dir()
 cpu_family = host_machine.cpu_family()
+
+# The public header states the version so a consumer can test it at compile
+# time, which only helps if it agrees with the one the build ships.
+public_header = import('fs').read('include/wpd.h')
+header_version = []
+foreach line : public_header.split('\n')
+  foreach part : ['MAJOR', 'MINOR', 'PATCH']
+    if line.startswith('#define WPD_VERSION_' + part + ' ')
+      header_version += line.split(' ')[2].strip()
+    endif
+  endforeach
+endforeach
+if '.'.join(header_version) != meson.project_version()
+  error('include/wpd.h says @0@, project() says @1@'.format(
+    '.'.join(header_version), meson.project_version()))
+endif
+if not public_header.contains(
+    '#define WPD_VERSION_STR "' + meson.project_version() + '"')
+  error('WPD_VERSION_STR in include/wpd.h is not ' + meson.project_version())
+endif
 
 optional_c_args = [
   '-fvisibility=hidden',
@@ -55,7 +75,7 @@ lib_sources = files(
   'src/cpu.c',
 )
 lib_objects = []
-lib_c_args = ['-Wno-unused-parameter']
+lib_c_args = ['-Wno-unused-parameter', '-DWPD_BUILDING']
 
 lib_c_args += '-DWPD_HAVE_GETAUXVAL=@0@'.format(
   cc.has_function('getauxval', prefix: '#include <sys/auxv.h>') ? 1 : 0)
@@ -188,19 +208,49 @@ lib_c_args += cpu_baseline_c_args
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
 
-libwpd = static_library(
+libwpd = library(
   'wpd',
   lib_sources,
   lib_objects,
   include_directories: inc_dirs,
   c_args: lib_c_args + trim_c_args,
-  install: false,
+  version: meson.project_version(),
+  soversion: meson.project_version().split('.')[0],
+  gnu_symbol_visibility: 'hidden',
+  install: true,
 )
 
+install_headers('include/wpd.h')
+
+import('pkgconfig').generate(
+  libwpd,
+  name: 'wpd',
+  filebase: 'wpd',
+  description: 'A fast WebP decoder',
+)
+
+# The bundled tools reach past the public API (cpu flag overrides), which the
+# shared library hides, so link them against the static objects instead.
+if get_option('default_library') == 'both'
+  libwpd_internal = libwpd.get_static_lib()
+elif get_option('default_library') == 'static'
+  libwpd_internal = libwpd
+else
+  libwpd_internal = static_library(
+    'wpd_internal',
+    lib_sources,
+    lib_objects,
+    include_directories: inc_dirs,
+    c_args: lib_c_args + trim_c_args,
+    build_by_default: false,
+    install: false,
+  )
+endif
+
 wpd_dep = declare_dependency(
-  link_with: libwpd,
+  link_with: libwpd_internal,
   include_directories: inc_dirs,
-  compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args,
+  compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
 )
 
 wpd = executable(

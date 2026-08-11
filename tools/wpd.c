@@ -80,7 +80,10 @@ static const struct option long_options[] = {
 };
 
 static void print_banner(void) {
-    fprintf(stderr, "wpd by Halide Compression, LLC | %s\n", WPD_VERSION);
+    fprintf(stderr,
+            "wpd by Halide Compression, LLC | %s | %s\n",
+            wpd_version_string(),
+            WPD_VCS_VERSION);
 }
 
 static void usage(const char *app, const char *reason) {

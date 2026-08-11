@@ -1,6 +1,7 @@
 #ifndef WPD_UTIL_H
 #define WPD_UTIL_H
 
+#include "wpd.h"
 #include "wpd_compat.h"
 
 #include <errno.h>
