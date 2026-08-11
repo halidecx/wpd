@@ -170,6 +170,42 @@ WPD_API WPDStatus wpd_get_info(const uint8_t *data, size_t size,
 
 WPD_API WPDDecoder *wpd_decoder_create(void);
 
+typedef struct WPDDecoderOptions {
+    /* Set to sizeof(WPDDecoderOptions), normally with WPD_DECODER_OPTIONS_INIT. */
+    size_t struct_size;
+    /* Skip the lossy in-loop filter. */
+    int bypass_filtering;
+    /* Use point-sampled chroma instead of the default fancy upsampler. */
+    int no_fancy_upsampling;
+    /* Crop to this rectangle when nonzero. */
+    int use_cropping;
+    int crop_left;
+    int crop_top;
+    int crop_width;
+    int crop_height;
+    /* Scale to these dimensions when nonzero. Taking a lossy frame down past
+       three quarters in both directions turns the in-loop filter off, as it
+       does in libwebp. */
+    int use_scaling;
+    int scaled_width;
+    int scaled_height;
+    /* Reverse the final output vertically. */
+    int flip;
+} WPDDecoderOptions;
+
+#define WPD_DECODER_OPTIONS_INIT \
+    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+/* Replace the decoder's processing options. Cropping is applied before
+   scaling. A lossy frame is cropped in its native YUV, whose chroma is
+   subsampled, so crop_left and crop_top are rounded down to even values there;
+   a lossless frame is cropped in ARGB and takes the origin exactly. libwebp
+   does the same. A zero scaled width or height is inferred from the other
+   dimension while preserving aspect ratio. Options take effect on the next
+   frame decoded. Returns WPD_OK or WPD_ERR_INVALID_ARG. */
+WPD_API WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
+                                          const WPDDecoderOptions *options);
+
 /* Force the pixel format frames are produced in. The default,
    WPD_PIX_FMT_NONE, reports whatever the bitstream decodes to: ARGB for
    lossless, YUV420P or YUVA420P for lossy.
@@ -294,8 +330,9 @@ WPD_API int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame);
    frame over yet. A lossless still gives rows away in blocks of sixteen.
 
    Nothing is consumed, so the same frame still arrives from
-   wpd_decoder_next_frame(). Returns WPD_OK, or WPD_ERR_INVALID_ARG if no file
-   is open. */
+   wpd_decoder_next_frame(). Cropped, scaled or flipped output is withheld
+   until the complete source frame is available. Returns WPD_OK, or
+   WPD_ERR_INVALID_ARG if no file is open. */
 WPD_API WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder,
                                             WPDFrame *frame, int *rows_valid);
 
