@@ -15,11 +15,13 @@ static const CheckasmCpuInfo cpu_flags[] = {
 #endif
     {0}};
 
-static const CheckasmTest tests[] = {{"lossless", checkasm_check_lossless},
-                                     {"vp8dsp", checkasm_check_vp8dsp},
-                                     {"vp8pred", checkasm_check_vp8pred},
-                                     {"yuvdsp", checkasm_check_yuvdsp},
-                                     {0}};
+static const CheckasmTest tests[] = {
+    {.name = "lossless", .func = checkasm_check_lossless},
+    {.name = "vp8dsp", .func = checkasm_check_vp8dsp},
+    {.name = "vp8pred", .func = checkasm_check_vp8pred},
+    {.name = "yuvdsp", .func = checkasm_check_yuvdsp},
+    {0},
+};
 
 static void set_cpu_flags(CheckasmCpu flags) {
     wpd_set_cpu_flags_mask((unsigned)flags);
