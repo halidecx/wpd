@@ -101,6 +101,8 @@ typedef struct WPDFrame {
        Both are 0 for still images. */
     int     duration;
     int64_t timestamp;
+    /* Private ownership used only by wpd_decode(). */
+    void *private_data;
 } WPDFrame;
 
 #define WPD_FRAME_INIT         \
@@ -111,7 +113,8 @@ typedef struct WPDFrame {
      0,                        \
      WPD_PIX_FMT_NONE,         \
      0,                        \
-     0}
+     0,                        \
+     NULL}
 
 /* How the image data is coded. Reported as WPD_CODING_UNKNOWN for animations,
    whose frames may mix the two, matching libwebp's WebPBitstreamFeatures. */
@@ -391,6 +394,23 @@ WPD_API WPDStatus wpd_decoder_status(const WPDDecoder *decoder);
 WPD_API const char *wpd_decoder_error(const WPDDecoder *decoder);
 
 WPD_API void wpd_decoder_free(WPDDecoder *decoder);
+
+/* Decode a still image or the first animation frame into caller-owned memory.
+   Any allocation previously owned by 'frame' is released first. */
+WPD_API WPDStatus wpd_decode_into(const uint8_t *data, size_t size,
+                                  WPDPixelFormat           format,
+                                  const WPDDecoderOptions *options,
+                                  const WPDOutputBuffer   *buffer,
+                                  WPDFrame                *frame);
+
+/* Decode and allocate a still image or the first animation frame. Release it
+   with wpd_frame_free(). Any allocation previously owned by 'frame' is
+   released first. */
+WPD_API WPDStatus wpd_decode(const uint8_t *data, size_t size,
+                             WPDPixelFormat           format,
+                             const WPDDecoderOptions *options, WPDFrame *frame);
+
+WPD_API void wpd_frame_free(WPDFrame *frame);
 
 typedef enum WPDLogLevel {
     WPD_LOG_ERROR   = 0,

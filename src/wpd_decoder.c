@@ -758,7 +758,7 @@ struct WPDDecoder {
     (offsetof(type, field) + sizeof(((type *)0)->field))
 
 static int frame_valid(const WPDFrame *frame) {
-    return frame && frame->struct_size >= WPD_FIELD_END(WPDFrame, timestamp);
+    return frame && frame->struct_size >= WPD_FIELD_END(WPDFrame, private_data);
 }
 
 static void frame_clear(WPDFrame *frame) {
@@ -766,8 +766,16 @@ static void frame_clear(WPDFrame *frame) {
 
     memset((uint8_t *)frame + sizeof(frame->struct_size),
            0,
-           WPD_FIELD_END(WPDFrame, timestamp) - sizeof(frame->struct_size));
+           WPD_FIELD_END(WPDFrame, private_data) - sizeof(frame->struct_size));
     frame->struct_size = struct_size;
+}
+
+/* Copies past struct_size rather than assigning: the caller's frame may be a
+   newer, longer revision of the struct, and its own size has to survive. */
+static void frame_copy(WPDFrame *dst, const WPDFrame *src) {
+    memcpy((uint8_t *)dst + sizeof(dst->struct_size),
+           (const uint8_t *)src + sizeof(src->struct_size),
+           WPD_FIELD_END(WPDFrame, private_data) - sizeof(dst->struct_size));
 }
 
 static int info_valid(const WPDImageInfo *info) {
@@ -4721,4 +4729,122 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     free(decoder->alpha_plane);
     free(decoder->file_alloc);
     free(decoder);
+}
+
+typedef struct WPDFrameOwner {
+    uint8_t *plane[4];
+} WPDFrameOwner;
+
+WPDStatus wpd_decode_into(const uint8_t *data, size_t size,
+                          WPDPixelFormat           format,
+                          const WPDDecoderOptions *options,
+                          const WPDOutputBuffer *buffer, WPDFrame *frame) {
+    WPDDecoder *decoder;
+    WPDStatus   status;
+    int         ret;
+
+    if (!data || !buffer || !frame_valid(frame))
+        return WPD_ERR_INVALID_ARG;
+    if (frame->private_data)
+        wpd_frame_free(frame);
+    decoder = wpd_decoder_create();
+    if (!decoder)
+        return WPD_ERR_NO_MEMORY;
+    status = options ? wpd_decoder_set_options(decoder, options) : WPD_OK;
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_format(decoder, format);
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_buffer(decoder, buffer);
+    if (status == WPD_OK)
+        status = wpd_decoder_open_borrowed(decoder, data, size);
+    ret = status == WPD_OK ? wpd_decoder_next_frame(decoder, frame) : status;
+    if (ret == 0)
+        status = WPD_ERR_BITSTREAM;
+    else if (ret < 0)
+        status = (WPDStatus)ret;
+    wpd_decoder_free(decoder);
+    return status;
+}
+
+WPDStatus wpd_decode(const uint8_t *data, size_t size, WPDPixelFormat format,
+                     const WPDDecoderOptions *options, WPDFrame *frame) {
+    WPDFrameOwner *owner;
+    WPDDecoder    *decoder;
+    WPDFrame       decoded = WPD_FRAME_INIT;
+    WPDStatus      status;
+    int            planes, ret;
+
+    if (!data || !frame_valid(frame))
+        return WPD_ERR_INVALID_ARG;
+    if (frame->private_data)
+        wpd_frame_free(frame);
+    decoder = wpd_decoder_create();
+    if (!decoder)
+        return WPD_ERR_NO_MEMORY;
+    status = options ? wpd_decoder_set_options(decoder, options) : WPD_OK;
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_format(decoder, format);
+    if (status == WPD_OK)
+        status = wpd_decoder_open_borrowed(decoder, data, size);
+    ret = status == WPD_OK ? wpd_decoder_next_frame(decoder, &decoded) : status;
+    if (ret <= 0) {
+        wpd_decoder_free(decoder);
+        return ret < 0 ? (WPDStatus)ret : WPD_ERR_BITSTREAM;
+    }
+
+    owner = calloc(1, sizeof(*owner));
+    if (!owner) {
+        wpd_decoder_free(decoder);
+        return WPD_ERR_NO_MEMORY;
+    }
+    frame_clear(frame);
+    frame_copy(frame, &decoded);
+    frame->private_data = owner;
+    planes              = decoded.format == WPD_PIX_FMT_YUVA420P ? 4
+        : decoded.format == WPD_PIX_FMT_YUV420P                  ? 3
+                                                                 : 1;
+    for (int p = 0; p < planes; p++) {
+        const int shift = p == 1 || p == 2;
+        const int w = planes == 1 ? decoded.width * format_bpp(decoded.format)
+                                  : CEIL_RSHIFT(decoded.width, shift);
+        const int h = CEIL_RSHIFT(decoded.height, shift);
+        size_t    bytes;
+
+        if ((size_t)h > SIZE_MAX / (size_t)w) {
+            status = WPD_ERR_TOO_LARGE;
+            goto fail;
+        }
+        bytes           = (size_t)w * (size_t)h;
+        owner->plane[p] = malloc(bytes);
+        if (!owner->plane[p]) {
+            status = WPD_ERR_NO_MEMORY;
+            goto fail;
+        }
+        for (int y = 0; y < h; y++)
+            memcpy(owner->plane[p] + (size_t)y * w,
+                   decoded.data[p] + (ptrdiff_t)y * decoded.stride[p],
+                   (size_t)w);
+        frame->data[p]   = owner->plane[p];
+        frame->stride[p] = w;
+    }
+    wpd_decoder_free(decoder);
+    return WPD_OK;
+
+fail:
+    wpd_decoder_free(decoder);
+    wpd_frame_free(frame);
+    return status;
+}
+
+void wpd_frame_free(WPDFrame *frame) {
+    WPDFrameOwner *owner;
+
+    if (!frame_valid(frame))
+        return;
+    owner = frame->private_data;
+    if (owner) {
+        for (int p = 0; p < 4; p++) free(owner->plane[p]);
+        free(owner);
+    }
+    frame_clear(frame);
 }
