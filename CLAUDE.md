@@ -12,6 +12,7 @@ A fast WebP decoder.
 - dav1d is the gold standard for decoder libraries; reference a dav1d checkout
   when you need to do research
 - Run stylecheck after finishing changes
+- After editing a Markdown file, run `deno fmt <file>`
 
 ## Usage
 
@@ -22,11 +23,12 @@ meson setup build
 meson compile -C build
 ```
 
-Compile libwebp test harness:
+Compile libwebp test harness. libwebp comes from a pinned Meson subproject by
+default; `-Dlibwebp=system` or an explicit path overrides that:
 
 ```sh
-meson setup build -Dlibwebpdecoder=/path/to/libwebpdecoder.a
 meson compile -C build libwebpdec
+meson setup build -Dlibwebpdecoder=/path/to/libwebpdecoder.a
 ```
 
 Testdata:
@@ -40,11 +42,13 @@ Test scripts:
 
 ```sh
 ./scripts/bench.sh      # performance, wpd vs libwebpdec
-./scripts/test.sh       # correctness, vs FFmpeg
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/testdata.sh   # asm vs c E2E correctness
+./scripts/fuzz.sh       # robustness, damaged input under sanitizers
 ./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp
+./scripts/rac32.sh      # correctness, forced 32-bit range coder
+./scripts/sanitize.sh   # memory safety, suite under sanitizers, asm and c
 ./scripts/stylecheck.sh # format codebase
 ```
 
