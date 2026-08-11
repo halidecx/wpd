@@ -50,6 +50,11 @@ typedef void (*argb_to_uv_func)(uint8_t *u, uint8_t *v, const uint8_t *argb,
                                 ptrdiff_t argb_stride, int num_pixels,
                                 int weight_alpha);
 
+/* The gamma tables argb_to_uv walks; assembly gathers from them directly. The
+   first has a padding entry so a gather may read a dword at the last index. */
+extern const uint16_t wpd_gamma_to_linear_tab[257];
+extern const uint16_t wpd_linear_to_gamma_tab[33];
+
 typedef struct WPDYUVDSP {
     upsample_argb_block_func upsample_block[WPD_LAYOUT_NB];
     dispatch_alpha_func      dispatch_alpha;

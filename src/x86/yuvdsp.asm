@@ -49,6 +49,58 @@ shuf_bcasta: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
 shuf_bcasta3: db 3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15
               db 3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15
 
+; The 4444 packer wants RGBA order, where the two nibble pairs it merges are
+; already neighbours; pmaddubsw then folds each pair into one word.
+%define shuf_rgba4444 shuf_rgba
+mask_rgba4444: times 32 db 0xf0
+mul_rgba4444:  times 16 db 16, 1
+; 565 needs the green byte twice, once per output byte. Weighting the masked
+; fields by 32/1 and 64/1 lines them up for a right shift of 5 and 3, which
+; pmulhuw does in one instruction with 2^11 and 2^13.
+shuf_rgb565: db 1, 2, 2, 3, 5, 6, 6, 7, 9, 10, 10, 11, 13, 14, 14, 15
+             db 1, 2, 2, 3, 5, 6, 6, 7, 9, 10, 10, 11, 13, 14, 14, 15
+mask_rgb565: times 8 db 0xf8, 0xe0, 0x1c, 0xf8
+mul_rgb565:  times 8 db 32, 1, 64, 1
+pw_565scale: times 8 dw 2048, 8192
+
+pw_15:   times 16 dw 15
+pw_17:   times 16 dw 17
+pw_240:  times 16 dw 240
+pw_4369: times 16 dw 4369
+
+; (R, G) and (G, B) pairs for pmaddwd. 33059 overflows a signed word, so it is
+; split as 16675 on the first pair and 16384 on the second.
+shuf_y_rg: db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
+           db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
+shuf_y_gb: db 2, -1, 3, -1, 6, -1, 7, -1, 10, -1, 11, -1, 14, -1, 15, -1
+           db 2, -1, 3, -1, 6, -1, 7, -1, 10, -1, 11, -1, 14, -1, 15, -1
+pw_y_rg:  times 8 dw 16839, 16675
+pw_y_gb:  times 8 dw 16384, 6420
+pd_y_rnd: times 8 dd 1081344
+; Undoes the lane interleave the two packssdw and the packuswb leave behind.
+permd_y:  dd 0, 4, 1, 5, 2, 6, 3, 7
+
+pd_255:   times 8 dd 255
+pd_511:   times 8 dd 511
+pd_512:   times 8 dd 512
+pd_64:    times 8 dd 64
+pd_1020:  times 8 dd 1020
+pd_65535: times 8 dd 65535
+pd_1:     times 8 dd 1
+ps_1_19:  times 8 dd 524288.0
+; U = (-9719 R - 19081 G + 28800 B) and V = (28800 R - 24116 G - 4684 B), each
+; rounded by half an output step plus the 128 offset before a shift of 18. R
+; and G ride in one word pair; B keeps a lane of its own, its second word being
+; the zero the sums never carry into.
+pw_u_rg:   times 8 dw -9719, -19081
+pw_u_b:    times 8 dw 28800, 0
+pw_v_rg:   times 8 dw 28800, -24116
+pw_v_b:    times 8 dw -4684, 0
+pd_uv_rnd: times 8 dd 33685504
+
+cextern_naked wpd_gamma_to_linear_tab
+cextern_naked wpd_linear_to_gamma_tab
+
 SECTION .text
 
 %if ARCH_X86_64
@@ -269,6 +321,209 @@ UPSAMPLE_ARGB_BLOCK bgra, 4
 UPSAMPLE_ARGB_BLOCK rgb, 3
 UPSAMPLE_ARGB_BLOCK bgr, 3
 
+; Splits sixteen ARGB columns of both rows into the four samples every output
+; pixel averages: even and odd column of the top row, then of the bottom one.
+%macro ARGB_TO_UV_COLUMNS 2 ; src, stride
+    movu      m0, [%1]
+    movu      m1, [%1 + 32]
+    shufps    m2, m0, m1, q2020
+    shufps    m3, m0, m1, q3131
+    vpermq    m2, m2, q3120
+    vpermq    m3, m3, q3120
+    mova      [rsp +  0], m2
+    mova      [rsp + 32], m3
+    movu      m0, [%1 + %2]
+    movu      m1, [%1 + %2 + 32]
+    shufps    m2, m0, m1, q2020
+    shufps    m3, m0, m1, q3131
+    vpermq    m2, m2, q3120
+    vpermq    m3, m3, q3120
+    mova      [rsp + 64], m2
+    mova      [rsp + 96], m3
+%endmacro
+
+%macro ARGB_TO_UV_IDX 1 ; channel shift
+%if %1
+    psrld     m0, [rsp +  0], %1
+    psrld     m1, [rsp + 32], %1
+    psrld     m2, [rsp + 64], %1
+    psrld     m3, [rsp + 96], %1
+%else
+    mova      m0, [rsp +  0]
+    mova      m1, [rsp + 32]
+    mova      m2, [rsp + 64]
+    mova      m3, [rsp + 96]
+%endif
+%if %1 != 24
+    pand      m0, [pd_255]
+    pand      m1, [pd_255]
+    pand      m2, [pd_255]
+    pand      m3, [pd_255]
+%endif
+%endmacro
+
+; One channel of eight output pixels. A gather with a scale of two lands the
+; wanted entry in the low word of each dword and its neighbour in the high one,
+; which the four-sample sum can ignore: the sum of four 12-bit entries never
+; carries into bit 16. The same overlap is what makes the interpolation of the
+; inverse table a single pmaddwd, its two entries arriving in one dword.
+%macro ARGB_TO_UV_CHANNEL 2 ; channel shift, dst
+    ARGB_TO_UV_IDX %1
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m4, [r6 + m0 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m5, [r6 + m1 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m6, [r6 + m2 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m0, [r6 + m3 * 2], m7
+    paddd      m1, m4, m5
+    paddd      m2, m6, m0
+    paddd      m1, m2
+    pand       m1, [pd_65535]
+    test       r5d, r5d
+    jz         %%unweighted
+    pand       m4, [pd_65535]
+    pand       m6, [pd_65535]
+    pslld      m5, 16
+    pslld      m0, 16
+    por        m4, m5
+    por        m6, m0
+    pmaddwd    m4, m13
+    pmaddwd    m6, m12
+    paddd      m4, m6
+    pmulld     m4, m9
+    psrld      m4, 17
+    vpblendvb  m1, m1, m4, m10
+%%unweighted:
+    psrld      m2, m1, 9
+    pand       m1, [pd_511]
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m3, [r7 + m2 * 2], m7
+    pslld      m2, m1, 16
+    mova       m0, [pd_512]
+    psubd      m0, m1
+    por        m2, m0
+    pmaddwd    m3, m2
+    paddd      m3, [pd_64]
+    psrad      %2, m3, 7
+%endmacro
+
+%macro ARGB_TO_UV_BODY 2 ; src, stride
+    ARGB_TO_UV_COLUMNS %1, %2
+    ARGB_TO_UV_IDX 0
+    paddd     m5, m0, m1
+    paddd     m6, m2, m3
+    paddd     m5, m6
+    pslld     m1, 16
+    pslld     m3, 16
+    por       m13, m0, m1
+    por       m12, m2, m3
+    pxor      m6, m6
+    pcmpeqd   m4, m5, m6
+    pcmpeqd   m7, m5, [pd_1020]
+    por       m4, m7
+    ; A block that is opaque, fully transparent, or whose alpha the caller does
+    ; not want kept is averaged unweighted; when none of the eight need the
+    ; weighted average, which is every block of an opaque image, skip it.
+    pandn     m10, m4, m11
+    pmovmskb  r5d, m10
+    pmaxsd    m5, [pd_1]
+    cvtdq2ps  m5, m5
+    mova      m9, [ps_1_19]
+    divps     m9, m5
+    ; 2^19 / total_a is never within a float rounding error of an integer from
+    ; below, so truncating agrees with the integer divide.
+    cvttps2dq m9, m9
+    ARGB_TO_UV_CHANNEL  8, m8
+    ARGB_TO_UV_CHANNEL 16, m14
+    ARGB_TO_UV_CHANNEL 24, m15
+    pslld     m0, m14, 16
+    por       m0, m8
+    pmaddwd   m1, m0, [pw_u_rg]
+    pmaddwd   m2, m15, [pw_u_b]
+    paddd     m1, m2
+    paddd     m1, [pd_uv_rnd]
+    psrad     m1, 18
+    pmaddwd   m2, m0, [pw_v_rg]
+    pmaddwd   m3, m15, [pw_v_b]
+    paddd     m2, m3
+    paddd     m2, [pd_uv_rnd]
+    psrad     m2, 18
+    packssdw  m1, m2
+    packuswb  m1, m1
+    vextracti128 xm2, m1, 1
+    punpckldq xm1, xm1, xm2
+%endmacro
+
+INIT_YMM avx2
+cglobal argb_to_uv, 6, 10, 16, 288, u, v, argb, argb_stride, n, weight_alpha
+    lea       r6, [wpd_gamma_to_linear_tab]
+    lea       r7, [wpd_linear_to_gamma_tab]
+    pxor      m11, m11
+    test      weight_alphad, weight_alphad
+    jz        .no_weight
+    pcmpeqd   m11, m11
+.no_weight:
+    mov       r8d, nd
+    sar       r8d, 4
+    jz        .tail
+.loop:
+    ARGB_TO_UV_BODY argbq, argb_strideq
+    movq      [uq], xm1
+    movhps    [vq], xm1
+    add       argbq, 64
+    add       uq, 8
+    add       vq, 8
+    dec       r8d
+    jg        .loop
+.tail:
+    and       nd, 15
+    jz        .end
+    ; Fewer than sixteen columns left: gather them into a zeroed block, with
+    ; the last column doubled up when the width is odd, which is exactly how
+    ; the scalar path folds a lone column onto itself.
+    pxor      m0, m0
+    mova      [rsp + 128], m0
+    mova      [rsp + 160], m0
+    mova      [rsp + 192], m0
+    mova      [rsp + 224], m0
+    mov       r8d, nd
+    lea       r9, [rsp + 128]
+.copy:
+    mov       r5d, [argbq]
+    mov       [r9], r5d
+    mov       r5d, [argbq + argb_strideq]
+    mov       [r9 + 64], r5d
+    add       argbq, 4
+    add       r9, 4
+    dec       r8d
+    jg        .copy
+    test      nd, 1
+    jz        .no_dup
+    mov       r5d, [r9 - 4]
+    mov       [r9], r5d
+    mov       r5d, [r9 + 60]
+    mov       [r9 + 64], r5d
+.no_dup:
+    lea       r9, [rsp + 128]
+    ARGB_TO_UV_BODY r9, 64
+    movq      [rsp + 256], xm1
+    movhps    [rsp + 264], xm1
+    add       nd, 1
+    shr       nd, 1
+    xor       r9d, r9d
+.store:
+    mov       r5b, [rsp + 256 + r9]
+    mov       [uq + r9], r5b
+    mov       r5b, [rsp + 264 + r9]
+    mov       [vq + r9], r5b
+    inc       r9
+    dec       nd
+    jg        .store
+.end:
+    RET
+
 %endif ; ARCH_X86_64
 
 %macro PACK32 1
@@ -301,15 +556,33 @@ cglobal pack_%1, 3, 3, 2, dst, src, n
 
 ; Four pixels at a time, storing 16 bytes for the 12 that matter. The vector
 ; loop stops eight pixels short so the overhang always lands inside the row.
+; The 256-bit pass gathers the six live dwords of a shuffle into 24 contiguous
+; bytes and stops sixteen pixels short, for the same reason.
 %macro PACK24 1
-cglobal pack_%1, 3, 4, 2, dst, src, n
+cglobal pack_%1, 3, 4, 3, dst, src, n
     mova      m1, [shuf_%1]
+%if mmsize == 32
+    mova      m2, [permd_rgb]
+    cmp       nd, 16
+    jl        .loop4_start
+.loop8:
+    movu      m0, [srcq]
+    pshufb    m0, m1
+    vpermd    m0, m2, m0
+    movu      [dstq], m0
+    add       srcq, 32
+    add       dstq, 24
+    sub       nd, 8
+    cmp       nd, 16
+    jge       .loop8
+.loop4_start:
+%endif
     cmp       nd, 8
     jl        .tail
 .loop4:
-    movu      m0, [srcq]
-    pshufb    m0, m1
-    movu      [dstq], m0
+    movu      xm0, [srcq]
+    pshufb    xm0, xm1
+    movu      [dstq], xm0
     add       srcq, 16
     add       dstq, 12
     sub       nd, 4
@@ -319,14 +592,188 @@ cglobal pack_%1, 3, 4, 2, dst, src, n
     test      nd, nd
     jz        .end
 .tail_loop:
-    movd      m0, [srcq]
-    pshufb    m0, m1
-    movd      r3d, m0
+    movd      xm0, [srcq]
+    pshufb    xm0, xm1
+    movd      r3d, xm0
     mov       [dstq], r3w
     shr       r3d, 16
     mov       [dstq + 2], r3b
     add       srcq, 4
     add       dstq, 3
+    dec       nd
+    jg        .tail_loop
+.end:
+    RET
+%endmacro
+
+%macro PACK16_SCALE 2 ; layout, reg
+%ifidn %1, rgb565
+    pmulhuw   %2, [pw_565scale]
+%else
+    psrlw     %2, 4
+%endif
+%endmacro
+
+; Two bytes out per pixel. The shuffle puts the fields of each output byte side
+; by side, the mask clears the bits that would carry into the neighbouring
+; field, and pmaddubsw merges the pair into one word that the scale shifts back
+; down; packuswb then lays the words out as the little-endian byte pairs.
+%macro PACK16 1
+cglobal pack_%1, 3, 4, 5, dst, src, n
+    mova      m2, [shuf_%1]
+    mova      m3, [mask_%1]
+    mova      m4, [mul_%1]
+    sub       nd, mmsize / 2
+    jl        .tail
+.loop:
+    movu      m0, [srcq]
+    movu      m1, [srcq + mmsize]
+    pshufb    m0, m2
+    pshufb    m1, m2
+    pand      m0, m3
+    pand      m1, m3
+    pmaddubsw m0, m4
+    pmaddubsw m1, m4
+    PACK16_SCALE %1, m0
+    PACK16_SCALE %1, m1
+    packuswb  m0, m1
+%if mmsize == 32
+    vpermq    m0, m0, q3120
+%endif
+    movu      [dstq], m0
+    add       srcq, 2 * mmsize
+    add       dstq, mmsize
+    sub       nd, mmsize / 2
+    jge       .loop
+.tail:
+    add       nd, mmsize / 2
+    jz        .end
+.tail_loop:
+    movd      xm0, [srcq]
+    pshufb    xm0, xm2
+    pand      xm0, xm3
+    pmaddubsw xm0, xm4
+    PACK16_SCALE %1, xm0
+    packuswb  xm0, xm0
+    movd      r3d, xm0
+    mov       [dstq], r3w
+    add       srcq, 4
+    add       dstq, 2
+    dec       nd
+    jg        .tail_loop
+.end:
+    RET
+%endmacro
+
+; Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16, never leaving
+; [16, 235], so neither pack saturates.
+%macro ARGB_TO_Y_GROUP 4 ; dst, scratch, src, offset
+    movu      %2, [%3 + %4]
+    pshufb    %1, %2, [shuf_y_rg]
+    pshufb    %2, [shuf_y_gb]
+    pmaddwd   %1, [pw_y_rg]
+    pmaddwd   %2, [pw_y_gb]
+    paddd     %1, %2
+    paddd     %1, [pd_y_rnd]
+    psrad     %1, 16
+%endmacro
+
+%macro ARGB_TO_Y 0
+cglobal argb_to_y, 3, 4, 6, y, argb, n
+    sub       nd, mmsize
+    jl        .loop4
+.loop:
+    ARGB_TO_Y_GROUP m2, m0, argbq, 0 * mmsize
+    ARGB_TO_Y_GROUP m3, m0, argbq, 1 * mmsize
+    ARGB_TO_Y_GROUP m4, m0, argbq, 2 * mmsize
+    ARGB_TO_Y_GROUP m5, m0, argbq, 3 * mmsize
+    packssdw  m2, m3
+    packssdw  m4, m5
+    packuswb  m2, m4
+%if mmsize == 32
+    mova      m3, [permd_y]
+    vpermd    m2, m3, m2
+%endif
+    movu      [yq], m2
+    add       argbq, 4 * mmsize
+    add       yq, mmsize
+    sub       nd, mmsize
+    jge       .loop
+.loop4:
+    add       nd, mmsize
+.loop4_test:
+    cmp       nd, 4
+    jl        .tail
+    ARGB_TO_Y_GROUP xm2, xm0, argbq, 0
+    packssdw  xm2, xm2
+    packuswb  xm2, xm2
+    movd      [yq], xm2
+    add       argbq, 16
+    add       yq, 4
+    sub       nd, 4
+    jmp       .loop4_test
+.tail:
+    test      nd, nd
+    jz        .end
+.tail_loop:
+    ARGB_TO_Y_GROUP xm2, xm0, argbq, 0
+    movd      r3d, xm2
+    mov       [yq], r3b
+    add       argbq, 4
+    inc       yq
+    dec       nd
+    jg        .tail_loop
+.end:
+    RET
+%endmacro
+
+; Every channel is a nibble expanded to eight bits by a multiply by 17, and
+; the alpha multiplier is the same expansion doubled up, so the truncating
+; divide by 255 the C does with a 32-bit product is exactly pmulhuw here.
+%macro PREMULTIPLY_4444 6 ; word, scratch, r, g, b, a
+    psrlw     %2, %1, 4
+    pand      %3, %2, [pw_15]
+    pand      %4, %1, [pw_15]
+    psrlw     %6, %1, 8
+    pand      %6, [pw_15]
+    psrlw     %5, %1, 12
+    pmullw    %2, %6, [pw_4369]
+    pmullw    %3, [pw_17]
+    pmullw    %4, [pw_17]
+    pmullw    %5, [pw_17]
+    pmulhuw   %3, %2
+    pmulhuw   %4, %2
+    pmulhuw   %5, %2
+    pand      %3, [pw_240]
+    psrlw     %4, 4
+    por       %3, %4
+    pand      %5, [pw_240]
+    por       %5, %6
+    psllw     %5, 8
+    por       %1, %3, %5
+%endmacro
+
+%macro PREMULTIPLY_ROW_4444 0
+cglobal premultiply_row_4444, 2, 3, 6, rgba, n
+    sub       nd, mmsize / 2
+    jl        .tail
+.loop:
+    movu      m0, [rgbaq]
+    PREMULTIPLY_4444 m0, m1, m2, m3, m4, m5
+    movu      [rgbaq], m0
+    add       rgbaq, mmsize
+    sub       nd, mmsize / 2
+    jge       .loop
+.tail:
+    add       nd, mmsize / 2
+    jz        .end
+.tail_loop:
+    movzx     r2d, word [rgbaq]
+    movd      xm0, r2d
+    PREMULTIPLY_4444 xm0, xm1, xm2, xm3, xm4, xm5
+    movd      r2d, xm0
+    mov       [rgbaq], r2w
+    add       rgbaq, 2
     dec       nd
     jg        .tail_loop
 .end:
@@ -403,11 +850,21 @@ PACK32 rgba
 PACK32 bgra
 PACK24 rgb
 PACK24 bgr
+PACK16 rgb565
+PACK16 rgba4444
 PREMULTIPLY_ROW
+PREMULTIPLY_ROW_4444
+ARGB_TO_Y
 INIT_YMM avx2
 PACK32 rgba
 PACK32 bgra
+PACK24 rgb
+PACK24 bgr
+PACK16 rgb565
+PACK16 rgba4444
 PREMULTIPLY_ROW
+PREMULTIPLY_ROW_4444
+ARGB_TO_Y
 
 INIT_XMM sse2
 cglobal dispatch_alpha, 3, 4, 7, dst, src, n

@@ -313,8 +313,9 @@ static void premultiply_row_c(uint8_t *rgba, int alpha_first, int num_pixels) {
 #define GAMMA_TAB_ROUNDER (GAMMA_TAB_SCALE >> 1)
 #define ALPHA_FIX 19
 
-/* pow(v / 255, 0.8) * 4095, rounded. */
-static const uint16_t gamma_to_linear_tab[256] = {
+/* pow(v / 255, 0.8) * 4095, rounded, with one padding entry so a gather may
+   read a whole dword at the last index. */
+const uint16_t wpd_gamma_to_linear_tab[257] = {
     0,    49,   85,   117,  147,  176,  204,  231,  257,  282,  307,  331,
     355,  379,  402,  425,  447,  469,  491,  513,  534,  556,  577,  598,
     618,  639,  659,  679,  699,  719,  739,  759,  778,  798,  817,  836,
@@ -336,24 +337,24 @@ static const uint16_t gamma_to_linear_tab[256] = {
     3586, 3599, 3612, 3626, 3639, 3652, 3665, 3678, 3692, 3705, 3718, 3731,
     3744, 3757, 3771, 3784, 3797, 3810, 3823, 3836, 3849, 3862, 3875, 3888,
     3901, 3914, 3927, 3940, 3953, 3966, 3979, 3992, 4005, 4018, 4031, 4044,
-    4056, 4069, 4082, 4095};
+    4056, 4069, 4082, 4095, 0};
 
 /* 255 * pow(v * 128 / 4095, 1 / 0.8), rounded. */
-static const uint16_t linear_to_gamma_tab[GAMMA_TAB_SIZE + 1] = {
+const uint16_t wpd_linear_to_gamma_tab[GAMMA_TAB_SIZE + 1] = {
     0,   3,   8,   13,  19,  25,  31,  38,  45,  52,  60,
     67,  75,  83,  91,  99,  107, 116, 124, 133, 142, 151,
     160, 169, 178, 187, 197, 206, 216, 226, 235, 245, 255};
 
 static wpd_always_inline unsigned gamma_to_linear(uint8_t v) {
-    return gamma_to_linear_tab[v];
+    return wpd_gamma_to_linear_tab[v];
 }
 
 static wpd_always_inline int linear_to_gamma(unsigned base_value, int shift) {
     const unsigned v   = base_value << shift;
     const int      pos = (int)(v >> (GAMMA_TAB_FIX + 2));
     const int      x   = (int)(v & ((GAMMA_TAB_SCALE << 2) - 1));
-    const int      v0  = linear_to_gamma_tab[pos];
-    const int      v1  = linear_to_gamma_tab[pos + 1];
+    const int      v0  = wpd_linear_to_gamma_tab[pos];
+    const int      v1  = wpd_linear_to_gamma_tab[pos + 1];
     const int      y   = v1 * x + v0 * ((GAMMA_TAB_SCALE << 2) - x);
 
     return (y + GAMMA_TAB_ROUNDER) >> GAMMA_TAB_FIX;

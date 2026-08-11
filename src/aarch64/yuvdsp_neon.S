@@ -303,6 +303,172 @@ endfunc
 pack24 rgb, 1, 2, 3
 pack24 bgr, 3, 2, 1
 
+// Both output bytes of these two formats are a high field of one input byte
+// and the top bits of the next, which is what sri does in one instruction:
+// it keeps the destination's leading bits and shifts the source in beneath
+// them. 565 needs green twice, its two fields landing at different shifts, so
+// the second one gets a shl first.
+.macro  pack16_rgb565 sz, a, r, g, b
+        shl             v\a\().\sz,  v\g\().\sz, #3
+        sri             v\r\().\sz,  v\g\().\sz, #5
+        mov             v\g\().16b,  v\a\().16b
+        sri             v\g\().\sz,  v\b\().\sz, #3
+.endm
+
+.macro  pack16_rgba4444 sz, a, r, g, b
+        sri             v\r\().\sz,  v\g\().\sz, #4
+        mov             v\g\().16b,  v\b\().16b
+        sri             v\g\().\sz,  v\a\().\sz, #4
+.endm
+
+.macro  pack16 name
+function ff_pack_\name\()_neon, export=1
+        cmp             w2,  #16
+        b.lt            2f
+1:      ld4             {v0.16b-v3.16b}, [x1], #64
+        sub             w2,  w2,  #16
+        pack16_\name    16b, 0, 1, 2, 3
+        st2             {v1.16b, v2.16b}, [x0], #32
+        cmp             w2,  #16
+        b.ge            1b
+2:      cmp             w2,  #8
+        b.lt            3f
+        ld4             {v0.8b-v3.8b}, [x1], #32
+        sub             w2,  w2,  #8
+        pack16_\name    8b, 0, 1, 2, 3
+        st2             {v1.8b, v2.8b}, [x0], #16
+3:      cbz             w2,  9f
+4:      ld4             {v0.b, v1.b, v2.b, v3.b}[0], [x1], #4
+        subs            w2,  w2,  #1
+        pack16_\name    8b, 0, 1, 2, 3
+        st2             {v1.b, v2.b}[0], [x0], #2
+        b.gt            4b
+9:      ret
+endfunc
+.endm
+
+pack16 rgb565
+pack16 rgba4444
+
+// Every channel is a nibble expanded to eight bits by a multiply by 17, and
+// the alpha multiplier is that expansion doubled up. Folding the 257 out of
+// it leaves a product that stays inside sixteen bits, so libwebp's truncating
+// divide by 255 -- a 32-bit product shifted down by 16 -- becomes
+// (p + (p >> 8)) >> 8, which is one usra and the narrowing shift.
+.macro  premultiply_mulhi ch, alpha, wide
+        umull           v18.8h,  v\ch\().8b,  v\alpha\().8b
+    .if \wide
+        umull2          v19.8h,  v\ch\().16b, v\alpha\().16b
+    .endif
+        usra            v18.8h,  v18.8h,  #8
+        shrn            v\ch\().8b,  v18.8h, #8
+    .if \wide
+        usra            v19.8h,  v19.8h,  #8
+        shrn2           v\ch\().16b, v19.8h, #8
+    .endif
+.endm
+
+.macro  premultiply4444 sz, wide
+        and             v2.16b,  v1.16b, v16.16b
+        mul             v3.16b,  v2.16b, v17.16b
+        ushr            v4.\sz,  v0.\sz, #4
+        and             v6.16b,  v0.16b, v16.16b
+        ushr            v5.\sz,  v1.\sz, #4
+        mul             v4.16b,  v4.16b, v17.16b
+        mul             v6.16b,  v6.16b, v17.16b
+        mul             v5.16b,  v5.16b, v17.16b
+        premultiply_mulhi 4, 3, \wide
+        premultiply_mulhi 6, 3, \wide
+        premultiply_mulhi 5, 3, \wide
+        sri             v4.\sz,  v6.\sz, #4
+        bit             v5.16b,  v1.16b, v16.16b
+.endm
+
+function ff_premultiply_row_4444_neon, export=1
+        movi            v16.16b, #15
+        movi            v17.16b, #17
+        cmp             w1,  #16
+        b.lt            2f
+1:      ld2             {v0.16b, v1.16b}, [x0]
+        sub             w1,  w1,  #16
+        premultiply4444 16b, 1
+        st2             {v4.16b, v5.16b}, [x0], #32
+        cmp             w1,  #16
+        b.ge            1b
+2:      cmp             w1,  #8
+        b.lt            3f
+        ld2             {v0.8b, v1.8b}, [x0]
+        sub             w1,  w1,  #8
+        premultiply4444 8b, 0
+        st2             {v4.8b, v5.8b}, [x0], #16
+3:      cbz             w1,  9f
+4:      ld2             {v0.b, v1.b}[0], [x0]
+        subs            w1,  w1,  #1
+        premultiply4444 8b, 0
+        st2             {v4.b, v5.b}[0], [x0], #2
+        b.gt            4b
+9:      ret
+endfunc
+
+// Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16. Splitting each
+// coefficient as 256 * hi + lo keeps either partial sum inside sixteen bits,
+// so the whole dot product is umlal on bytes; the rounding term divides evenly
+// into the high half as 4224, and the low half folds back in through usra.
+.macro  argb_to_y_group sz, wide
+        umull           v4.8h,   v1.8b,  v20.8b
+        umlal           v4.8h,   v2.8b,  v21.8b
+        umlal           v4.8h,   v3.8b,  v22.8b
+        umull           v6.8h,   v1.8b,  v23.8b
+        umlal           v6.8h,   v2.8b,  v24.8b
+        umlal           v6.8h,   v3.8b,  v25.8b
+        usra            v4.8h,   v6.8h,  #8
+        add             v4.8h,   v4.8h,  v26.8h
+        shrn            v4.8b,   v4.8h,  #8
+    .if \wide
+        umull2          v5.8h,   v1.16b, v20.16b
+        umlal2          v5.8h,   v2.16b, v21.16b
+        umlal2          v5.8h,   v3.16b, v22.16b
+        umull2          v7.8h,   v1.16b, v23.16b
+        umlal2          v7.8h,   v2.16b, v24.16b
+        umlal2          v7.8h,   v3.16b, v25.16b
+        usra            v5.8h,   v7.8h,  #8
+        add             v5.8h,   v5.8h,  v26.8h
+        shrn2           v4.16b,  v5.8h,  #8
+    .endif
+.endm
+
+function ff_argb_to_y_neon, export=1
+        movi            v20.16b, #65
+        movi            v21.16b, #129
+        movi            v22.16b, #25
+        movi            v23.16b, #199
+        movi            v24.16b, #35
+        movi            v25.16b, #20
+        mov             w3,  #4224
+        dup             v26.8h,  w3
+        cmp             w2,  #16
+        b.lt            2f
+1:      ld4             {v0.16b-v3.16b}, [x1], #64
+        sub             w2,  w2,  #16
+        argb_to_y_group 16b, 1
+        st1             {v4.16b}, [x0], #16
+        cmp             w2,  #16
+        b.ge            1b
+2:      cmp             w2,  #8
+        b.lt            3f
+        ld4             {v0.8b-v3.8b}, [x1], #32
+        sub             w2,  w2,  #8
+        argb_to_y_group 8b, 0
+        st1             {v4.8b}, [x0], #8
+3:      cbz             w2,  9f
+4:      ld4             {v0.b, v1.b, v2.b, v3.b}[0], [x1], #4
+        subs            w2,  w2,  #1
+        argb_to_y_group 8b, 0
+        st1             {v4.b}[0], [x0], #1
+        b.gt            4b
+9:      ret
+endfunc
+
 .macro  premultiply_ch ch, alpha
         umull           v4.8h,   v\ch\().8b, v\alpha\().8b
         ushr            v5.8h,   v4.8h,   #8
@@ -348,4 +514,232 @@ function ff_premultiply_row_neon, export=1
         subs            w2,  w2,  #1
         b.gt            4b
 9:      ret
+endfunc
+
+#define UV_BLOCK  192                   // 16 columns of both rows, for the tail
+#define UV_OUT    320
+#define UV_FRAME  336
+
+const argb_to_uv_consts, align=4
+        .short          1020, 1020, 1020, 1020, 1020, 1020, 1020, 1020
+        .float          524288.0, 524288.0, 524288.0, 524288.0
+        .long           33685504, 33685504, 33685504, 33685504
+        .short          -9719, -19081, 28800, 28800, -24116, -4684, 0, 0
+endconst
+
+// Eight gamma_to_linear entries. NEON has no gather, so the indices leave the
+// vector in one umov and ubfx picks them apart; packing four results into an x
+// register keeps this down to two stores per group.
+.macro  gamma8  src, half, off
+        umov            x7,  v\src\().d[\half]
+.irp    quad, 0, 1
+        ubfx            x8,  x7,  #(32 * \quad +  0), #8
+        ubfx            x9,  x7,  #(32 * \quad +  8), #8
+        ubfx            x10, x7,  #(32 * \quad + 16), #8
+        ubfx            x11, x7,  #(32 * \quad + 24), #8
+        ldrh            w8,  [x12, x8,  lsl #1]
+        ldrh            w9,  [x12, x9,  lsl #1]
+        ldrh            w10, [x12, x10, lsl #1]
+        ldrh            w11, [x12, x11, lsl #1]
+        orr             x8,  x8,  x9,  lsl #16
+        orr             x10, x10, x11, lsl #16
+        orr             x8,  x8,  x10, lsl #32
+        str             x8,  [sp, #(\off + 8 * \quad)]
+.endr
+.endm
+
+.macro  gamma16 src, off
+        gamma8          \src, 0, (\off)
+        gamma8          \src, 1, (\off + 16)
+.endm
+
+// One channel of eight output pixels: the four samples each averages are two
+// neighbouring columns of both rows, so addp folds them without ever splitting
+// even from odd columns. linear_to_gamma then interpolates between two entries
+// of a table whose values are bytes, which tbl reaches directly once the
+// differences are precomputed alongside it; 512 * v0 is a multiple of the
+// rounding step, so only the interpolated part goes through the shift.
+.macro  uv_channel  off_top, off_bot, dst
+        ldp             q1,  q2,  [sp, #(\off_top)]
+        ldp             q3,  q5,  [sp, #(\off_bot)]
+        addp            v6.8h,   v1.8h,  v2.8h
+        addp            v7.8h,   v3.8h,  v5.8h
+        add             v6.8h,   v6.8h,  v7.8h
+        cbz             w13, 6f
+        umull           v7.4s,   v1.4h,  v29.4h
+        umull2          v17.4s,  v1.8h,  v29.8h
+        addp            v7.4s,   v7.4s,  v17.4s
+        umull           v17.4s,  v3.4h,  v31.4h
+        umull2          v19.4s,  v3.8h,  v31.8h
+        addp            v17.4s,  v17.4s, v19.4s
+        add             v7.4s,   v7.4s,  v17.4s
+        umull           v17.4s,  v2.4h,  v30.4h
+        umull2          v19.4s,  v2.8h,  v30.8h
+        addp            v17.4s,  v17.4s, v19.4s
+        umull           v19.4s,  v5.4h,  v23.4h
+        umull2          v22.4s,  v5.8h,  v23.8h
+        addp            v19.4s,  v19.4s, v22.4s
+        add             v17.4s,  v17.4s, v19.4s
+        mul             v7.4s,   v7.4s,  v20.4s
+        mul             v17.4s,  v17.4s, v21.4s
+        ushr            v7.4s,   v7.4s,  #17
+        ushr            v17.4s,  v17.4s, #17
+        uzp1            v7.8h,   v7.8h,  v17.8h
+        bit             v6.16b,  v7.16b, v18.16b
+6:      ushr            v1.8h,   v6.8h,  #9
+        bic             v6.8h,   #0xfe,  lsl #8
+        xtn             v2.8b,   v1.8h
+        tbl             v3.8b,   {v24.16b, v25.16b}, v2.8b
+        tbl             v2.8b,   {v26.16b, v27.16b}, v2.8b
+        uxtl            v2.8h,   v2.8b
+        mul             v2.8h,   v2.8h,  v6.8h
+        urshr           v2.8h,   v2.8h,  #7
+        ushll           v\dst\().8h, v3.8b, #2
+        add             v\dst\().8h, v\dst\().8h, v2.8h
+.endm
+
+.macro  uv_matrix dst, first, rnd
+        mov             v2.16b,  \rnd\().16b
+        mov             v3.16b,  \rnd\().16b
+        smlal           v2.4s,   v0.4h,  v15.h[\first]
+        smlal2          v3.4s,   v0.8h,  v15.h[\first]
+        smlal           v2.4s,   v4.4h,  v15.h[(\first + 1)]
+        smlal2          v3.4s,   v4.8h,  v15.h[(\first + 1)]
+        smlal           v2.4s,   v16.4h, v15.h[(\first + 2)]
+        smlal2          v3.4s,   v16.8h, v15.h[(\first + 2)]
+        sshr            v2.4s,   v2.4s,  #2
+        sshr            v3.4s,   v3.4s,  #2
+        sqshrun         v2.4h,   v2.4s,  #16
+        sqshrun2        v2.8h,   v3.4s,  #16
+        sqxtun          \dst\().8b,  v2.8h
+.endm
+
+// Sixteen columns of both rows, eight output pixels. A block that is opaque,
+// fully transparent, or whose alpha the caller does not want kept is averaged
+// unweighted; when no lane of the eight needs the weighted average, which is
+// every block of an opaque image, the whole of it is skipped.
+.macro  argb_to_uv_body src, stride
+        ld4             {v0.16b-v3.16b}, [\src]
+        add             x11, \src, \stride
+        ld4             {v4.16b-v7.16b}, [x11]
+        gamma16         1,  0
+        gamma16         5,  32
+        gamma16         2,  64
+        gamma16         6,  96
+        gamma16         3,  128
+        gamma16         7,  160
+        uaddlp          v16.8h,  v0.16b
+        uadalp          v16.8h,  v4.16b
+        ldr             q17, [x14]
+        cmeq            v18.8h,  v16.8h, v17.8h
+        cmeq            v19.8h,  v16.8h, #0
+        orr             v18.16b, v18.16b, v19.16b
+        bic             v18.16b, v28.16b, v18.16b
+        umaxv           h19, v18.8h
+        fmov            w13, s19
+        cbz             w13, 5f
+        ushll           v20.4s,  v16.4h, #0
+        ushll2          v21.4s,  v16.8h, #0
+        movi            v22.4s,  #1
+        umax            v20.4s,  v20.4s, v22.4s
+        umax            v21.4s,  v21.4s, v22.4s
+        ucvtf           v20.4s,  v20.4s
+        ucvtf           v21.4s,  v21.4s
+        ldr             q22, [x14, #16]
+        // 2^19 over a total in [1, 1020] is never within a float rounding
+        // error of an integer from below, so truncating agrees with the
+        // integer divide the C does.
+        fdiv            v20.4s,  v22.4s, v20.4s
+        fdiv            v21.4s,  v22.4s, v21.4s
+        fcvtzu          v20.4s,  v20.4s
+        fcvtzu          v21.4s,  v21.4s
+        uxtl            v29.8h,  v0.8b
+        uxtl2           v30.8h,  v0.16b
+        uxtl            v31.8h,  v4.8b
+        uxtl2           v23.8h,  v4.16b
+5:      uv_channel      0,   32,  0
+        uv_channel      64,  96,  4
+        uv_channel      128, 160, 16
+        ldr             q1,  [x14, #32]
+        uv_matrix       v20, 0, v1
+        uv_matrix       v21, 3, v1
+.endm
+
+function ff_argb_to_uv_neon, export=1
+        str             d15, [sp, #-16]!
+        sub             sp,  sp,  #UV_FRAME
+        movrel          x12, X(wpd_gamma_to_linear_tab)
+        movrel          x14, argb_to_uv_consts
+        // The inverse table is 33 byte-sized entries; loading it twice, one
+        // entry apart, builds both the values and their differences, which is
+        // what the interpolation wants and what tbl can index.
+        movrel          x6,  X(wpd_linear_to_gamma_tab)
+        ld1             {v16.8h-v19.8h}, [x6]
+        xtn             v24.8b,  v16.8h
+        xtn2            v24.16b, v17.8h
+        xtn             v25.8b,  v18.8h
+        xtn2            v25.16b, v19.8h
+        add             x6,  x6,  #2
+        ld1             {v16.8h-v19.8h}, [x6]
+        xtn             v26.8b,  v16.8h
+        xtn2            v26.16b, v17.8h
+        xtn             v27.8b,  v18.8h
+        xtn2            v27.16b, v19.8h
+        sub             v26.16b, v26.16b, v24.16b
+        sub             v27.16b, v27.16b, v25.16b
+        ldr             q15, [x14, #48]
+        dup             v28.4s,  w5
+        cmeq            v28.4s,  v28.4s, #0
+        not             v28.16b, v28.16b
+        lsr             w15, w4,  #4
+        cbz             w15, 3f
+1:      argb_to_uv_body x2, x3
+        st1             {v20.8b}, [x0], #8
+        st1             {v21.8b}, [x1], #8
+        add             x2,  x2,  #64
+        subs            w15, w15, #1
+        b.gt            1b
+3:      ands            w4,  w4,  #15
+        b.eq            9f
+        // Fewer than sixteen columns left: gather them into a zeroed block,
+        // with the last column doubled up when the width is odd, which is
+        // exactly how the scalar path folds a lone column onto itself.
+        movi            v0.16b,  #0
+        stp             q0,  q0,  [sp, #(UV_BLOCK)]
+        stp             q0,  q0,  [sp, #(UV_BLOCK + 32)]
+        stp             q0,  q0,  [sp, #(UV_BLOCK + 64)]
+        stp             q0,  q0,  [sp, #(UV_BLOCK + 96)]
+        add             x6,  sp,  #UV_BLOCK
+        mov             w7,  w4
+2:      ldr             w8,  [x2]
+        ldr             w9,  [x2, x3]
+        add             x2,  x2,  #4
+        subs            w7,  w7,  #1
+        str             w8,  [x6]
+        str             w9,  [x6, #64]
+        add             x6,  x6,  #4
+        b.gt            2b
+        tbz             w4,  #0,  4f
+        ldur            w8,  [x6, #-4]
+        ldr             w9,  [x6, #60]
+        str             w8,  [x6]
+        str             w9,  [x6, #64]
+4:      add             x2,  sp,  #UV_BLOCK
+        mov             x3,  #64
+        argb_to_uv_body x2, x3
+        str             d20, [sp, #(UV_OUT)]
+        str             d21, [sp, #(UV_OUT + 8)]
+        add             w4,  w4,  #1
+        lsr             w4,  w4,  #1
+        add             x6,  sp,  #UV_OUT
+        add             x7,  sp,  #(UV_OUT + 8)
+8:      ldrb            w8,  [x6], #1
+        ldrb            w9,  [x7], #1
+        subs            w4,  w4,  #1
+        strb            w8,  [x0], #1
+        strb            w9,  [x1], #1
+        b.gt            8b
+9:      add             sp,  sp,  #UV_FRAME
+        ldr             d15, [sp], #16
+        ret
 endfunc
