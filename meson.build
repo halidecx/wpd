@@ -2,7 +2,7 @@ project(
   'wpd',
   'c',
   version: '0.0.0',
-  meson_version: '>= 0.54.0',
+  meson_version: '>= 0.57.0',
   default_options: [
     'buildtype=release',
     'c_std=c11',
@@ -227,28 +227,77 @@ md5_test = executable(
 )
 test('md5', md5_test, suite: 'md5')
 
+# libwebp is the reference wpd is measured against, so which one gets linked
+# is a correctness question, not just a convenience: a released libwebp
+# predates decoder changes wpd already matches. The wrap pins a revision known
+# to agree, and is preferred over whatever the system carries.
+libwebp_source = get_option('libwebp')
 libwebpdecoder_path = get_option('libwebpdecoder')
-if libwebpdecoder_path != ''
-  libwebp_dep = declare_dependency(link_args: [libwebpdecoder_path])
-  message('libwebpdec decoder: ' + libwebpdecoder_path)
-else
-  libwebp_dep = dependency('libwebp', required: false, static: true)
-endif
-libwebpdemux_dep = dependency('libwebpdemux', required: false, static: true)
+libwebp_dec_dep = declare_dependency()
+libwebpdec_deps = []
+have_libwebp = false
+libwebp_origin = ''
 
-if libwebp_dep.found() and libwebpdemux_dep.found()
+if libwebpdecoder_path != ''
+  libwebp_dec_dep = declare_dependency(link_args: [libwebpdecoder_path])
+  have_libwebp = true
+  libwebp_origin = libwebpdecoder_path
+elif libwebp_source in ['auto', 'subproject']
+  libwebp_cmake_options = import('cmake').subproject_options()
+  libwebp_cmake_options.add_cmake_defines({
+    'BUILD_SHARED_LIBS': false,
+    'WEBP_BUILD_ANIM_UTILS': false,
+    'WEBP_BUILD_CWEBP': false,
+    'WEBP_BUILD_DWEBP': false,
+    'WEBP_BUILD_EXTRAS': false,
+    'WEBP_BUILD_GIF2WEBP': false,
+    'WEBP_BUILD_IMG2WEBP': false,
+    'WEBP_BUILD_LIBWEBPMUX': false,
+    'WEBP_BUILD_VWEBP': false,
+    'WEBP_BUILD_WEBPINFO': false,
+    'WEBP_BUILD_WEBPMUX': false,
+  })
+  libwebp_subproject = import('cmake').subproject(
+    'libwebp',
+    options: libwebp_cmake_options,
+    required: libwebp_source == 'subproject',
+  )
+  if libwebp_subproject.found()
+    libwebp_dec_dep = libwebp_subproject.dependency('webpdecoder')
+    # webpdemux pulls in the full webp library, which already decodes; adding
+    # webpdecoder alongside it would only offer the linker a second copy.
+    libwebpdec_deps = [libwebp_subproject.dependency('webpdemux')]
+    have_libwebp = true
+    libwebp_origin = 'subproject'
+  endif
+endif
+
+if not have_libwebp and libwebp_source in ['auto', 'system']
+  libwebp_dec_dep = dependency('libwebp', required: false, static: true)
+  have_libwebp = libwebp_dec_dep.found()
+  libwebp_origin = 'system'
+endif
+
+if libwebpdec_deps.length() == 0 and have_libwebp
+  libwebpdemux_dep = dependency('libwebpdemux', required: false, static: true)
+  if libwebpdemux_dep.found()
+    libwebpdec_deps = [libwebp_dec_dep, libwebpdemux_dep]
+  endif
+endif
+
+if libwebpdec_deps.length() > 0
   executable(
     'libwebpdec',
     'tools/libwebpdec.c',
     getopt_sources,
-    dependencies: [libwebp_dep, libwebpdemux_dep],
+    dependencies: libwebpdec_deps,
     include_directories: getopt_inc_dirs,
     build_by_default: false,
     install: false,
   )
   message('libwebpdec: enabled (build explicitly with target libwebpdec)')
 else
-  message('libwebpdec: disabled (static libwebp and libwebpdemux not found)')
+  message('libwebpdec: disabled (libwebp demuxer not found)')
 endif
 
 checkasm_dep = dependency(

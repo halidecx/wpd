@@ -3,6 +3,12 @@ option('enable_asm',
     value: true,
     description: 'Build asm files, if available')
 
+option('libwebp',
+    type: 'combo',
+    choices: ['auto', 'subproject', 'system', 'disabled'],
+    value: 'auto',
+    description: 'Where the libwebp compared against comes from')
+
 option('libwebpdecoder',
     type: 'string',
     value: '',
