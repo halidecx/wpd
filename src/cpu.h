@@ -42,6 +42,7 @@ extern atomic_uint wpd_cpu_flags_mask;
 
 void          wpd_init_cpu(void);
 void          wpd_set_cpu_flags_mask(unsigned mask);
+int           wpd_num_logical_processors(void);
 unsigned long wpd_getauxval(unsigned long type);
 
 /* Feature set the compiler was told to target. Detection starts from these,

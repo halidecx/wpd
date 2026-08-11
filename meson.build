@@ -89,6 +89,12 @@ endif
 
 threads_dep = dependency('threads', required: get_option('threads'))
 lib_c_args += '-DWPD_HAVE_THREADS=@0@'.format(threads_dep.found() ? 1 : 0)
+# Counting the threads a process is actually allowed to run on, rather than the
+# ones the machine has, needs the affinity mask.
+lib_c_args += '-DWPD_HAVE_PTHREAD_GETAFFINITY_NP=@0@'.format(
+  threads_dep.found() and cc.has_function('pthread_getaffinity_np',
+    prefix: '#define _GNU_SOURCE\n#include <pthread.h>',
+    dependencies: threads_dep) ? 1 : 0)
 
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or

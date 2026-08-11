@@ -46,6 +46,10 @@ static wpd_always_inline void wpd_cond_wait(wpd_cond *c, wpd_mutex *m) {
     SleepConditionVariableSRW(c, m, INFINITE, 0);
 }
 
+static wpd_always_inline void wpd_cond_signal(wpd_cond *c) {
+    WakeConditionVariable(c);
+}
+
 static wpd_always_inline void wpd_cond_broadcast(wpd_cond *c) {
     WakeAllConditionVariable(c);
 }
@@ -97,6 +101,10 @@ static wpd_always_inline void wpd_cond_destroy(wpd_cond *c) {
 
 static wpd_always_inline void wpd_cond_wait(wpd_cond *c, wpd_mutex *m) {
     pthread_cond_wait(c, m);
+}
+
+static wpd_always_inline void wpd_cond_signal(wpd_cond *c) {
+    pthread_cond_signal(c);
 }
 
 static wpd_always_inline void wpd_cond_broadcast(wpd_cond *c) {
