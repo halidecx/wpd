@@ -83,6 +83,10 @@ lib_c_args += '-DWPD_HAVE_GETAUXVAL=@0@'.format(
 lib_c_args += '-DWPD_HAVE_ELF_AUX_INFO=@0@'.format(
   cc.has_function('elf_aux_info', prefix: '#include <sys/auxv.h>') ? 1 : 0)
 
+if get_option('force_rac32')
+  lib_c_args += '-DWPD_FORCE_RAC32'
+endif
+
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or
   cpu_family.startswith('arm') or

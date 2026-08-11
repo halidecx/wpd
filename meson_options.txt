@@ -24,6 +24,11 @@ option('testdata_dir',
     value: '',
     description: 'Path to wpd-test-data; defaults to wpd-test-data in the source root')
 
+option('force_rac32',
+    type: 'boolean',
+    value: false,
+    description: 'Use the 32-bit range coder even where the 64-bit one fits')
+
 option('trim_dsp',
   type: 'combo',
   choices: ['true', 'false', 'if-release'],
