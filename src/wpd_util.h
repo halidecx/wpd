@@ -16,8 +16,6 @@
 
 #define WPD_ERROR(e) (-(e))
 #define WPD_ERROR_INVALID_DATA (-1094995529)
-#define WPD_LOG_ERROR 0
-#define WPD_LOG_WARNING 1
 
 static wpd_always_inline unsigned wpd_clip_uint8(int value) {
     return value & ~255 ? (unsigned)((-value >> 31) & 255) : (unsigned)value;

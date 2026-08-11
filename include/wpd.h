@@ -117,6 +117,28 @@ WPD_API const char *wpd_decoder_error(const WPDDecoder *decoder);
 
 WPD_API void wpd_decoder_free(WPDDecoder *decoder);
 
+typedef enum WPDLogLevel {
+    WPD_LOG_ERROR   = 0,
+    WPD_LOG_WARNING = 1,
+} WPDLogLevel;
+
+/* 'message' is a complete, NUL-terminated line with no trailing newline, valid
+   only for the duration of the call. */
+typedef void (*WPDLogCallback)(void *opaque, WPDLogLevel level,
+                               const char *message);
+
+/* Redirect diagnostics, which are silent by default. 'opaque' is handed back to
+   every call. Passing a NULL callback silences them again.
+
+   This is process-global. Install it before decoding starts: it may be called
+   from any thread, and a decode that sees the callback is guaranteed to see the
+   'opaque' installed alongside it, on that thread and every other. Replacing or
+   clearing it while another thread is decoding is not supported. The callback
+   and the opaque are read one after the other, so a decode already past the
+   first read can pair the outgoing callback with the incoming opaque; only the
+   initial install is ordered. */
+WPD_API void wpd_set_log_callback(WPDLogCallback callback, void *opaque);
+
 #ifdef __cplusplus
 }
 #endif
