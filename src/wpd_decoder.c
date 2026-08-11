@@ -650,6 +650,31 @@ typedef struct ImageContext {
     int            is_alpha_primary;
 } ImageContext;
 
+/* One VP8L decode. A lossy frame's alpha is a VP8L image in its own right and
+   shares nothing with the colour planes, so the decoder keeps one of these per
+   image it can be decoding at once rather than one per file. 'ldsp' points at
+   the decoder's function table, which is read-only once initialised. */
+typedef struct Vp8lDecoder {
+    const WPDLosslessDSP *ldsp;
+    LEBitReader           gb;
+    int                   width, height;
+    int                   lossless_has_alpha;
+    int                   nb_transforms;
+    enum TransformType    transforms[4];
+    int                   reduced_width;
+    int                   nb_huffman_groups;
+    ImageContext          image[IMAGE_ROLE_NB];
+    /* Where an alpha plane is written straight out, bypassing the ARGB
+       intermediate; NULL for a colour image. */
+    uint8_t *alpha_dst;
+    int      alpha_dst_stride;
+    int      alpha_dst_used;
+    /* Cursor a still image being streamed resumes from. */
+    size_t pos, cached;
+    int    x, y, hg;
+    int    rows_done;
+} Vp8lDecoder;
+
 #if WPD_HAVE_THREADS
 /* A lossy frame's alpha is a VP8L image of its own, sharing nothing with the
    luma and chroma planes, so it decodes on this worker while the calling
@@ -697,9 +722,7 @@ struct WPDDecoder {
     int            vp8l_active;
     int            still_lossless;
     size_t         vp8l_next_try;
-    size_t         vp8l_pos, vp8l_cached;
-    int            vp8l_x, vp8l_y, vp8l_hg;
-    int            vp8l_rows_done, vp8l_rows_out, vp8l_peeked;
+    int            vp8l_rows_out, vp8l_peeked;
     int            frame_index;
     int            canvas_width, canvas_height;
 
@@ -715,17 +738,10 @@ struct WPDDecoder {
     AlphaWorker alpha_worker;
 #endif
 
-    LEBitReader        gb;
-    uint8_t           *alpha_dst;
-    int                alpha_dst_stride;
-    int                alpha_dst_used;
-    int                width, height;
-    int                lossless_has_alpha;
-    int                nb_transforms;
-    enum TransformType transforms[4];
-    int                reduced_width;
-    int                nb_huffman_groups;
-    ImageContext       image[IMAGE_ROLE_NB];
+    int width, height;
+    /* The colour image, and the alpha plane that can decode alongside it. */
+    Vp8lDecoder vp8l;
+    Vp8lDecoder vp8l_alpha;
 
     WebPImage  argb;
     WebPImage  lossless_out;
@@ -827,38 +843,38 @@ static void image_ctx_free(ImageContext *img) {
     memset(img, 0, sizeof(*img));
 }
 
-static void read_huffman_code_simple(WPDDecoder *s, uint8_t *code_lengths,
+static void read_huffman_code_simple(Vp8lDecoder *l, uint8_t *code_lengths,
                                      int alphabet_size) {
-    int nb_symbols = br_bit(&s->gb) + 1;
+    int nb_symbols = br_bit(&l->gb) + 1;
     int symbol;
 
-    symbol = br_bit(&s->gb) ? br_bits(&s->gb, 8) : br_bit(&s->gb);
+    symbol = br_bit(&l->gb) ? br_bits(&l->gb, 8) : br_bit(&l->gb);
     if (symbol < alphabet_size)
         code_lengths[symbol] = 1;
 
     if (nb_symbols == 2) {
-        symbol = br_bits(&s->gb, 8);
+        symbol = br_bits(&l->gb, 8);
         if (symbol < alphabet_size)
             code_lengths[symbol] = 1;
     }
 }
 
-static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
+static int read_huffman_code_normal(Vp8lDecoder *l, uint8_t *code_lengths,
                                     int alphabet_size) {
     /* Code lengths are 3 bits wide, so this table never needs a second level. */
     HuffCode code_len_table[1 << HUFF_TABLE_BITS];
     uint16_t sorted[NUM_CODE_LENGTH_CODES];
     uint8_t  code_length_code_lengths[NUM_CODE_LENGTH_CODES] = {0};
     int      symbol, max_symbol, prev_code_len, ret;
-    int      num_codes = 4 + br_bits(&s->gb, 4);
+    int      num_codes = 4 + br_bits(&l->gb, 4);
 
     for (int i = 0; i < num_codes; i++)
-        code_length_code_lengths[code_length_code_order[i]] = br_bits(&s->gb,
+        code_length_code_lengths[code_length_code_order[i]] = br_bits(&l->gb,
                                                                       3);
 
-    if (br_bit(&s->gb)) {
-        int bits   = 2 + 2 * br_bits(&s->gb, 3);
-        max_symbol = 2 + br_bits(&s->gb, bits);
+    if (br_bit(&l->gb)) {
+        int bits   = 2 + 2 * br_bits(&l->gb, 3);
+        max_symbol = 2 + br_bits(&l->gb, bits);
         if (max_symbol > alphabet_size) {
             wpd_log(NULL,
                     WPD_LOG_ERROR,
@@ -890,10 +906,10 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
 
         if (!max_symbol--)
             break;
-        if (br_is_eos(&s->gb))
+        if (br_is_eos(&l->gb))
             break;
-        br_fill(&s->gb);
-        code_len = huff_read_symbol(code_len_table, &s->gb);
+        br_fill(&l->gb);
+        code_len = huff_read_symbol(code_len_table, &l->gb);
         if (code_len < 16) {
             code_lengths[symbol++] = code_len;
             if (code_len)
@@ -903,11 +919,11 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
             switch (code_len) {
             default: ret = WPD_ERROR_INVALID_DATA; goto finish;
             case 16:
-                repeat = 3 + br_bits(&s->gb, 2);
+                repeat = 3 + br_bits(&l->gb, 2);
                 length = prev_code_len;
                 break;
-            case 17: repeat = 3 + br_bits(&s->gb, 3); break;
-            case 18: repeat = 11 + br_bits(&s->gb, 7); break;
+            case 17: repeat = 3 + br_bits(&l->gb, 3); break;
+            case 18: repeat = 11 + br_bits(&l->gb, 7); break;
             }
             if (symbol + repeat > alphabet_size) {
                 wpd_log(NULL,
@@ -929,27 +945,27 @@ finish:
     return ret;
 }
 
-static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
-                                      int h);
+static int decode_entropy_coded_image(Vp8lDecoder *l, enum ImageRole role,
+                                      int w, int h);
 
 #define PARSE_BLOCK_SIZE(w, h)                                    \
     do {                                                          \
-        block_bits = br_bits(&s->gb, 3) + 2;                      \
+        block_bits = br_bits(&l->gb, 3) + 2;                      \
         blocks_w   = ((w) + (1 << block_bits) - 1) >> block_bits; \
         blocks_h   = ((h) + (1 << block_bits) - 1) >> block_bits; \
     } while (0)
 
-static int decode_entropy_image(WPDDecoder *s) {
+static int decode_entropy_image(Vp8lDecoder *l) {
     ImageContext *img;
     int           ret, block_bits, blocks_w, blocks_h, x, y, max;
 
-    PARSE_BLOCK_SIZE(s->reduced_width, s->height);
+    PARSE_BLOCK_SIZE(l->reduced_width, l->height);
 
-    ret = decode_entropy_coded_image(s, IMAGE_ROLE_ENTROPY, blocks_w, blocks_h);
+    ret = decode_entropy_coded_image(l, IMAGE_ROLE_ENTROPY, blocks_w, blocks_h);
     if (ret < 0)
         return ret;
 
-    img                 = &s->image[IMAGE_ROLE_ENTROPY];
+    img                 = &l->image[IMAGE_ROLE_ENTROPY];
     img->size_reduction = block_bits;
 
     max = 0;
@@ -961,47 +977,47 @@ static int decode_entropy_image(WPDDecoder *s) {
             max    = WPD_MAX(max, p);
         }
     }
-    s->nb_huffman_groups = max + 1;
+    l->nb_huffman_groups = max + 1;
 
     return 0;
 }
 
-static int parse_transform_predictor(WPDDecoder *s) {
+static int parse_transform_predictor(Vp8lDecoder *l) {
     int block_bits, blocks_w, blocks_h, ret;
 
-    PARSE_BLOCK_SIZE(s->reduced_width, s->height);
+    PARSE_BLOCK_SIZE(l->reduced_width, l->height);
 
     ret = decode_entropy_coded_image(
-        s, IMAGE_ROLE_PREDICTOR, blocks_w, blocks_h);
+        l, IMAGE_ROLE_PREDICTOR, blocks_w, blocks_h);
     if (ret < 0)
         return ret;
 
-    s->image[IMAGE_ROLE_PREDICTOR].size_reduction = block_bits;
+    l->image[IMAGE_ROLE_PREDICTOR].size_reduction = block_bits;
 
     return 0;
 }
 
-static int parse_transform_color(WPDDecoder *s) {
+static int parse_transform_color(Vp8lDecoder *l) {
     int block_bits, blocks_w, blocks_h, ret;
 
-    PARSE_BLOCK_SIZE(s->reduced_width, s->height);
+    PARSE_BLOCK_SIZE(l->reduced_width, l->height);
 
     ret = decode_entropy_coded_image(
-        s, IMAGE_ROLE_COLOR_TRANSFORM, blocks_w, blocks_h);
+        l, IMAGE_ROLE_COLOR_TRANSFORM, blocks_w, blocks_h);
     if (ret < 0)
         return ret;
 
-    s->image[IMAGE_ROLE_COLOR_TRANSFORM].size_reduction = block_bits;
+    l->image[IMAGE_ROLE_COLOR_TRANSFORM].size_reduction = block_bits;
 
     return 0;
 }
 
-static int parse_transform_color_indexing(WPDDecoder *s) {
+static int parse_transform_color_indexing(Vp8lDecoder *l) {
     ImageContext *img;
     int           width_bits, index_size, ret, x;
     uint8_t      *ct;
 
-    index_size = br_bits(&s->gb, 8) + 1;
+    index_size = br_bits(&l->gb, 8) + 1;
 
     if (index_size <= 2)
         width_bits = 3;
@@ -1013,14 +1029,14 @@ static int parse_transform_color_indexing(WPDDecoder *s) {
         width_bits = 0;
 
     ret = decode_entropy_coded_image(
-        s, IMAGE_ROLE_COLOR_INDEXING, index_size, 1);
+        l, IMAGE_ROLE_COLOR_INDEXING, index_size, 1);
     if (ret < 0)
         return ret;
 
-    img                 = &s->image[IMAGE_ROLE_COLOR_INDEXING];
+    img                 = &l->image[IMAGE_ROLE_COLOR_INDEXING];
     img->size_reduction = width_bits;
     if (width_bits > 0)
-        s->reduced_width = (s->width + ((1 << width_bits) - 1)) >> width_bits;
+        l->reduced_width = (l->width + ((1 << width_bits) - 1)) >> width_bits;
 
     ct = img->frame->data[0] + 4;
     for (x = 4; x < img->frame->width * 4; x++, ct++) ct[0] += ct[-4];
@@ -1028,9 +1044,9 @@ static int parse_transform_color_indexing(WPDDecoder *s) {
     return 0;
 }
 
-static HTreeGroup *get_huffman_group(WPDDecoder *s, ImageContext *img, int x,
+static HTreeGroup *get_huffman_group(Vp8lDecoder *l, ImageContext *img, int x,
                                      int y) {
-    ImageContext *gimg  = &s->image[IMAGE_ROLE_ENTROPY];
+    ImageContext *gimg  = &l->image[IMAGE_ROLE_ENTROPY];
     int           group = 0;
 
     if (gimg->size_reduction > 0) {
@@ -1081,7 +1097,7 @@ static wpd_always_inline void copy_block32(uint8_t *dst, int dist, int length) {
     }
 }
 
-static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
+static wpd_always_inline int read_entropy_image_header(Vp8lDecoder   *l,
                                                        enum ImageRole role,
                                                        int w, int h) {
     ImageContext *img;
@@ -1090,7 +1106,7 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
     uint16_t     *sorted;
     int           i, j, ret, max_alphabet_size;
 
-    img       = &s->image[role];
+    img       = &l->image[role];
     img->role = role;
 
     if (!img->frame)
@@ -1100,8 +1116,8 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
     if (ret < 0)
         return ret;
 
-    if (br_bit(&s->gb)) {
-        img->color_cache_bits = br_bits(&s->gb, 4);
+    if (br_bit(&l->gb)) {
+        img->color_cache_bits = br_bits(&l->gb, 4);
         if (img->color_cache_bits < 1 || img->color_cache_bits > 11) {
             wpd_log(NULL,
                     WPD_LOG_ERROR,
@@ -1118,11 +1134,11 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
     }
 
     img->nb_huffman_groups = 1;
-    if (role == IMAGE_ROLE_ARGB && br_bit(&s->gb)) {
-        ret = decode_entropy_image(s);
+    if (role == IMAGE_ROLE_ARGB && br_bit(&l->gb)) {
+        ret = decode_entropy_image(l);
         if (ret < 0)
             return ret;
-        img->nb_huffman_groups = s->nb_huffman_groups;
+        img->nb_huffman_groups = l->nb_huffman_groups;
     }
     img->huffman_groups = wpd_mallocz((size_t)img->nb_huffman_groups *
                                       sizeof(*img->huffman_groups));
@@ -1145,10 +1161,10 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
                 alphabet_size += 1 << img->color_cache_bits;
 
             memset(code_lengths, 0, alphabet_size);
-            if (br_bit(&s->gb))
-                read_huffman_code_simple(s, code_lengths, alphabet_size);
+            if (br_bit(&l->gb))
+                read_huffman_code_simple(l, code_lengths, alphabet_size);
             else
-                ret = read_huffman_code_normal(s, code_lengths, alphabet_size);
+                ret = read_huffman_code_normal(l, code_lengths, alphabet_size);
             if (ret >= 0)
                 ret = huff_reader_build(
                     &hg->trees[j], code_lengths, alphabet_size, sorted);
@@ -1172,24 +1188,24 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
     return 0;
 }
 
-static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
+static wpd_always_inline int decode_entropy_pixels(Vp8lDecoder   *l,
                                                    enum ImageRole role,
                                                    const int      resumable) {
-    ImageContext *img = &s->image[role];
+    ImageContext *img = &l->image[role];
     HTreeGroup   *hg;
     int           x, y, width;
 
     width = img->frame->width;
-    if (role == IMAGE_ROLE_ARGB && s->reduced_width < width) {
+    if (role == IMAGE_ROLE_ARGB && l->reduced_width < width) {
         /* Decode packed palette rows contiguously; expansion re-strides. */
-        width                   = s->reduced_width;
+        width                   = l->reduced_width;
         img->frame->linesize[0] = width * 4;
     }
 
     {
         const int      multi_group = img->nb_huffman_groups > 1;
         const int      huff_bits   = multi_group
-            ? s->image[IMAGE_ROLE_ENTROPY].size_reduction
+            ? l->image[IMAGE_ROLE_ENTROPY].size_reduction
             : 0;
         const int      huff_mask   = huff_bits ? (1 << huff_bits) - 1 : ~0;
         uint8_t       *base        = img->frame->data[0];
@@ -1203,47 +1219,47 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
         x  = 0;
         y  = 0;
         if (resumable) {
-            pos    = s->vp8l_pos;
-            x      = s->vp8l_x;
-            y      = s->vp8l_y;
-            cached = base + s->vp8l_cached;
-            hg     = &img->huffman_groups[s->vp8l_hg];
+            pos    = l->pos;
+            x      = l->x;
+            y      = l->y;
+            cached = base + l->cached;
+            hg     = &img->huffman_groups[l->hg];
         }
         while (pos < total) {
             uint8_t *p = base + 4 * pos;
             int      v;
 
-            if (!resumable && br_is_eos(&s->gb))
+            if (!resumable && br_is_eos(&l->gb))
                 return WPD_ERROR_INVALID_DATA;
             /* One pixel reads at most 108 bits, which draws the reader no
                more than 20 bytes further in, so the margin leaves the loop
                nothing to save or check until the end really is in sight. */
             if (resumable) {
-                near = s->gb.len - s->gb.pos <= VP8L_TAIL_MARGIN;
+                near = l->gb.len - l->gb.pos <= VP8L_TAIL_MARGIN;
                 if (near)
-                    snap = s->gb;
+                    snap = l->gb;
             }
 
             if ((x & huff_mask) == 0)
-                hg = get_huffman_group(s, img, x, y);
-            br_fill(&s->gb);
-            v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
+                hg = get_huffman_group(l, img, x, y);
+            br_fill(&l->gb);
+            v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &l->gb);
             if (v < NUM_LITERAL_CODES) {
                 if (hg->trivial_literal) {
-                    if (resumable && near && br_is_eos(&s->gb))
+                    if (resumable && near && br_is_eos(&l->gb))
                         goto suspend;
                     copy32(p, hg->literal);
                     p[2] = v;
                 } else {
                     int r = huff_read_symbol(hg->trees[HUFF_IDX_RED].table,
-                                             &s->gb);
+                                             &l->gb);
                     int b, a;
-                    br_fill(&s->gb);
+                    br_fill(&l->gb);
                     b = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table,
-                                         &s->gb);
+                                         &l->gb);
                     a = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table,
-                                         &s->gb);
-                    if (resumable && near && br_is_eos(&s->gb))
+                                         &l->gb);
+                    if (resumable && near && br_is_eos(&l->gb))
                         goto suspend;
                     p[0] = a;
                     p[1] = r;
@@ -1266,11 +1282,11 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
                 } else {
                     int extra_bits = (prefix_code - 2) >> 1;
                     int offset     = (2 + (prefix_code & 1)) << extra_bits;
-                    length         = offset + br_bits(&s->gb, extra_bits) + 1;
+                    length         = offset + br_bits(&l->gb, extra_bits) + 1;
                 }
                 prefix_code = huff_read_symbol(hg->trees[HUFF_IDX_DIST].table,
-                                               &s->gb);
-                br_fill(&s->gb);
+                                               &l->gb);
+                br_fill(&l->gb);
                 if (prefix_code > 39) {
                     wpd_log(NULL,
                             WPD_LOG_ERROR,
@@ -1283,10 +1299,10 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
                 } else {
                     int extra_bits = (prefix_code - 2) >> 1;
                     int offset     = (2 + (prefix_code & 1)) << extra_bits;
-                    distance       = offset + br_bits(&s->gb, extra_bits) + 1;
+                    distance       = offset + br_bits(&l->gb, extra_bits) + 1;
                 }
 
-                if (resumable && near && br_is_eos(&s->gb))
+                if (resumable && near && br_is_eos(&l->gb))
                     goto suspend;
 
                 if (distance <= NUM_SHORT_DISTANCES) {
@@ -1308,13 +1324,13 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
                     y++;
                 }
                 if (multi_group && (x & huff_mask))
-                    hg = get_huffman_group(s, img, x, y);
+                    hg = get_huffman_group(l, img, x, y);
                 if (img->color_cache_bits)
                     cached = color_cache_fill(img, cached, base + 4 * pos);
             } else {
                 int cache_idx = v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES);
 
-                if (resumable && near && br_is_eos(&s->gb))
+                if (resumable && near && br_is_eos(&l->gb))
                     goto suspend;
                 if (!img->color_cache_bits) {
                     wpd_log(NULL, WPD_LOG_ERROR, "color cache not found\n");
@@ -1336,42 +1352,42 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
             }
         }
         if (resumable)
-            s->vp8l_rows_done = y;
+            l->rows_done = y;
         return 0;
 
     suspend:
-        s->gb             = snap;
-        s->vp8l_pos       = pos;
-        s->vp8l_x         = x;
-        s->vp8l_y         = y;
-        s->vp8l_cached    = (size_t)(cached - base);
-        s->vp8l_hg        = (int)(hg - img->huffman_groups);
-        s->vp8l_rows_done = y;
+        l->gb        = snap;
+        l->pos       = pos;
+        l->x         = x;
+        l->y         = y;
+        l->cached    = (size_t)(cached - base);
+        l->hg        = (int)(hg - img->huffman_groups);
+        l->rows_done = y;
         return VP8L_NEED_MORE;
     }
 }
 
-static wpd_noclone int vp8l_resume_argb_pixels(WPDDecoder *s) {
-    return decode_entropy_pixels(s, IMAGE_ROLE_ARGB, 1);
+static wpd_noclone int vp8l_resume_argb_pixels(Vp8lDecoder *l) {
+    return decode_entropy_pixels(l, IMAGE_ROLE_ARGB, 1);
 }
 
-static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
-                                      int h) {
-    int ret = read_entropy_image_header(s, role, w, h);
+static int decode_entropy_coded_image(Vp8lDecoder *l, enum ImageRole role,
+                                      int w, int h) {
+    int ret = read_entropy_image_header(l, role, w, h);
 
     if (ret < 0)
         return ret;
-    return decode_entropy_pixels(s, role, 0);
+    return decode_entropy_pixels(l, role, 0);
 }
 
-static wpd_always_inline int predictor_transform_rows(WPDDecoder *s,
-                                                      uint32_t   *rows,
-                                                      int         stride,
+static wpd_always_inline int predictor_transform_rows(Vp8lDecoder *l,
+                                                      uint32_t    *rows,
+                                                      int          stride,
                                                       uint32_t *upper0, int y0,
                                                       int y1) {
-    ImageContext              *pimg      = &s->image[IMAGE_ROLE_PREDICTOR];
-    pred_add_func const *const pred_add  = s->ldsp.pred_add;
-    const int                  width     = s->reduced_width;
+    ImageContext              *pimg      = &l->image[IMAGE_ROLE_PREDICTOR];
+    pred_add_func const *const pred_add  = l->ldsp->pred_add;
+    const int                  width     = l->reduced_width;
     const int                  tile_bits = pimg->size_reduction;
     const int                  tile_size = 1 << tile_bits;
     const int                  tile_mask = tile_size - 1;
@@ -1420,10 +1436,10 @@ static wpd_always_inline int predictor_transform_rows(WPDDecoder *s,
     return 0;
 }
 
-static int apply_predictor_transform(WPDDecoder *s) {
-    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
+static int apply_predictor_transform(Vp8lDecoder *l) {
+    ImageContext *img = &l->image[IMAGE_ROLE_ARGB];
 
-    return predictor_transform_rows(s,
+    return predictor_transform_rows(l,
                                     (uint32_t *)img->frame->data[0],
                                     img->frame->linesize[0] / 4,
                                     NULL,
@@ -1436,10 +1452,10 @@ static wpd_always_inline uint8_t color_transform_delta(uint8_t color_pred,
     return u8_to_s8(color_pred) * u8_to_s8(color) >> 5;
 }
 
-static wpd_always_inline int color_transform_rows(WPDDecoder *s, uint8_t *rows,
+static wpd_always_inline int color_transform_rows(Vp8lDecoder *l, uint8_t *rows,
                                                   int stride, int y0, int y1) {
-    ImageContext *cimg      = &s->image[IMAGE_ROLE_COLOR_TRANSFORM];
-    const int     width     = s->reduced_width;
+    ImageContext *cimg      = &l->image[IMAGE_ROLE_COLOR_TRANSFORM];
+    const int     width     = l->reduced_width;
     const int     tile_bits = cimg->size_reduction;
     const int     tile_size = 1 << tile_bits;
     const int     tile_mask = tile_size - 1;
@@ -1470,16 +1486,16 @@ static wpd_always_inline int color_transform_rows(WPDDecoder *s, uint8_t *rows,
     return 0;
 }
 
-static int apply_color_transform(WPDDecoder *s) {
-    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
+static int apply_color_transform(Vp8lDecoder *l) {
+    ImageContext *img = &l->image[IMAGE_ROLE_ARGB];
 
     return color_transform_rows(
-        s, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
+        l, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
 }
 
-static wpd_always_inline int subtract_green_rows(WPDDecoder *s, uint8_t *rows,
+static wpd_always_inline int subtract_green_rows(Vp8lDecoder *l, uint8_t *rows,
                                                  int stride, int y0, int y1) {
-    const int width = s->reduced_width;
+    const int width = l->reduced_width;
     int       x, y;
 
     for (y = y0; y < y1; y++, rows += stride) {
@@ -1492,16 +1508,16 @@ static wpd_always_inline int subtract_green_rows(WPDDecoder *s, uint8_t *rows,
     return 0;
 }
 
-static int apply_subtract_green_transform(WPDDecoder *s) {
-    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
+static int apply_subtract_green_transform(Vp8lDecoder *l) {
+    ImageContext *img = &l->image[IMAGE_ROLE_ARGB];
 
     return subtract_green_rows(
-        s, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
+        l, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
 }
 
-static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
-    ImageContext *img    = &s->image[IMAGE_ROLE_ARGB];
-    ImageContext *pal    = &s->image[IMAGE_ROLE_COLOR_INDEXING];
+static int apply_color_indexing_transform_alpha(Vp8lDecoder *l) {
+    ImageContext *img    = &l->image[IMAGE_ROLE_ARGB];
+    ImageContext *pal    = &l->image[IMAGE_ROLE_COLOR_INDEXING];
     const int     width  = img->frame->width;
     const int     height = img->frame->height;
     const int     pal_w  = pal->frame->width;
@@ -1514,7 +1530,7 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
 
     for (y = 0; y < height; y++) {
         const uint8_t *src = GET_PIXEL(img->frame, 0, y) + 2;
-        uint8_t       *dst = s->alpha_dst + (size_t)s->alpha_dst_stride * y;
+        uint8_t       *dst = l->alpha_dst + (size_t)l->alpha_dst_stride * y;
 
         if (pal->size_reduction > 0) {
             const int      pixel_bits      = 8 >> pal->size_reduction;
@@ -1542,8 +1558,8 @@ static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
     }
 
     img->frame->linesize[0] = width * 4;
-    s->alpha_dst_used       = 1;
-    s->reduced_width        = s->width;
+    l->alpha_dst_used       = 1;
+    l->reduced_width        = l->width;
     return 0;
 }
 
@@ -1573,7 +1589,7 @@ static wpd_always_inline void expand_palette_rows(uint8_t *base, int dst_stride,
     }
 }
 
-static wpd_always_inline int color_indexing_rows(WPDDecoder *s, uint8_t *base,
+static wpd_always_inline int color_indexing_rows(Vp8lDecoder *l, uint8_t *base,
                                                  int dst_stride, int src_stride,
                                                  int height, int big) {
     ImageContext *img;
@@ -1581,8 +1597,8 @@ static wpd_always_inline int color_indexing_rows(WPDDecoder *s, uint8_t *base,
     int           i, x, y;
     uint8_t      *p;
 
-    img = &s->image[IMAGE_ROLE_ARGB];
-    pal = &s->image[IMAGE_ROLE_COLOR_INDEXING];
+    img = &l->image[IMAGE_ROLE_ARGB];
+    pal = &l->image[IMAGE_ROLE_COLOR_INDEXING];
 
     if (pal->size_reduction > 0) {
         const int      pixel_bits      = 8 >> pal->size_reduction;
@@ -1633,7 +1649,7 @@ static wpd_always_inline int color_indexing_rows(WPDDecoder *s, uint8_t *base,
         for (y = 0; y < height; y++) {
             uint8_t *row = base + (size_t)y * dst_stride;
 
-            s->ldsp.map_color32(row, row, palette, w);
+            l->ldsp->map_color32(row, row, palette, w);
         }
     } else {
         for (y = 0; y < height; y++) {
@@ -1653,14 +1669,14 @@ static wpd_always_inline int color_indexing_rows(WPDDecoder *s, uint8_t *base,
     return 0;
 }
 
-static int apply_color_indexing_transform(WPDDecoder *s) {
-    ImageContext *img    = &s->image[IMAGE_ROLE_ARGB];
-    ImageContext *pal    = &s->image[IMAGE_ROLE_COLOR_INDEXING];
+static int apply_color_indexing_transform(Vp8lDecoder *l) {
+    ImageContext *img    = &l->image[IMAGE_ROLE_ARGB];
+    ImageContext *pal    = &l->image[IMAGE_ROLE_COLOR_INDEXING];
     const int     width  = img->frame->width;
     const int     height = img->frame->height;
     int           ret;
 
-    ret = color_indexing_rows(s,
+    ret = color_indexing_rows(l,
                               GET_PIXEL(img->frame, 0, 0),
                               width * 4,
                               img->frame->linesize[0],
@@ -1670,7 +1686,7 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
         return ret;
     if (pal->size_reduction > 0) {
         img->frame->linesize[0] = width * 4;
-        s->reduced_width        = s->width;
+        l->reduced_width        = l->width;
     }
     return 0;
 }
@@ -1694,47 +1710,51 @@ static void update_canvas_size(WPDDecoder *s, int w, int h) {
     s->height = h;
 }
 
+/* 's' is only consulted for a colour image, whose header carries the canvas
+   dimensions; an alpha chunk inherits the ones 'l' was given. */
 static wpd_always_inline int vp8l_read_frame_header(
-    WPDDecoder *s, WebPImage *out, const uint8_t *data_start,
+    WPDDecoder *s, Vp8lDecoder *l, WebPImage *out, const uint8_t *data_start,
     unsigned int data_size, int is_alpha_chunk, int *w_out, int *h_out) {
     int      w, h, ret;
     unsigned used;
 
-    br_init(&s->gb, data_start, data_size);
+    br_init(&l->gb, data_start, data_size);
 
     if (!is_alpha_chunk) {
-        if (br_bits(&s->gb, 8) != 0x2F) {
+        if (br_bits(&l->gb, 8) != 0x2F) {
             wpd_log(NULL, WPD_LOG_ERROR, "Invalid WebP Lossless signature\n");
             return WPD_ERROR_INVALID_DATA;
         }
 
-        w = br_bits(&s->gb, 14) + 1;
-        h = br_bits(&s->gb, 14) + 1;
+        w = br_bits(&l->gb, 14) + 1;
+        h = br_bits(&l->gb, 14) + 1;
 
         update_canvas_size(s, w, h);
+        l->width  = s->width;
+        l->height = s->height;
 
-        ret = wpd_check_image_size(s->width, s->height);
+        ret = wpd_check_image_size(l->width, l->height);
         if (ret < 0)
             return ret;
 
-        s->lossless_has_alpha = br_bit(&s->gb);
+        l->lossless_has_alpha = br_bit(&l->gb);
 
-        if (br_bits(&s->gb, 3) != 0x0) {
+        if (br_bits(&l->gb, 3) != 0x0) {
             wpd_log(NULL, WPD_LOG_ERROR, "Invalid WebP Lossless version\n");
             return WPD_ERROR_INVALID_DATA;
         }
     } else {
-        if (!s->width || !s->height)
+        if (!l->width || !l->height)
             return WPD_ERROR_INVALID_DATA;
-        w = s->width;
-        h = s->height;
+        w = l->width;
+        h = l->height;
     }
 
-    s->nb_transforms = 0;
-    s->reduced_width = s->width;
+    l->nb_transforms = 0;
+    l->reduced_width = l->width;
     used             = 0;
-    while (br_bit(&s->gb)) {
-        enum TransformType transform = br_bits(&s->gb, 2);
+    while (br_bit(&l->gb)) {
+        enum TransformType transform = br_bits(&l->gb, 2);
         if (used & (1 << transform)) {
             wpd_log(NULL,
                     WPD_LOG_ERROR,
@@ -1743,13 +1763,13 @@ static wpd_always_inline int vp8l_read_frame_header(
             return WPD_ERROR_INVALID_DATA;
         }
         used |= (1 << transform);
-        s->transforms[s->nb_transforms++] = transform;
+        l->transforms[l->nb_transforms++] = transform;
         ret                               = 0;
         switch (transform) {
-        case PREDICTOR_TRANSFORM: ret = parse_transform_predictor(s); break;
-        case COLOR_TRANSFORM: ret = parse_transform_color(s); break;
+        case PREDICTOR_TRANSFORM: ret = parse_transform_predictor(l); break;
+        case COLOR_TRANSFORM: ret = parse_transform_color(l); break;
         case COLOR_INDEXING_TRANSFORM:
-            ret = parse_transform_color_indexing(s);
+            ret = parse_transform_color_indexing(l);
             break;
         case SUBTRACT_GREEN: break;
         }
@@ -1757,28 +1777,28 @@ static wpd_always_inline int vp8l_read_frame_header(
             return ret;
     }
 
-    s->image[IMAGE_ROLE_ARGB].frame = out;
+    l->image[IMAGE_ROLE_ARGB].frame = out;
     if (is_alpha_chunk)
-        s->image[IMAGE_ROLE_ARGB].is_alpha_primary = 1;
+        l->image[IMAGE_ROLE_ARGB].is_alpha_primary = 1;
     *w_out = w;
     *h_out = h;
-    return read_entropy_image_header(s, IMAGE_ROLE_ARGB, w, h);
+    return read_entropy_image_header(l, IMAGE_ROLE_ARGB, w, h);
 }
 
-static wpd_noclone int vp8l_apply_transforms(WPDDecoder *s) {
+static wpd_noclone int vp8l_apply_transforms(Vp8lDecoder *l) {
     int i, ret;
 
-    for (i = s->nb_transforms - 1; i >= 0; i--) {
+    for (i = l->nb_transforms - 1; i >= 0; i--) {
         ret = 0;
-        switch (s->transforms[i]) {
-        case PREDICTOR_TRANSFORM: ret = apply_predictor_transform(s); break;
-        case COLOR_TRANSFORM: ret = apply_color_transform(s); break;
-        case SUBTRACT_GREEN: ret = apply_subtract_green_transform(s); break;
+        switch (l->transforms[i]) {
+        case PREDICTOR_TRANSFORM: ret = apply_predictor_transform(l); break;
+        case COLOR_TRANSFORM: ret = apply_color_transform(l); break;
+        case SUBTRACT_GREEN: ret = apply_subtract_green_transform(l); break;
         case COLOR_INDEXING_TRANSFORM:
-            if (s->alpha_dst && s->nb_transforms == 1)
-                ret = apply_color_indexing_transform_alpha(s);
+            if (l->alpha_dst && l->nb_transforms == 1)
+                ret = apply_color_indexing_transform_alpha(l);
             else
-                ret = apply_color_indexing_transform(s);
+                ret = apply_color_indexing_transform(l);
             break;
         }
         if (ret < 0)
@@ -1787,26 +1807,26 @@ static wpd_noclone int vp8l_apply_transforms(WPDDecoder *s) {
     return 0;
 }
 
-static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
-                                     const uint8_t *data_start,
-                                     unsigned int   data_size,
-                                     int            is_alpha_chunk) {
+static int vp8_lossless_decode_frame(WPDDecoder *s, Vp8lDecoder *l,
+                                     WebPImage *out, const uint8_t *data_start,
+                                     unsigned int data_size,
+                                     int          is_alpha_chunk) {
     int w, h, ret, i;
 
     ret = vp8l_read_frame_header(
-        s, out, data_start, data_size, is_alpha_chunk, &w, &h);
+        s, l, out, data_start, data_size, is_alpha_chunk, &w, &h);
     if (ret < 0)
         goto free_and_return;
 
-    ret = decode_entropy_pixels(s, IMAGE_ROLE_ARGB, 0);
+    ret = decode_entropy_pixels(l, IMAGE_ROLE_ARGB, 0);
     if (ret < 0)
         goto free_and_return;
 
-    ret = vp8l_apply_transforms(s);
+    ret = vp8l_apply_transforms(l);
 
 free_and_return:
     out->linesize[0] = out->width * 4;
-    for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+    for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&l->image[i]);
 
     return ret;
 }
@@ -1814,11 +1834,12 @@ free_and_return:
 #define VP8L_ROW_BATCH 16
 
 static int vp8l_transform_rows(WPDDecoder *s, int y0, int y1) {
-    ImageContext *img        = &s->image[IMAGE_ROLE_ARGB];
+    Vp8lDecoder  *l          = &s->vp8l;
+    ImageContext *img        = &l->image[IMAGE_ROLE_ARGB];
     WebPImage    *dst        = &s->lossless_out;
     const int     stride     = dst->linesize[0];
     const int     src_stride = img->frame->linesize[0];
-    const int     packed     = s->reduced_width;
+    const int     packed     = l->reduced_width;
     const size_t  packed_row = (size_t)packed * 4;
     uint8_t      *rows       = dst->data[0] + (size_t)y0 * stride;
     int           i, ret = 0;
@@ -1828,11 +1849,11 @@ static int vp8l_transform_rows(WPDDecoder *s, int y0, int y1) {
                img->frame->data[0] + (size_t)(y0 + i) * src_stride,
                packed_row);
 
-    for (i = s->nb_transforms - 1; i >= 0 && ret >= 0; i--) {
-        switch (s->transforms[i]) {
+    for (i = l->nb_transforms - 1; i >= 0 && ret >= 0; i--) {
+        switch (l->transforms[i]) {
         case PREDICTOR_TRANSFORM:
             ret = predictor_transform_rows(
-                s,
+                l,
                 (uint32_t *)rows,
                 stride / 4,
                 y0 ? (uint32_t *)s->lossless_top : NULL,
@@ -1841,26 +1862,26 @@ static int vp8l_transform_rows(WPDDecoder *s, int y0, int y1) {
             if (ret >= 0)
                 memcpy(s->lossless_top,
                        rows + (size_t)(y1 - 1 - y0) * stride,
-                       (size_t)s->reduced_width * 4);
+                       (size_t)l->reduced_width * 4);
             break;
         case COLOR_TRANSFORM:
-            ret = color_transform_rows(s, rows, stride, y0, y1);
+            ret = color_transform_rows(l, rows, stride, y0, y1);
             break;
         case SUBTRACT_GREEN:
-            ret = subtract_green_rows(s, rows, stride, y0, y1);
+            ret = subtract_green_rows(l, rows, stride, y0, y1);
             break;
         case COLOR_INDEXING_TRANSFORM:
-            ret = color_indexing_rows(s,
+            ret = color_indexing_rows(l,
                                       rows,
                                       stride,
                                       stride,
                                       y1 - y0,
                                       dst->height * dst->width > 300);
-            s->reduced_width = s->width;
+            l->reduced_width = l->width;
             break;
         }
     }
-    s->reduced_width = packed;
+    l->reduced_width = packed;
     return ret;
 }
 
@@ -1886,44 +1907,45 @@ static int vp8l_still_alloc(WPDDecoder *s) {
    Returns 1 once the whole image is out, 0 while more input is needed. */
 static int vp8l_still_step(WPDDecoder *s, const uint8_t *payload,
                            unsigned avail, unsigned size, int complete) {
-    int rows, ret, i, w, h;
+    Vp8lDecoder *l = &s->vp8l;
+    int          rows, ret, i, w, h;
 
     if (!s->vp8l_active) {
         const size_t first = WPD_MAX((size_t)16, (size_t)size / 16);
 
         if (avail < first || (!complete && avail < s->vp8l_next_try))
             return 0;
-        for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+        for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&l->image[i]);
         s->width = s->height = 0;
-        ret = vp8l_read_frame_header(s, &s->argb, payload, avail, 0, &w, &h);
-        if (ret >= 0 && br_is_eos(&s->gb))
+        ret = vp8l_read_frame_header(s, l, &s->argb, payload, avail, 0, &w, &h);
+        if (ret >= 0 && br_is_eos(&l->gb))
             ret = WPD_ERROR_INVALID_DATA;
         if (ret < 0) {
-            for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+            for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&l->image[i]);
             if (complete)
                 return ret;
             s->vp8l_next_try = 2 * (size_t)avail;
             return 0;
         }
-        s->vp8l_pos    = 0;
-        s->vp8l_cached = 0;
-        s->vp8l_x = s->vp8l_y = s->vp8l_hg = 0;
-        s->vp8l_rows_done = s->vp8l_rows_out = 0;
-        s->vp8l_peeked                       = 0;
-        s->vp8l_active                       = 1;
-        s->still_lossless                    = 1;
-        s->lossless_frame                    = &s->argb;
+        l->pos    = 0;
+        l->cached = 0;
+        l->x = l->y = l->hg = 0;
+        l->rows_done = s->vp8l_rows_out = 0;
+        s->vp8l_peeked                  = 0;
+        s->vp8l_active                  = 1;
+        s->still_lossless               = 1;
+        s->lossless_frame               = &s->argb;
     } else {
-        br_extend(&s->gb, payload, avail);
+        br_extend(&l->gb, payload, avail);
     }
 
-    ret = vp8l_resume_argb_pixels(s);
+    ret = vp8l_resume_argb_pixels(l);
     if (ret < 0)
         return ret;
     if (ret == VP8L_NEED_MORE && complete)
         return WPD_ERROR_INVALID_DATA;
 
-    rows = s->vp8l_rows_done;
+    rows = l->rows_done;
     if (ret)
         rows -= rows % VP8L_ROW_BATCH;
     if (s->vp8l_peeked && rows > s->vp8l_rows_out) {
@@ -1938,9 +1960,9 @@ static int vp8l_still_step(WPDDecoder *s, const uint8_t *payload,
 
     /* Nobody looked, so the image can be transformed where it lies. */
     if (!s->vp8l_peeked)
-        ret = vp8l_apply_transforms(s);
+        ret = vp8l_apply_transforms(l);
     s->argb.linesize[0] = s->argb.width * 4;
-    for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+    for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&l->image[i]);
     s->vp8l_active = 0;
     return ret < 0 ? ret : 1;
 }
@@ -1958,7 +1980,7 @@ static int vp8l_still_peek(WPDDecoder *s) {
         s->vp8l_peeked    = 1;
         s->lossless_frame = &s->lossless_out;
     }
-    rows = s->vp8l_rows_done - s->vp8l_rows_done % VP8L_ROW_BATCH;
+    rows = s->vp8l.rows_done - s->vp8l.rows_done % VP8L_ROW_BATCH;
     if (rows > s->vp8l_rows_out) {
         ret = vp8l_transform_rows(s, s->vp8l_rows_out, rows);
         if (ret < 0)
@@ -2021,23 +2043,27 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
             left -= n;
         }
     } else if (s->alpha_compression == ALPHA_COMPRESSION_VP8L) {
-        s->alpha_dst        = p->data[3];
-        s->alpha_dst_stride = p->linesize[3];
-        s->alpha_dst_used   = 0;
+        Vp8lDecoder *l = &s->vp8l_alpha;
+
+        l->width            = s->width;
+        l->height           = s->height;
+        l->alpha_dst        = p->data[3];
+        l->alpha_dst_stride = p->linesize[3];
+        l->alpha_dst_used   = 0;
 
         ret = vp8_lossless_decode_frame(
-            s, &s->alpha_argb, data_start, data_size, 1);
-        s->alpha_dst = NULL;
+            s, l, &s->alpha_argb, data_start, data_size, 1);
+        l->alpha_dst = NULL;
         if (ret < 0) {
             image_free(&s->alpha_argb);
             return ret;
         }
 
-        if (!s->alpha_dst_used)
+        if (!l->alpha_dst_used)
             for (y = 0; y < s->height; y++)
-                s->ldsp.extract_green(p->data[3] + p->linesize[3] * y,
-                                      GET_PIXEL(&s->alpha_argb, 0, y),
-                                      s->width);
+                l->ldsp->extract_green(p->data[3] + p->linesize[3] * y,
+                                       GET_PIXEL(&s->alpha_argb, 0, y),
+                                       s->width);
         image_free(&s->alpha_argb);
     }
 
@@ -3179,11 +3205,12 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         case MKTAG('V', 'P', '8', 'L'):
             if (sub)
                 break;
-            ret = vp8_lossless_decode_frame(s, &s->argb, p, payload_size, 0);
+            ret = vp8_lossless_decode_frame(
+                s, &s->vp8l, &s->argb, p, payload_size, 0);
             if (ret < 0)
                 return ret;
             sub                = &s->argb;
-            s->frame_has_alpha = s->lossless_has_alpha;
+            s->frame_has_alpha = s->vp8l.lossless_has_alpha;
             break;
         default: break;
         }
@@ -3768,6 +3795,8 @@ WPDDecoder *wpd_decoder_create(void) {
     wpd_init_cpu();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     wpd_yuv_dsp_init(&decoder->ydsp);
+    decoder->vp8l.ldsp           = &decoder->ldsp;
+    decoder->vp8l_alpha.ldsp     = &decoder->ldsp;
     decoder->out_format          = WPD_PIX_FMT_NONE;
     decoder->options.struct_size = sizeof(decoder->options);
     return decoder;
@@ -4119,7 +4148,10 @@ static void decoder_reset(WPDDecoder *decoder) {
         decoder->meta[i]      = NULL;
         decoder->meta_size[i] = 0;
     }
-    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    for (int i = 0; i < IMAGE_ROLE_NB; i++) {
+        image_ctx_free(&decoder->vp8l.image[i]);
+        image_ctx_free(&decoder->vp8l_alpha.image[i]);
+    }
     image_free(&decoder->canvas);
     image_free(&decoder->argb);
     image_free(&decoder->lossless_out);
@@ -4541,8 +4573,12 @@ static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
 
     decoder->width = decoder->height = 0;
     if (hs->raw_kind == 1) {
-        ret = vp8_lossless_decode_frame(
-            decoder, &decoder->argb, data, (unsigned)hs->raw_image_size, 0);
+        ret = vp8_lossless_decode_frame(decoder,
+                                        &decoder->vp8l,
+                                        &decoder->argb,
+                                        data,
+                                        (unsigned)hs->raw_image_size,
+                                        0);
         if (ret < 0)
             return set_error(decoder, "VP8L decode failed", ret);
         decoder->still_done     = 1;
@@ -4699,7 +4735,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             }
             decoder->width = decoder->height = 0;
             ret                              = vp8_lossless_decode_frame(
-                decoder, &decoder->argb, payload, size, 0);
+                decoder, &decoder->vp8l, &decoder->argb, payload, size, 0);
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
             decoder->still_done = 1;
@@ -4871,7 +4907,10 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     image_free(&decoder->transformed);
     image_free(&decoder->alpha_argb);
     image_free(&decoder->lossless_out);
-    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    for (int i = 0; i < IMAGE_ROLE_NB; i++) {
+        image_ctx_free(&decoder->vp8l.image[i]);
+        image_ctx_free(&decoder->vp8l_alpha.image[i]);
+    }
     for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
     free(decoder->rescale_work);
     free(decoder->rescale_row);
