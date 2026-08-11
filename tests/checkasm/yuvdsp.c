@@ -156,6 +156,71 @@ static void check_premultiply_row_4444(WPDYUVDSP *dsp) {
     }
 }
 
+static void check_argb_to_y(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, argb, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [MAX_PIXELS + GUARD_PIXELS]);
+    declare_func(void, uint8_t *, const uint8_t *, int);
+
+    if (check_func(dsp->argb_to_y, "argb_to_y")) {
+        for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
+             i++) {
+            const int n = row_lengths[i];
+
+            for (int x = 0; x < 4 * MAX_PIXELS; x++) argb[x] = (uint8_t)rnd();
+            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+                dst0[x] = dst1[x] = (uint8_t)rnd();
+
+            call_ref(dst0, argb, n);
+            call_new(dst1, argb, n);
+            if (memcmp(dst0, dst1, (size_t)n + GUARD_PIXELS))
+                fail();
+        }
+        bench_new(dst1, argb, MAX_PIXELS);
+    }
+}
+
+static void check_argb_to_uv(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, argb, [8 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, u0, [UV_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, u1, [UV_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, v0, [UV_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, v1, [UV_PIXELS]);
+    declare_func(
+        void, uint8_t *, uint8_t *, const uint8_t *, ptrdiff_t, int, int);
+
+    if (check_func(dsp->argb_to_uv, "argb_to_uv")) {
+        for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
+             i++) {
+            const int n = row_lengths[i];
+
+            for (int weight = 0; weight < 2; weight++)
+                for (int alpha = 0; alpha < 3; alpha++)
+                    for (int pair = 0; pair < 2; pair++) {
+                        /* A stride of 0 is how the last row of an odd-height
+                           image is folded onto itself. */
+                        const ptrdiff_t stride = pair ? 4 * MAX_PIXELS : 0;
+                        const int       uv     = (n + 1) / 2;
+
+                        for (int x = 0; x < 8 * MAX_PIXELS; x++)
+                            argb[x] = (uint8_t)rnd();
+                        if (alpha < 2)
+                            for (int x = 0; x < 8 * MAX_PIXELS; x += 4)
+                                argb[x] = alpha ? 0xff : 0;
+                        for (int x = 0; x < UV_PIXELS; x++)
+                            u0[x] = u1[x] = v0[x] = v1[x] = (uint8_t)rnd();
+
+                        call_ref(u0, v0, argb, stride, n, weight);
+                        call_new(u1, v1, argb, stride, n, weight);
+                        if (memcmp(u0, u1, (size_t)uv) ||
+                            memcmp(v0, v1, (size_t)uv))
+                            fail();
+                    }
+        }
+        bench_new(u1, v1, argb, (ptrdiff_t)4 * MAX_PIXELS, MAX_PIXELS, 1);
+    }
+}
+
 static void check_premultiply_row(WPDYUVDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, argb0, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
     LOCAL_ALIGNED_16(uint8_t, argb1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
@@ -386,6 +451,10 @@ void checkasm_check_yuvdsp(void) {
     check_premultiply_row(&dsp);
     check_premultiply_row_4444(&dsp);
     report("premultiply_row");
+    check_argb_to_y(&dsp);
+    report("argb_to_y");
+    check_argb_to_uv(&dsp);
+    report("argb_to_uv");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_RGBA, "rgba");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_BGRA, "bgra");
