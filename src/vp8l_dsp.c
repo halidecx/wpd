@@ -120,7 +120,12 @@ static void pred_add_1(const uint32_t *in, const uint32_t *upper,
         out[x] = left = pred_add_pixels(in[x], left);
 }
 
-PRED_ADD(pred_add_2, t)
+static void pred_add_2(const uint32_t *in, const uint32_t *upper,
+                       int num_pixels, uint32_t *out) {
+    for (int x = 0; x < num_pixels; x++)
+        out[x] = pred_add_pixels(in[x], upper[x]);
+}
+
 PRED_ADD(pred_add_3, tr)
 PRED_ADD(pred_add_4, tl)
 PRED_ADD(pred_add_5, pred_avg3(l, t, tr))
