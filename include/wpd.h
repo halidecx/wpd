@@ -53,6 +53,9 @@ typedef enum WPDStatus {
     WPD_ERR_NO_MEMORY   = -6,
     /* Dimensions or allocation size exceed the decoder's safe limits. */
     WPD_ERR_TOO_LARGE = -7,
+    /* The buffer given to wpd_decoder_set_output_buffer() cannot hold the
+       frame at the stride requested. */
+    WPD_ERR_BUFFER_TOO_SMALL = -8,
 } WPDStatus;
 
 /* A short, static description of 'status'. Never NULL. */
@@ -223,6 +226,48 @@ WPD_API WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
 WPD_API WPDStatus wpd_decoder_set_output_format(WPDDecoder    *decoder,
                                                 WPDPixelFormat format);
 
+typedef struct WPDOutputPlane {
+    uint8_t  *data;
+    size_t    size;
+    ptrdiff_t stride;
+} WPDOutputPlane;
+
+/* Caller-owned memory to write decoded frames into. Packed formats use
+   plane[0]. Planar formats use planes Y, U, V and optionally A in that order.
+   Each size must cover abs(stride) times that plane's height, and each stride
+   must be at least the plane width in magnitude. Negative strides flip planes
+   vertically; data must then point at the first byte of the last row. */
+typedef struct WPDOutputBuffer {
+    /* Set to sizeof(WPDOutputBuffer), normally with WPD_OUTPUT_BUFFER_INIT. */
+    size_t         struct_size;
+    WPDOutputPlane plane[4];
+} WPDOutputBuffer;
+
+#define WPD_OUTPUT_BUFFER_INIT                                     \
+    {                                                              \
+        sizeof(WPDOutputBuffer), {                                 \
+            {NULL, 0, 0}, {NULL, 0, 0}, {NULL, 0, 0}, {NULL, 0, 0} \
+        }                                                          \
+    }
+
+/* Decode into memory the caller owns instead of into decoder-owned memory.
+   Frames returned by wpd_decoder_next_frame() then point into 'buffer', and
+   stay valid for as long as the caller keeps it alive. Pass NULL to go back to
+   decoder-owned memory.
+
+   Animations are composited internally and each finished canvas is written
+   out, so the caller may freely overwrite the buffer between frames.
+
+   The buffer is measured against the final cropped and scaled dimensions on
+   every frame, so it is fine to set it before wpd_decoder_open(). Changing it
+   part way through a progressive still decode is allowed: the rows already
+   written stay in the old buffer, and the new one is filled from the top by
+   the next wpd_decoder_partial_frame(). Returns WPD_OK or WPD_ERR_INVALID_ARG;
+   a buffer too small for the image is reported by wpd_decoder_next_frame() as
+   WPD_ERR_BUFFER_TOO_SMALL. */
+WPD_API WPDStatus wpd_decoder_set_output_buffer(WPDDecoder            *decoder,
+                                                const WPDOutputBuffer *buffer);
+
 /* 'data' is copied, so it need not outlive the call. The whole file has to be
    here: a chunk list that stops short of what it promised is
    WPD_ERR_TRUNCATED, and one that carries no image at all is
@@ -256,7 +301,7 @@ WPD_API WPDStatus wpd_decoder_open_borrowed(WPDDecoder    *decoder,
    is handed over only once it is complete, but it decodes as the bytes arrive
    and its finished rows can be displayed meanwhile; see
    wpd_decoder_partial_frame(). Everything else behaves as it does for a file
-   opened whole, including the output format.
+   opened whole, including the output format and output buffer.
 
    A bare VP8 or VP8L payload with no RIFF header around it carries no length,
    so nothing about it can be decoded until wpd_decoder_end_of_stream() says
@@ -310,8 +355,8 @@ WPD_API WPDStatus wpd_decoder_metadata(const WPDDecoder *decoder,
                                        size_t *size);
 
 /* Returns 1 and fills 'frame', 0 when no further frame is available, or a
-   negative WPDStatus. The frame borrows decoder memory that the next call
-   invalidates.
+   negative WPDStatus. Unless an external output buffer is set, the frame
+   borrows decoder memory that the next call invalidates.
 
    For a file opened whole, 0 means end of stream. For one being streamed, 0
    means no frame can be produced from the bytes appended so far; it means end
@@ -330,9 +375,11 @@ WPD_API int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame);
    frame over yet. A lossless still gives rows away in blocks of sixteen.
 
    Nothing is consumed, so the same frame still arrives from
-   wpd_decoder_next_frame(). Cropped, scaled or flipped output is withheld
-   until the complete source frame is available. Returns WPD_OK, or
-   WPD_ERR_INVALID_ARG if no file is open. */
+   wpd_decoder_next_frame(). An output buffer set with
+   wpd_decoder_set_output_buffer() does receive the finished rows, since that
+   is where the caller asked for output to go. Cropped, scaled or flipped
+   output is withheld until the complete source frame is available. Returns
+   WPD_OK, or WPD_ERR_INVALID_ARG if no file is open. */
 WPD_API WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder,
                                             WPDFrame *frame, int *rows_valid);
 

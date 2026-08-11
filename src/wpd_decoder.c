@@ -747,6 +747,9 @@ struct WPDDecoder {
     int    borrowed;
     int    input_mode;
 
+    WPDOutputPlane ext[4];
+    int            ext_active;
+
     WPDStatus status;
     char      error[128];
 };
@@ -3127,6 +3130,94 @@ static void export_frame(const WPDDecoder *s, const WebPImage *img,
     frame->timestamp = s->frame_timestamp - s->frame_duration;
 }
 
+static size_t stride_magnitude(ptrdiff_t stride) {
+    return stride < 0 ? (size_t)(-(stride + 1)) + 1 : (size_t)stride;
+}
+
+static int export_external_rows(WPDDecoder *s, const WebPImage *img,
+                                WPDPixelFormat format, WPDFrame *frame,
+                                int row_start, int row_end) {
+    const size_t  row     = (size_t)img->width * format_bpp(format);
+    const size_t  advance = stride_magnitude(s->ext[0].stride);
+    pack_row_func pack    = img->format == format ? NULL
+                                                  : format_packer(s, format);
+    uint8_t      *dst     = s->ext[0].data;
+
+    if (!pack && format_bpp(img->format) != format_bpp(format))
+        return WPD_ERR_UNSUPPORTED;
+    if (advance < row || (size_t)img->height > s->ext[0].size / advance)
+        return WPD_ERR_BUFFER_TOO_SMALL;
+
+    dst += (ptrdiff_t)row_start * s->ext[0].stride;
+    for (int y = row_start; y < row_end; y++) {
+        const uint8_t *src = img->data[0] + (ptrdiff_t)y * img->linesize[0];
+
+        if (pack) {
+            pack(dst, src, img->width);
+        } else {
+            memcpy(dst, src, row);
+        }
+        dst += s->ext[0].stride;
+    }
+
+    export_frame(s, img, format, frame);
+    for (int p = 1; p < 4; p++) {
+        frame->data[p]   = NULL;
+        frame->stride[p] = 0;
+    }
+    frame->data[0]   = s->ext[0].data;
+    frame->stride[0] = s->ext[0].stride;
+    return 0;
+}
+
+static int export_external_planar_rows(WPDDecoder *s, const WebPImage *img,
+                                       WPDPixelFormat format, WPDFrame *frame,
+                                       int row_start, int row_end) {
+    const int planes = format == WPD_PIX_FMT_YUVA420P ? 4 : 3;
+
+    for (int p = 0; p < planes; p++) {
+        const int    shift = p == 1 || p == 2;
+        const int    w     = CEIL_RSHIFT(img->width, shift);
+        const int    h     = CEIL_RSHIFT(img->height, shift);
+        const size_t step  = stride_magnitude(s->ext[p].stride);
+
+        if (!s->ext[p].data || !s->ext[p].stride || step < (size_t)w ||
+            (size_t)h > s->ext[p].size / step)
+            return WPD_ERR_BUFFER_TOO_SMALL;
+    }
+
+    for (int p = 0; p < planes; p++) {
+        const int shift = p == 1 || p == 2;
+        const int w     = CEIL_RSHIFT(img->width, shift);
+        const int y0    = row_start >> shift;
+        const int h     = CEIL_RSHIFT(row_end, shift);
+        uint8_t  *dst   = s->ext[p].data + (ptrdiff_t)y0 * s->ext[p].stride;
+
+        for (int y = y0; y < h; y++) {
+            memcpy(
+                dst, img->data[p] + (ptrdiff_t)y * img->linesize[p], (size_t)w);
+            dst += s->ext[p].stride;
+        }
+    }
+
+    export_frame(s, img, format, frame);
+    for (int p = 0; p < 4; p++) {
+        frame->data[p]   = p < planes ? s->ext[p].data : NULL;
+        frame->stride[p] = p < planes ? s->ext[p].stride : 0;
+    }
+    return 0;
+}
+
+static int export_external_planar(WPDDecoder *s, const WebPImage *img,
+                                  WPDPixelFormat format, WPDFrame *frame) {
+    return export_external_planar_rows(s, img, format, frame, 0, img->height);
+}
+
+static int export_external(WPDDecoder *s, const WebPImage *img,
+                           WPDPixelFormat format, WPDFrame *frame) {
+    return export_external_rows(s, img, format, frame, 0, img->height);
+}
+
 static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
     const WPDPixelFormat format = s->out_format;
     WebPImage            view;
@@ -3157,6 +3248,8 @@ static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
             flip_image(&view);
             planar = &view;
         }
+        if (s->ext_active)
+            return export_external_planar(s, planar, format, frame);
         export_frame(s, planar, format, frame);
         return 0;
     }
@@ -3166,8 +3259,13 @@ static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
             flip_image(&view);
             img = &view;
         }
-        export_frame(s, img, img->format, frame);
-        return 0;
+        if (!s->ext_active) {
+            export_frame(s, img, img->format, frame);
+            return 0;
+        }
+        if (!format_is_packed(img->format))
+            return export_external_planar(s, img, img->format, frame);
+        return export_external(s, img, img->format, frame);
     }
     if (!format_is_packed(img->format) || format_bpp(format) == 2) {
         ret = convert_to_packed(s, &s->output, img, format);
@@ -3222,6 +3320,8 @@ static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
         flip_image(&view);
         img = &view;
     }
+    if (s->ext_active)
+        return export_external(s, img, format, frame);
     export_frame(s, img, format, frame);
     return 0;
 }
@@ -3295,7 +3395,14 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                     s->ydsp.premultiply_row_4444(row, src->width);
             }
         }
-        export_frame(s, dst, format, frame);
+        if (s->ext_active) {
+            ret = export_external_rows(
+                s, dst, format, frame, converted_from, upto);
+            if (ret < 0)
+                return ret;
+        } else {
+            export_frame(s, dst, format, frame);
+        }
         s->converted_rows   = upto;
         s->converted_format = format;
         return 0;
@@ -3346,6 +3453,14 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                                     format_layout(format) == WPD_LAYOUT_ARGB,
                                     dst->width);
 
+    if (s->ext_active) {
+        ret = export_external_rows(s, dst, format, frame, converted_from, upto);
+        if (ret < 0)
+            return ret;
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
     s->converted_rows   = upto;
     s->converted_format = format;
     export_frame(s, dst, format, frame);
@@ -3369,14 +3484,51 @@ static int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
             s, &s->output, img, format == WPD_PIX_FMT_YUVA420P, first, upto);
         if (ret < 0)
             return ret;
-        export_frame(s, &s->output, format, frame);
+        if (s->ext_active)
+            ret = export_external_planar_rows(
+                s, &s->output, format, frame, first, upto);
+        else {
+            export_frame(s, &s->output, format, frame);
+            ret = 0;
+        }
+        if (ret < 0)
+            return ret;
         s->converted_rows   = upto;
         s->converted_format = format;
         return 0;
     }
 
     if (!format_is_packed(format)) {
-        export_frame(s, img, img->format, frame);
+        if (!s->ext_active) {
+            export_frame(s, img, img->format, frame);
+            s->converted_rows   = upto;
+            s->converted_format = format;
+            return 0;
+        }
+        ret = export_external_rows(s, img, img->format, frame, first, upto);
+        if (ret < 0)
+            return ret;
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    if (s->ext_active) {
+        ret = export_external_rows(s, img, format, frame, first, upto);
+        if (ret < 0)
+            return ret;
+        if (s->premultiply)
+            for (int y = first; y < upto; y++) {
+                uint8_t *row = s->ext[0].data + (ptrdiff_t)y * s->ext[0].stride;
+
+                if (format_bpp(format) == 2)
+                    s->ydsp.premultiply_row_4444(row, img->width);
+                else
+                    s->ydsp.premultiply_row(
+                        row,
+                        format_layout(format) == WPD_LAYOUT_ARGB,
+                        img->width);
+            }
         s->converted_rows   = upto;
         s->converted_format = format;
         return 0;
@@ -3428,6 +3580,7 @@ const char *wpd_status_string(WPDStatus status) {
     case WPD_ERR_UNSUPPORTED: return "unsupported feature";
     case WPD_ERR_NO_MEMORY: return "out of memory";
     case WPD_ERR_TOO_LARGE: return "image too large";
+    case WPD_ERR_BUFFER_TOO_SMALL: return "output buffer too small";
     }
     return "unknown error";
 }
@@ -3442,7 +3595,7 @@ static WPDStatus status_from_internal(int code) {
     case WPD_ERROR(EINVAL): return WPD_ERR_INVALID_ARG;
     default: break;
     }
-    if (code <= WPD_ERR_INVALID_ARG && code >= WPD_ERR_TOO_LARGE)
+    if (code <= WPD_ERR_INVALID_ARG && code >= WPD_ERR_BUFFER_TOO_SMALL)
         return (WPDStatus)code;
     return WPD_ERR_BITSTREAM;
 }
@@ -3505,6 +3658,50 @@ WPDStatus wpd_decoder_set_output_format(WPDDecoder    *decoder,
         return set_error(decoder, "invalid output format", WPD_ERR_INVALID_ARG);
     decoder->out_format  = format;
     decoder->premultiply = format_is_premultiplied(format);
+    return WPD_OK;
+}
+
+static int same_output_planes(const WPDOutputPlane *a,
+                              const WPDOutputPlane *b) {
+    for (int p = 0; p < 4; p++)
+        if (a[p].data != b[p].data || a[p].size != b[p].size ||
+            a[p].stride != b[p].stride)
+            return 0;
+    return 1;
+}
+
+/* Rows already handed out live in whichever buffer was current at the time, so
+   a new destination has to be filled from the top again. */
+static void drop_converted_rows(WPDDecoder *decoder) {
+    decoder->converted_rows   = 0;
+    decoder->converted_format = WPD_PIX_FMT_NONE;
+}
+
+WPDStatus wpd_decoder_set_output_buffer(WPDDecoder            *decoder,
+                                        const WPDOutputBuffer *buffer) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!buffer) {
+        if (decoder->ext_active)
+            drop_converted_rows(decoder);
+        decoder->ext_active = 0;
+        memset(decoder->ext, 0, sizeof(decoder->ext));
+        return WPD_OK;
+    }
+    if (buffer->struct_size < WPD_FIELD_END(WPDOutputBuffer, plane) ||
+        !buffer->plane[0].data || !buffer->plane[0].stride)
+        return set_error(decoder, "invalid output buffer", WPD_ERR_INVALID_ARG);
+    for (int p = 0; p < 4; p++) {
+        if ((buffer->plane[p].data && !buffer->plane[p].stride) ||
+            (!buffer->plane[p].data && buffer->plane[p].stride))
+            return set_error(
+                decoder, "invalid output buffer", WPD_ERR_INVALID_ARG);
+    }
+    if (!decoder->ext_active ||
+        !same_output_planes(decoder->ext, buffer->plane))
+        drop_converted_rows(decoder);
+    memcpy(decoder->ext, buffer->plane, sizeof(decoder->ext));
+    decoder->ext_active = 1;
     return WPD_OK;
 }
 
@@ -4467,7 +4664,14 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
                 return set_error(decoder, "cannot output frame", ret);
             plane = &decoder->output;
         }
-        export_frame(decoder, plane, format, frame);
+        if (decoder->ext_active) {
+            ret = export_external_planar_rows(
+                decoder, plane, format, frame, first, rows);
+            if (ret < 0)
+                return set_error(decoder, "cannot output frame", ret);
+        } else {
+            export_frame(decoder, plane, format, frame);
+        }
         decoder->converted_rows   = rows;
         decoder->converted_format = format;
         if (rows_valid)
