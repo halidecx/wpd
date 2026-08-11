@@ -71,6 +71,7 @@ lib_sources = files(
   'src/vp8pred.c',
   'src/vp8l_dsp.c',
   'src/yuvdsp.c',
+  'src/rescaler.c',
   'src/wpd_compat.c',
   'src/cpu.c',
 )
