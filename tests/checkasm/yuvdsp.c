@@ -426,6 +426,46 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
                                  h);
             if (memcmp(dst0, dst1, 4 * MAX_W * MAX_H))
                 fail();
+
+            /* step 2 walks the (odd, even) pair boundaries the upsampler
+               prefers; step 1 and 3 land row_start on even rows, which split a
+               pair and make it rewrite the row below. */
+            for (int step = 1; step <= 3; step++) {
+                int seen = 0;
+
+                memset(dst1, 0xa5, 4 * MAX_W * MAX_H);
+                for (int split = 0; split < h;) {
+                    int end = split ? split + step : 1;
+                    int from;
+
+                    if (end > h)
+                        end = h;
+
+                    from = wpd_yuv420_to_packed_rows(dsp,
+                                                     layout,
+                                                     dst1,
+                                                     stride,
+                                                     y,
+                                                     MAX_W,
+                                                     u,
+                                                     v,
+                                                     MAX_CW,
+                                                     alpha ? a : NULL,
+                                                     MAX_W,
+                                                     w,
+                                                     h,
+                                                     split,
+                                                     end);
+                    /* It may reach one row below row_start to finish a pair,
+                       but never further, and never above it. */
+                    if (from > split || from < (split ? split - 1 : 0))
+                        fail();
+                    seen  = end;
+                    split = end;
+                }
+                if (seen != h || memcmp(dst0, dst1, 4 * MAX_W * MAX_H))
+                    fail();
+            }
         }
 }
 

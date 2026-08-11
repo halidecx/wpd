@@ -493,6 +493,14 @@ void wpd_argb_to_yuva(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
     }
 }
 
+static int upsample_first_pair(int row_start) {
+    return row_start ? (row_start + 1) / 2 : 1;
+}
+
+static int upsample_first_row(int row_start) {
+    return row_start ? 2 * upsample_first_pair(row_start) - 1 : 0;
+}
+
 #define UPSAMPLE_IMAGE(name)                                                  \
     static void yuv420_to_##name(const WPDYUVDSP *dsp,                        \
                                  uint8_t         *dst,                        \
@@ -503,9 +511,12 @@ void wpd_argb_to_yuva(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
                                  const uint8_t   *v,                          \
                                  ptrdiff_t        uv_stride,                  \
                                  int              width,                      \
-                                 int              height) {                   \
-        upsample_row_##name(dsp, y, NULL, u, v, u, v, dst, NULL, width);      \
-        for (int j = 1; 2 * j < height; j++) {                                \
+                                 int              height,                     \
+                                 int              row_start,                  \
+                                 int              row_end) {                  \
+        if (!row_start)                                                       \
+            upsample_row_##name(dsp, y, NULL, u, v, u, v, dst, NULL, width);  \
+        for (int j = upsample_first_pair(row_start); 2 * j < row_end; j++) {  \
             const uint8_t *top_u = u + (ptrdiff_t)(j - 1) * uv_stride;        \
             const uint8_t *top_v = v + (ptrdiff_t)(j - 1) * uv_stride;        \
             uint8_t       *top   = dst + (ptrdiff_t)(2 * j - 1) * dst_stride; \
@@ -521,7 +532,7 @@ void wpd_argb_to_yuva(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
                                 top + dst_stride,                             \
                                 width);                                       \
         }                                                                     \
-        if (!(height & 1)) {                                                  \
+        if (!(height & 1) && row_end == height) {                             \
             const ptrdiff_t off = (ptrdiff_t)((height + 1) / 2 - 1) *         \
                 uv_stride;                                                    \
                                                                               \
@@ -545,45 +556,186 @@ UPSAMPLE_IMAGE(rgb)
 UPSAMPLE_IMAGE(bgr)
 #undef UPSAMPLE_IMAGE
 
+int wpd_yuv420_to_packed_rows(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
+                              ptrdiff_t dst_stride, const uint8_t *y,
+                              ptrdiff_t y_stride, const uint8_t *u,
+                              const uint8_t *v, ptrdiff_t uv_stride,
+                              const uint8_t *a, ptrdiff_t a_stride, int width,
+                              int height, int row_start, int row_end) {
+    const int first = upsample_first_row(row_start);
+
+    if (width <= 0 || height <= 0 || row_start >= row_end)
+        return row_start;
+
+    switch (layout) {
+    case WPD_LAYOUT_RGBA:
+        yuv420_to_rgba(dsp,
+                       dst,
+                       dst_stride,
+                       y,
+                       y_stride,
+                       u,
+                       v,
+                       uv_stride,
+                       width,
+                       height,
+                       row_start,
+                       row_end);
+        break;
+    case WPD_LAYOUT_BGRA:
+        yuv420_to_bgra(dsp,
+                       dst,
+                       dst_stride,
+                       y,
+                       y_stride,
+                       u,
+                       v,
+                       uv_stride,
+                       width,
+                       height,
+                       row_start,
+                       row_end);
+        break;
+    case WPD_LAYOUT_RGB:
+        yuv420_to_rgb(dsp,
+                      dst,
+                      dst_stride,
+                      y,
+                      y_stride,
+                      u,
+                      v,
+                      uv_stride,
+                      width,
+                      height,
+                      row_start,
+                      row_end);
+        break;
+    case WPD_LAYOUT_BGR:
+        yuv420_to_bgr(dsp,
+                      dst,
+                      dst_stride,
+                      y,
+                      y_stride,
+                      u,
+                      v,
+                      uv_stride,
+                      width,
+                      height,
+                      row_start,
+                      row_end);
+        break;
+    default:
+        yuv420_to_argb(dsp,
+                       dst,
+                       dst_stride,
+                       y,
+                       y_stride,
+                       u,
+                       v,
+                       uv_stride,
+                       width,
+                       height,
+                       row_start,
+                       row_end);
+        break;
+    }
+
+    if (!a || layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR)
+        return first;
+    dst += layout == WPD_LAYOUT_ARGB ? 0 : 3;
+    for (int j = first; j < row_end; j++)
+        dsp->dispatch_alpha(dst + (ptrdiff_t)j * dst_stride,
+                            a + (ptrdiff_t)j * a_stride,
+                            width);
+    return first;
+}
+
 void wpd_yuv420_to_packed(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
                           ptrdiff_t dst_stride, const uint8_t *y,
                           ptrdiff_t y_stride, const uint8_t *u,
                           const uint8_t *v, ptrdiff_t uv_stride,
                           const uint8_t *a, ptrdiff_t a_stride, int width,
                           int height) {
-    if (width <= 0 || height <= 0)
-        return;
+    wpd_yuv420_to_packed_rows(dsp,
+                              layout,
+                              dst,
+                              dst_stride,
+                              y,
+                              y_stride,
+                              u,
+                              v,
+                              uv_stride,
+                              a,
+                              a_stride,
+                              width,
+                              height,
+                              0,
+                              height);
+}
 
-    switch (layout) {
-    case WPD_LAYOUT_RGBA:
-        yuv420_to_rgba(
-            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-        break;
-    case WPD_LAYOUT_BGRA:
-        yuv420_to_bgra(
-            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-        break;
-    case WPD_LAYOUT_RGB:
-        yuv420_to_rgb(
-            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-        break;
-    case WPD_LAYOUT_BGR:
-        yuv420_to_bgr(
-            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-        break;
-    default:
-        yuv420_to_argb(
-            dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, width, height);
-        break;
+void wpd_yuv444_to_packed(int layout, uint8_t *dst, ptrdiff_t dst_stride,
+                          const uint8_t *y, ptrdiff_t y_stride,
+                          const uint8_t *u, const uint8_t *v,
+                          ptrdiff_t uv_stride, int width, int height) {
+    const int bpp = layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR ? 3
+                                                                         : 4;
+
+    for (int j = 0; j < height; j++) {
+        const uint8_t *yy  = y + (ptrdiff_t)j * y_stride;
+        const uint8_t *uu  = u + (ptrdiff_t)j * uv_stride;
+        const uint8_t *vv  = v + (ptrdiff_t)j * uv_stride;
+        uint8_t       *out = dst + (ptrdiff_t)j * dst_stride;
+
+        for (int i = 0; i < width; i++) {
+            switch (layout) {
+            case WPD_LAYOUT_RGBA:
+                yuv_to_rgba(yy[i], uu[i], vv[i], out + bpp * i);
+                break;
+            case WPD_LAYOUT_BGRA:
+                yuv_to_bgra(yy[i], uu[i], vv[i], out + bpp * i);
+                break;
+            case WPD_LAYOUT_RGB:
+                yuv_to_rgb(yy[i], uu[i], vv[i], out + bpp * i);
+                break;
+            case WPD_LAYOUT_BGR:
+                yuv_to_bgr(yy[i], uu[i], vv[i], out + bpp * i);
+                break;
+            default: yuv_to_argb(yy[i], uu[i], vv[i], out + bpp * i); break;
+            }
+        }
     }
+}
 
-    if (!a || layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR)
-        return;
-    dst += layout == WPD_LAYOUT_ARGB ? 0 : 3;
-    for (int j = 0; j < height; j++)
-        dsp->dispatch_alpha(dst + (ptrdiff_t)j * dst_stride,
-                            a + (ptrdiff_t)j * a_stride,
-                            width);
+void wpd_yuv420_to_packed_simple(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
+                                 ptrdiff_t dst_stride, const uint8_t *y,
+                                 ptrdiff_t y_stride, const uint8_t *u,
+                                 const uint8_t *v, ptrdiff_t uv_stride,
+                                 const uint8_t *a, ptrdiff_t a_stride,
+                                 int width, int row_start, int row_end) {
+    const int bpp = layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR ? 3
+                                                                         : 4;
+
+    for (int j = row_start; j < row_end; j++) {
+        uint8_t *out = dst + (ptrdiff_t)j * dst_stride;
+
+        for (int i = 0; i < width; i++) {
+            const int yy = y[(ptrdiff_t)j * y_stride + i];
+            const int uu = u[(ptrdiff_t)(j >> 1) * uv_stride + (i >> 1)];
+            const int vv = v[(ptrdiff_t)(j >> 1) * uv_stride + (i >> 1)];
+
+            switch (layout) {
+            case WPD_LAYOUT_RGBA: yuv_to_rgba(yy, uu, vv, out + bpp * i); break;
+            case WPD_LAYOUT_BGRA: yuv_to_bgra(yy, uu, vv, out + bpp * i); break;
+            case WPD_LAYOUT_RGB: yuv_to_rgb(yy, uu, vv, out + bpp * i); break;
+            case WPD_LAYOUT_BGR: yuv_to_bgr(yy, uu, vv, out + bpp * i); break;
+            default: yuv_to_argb(yy, uu, vv, out + bpp * i); break;
+            }
+        }
+        if (a && layout != WPD_LAYOUT_RGB && layout != WPD_LAYOUT_BGR)
+            dsp->dispatch_alpha(out + (layout == WPD_LAYOUT_ARGB ? 0 : 3),
+                                a + (ptrdiff_t)j * a_stride,
+                                width);
+    }
 }
 
 wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {

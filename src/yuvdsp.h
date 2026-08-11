@@ -68,12 +68,39 @@ typedef struct WPDYUVDSP {
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);
 
+/* Converts rows [row_start, row_end). The fancy upsampler emits an (odd, even)
+   row pair at a time, so an even row_start also rewrites row_start - 1; the
+   first row actually written is returned, and a caller with a per-row pass of
+   its own must run that pass from there, not from row_start. */
+int wpd_yuv420_to_packed_rows(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
+                              ptrdiff_t dst_stride, const uint8_t *y,
+                              ptrdiff_t y_stride, const uint8_t *u,
+                              const uint8_t *v, ptrdiff_t uv_stride,
+                              const uint8_t *a, ptrdiff_t a_stride, int width,
+                              int height, int row_start, int row_end);
+
 void wpd_yuv420_to_packed(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
                           ptrdiff_t dst_stride, const uint8_t *y,
                           ptrdiff_t y_stride, const uint8_t *u,
                           const uint8_t *v, ptrdiff_t uv_stride,
                           const uint8_t *a, ptrdiff_t a_stride, int width,
                           int height);
+/* Point sampling, which libwebp uses when fancy upsampling is turned off.
+   Every output row stands alone here, so rows [row_start, row_end) may be cut
+   anywhere. */
+void wpd_yuv420_to_packed_simple(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
+                                 ptrdiff_t dst_stride, const uint8_t *y,
+                                 ptrdiff_t y_stride, const uint8_t *u,
+                                 const uint8_t *v, ptrdiff_t uv_stride,
+                                 const uint8_t *a, ptrdiff_t a_stride,
+                                 int width, int row_start, int row_end);
+
+/* Point conversion from full-resolution planes, which is what libwebp uses
+   once the rescaler has brought chroma up to the output size. */
+void wpd_yuv444_to_packed(int layout, uint8_t *dst, ptrdiff_t dst_stride,
+                          const uint8_t *y, ptrdiff_t y_stride,
+                          const uint8_t *u, const uint8_t *v,
+                          ptrdiff_t uv_stride, int width, int height);
 
 /* Converts rows [row_start, row_end) of a packed ARGB image to planar 4:2:0.
    Pass a NULL 'a' when the caller wants no alpha plane; chroma is then
