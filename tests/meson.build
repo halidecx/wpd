@@ -103,6 +103,8 @@ testdata = [
 ]
 
 test('api-testdata', api_test, suite: ['testdata', 'api'], args: [testdata_dir])
+test('parity', parity_test, suite: ['testdata', 'parity'], args: [testdata_dir],
+     timeout: 300)
 foreach t : testdata
   input = testdata_dir / t[0] + '.webp'
   if not fs.exists(input)

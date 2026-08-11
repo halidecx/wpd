@@ -290,10 +290,10 @@ md5_test = executable(
 )
 test('md5', md5_test, suite: 'md5')
 
-# libwebp is the reference wpd is measured against, so which one gets linked
-# is a correctness question, not just a convenience: a released libwebp
-# predates decoder changes wpd already matches. The wrap pins a revision known
-# to agree, and is preferred over whatever the system carries.
+# libwebp is the reference the parity suite and libwebpdec measure against, so
+# which one gets linked is a correctness question, not just a convenience: a
+# released libwebp predates decoder changes wpd already matches. The wrap pins a
+# revision known to agree, and is preferred over whatever the system carries.
 libwebp_source = get_option('libwebp')
 libwebpdecoder_path = get_option('libwebpdecoder')
 libwebp_dec_dep = declare_dependency()
@@ -346,6 +346,23 @@ if libwebpdec_deps.length() == 0 and have_libwebp
   if libwebpdemux_dep.found()
     libwebpdec_deps = [libwebp_dec_dep, libwebpdemux_dep]
   endif
+endif
+
+if have_libwebp
+  parity_test = executable(
+    'test_parity',
+    files('tests/parity.c'),
+    dependencies: [
+      wpd_dep,
+      libwebp_dec_dep,
+      cc.find_library('m', required: false),
+    ],
+    install: false,
+  )
+  message('parity: enabled, against libwebp from ' + libwebp_origin)
+else
+  parity_test = disabler()
+  message('parity: disabled (no libwebp)')
 endif
 
 if libwebpdec_deps.length() > 0
