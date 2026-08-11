@@ -49,7 +49,7 @@ void wpd_log(void *context, int level, const char *format, ...) {
 }
 
 int wpd_check_image_size(unsigned width, unsigned height) {
-    return !width || !height || width > 16383 || height > 16383
-        ? WPD_ERROR(EINVAL)
+    return !width || !height || width > 16384 || height > 16384
+        ? WPD_ERROR_TOO_LARGE
         : 0;
 }

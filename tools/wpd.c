@@ -16,6 +16,7 @@ enum {
     ARG_VERIFY,
     ARG_CPUMASK,
     ARG_INFO,
+    ARG_STREAM,
 };
 
 typedef struct CpuMask {
@@ -76,6 +77,7 @@ static const struct option long_options[] = {
     {"verify", required_argument, NULL, ARG_VERIFY},
     {"cpumask", required_argument, NULL, ARG_CPUMASK},
     {"info", no_argument, NULL, ARG_INFO},
+    {"stream", required_argument, NULL, ARG_STREAM},
     {NULL, 0, NULL, 0},
 };
 
@@ -112,7 +114,10 @@ static void usage(const char *app, const char *reason) {
             ",\n"
             "    or a number; default all detected\n"
             " --info\n"
-            "    print canvas, animation and per-frame timing to stdout\n",
+            "    print canvas, animation and per-frame timing to stdout\n"
+            " --stream u32\n"
+            "    decode incrementally, appending this many bytes at a time,\n"
+            "    instead of opening the file whole\n",
             app);
 }
 
@@ -355,6 +360,88 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
     return 0;
 }
 
+typedef struct DecodeContext {
+    OutputContext *sink;
+    const char    *pixel_format;
+    int            info;
+    int            frames;
+    int            info_printed;
+} DecodeContext;
+
+static void print_image_info(WPDDecoder *decoder, DecodeContext *ctx) {
+    static const char *const codings[] = {"unknown", "lossy", "lossless"};
+    WPDImageInfo             image     = WPD_IMAGE_INFO_INIT;
+
+    if (ctx->info_printed || wpd_decoder_get_info(decoder, &image) != WPD_OK)
+        return;
+    ctx->info_printed = 1;
+    printf("canvas: %dx%d\n", image.width, image.height);
+    printf("coding: %s\n", codings[image.coding]);
+    printf("alpha: %d\n", image.has_alpha);
+    printf("animation: %d\n", image.is_animation);
+    printf("frames: %d\n", image.frame_count);
+    printf("loops: %d\n", image.loop_count);
+    printf("background: 0x%08x\n", image.background_argb);
+}
+
+/* Pulls every frame currently available. Returns 0 when the decoder has
+   nothing more for now, or negative on error. */
+static int drain_frames(WPDDecoder *decoder, DecodeContext *ctx) {
+    WPDFrame frame = WPD_FRAME_INIT;
+    int      ret;
+
+    while ((ret = wpd_decoder_next_frame(decoder, &frame)) > 0) {
+        if (ctx->info)
+            printf("frame %d: %dx%d %s duration %d timestamp %lld\n",
+                   ctx->frames,
+                   frame.width,
+                   frame.height,
+                   format_name(frame.format),
+                   frame.duration,
+                   (long long)frame.timestamp);
+        if (ctx->sink &&
+            write_frame(ctx->sink, &frame, ctx->pixel_format) < 0) {
+            if (ctx->sink->file && ferror(ctx->sink->file))
+                perror("write");
+            return -1;
+        }
+        ctx->frames++;
+    }
+    return ret;
+}
+
+static int decode_stream(WPDDecoder *decoder, const uint8_t *data, size_t size,
+                         size_t chunk, DecodeContext *ctx) {
+    int last_rows = 0;
+
+    if (wpd_decoder_open_stream(decoder) < 0)
+        return -1;
+
+    for (size_t offset = 0; offset < size; offset += chunk) {
+        const size_t n = size - offset < chunk ? size - offset : chunk;
+
+        if (wpd_decoder_append(decoder, data + offset, n) < 0)
+            return -1;
+        if (drain_frames(decoder, ctx) < 0)
+            return -1;
+        if (ctx->info) {
+            WPDFrame partial = WPD_FRAME_INIT;
+            int      rows    = 0;
+
+            if (wpd_decoder_partial_frame(decoder, &partial, &rows) == WPD_OK &&
+                rows > 0 && rows != last_rows) {
+                printf("partial: %d of %d rows\n", rows, partial.height);
+                last_rows = rows;
+            }
+        }
+    }
+    if (wpd_decoder_end_of_stream(decoder) < 0)
+        return -1;
+    if (ctx->info)
+        print_image_info(decoder, ctx);
+    return drain_frames(decoder, ctx);
+}
+
 static uint8_t *read_file(const char *name, FILE *input, size_t *size) {
     uint8_t *data     = NULL;
     size_t   capacity = 0, used = 0;
@@ -396,10 +483,9 @@ int main(int argc, char **argv) {
     const char    *muxer = NULL, *pixel_format = NULL, *verify = NULL;
     WPDPixelFormat out_format = WPD_PIX_FMT_NONE;
     const char    *input_name, *output_name;
-    int            info   = 0;
+    int            info = 0, stream = 0;
     int            frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
     unsigned       cpumask;
-    WPDFrame       frame;
 
     print_banner();
     opterr = 0;
@@ -430,6 +516,13 @@ int main(int argc, char **argv) {
             break;
         case ARG_VERIFY: verify = optarg; break;
         case ARG_INFO: info = 1; break;
+        case ARG_STREAM:
+            if (parse_repeat(optarg, &stream) < 0) {
+                usage(argv[0],
+                      "invalid stream chunk size; expected 1..INT_MAX");
+                return 2;
+            }
+            break;
         case ARG_CPUMASK:
             if (parse_cpumask(optarg, &cpumask) < 0) {
                 usage(argv[0],
@@ -486,8 +579,11 @@ int main(int argc, char **argv) {
         goto done;
 
     for (int iter = 0; iter < repeat; iter++) {
-        OutputContext *sink = iter == 0 && output.type != OUTPUT_NULL ? &output
-                                                                      : NULL;
+        DecodeContext ctx = {0};
+
+        ctx.sink = iter == 0 && output.type != OUTPUT_NULL ? &output : NULL;
+        ctx.pixel_format = pixel_format;
+        ctx.info         = info && iter == 0;
 
         wpd_decoder_free(decoder);
         frames = 0;
@@ -497,44 +593,21 @@ int main(int argc, char **argv) {
             fprintf(stderr, "out of memory\n");
             goto done;
         }
-        if (out_format >= WPD_PIX_FMT_ARGB &&
+        if (out_format != WPD_PIX_FMT_NONE &&
             wpd_decoder_set_output_format(decoder, out_format) < 0) {
             fprintf(stderr, "cannot select %s output\n", pixel_format);
             goto done;
         }
-        if (wpd_decoder_open(decoder, data, size) < 0) {
-            fprintf(stderr, "%s: %s\n", input_name, wpd_decoder_error(decoder));
-            goto done;
+        if (stream) {
+            ret = decode_stream(decoder, data, size, (size_t)stream, &ctx);
+        } else if (wpd_decoder_open(decoder, data, size) < 0) {
+            ret = -1;
+        } else {
+            if (ctx.info)
+                print_image_info(decoder, &ctx);
+            ret = drain_frames(decoder, &ctx);
         }
-        if (info && iter == 0) {
-            WPDAnimInfo anim;
-
-            if (wpd_decoder_anim_info(decoder, &anim) < 0) {
-                fprintf(stderr, "%s: cannot read info\n", input_name);
-                goto done;
-            }
-            printf("canvas: %dx%d\n", anim.canvas_width, anim.canvas_height);
-            printf("animation: %d\n", anim.is_animation);
-            printf("frames: %d\n", anim.frame_count);
-            printf("loops: %d\n", anim.loop_count);
-            printf("background: 0x%08x\n", anim.background_argb);
-        }
-        while ((ret = wpd_decoder_next_frame(decoder, &frame)) > 0) {
-            if (info && iter == 0)
-                printf("frame %d: %dx%d %s duration %d timestamp %lld\n",
-                       frames,
-                       frame.width,
-                       frame.height,
-                       format_name(frame.format),
-                       frame.duration,
-                       (long long)frame.timestamp);
-            if (sink && write_frame(sink, &frame, pixel_format) < 0) {
-                if (sink->file && ferror(sink->file))
-                    perror("write");
-                goto done;
-            }
-            frames++;
-        }
+        frames = ctx.frames;
         if (ret < 0) {
             fprintf(stderr, "%s: %s\n", input_name, wpd_decoder_error(decoder));
             goto done;

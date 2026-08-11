@@ -35,6 +35,29 @@ extern "C" {
 
 typedef struct WPDDecoder WPDDecoder;
 
+/* Every entry point that can fail reports one of these. Negative values are
+   errors, so 'result < 0' is a valid test even where a function returns extra
+   non-negative values. */
+typedef enum WPDStatus {
+    WPD_OK = 0,
+    /* A NULL pointer, or an argument outside its permitted range. */
+    WPD_ERR_INVALID_ARG = -1,
+    /* The data is not a RIFF WebP or supported raw WebP bitstream. */
+    WPD_ERR_NOT_WEBP = -2,
+    /* The file is a WebP but its contents are malformed. */
+    WPD_ERR_BITSTREAM = -3,
+    /* The file ends inside a chunk. More data may complete it. */
+    WPD_ERR_TRUNCATED = -4,
+    /* Well-formed, but uses something this decoder cannot produce. */
+    WPD_ERR_UNSUPPORTED = -5,
+    WPD_ERR_NO_MEMORY   = -6,
+    /* Dimensions or allocation size exceed the decoder's safe limits. */
+    WPD_ERR_TOO_LARGE = -7,
+} WPDStatus;
+
+/* A short, static description of 'status'. Never NULL. */
+WPD_API const char *wpd_status_string(WPDStatus status);
+
 /* WPD_VERSION_NUM and WPD_VERSION_STR for the linked library. */
 WPD_API unsigned    wpd_version(void);
 WPD_API const char *wpd_version_string(void);
@@ -60,6 +83,8 @@ typedef enum WPDPixelFormat {
 } WPDPixelFormat;
 
 typedef struct WPDFrame {
+    /* Set to sizeof(WPDFrame), normally with WPD_FRAME_INIT. */
+    size_t         struct_size;
     const uint8_t *data[4];
     ptrdiff_t      stride[4];
     int            width;
@@ -71,16 +96,59 @@ typedef struct WPDFrame {
     int64_t timestamp;
 } WPDFrame;
 
-typedef struct WPDAnimInfo {
-    int canvas_width;
-    int canvas_height;
+#define WPD_FRAME_INIT         \
+    {sizeof(WPDFrame),         \
+     {NULL, NULL, NULL, NULL}, \
+     {0, 0, 0, 0},             \
+     0,                        \
+     0,                        \
+     WPD_PIX_FMT_NONE,         \
+     0,                        \
+     0}
+
+/* How the image data is coded. Reported as WPD_CODING_UNKNOWN for animations,
+   whose frames may mix the two, matching libwebp's WebPBitstreamFeatures. */
+typedef enum WPDCoding {
+    WPD_CODING_UNKNOWN  = 0,
+    WPD_CODING_LOSSY    = 1,
+    WPD_CODING_LOSSLESS = 2,
+} WPDCoding;
+
+typedef struct WPDImageInfo {
+    /* Set to sizeof(WPDImageInfo), normally with WPD_IMAGE_INFO_INIT. */
+    size_t struct_size;
+    /* Canvas dimensions. Every decoded frame is this size. */
+    int width;
+    int height;
+    /* Set if any frame can carry transparency. A frame may still be fully
+       opaque. */
+    int has_alpha;
+    int is_animation;
+    /* 1 for a still image. May undercount a truncated animation. */
     int frame_count;
     int loop_count; /* 0 repeats forever */
     /* Advisory only: frames are composited onto transparent black, matching
        libwebp. */
-    uint32_t background_argb;
-    int      is_animation;
-} WPDAnimInfo;
+    uint32_t  background_argb;
+    WPDCoding coding;
+} WPDImageInfo;
+
+#define WPD_IMAGE_INFO_INIT \
+    {sizeof(WPDImageInfo), 0, 0, 0, 0, 0, 0, 0, WPD_CODING_UNKNOWN}
+
+/* Read the headers of 'data' without decoding, allocating, or retaining it.
+   This is the cheap way to learn an image's dimensions and whether it has
+   alpha or animation before committing to a decode. RIFF WebP files, bare VP8
+   and VP8L payloads, and an ALPH chunk followed by a VP8 chunk are accepted.
+
+   Once a canvas header has given the dimensions this succeeds, as libwebp
+   does, even if the image data behind it is short or absent; only opening the
+   file for decoding judges it complete.
+
+   Returns WPD_OK and fills 'info', or WPD_ERR_NOT_WEBP, WPD_ERR_TRUNCATED if
+   the headers are incomplete, or WPD_ERR_BITSTREAM. */
+WPD_API WPDStatus wpd_get_info(const uint8_t *data, size_t size,
+                               WPDImageInfo *info);
 
 WPD_API WPDDecoder *wpd_decoder_create(void);
 
@@ -94,25 +162,113 @@ WPD_API WPDDecoder *wpd_decoder_create(void);
    libwebp only ever composites in RGB. Conversion is not free; leave it off if
    YUV output is acceptable.
 
-   The planar formats are not accepted, since a lossless frame cannot be
-   expressed in them. Takes effect on the next wpd_decoder_next_frame(); call
-   it before decoding an animation, since compositing depends on it. Returns 0,
-   or -1 on an unsupported format. */
-WPD_API int wpd_decoder_set_output_format(WPDDecoder    *decoder,
-                                          WPDPixelFormat format);
+   Planar output from a lossless source includes an RGB-to-YUV conversion.
+   Takes effect on the next wpd_decoder_next_frame(); call it before decoding an
+   animation, since compositing depends on it. Returns WPD_OK, or
+   WPD_ERR_INVALID_ARG on an unsupported format. */
+WPD_API WPDStatus wpd_decoder_set_output_format(WPDDecoder    *decoder,
+                                                WPDPixelFormat format);
 
-WPD_API int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data,
-                             size_t size);
+/* 'data' is copied, so it need not outlive the call. The whole file has to be
+   here: a chunk list that stops short of what it promised is
+   WPD_ERR_TRUNCATED, and one that carries no image at all is
+   WPD_ERR_BITSTREAM. Use wpd_decoder_open_stream() for a file still arriving.
+   Returns WPD_OK or an error. */
+WPD_API WPDStatus wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data,
+                                   size_t size);
 
-/* Valid after a successful wpd_decoder_open(). Returns 0, or -1 if no file
-   is open. */
-WPD_API int wpd_decoder_anim_info(const WPDDecoder *decoder,
-                                  WPDAnimInfo      *info);
+/* Open caller-owned input without copying it. The bytes must remain at the
+   same address and unchanged until the decoder is reopened or freed. */
+WPD_API WPDStatus wpd_decoder_open_borrowed(WPDDecoder    *decoder,
+                                            const uint8_t *data, size_t size);
 
-/* Returns 1 and fills 'frame', 0 at end of stream, or -1 on error. The frame
-   borrows decoder memory that the next call invalidates. */
+/* Begin decoding a file that is not all here yet, for callers reading from a
+   socket or a pipe. Use instead of wpd_decoder_open(), then alternate
+   wpd_decoder_append() with wpd_decoder_next_frame():
+
+     wpd_decoder_open_stream(decoder);
+     while ((n = read(fd, buf, sizeof(buf))) > 0) {
+         if (wpd_decoder_append(decoder, buf, n) < 0)
+             break;
+         while (wpd_decoder_next_frame(decoder, &frame) > 0)
+             present(&frame);
+     }
+     if (wpd_decoder_end_of_stream(decoder) == WPD_OK)
+         while (wpd_decoder_next_frame(decoder, &frame) > 0)
+             present(&frame);
+
+   An animation yields each frame as soon as that frame's bytes have arrived,
+   so a long animation starts playing while the rest downloads. A still image
+   is handed over only once it is complete, but it decodes as the bytes arrive
+   and its finished rows can be displayed meanwhile; see
+   wpd_decoder_partial_frame(). Everything else behaves as it does for a file
+   opened whole, including the output format.
+
+   A bare VP8 or VP8L payload with no RIFF header around it carries no length,
+   so nothing about it can be decoded until wpd_decoder_end_of_stream() says
+   where it ends. Such a stream produces no frame and no partial rows before
+   then. */
+WPD_API WPDStatus wpd_decoder_open_stream(WPDDecoder *decoder);
+
+/* Add the next 'size' bytes of the file, which are copied. Returns WPD_OK,
+   including when the headers are still incomplete, or an error once the data
+   is known to be unusable. */
+WPD_API WPDStatus wpd_decoder_append(WPDDecoder *decoder, const uint8_t *data,
+                                     size_t size);
+
+/* Supply a cumulative caller-owned stream buffer without copying it. Each call
+   contains the complete prefix of the file and must not shrink. The bytes must
+   remain unchanged until the next update or until the decoder is freed, except
+   that a call reporting an error hands the memory straight back: the decoder
+   keeps no reference to a buffer it has rejected. Use instead of
+   wpd_decoder_append() for a stream opened normally. */
+WPD_API WPDStatus wpd_decoder_update(WPDDecoder *decoder, const uint8_t *data,
+                                     size_t size);
+
+/* Declare the file complete, so that wpd_decoder_next_frame() reporting 0
+   means end of stream rather than "not yet". Returns WPD_OK,
+   WPD_ERR_TRUNCATED if the file ended inside a chunk, or WPD_ERR_BITSTREAM if
+   it carried no image at all. */
+WPD_API WPDStatus wpd_decoder_end_of_stream(WPDDecoder *decoder);
+
+/* Same as wpd_get_info() for the file currently open. Returns WPD_OK,
+   WPD_ERR_INVALID_ARG if no file is open, or WPD_ERR_TRUNCATED if a stream has
+   not yet delivered enough of its headers. For a stream, 'frame_count' counts
+   the frames seen so far and grows as more arrives. */
+WPD_API WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder,
+                                       WPDImageInfo     *info);
+
+/* Returns 1 and fills 'frame', 0 when no further frame is available, or a
+   negative WPDStatus. The frame borrows decoder memory that the next call
+   invalidates.
+
+   For a file opened whole, 0 means end of stream. For one being streamed, 0
+   means no frame can be produced from the bytes appended so far; it means end
+   of stream only once wpd_decoder_end_of_stream() has been called. */
 WPD_API int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame);
 
+/* Look at the rows of a still image decoded so far, for progressive display.
+   Fills 'frame' as wpd_decoder_next_frame() would and sets *rows_valid to the
+   number of rows that are finished; those rows will not change again. Rows at
+   or past *rows_valid hold whatever the decoder has written so far and must
+   not be displayed.
+
+   rows_valid is 0 until something is decodable, and stays 0 for animations,
+   which decode a whole frame at a time. It reaches the image height once the
+   frame is complete, whether or not wpd_decoder_next_frame() has handed that
+   frame over yet. A lossless still gives rows away in blocks of sixteen.
+
+   Nothing is consumed, so the same frame still arrives from
+   wpd_decoder_next_frame(). Returns WPD_OK, or WPD_ERR_INVALID_ARG if no file
+   is open. */
+WPD_API WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder,
+                                            WPDFrame *frame, int *rows_valid);
+
+/* The status of the last failed call on 'decoder', or WPD_OK. */
+WPD_API WPDStatus wpd_decoder_status(const WPDDecoder *decoder);
+
+/* A human-readable description of the last failure, for logs. Callers that
+   need to branch on the failure should use wpd_decoder_status(). */
 WPD_API const char *wpd_decoder_error(const WPDDecoder *decoder);
 
 WPD_API void wpd_decoder_free(WPDDecoder *decoder);

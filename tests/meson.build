@@ -110,4 +110,10 @@ foreach t : testdata
   test('@0@-@1@'.format(t[0], t[1]), wpd,
        suite: ['testdata', 'testdata-' + t[1]],
        args: ['--verify', t[2], '-f', t[1], input])
+  # The same decode driven incrementally must be bit-identical. The chunk size
+  # is deliberately not a power of two, so chunk boundaries land inside chunk
+  # headers and payloads rather than lining up with them.
+  test('@0@-@1@-stream'.format(t[0], t[1]), wpd,
+       suite: ['testdata', 'testdata-stream'],
+       args: ['--verify', t[2], '-f', t[1], '--stream', '1021', input])
 endforeach
