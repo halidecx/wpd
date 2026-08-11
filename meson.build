@@ -279,6 +279,14 @@ api_test = executable(
 )
 test('api', api_test, suite: 'api')
 
+fuzz_test = executable(
+  'test_fuzz',
+  files('tests/fuzz.c'),
+  dependencies: wpd_dep,
+  build_by_default: false,
+  install: false,
+)
+
 md5_test = executable(
   'test_md5',
   files(
