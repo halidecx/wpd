@@ -104,12 +104,6 @@ typedef struct VP8Context {
     VP8PredContext pred;
 } VP8Context;
 
-#ifdef WPD_CHECKASM
-int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
-                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
-                              uint8_t *token_prob, int16_t qmul[2]);
-#endif
-
 int vp8_decode_init(WpdCodecContext *context);
 int vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
 int vp8_decode_free(WpdCodecContext *context);

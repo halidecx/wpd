@@ -7,11 +7,13 @@
 #if defined(__GNUC__) || defined(__clang__)
 #define wpd_always_inline inline __attribute__((always_inline))
 #define wpd_cold __attribute__((cold))
+#define wpd_noclone __attribute__((noinline, noclone))
 #define wpd_unused __attribute__((unused))
 #define WPD_DECLARE_ALIGNED(n, t, v) t __attribute__((aligned(n))) v
 #else
 #define wpd_always_inline inline
 #define wpd_cold
+#define wpd_noclone
 #define wpd_unused
 #define WPD_DECLARE_ALIGNED(n, t, v) t v
 #endif

@@ -170,7 +170,6 @@ if asm_enabled
     )
     if armv6
       lib_sources += files(
-        'src/arm/vp8_armv6.S',
         'src/arm/vp8dsp_armv6.S',
       )
       cpu_baseline_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
@@ -279,7 +278,6 @@ if asm_enabled and checkasm_dep.found()
     files(
       'tests/checkasm/main.c',
       'tests/checkasm/lossless.c',
-      'tests/checkasm/vp8coeffs.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
       'tests/checkasm/yuvdsp.c',

@@ -1,8 +1,5 @@
 #include "vp8.h"
 #include "wpd_codec.h"
-#if WPD_HAVE_ASM && WPD_ARCH_ARM
-#include "arm/vp8.h"
-#endif
 
 static const uint8_t vp8_pred4x4_mode[] = {
     [DC_PRED8x8]    = DC_PRED,
@@ -894,9 +891,10 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         c, vp8_pred8x8c_tree, vp8_pred8x8c_prob_intra);
 }
 
-static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
-                                 uint8_t probs[16][3][NUM_DCT_TOKENS - 1],
-                                 int i, uint8_t *token_prob, int16_t qmul[2]) {
+static wpd_noclone int decode_block_coeffs_c(
+    VP56RangeCoder *c, WpdDctElem block[16],
+    uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, uint8_t *token_prob,
+    int16_t qmul[2]) {
     goto skip_eob;
     do {
         int coeff;
@@ -946,18 +944,6 @@ static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
     return i;
 }
 
-#ifndef decode_block_coeffs_internal
-#define decode_block_coeffs_internal decode_block_coeffs_c
-#endif
-
-#ifdef WPD_CHECKASM
-int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
-                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
-                              uint8_t *token_prob, int16_t qmul[2]) {
-    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
-}
-#endif
-
 static wpd_always_inline int decode_block_coeffs(
     VP56RangeCoder *c, WpdDctElem block[16],
     uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, int zero_nhood,
@@ -965,7 +951,7 @@ static wpd_always_inline int decode_block_coeffs(
     uint8_t *token_prob = probs[i][zero_nhood];
     if (!vp56_rac_get_prob_branchy(c, token_prob[0]))
         return 0;
-    return decode_block_coeffs_internal(c, block, probs, i, token_prob, qmul);
+    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
 }
 
 static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
