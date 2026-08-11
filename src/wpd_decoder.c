@@ -10,8 +10,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define VP8X_FLAG_XMP 0x04
+#define VP8X_FLAG_EXIF 0x08
+#define VP8X_FLAG_ICCP 0x20
 #define VP8X_FLAG_ANIMATION 0x02
 #define VP8X_FLAG_ALPHA 0x10
+
+#define WPD_METADATA_NB 3
 
 #define ANMF_FLAG_DISPOSE (1 << 0)
 #define ANMF_FLAG_NO_BLEND (1 << 1)
@@ -290,12 +295,28 @@ typedef struct HeaderScan {
     uint32_t  background_argb;
     WPDCoding coding;
     int       truncated;
+    int       metadata;
+    size_t    meta_offset[WPD_METADATA_NB];
+    uint32_t  meta_size[WPD_METADATA_NB];
     int       raw_kind;
     size_t    raw_image_offset;
     size_t    raw_image_size;
     size_t    raw_alpha_offset;
     size_t    raw_alpha_size;
 } HeaderScan;
+
+/* The order of the WPDMetadata bits, so a bit indexes these tables. */
+static const uint32_t meta_tag[WPD_METADATA_NB] = {
+    MKTAG('I', 'C', 'C', 'P'),
+    MKTAG('E', 'X', 'I', 'F'),
+    MKTAG('X', 'M', 'P', ' '),
+};
+
+static const uint8_t meta_vp8x_flag[WPD_METADATA_NB] = {
+    VP8X_FLAG_ICCP,
+    VP8X_FLAG_EXIF,
+    VP8X_FLAG_XMP,
+};
 
 typedef struct WebPImage {
     /* Set when the colour channels already carry alpha, as the animation
@@ -680,6 +701,9 @@ struct WPDDecoder {
     int       info_has_alpha;
     WPDCoding info_coding;
 
+    uint8_t *meta[WPD_METADATA_NB];
+    size_t   meta_size[WPD_METADATA_NB];
+
     size_t file_capacity;
     int    opened;
     int    streaming;
@@ -710,7 +734,7 @@ static void frame_clear(WPDFrame *frame) {
 }
 
 static int info_valid(const WPDImageInfo *info) {
-    return info && info->struct_size >= WPD_FIELD_END(WPDImageInfo, coding);
+    return info && info->struct_size >= WPD_FIELD_END(WPDImageInfo, metadata);
 }
 
 static void info_clear(WPDImageInfo *info) {
@@ -718,7 +742,7 @@ static void info_clear(WPDImageInfo *info) {
 
     memset((uint8_t *)info + sizeof(info->struct_size),
            0,
-           WPD_FIELD_END(WPDImageInfo, coding) - sizeof(info->struct_size));
+           WPD_FIELD_END(WPDImageInfo, metadata) - sizeof(info->struct_size));
     info->struct_size = struct_size;
 }
 
@@ -3154,6 +3178,9 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
             hs->vp8x = 1;
             if (size_ >= 10) {
                 hs->has_alpha |= (chunk[8] & VP8X_FLAG_ALPHA) != 0;
+                for (int i = 0; i < WPD_METADATA_NB; i++)
+                    if (chunk[8] & meta_vp8x_flag[i])
+                        hs->metadata |= 1 << i;
                 hs->width  = WPD_RL24(chunk + 12) + 1;
                 hs->height = WPD_RL24(chunk + 15) + 1;
                 if ((uint64_t)hs->width * (uint64_t)hs->height >= 1ULL << 32)
@@ -3181,7 +3208,17 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
                 }
             }
             break;
-        default: break;
+        default:
+            for (int i = 0; i < WPD_METADATA_NB; i++) {
+                if (tag != meta_tag[i])
+                    continue;
+                hs->metadata |= 1 << i;
+                if (!hs->meta_offset[i] && size_) {
+                    hs->meta_offset[i] = hs->pos + 8;
+                    hs->meta_size[i]   = size_;
+                }
+            }
+            break;
         }
         hs->pos += 8 + padded_size;
     }
@@ -3207,6 +3244,7 @@ static void info_from_scan(WPDImageInfo *info, const HeaderScan *hs) {
     info->loop_count      = hs->loop_count;
     info->background_argb = hs->background_argb;
     info->coding          = hs->coding;
+    info->metadata        = hs->metadata;
 }
 
 WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
@@ -3228,6 +3266,11 @@ WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
 /* Clears everything derived from a file but keeps the input allocation, which
    a stream grows across many calls. */
 static void decoder_reset(WPDDecoder *decoder) {
+    for (int i = 0; i < WPD_METADATA_NB; i++) {
+        free(decoder->meta[i]);
+        decoder->meta[i]      = NULL;
+        decoder->meta_size[i] = 0;
+    }
     for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
     image_free(&decoder->canvas);
     image_free(&decoder->argb);
@@ -3324,6 +3367,29 @@ static WPDStatus file_reserve(WPDDecoder *decoder, size_t size) {
     return WPD_OK;
 }
 
+/* Takes a copy of each metadata chunk the scanner has reached, since the
+   buffer it sits in is dropped as the stream moves past it. */
+static WPDStatus capture_metadata(WPDDecoder *decoder) {
+    const HeaderScan *hs = &decoder->scan;
+
+    for (int i = 0; i < WPD_METADATA_NB; i++) {
+        const size_t offset = hs->meta_offset[i];
+        const size_t size   = hs->meta_size[i];
+
+        if (!offset || decoder->meta[i])
+            continue;
+        if (offset < decoder->discarded || offset > decoder->file_size ||
+            size > decoder->file_size - offset)
+            continue;
+        decoder->meta[i] = malloc(size);
+        if (!decoder->meta[i])
+            return WPD_ERR_NO_MEMORY;
+        memcpy(decoder->meta[i], file_at(decoder, offset), size);
+        decoder->meta_size[i] = size;
+    }
+    return WPD_OK;
+}
+
 static WPDStatus rescan_headers(WPDDecoder *decoder) {
     const HeaderScan *hs     = &decoder->scan;
     WPDStatus         status = scan_headers(&decoder->scan,
@@ -3331,9 +3397,12 @@ static WPDStatus rescan_headers(WPDDecoder *decoder) {
                                             decoder->discarded,
                                             decoder->file_size,
                                             decoder->streaming);
+    WPDStatus         meta   = capture_metadata(decoder);
 
     if (status != WPD_OK)
         return status;
+    if (meta != WPD_OK)
+        return meta;
 
     decoder->end                  = hs->end;
     decoder->canvas_width         = hs->width;
@@ -3544,6 +3613,28 @@ WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder, WPDImageInfo *info) {
     info->loop_count      = decoder->anim_loop_count;
     info->background_argb = decoder->anim_background_argb;
     info->coding          = decoder->info_coding;
+    info->metadata        = decoder->scan.metadata;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_metadata(const WPDDecoder *decoder, WPDMetadata which,
+                               const uint8_t **data, size_t *size) {
+    int index;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data || !size || !decoder->opened)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid decoder state",
+                         WPD_ERR_INVALID_ARG);
+    if (which <= 0 || (which & (which - 1)) || which >> WPD_METADATA_NB)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid metadata type",
+                         WPD_ERR_INVALID_ARG);
+
+    for (index = 0; !(which >> index & 1); index++) continue;
+    *data = decoder->meta[index];
+    *size = decoder->meta_size[index];
     return WPD_OK;
 }
 
@@ -3888,6 +3979,7 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     image_free(&decoder->alpha_argb);
     image_free(&decoder->lossless_out);
     for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
     free(decoder->lossless_top);
     free(decoder->alpha_plane);
     free(decoder->file_alloc);

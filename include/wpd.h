@@ -114,6 +114,17 @@ typedef enum WPDCoding {
     WPD_CODING_LOSSLESS = 2,
 } WPDCoding;
 
+/* The metadata a WebP file can carry alongside the image. These are bits in
+   WPDImageInfo.metadata, and one of them selects a chunk in
+   wpd_decoder_metadata(). The decoder never acts on any of it: an EXIF
+   orientation does not rotate the frames, and an ICC profile does not change
+   how they are converted. */
+typedef enum WPDMetadata {
+    WPD_METADATA_ICCP = 1 << 0, /* "ICCP", an ICC colour profile */
+    WPD_METADATA_EXIF = 1 << 1, /* "EXIF" */
+    WPD_METADATA_XMP  = 1 << 2, /* "XMP " */
+} WPDMetadata;
+
 typedef struct WPDImageInfo {
     /* Set to sizeof(WPDImageInfo), normally with WPD_IMAGE_INFO_INIT. */
     size_t struct_size;
@@ -131,10 +142,13 @@ typedef struct WPDImageInfo {
        libwebp. */
     uint32_t  background_argb;
     WPDCoding coding;
+    /* WPDMetadata bits for the metadata the file says it carries. A bit can be
+       set before the chunk itself has arrived in a stream. */
+    int metadata;
 } WPDImageInfo;
 
 #define WPD_IMAGE_INFO_INIT \
-    {sizeof(WPDImageInfo), 0, 0, 0, 0, 0, 0, 0, WPD_CODING_UNKNOWN}
+    {sizeof(WPDImageInfo), 0, 0, 0, 0, 0, 0, 0, WPD_CODING_UNKNOWN, 0}
 
 /* Read the headers of 'data' without decoding, allocating, or retaining it.
    This is the cheap way to learn an image's dimensions and whether it has
@@ -237,6 +251,23 @@ WPD_API WPDStatus wpd_decoder_end_of_stream(WPDDecoder *decoder);
    the frames seen so far and grows as more arrives. */
 WPD_API WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder,
                                        WPDImageInfo     *info);
+
+/* Point '*data' and '*size' at one metadata chunk's payload, where 'which' is
+   a single WPDMetadata bit. The bytes belong to the decoder and stay valid
+   until the next wpd_decoder_open(), wpd_decoder_open_stream(),
+   wpd_decoder_open_borrowed(), or wpd_decoder_free(); appending to a stream
+   does not move them.
+
+   Sets *data to NULL and *size to 0 when the file has no such chunk, or when a
+   stream has not reached it yet: EXIF and XMP follow the image data, so they
+   arrive last. WPDImageInfo.metadata says what to expect. Only the first chunk
+   of a kind is kept, as libwebp does.
+
+   Returns WPD_OK, or WPD_ERR_INVALID_ARG if no file is open or 'which' is not
+   a single metadata bit. */
+WPD_API WPDStatus wpd_decoder_metadata(const WPDDecoder *decoder,
+                                       WPDMetadata which, const uint8_t **data,
+                                       size_t *size);
 
 /* Returns 1 and fills 'frame', 0 when no further frame is available, or a
    negative WPDStatus. The frame borrows decoder memory that the next call

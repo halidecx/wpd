@@ -384,6 +384,27 @@ static void print_image_info(WPDDecoder *decoder, DecodeContext *ctx) {
     printf("background: 0x%08x\n", image.background_argb);
 }
 
+static void print_metadata(WPDDecoder *decoder) {
+    static const struct {
+        WPDMetadata which;
+        const char *name;
+    } kinds[] = {
+        {WPD_METADATA_ICCP, "iccp"},
+        {WPD_METADATA_EXIF, "exif"},
+        {WPD_METADATA_XMP, "xmp"},
+    };
+
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(*kinds); i++) {
+        const uint8_t *data;
+        size_t         size;
+
+        if (wpd_decoder_metadata(decoder, kinds[i].which, &data, &size) ==
+                WPD_OK &&
+            size)
+            printf("%s: %zu bytes\n", kinds[i].name, size);
+    }
+}
+
 /* Pulls every frame currently available. Returns 0 when the decoder has
    nothing more for now, or negative on error. */
 static int drain_frames(WPDDecoder *decoder, DecodeContext *ctx) {
@@ -607,6 +628,8 @@ int main(int argc, char **argv) {
                 print_image_info(decoder, &ctx);
             ret = drain_frames(decoder, &ctx);
         }
+        if (ctx.info && ret >= 0)
+            print_metadata(decoder);
         frames = ctx.frames;
         if (ret < 0) {
             fprintf(stderr, "%s: %s\n", input_name, wpd_decoder_error(decoder));
