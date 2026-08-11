@@ -119,13 +119,15 @@ typedef struct VP8Context {
 #define VP8_NEED_MORE 1
 
 int  vp8_decode_init(WpdCodecContext *context);
-int  vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
 int  vp8_decode_frame_init(WpdCodecContext *context, const uint8_t *chunk,
                            int avail, int size);
 void vp8_decode_extend(WpdCodecContext *context, const uint8_t *chunk,
                        int avail);
-int  vp8_decode_rows(WpdCodecContext *context, void *frame);
-int  vp8_rows_finalized(const WpdCodecContext *context);
-int  vp8_decode_free(WpdCodecContext *context);
+/* Decodes every row of a frame whose data is all present, where
+   vp8_decode_rows() resumes one that is still arriving. */
+int vp8_decode_frame_rows(WpdCodecContext *context, void *frame);
+int vp8_decode_rows(WpdCodecContext *context, void *frame);
+int vp8_rows_finalized(const WpdCodecContext *context);
+int vp8_decode_free(WpdCodecContext *context);
 
 #endif

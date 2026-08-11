@@ -1506,6 +1506,46 @@ static void test_partial_matches_whole(const char *path, WPDPixelFormat format,
     free(data);
 }
 
+/* A lossy frame's alpha decodes on a worker thread, which must not change a
+   pixel: the same file decoded on one thread has to agree frame for frame. */
+static void test_threads_match(const char *path, WPDPixelFormat format) {
+    size_t            size;
+    uint8_t          *data     = read_file(path, &size);
+    WPDDecoder       *serial   = wpd_decoder_create();
+    WPDDecoder       *parallel = wpd_decoder_create();
+    WPDDecoderOptions options  = WPD_DECODER_OPTIONS_INIT;
+    WPDFrame          a = WPD_FRAME_INIT, b = WPD_FRAME_INIT;
+    int               frames = 0, ret;
+
+    CHECK(data != NULL);
+    CHECK(serial != NULL && parallel != NULL);
+    if (!data || !serial || !parallel)
+        goto done;
+
+    options.n_threads = 1;
+    CHECK(wpd_decoder_set_options(serial, &options) == WPD_OK);
+    options.n_threads = 0;
+    CHECK(wpd_decoder_set_options(parallel, &options) == WPD_OK);
+    CHECK(wpd_decoder_set_output_format(serial, format) == WPD_OK);
+    CHECK(wpd_decoder_set_output_format(parallel, format) == WPD_OK);
+    CHECK(wpd_decoder_open(serial, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open(parallel, data, size) == WPD_OK);
+
+    while ((ret = wpd_decoder_next_frame(serial, &a)) > 0) {
+        CHECK(wpd_decoder_next_frame(parallel, &b) == 1);
+        CHECK(frame_equal(&a, &b));
+        frames++;
+    }
+    CHECK(ret == 0);
+    CHECK(wpd_decoder_next_frame(parallel, &b) == 0);
+    CHECK(frames > 0);
+
+done:
+    wpd_decoder_free(serial);
+    wpd_decoder_free(parallel);
+    free(data);
+}
+
 static void test_structs_and_limits(void) {
     uint8_t      file[30];
     WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
@@ -1534,6 +1574,18 @@ static void test_structs_and_limits(void) {
     CHECK(wpd_decoder_set_options(
               decoder, &(WPDDecoderOptions){.struct_size = sizeof(size_t)}) ==
           WPD_ERR_INVALID_ARG);
+    CHECK(wpd_decoder_set_options(decoder,
+                                  &(WPDDecoderOptions){
+                                      .struct_size = sizeof(WPDDecoderOptions),
+                                      .n_threads   = -1,
+                                  }) == WPD_ERR_INVALID_ARG);
+    /* A caller built against a header without n_threads passes a struct that
+       stops before it, and the fields behind it take their defaults. */
+    CHECK(wpd_decoder_set_options(
+              decoder,
+              &(WPDDecoderOptions){
+                  .struct_size = offsetof(WPDDecoderOptions, n_threads),
+              }) == WPD_OK);
     /* A rejected call has to leave its reason behind, not the last success. */
     CHECK(wpd_decoder_status(decoder) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_set_options(decoder, NULL) == WPD_ERR_INVALID_ARG);
@@ -2334,6 +2386,8 @@ int main(int argc, char **argv) {
 
         snprintf(path, sizeof(path), "%s/a_lossy.webp", dir);
         test_file_info(path, 600, 600, 1, 0, 1, WPD_CODING_LOSSY);
+        test_threads_match(path, WPD_PIX_FMT_NONE);
+        test_threads_match(path, WPD_PIX_FMT_BGRA);
         test_replacement_api_file(path, "VP8 ", 1);
         test_output_buffer(path, WPD_PIX_FMT_BGRA);
         test_output_buffer(path, WPD_PIX_FMT_ARGB_PRE);
@@ -2341,6 +2395,7 @@ int main(int argc, char **argv) {
 
         snprintf(path, sizeof(path), "%s/anim_yuva.webp", dir);
         test_file_info(path, 422, 480, 1, 1, 14, WPD_CODING_UNKNOWN);
+        test_threads_match(path, WPD_PIX_FMT_ARGB);
         test_replacement_animation(path);
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);
@@ -2356,6 +2411,7 @@ int main(int argc, char **argv) {
         test_stream(path, WPD_PIX_FMT_RGBA, 4096, 0);
         snprintf(path, sizeof(path), "%s/lossy.webp", dir);
         test_replacement_api_file(path, "VP8 ", 0);
+        test_threads_match(path, WPD_PIX_FMT_NONE);
         snprintf(path, sizeof(path), "%s/a_lossy.webp", dir);
         test_stream(path, WPD_PIX_FMT_BGRA, 512, 0);
         test_stream(path, WPD_PIX_FMT_NONE, 512, 0);

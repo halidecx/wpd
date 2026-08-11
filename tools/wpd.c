@@ -17,6 +17,7 @@ enum {
     ARG_CPUMASK,
     ARG_INFO,
     ARG_STREAM,
+    ARG_THREADS,
 };
 
 typedef struct CpuMask {
@@ -78,6 +79,7 @@ static const struct option long_options[] = {
     {"cpumask", required_argument, NULL, ARG_CPUMASK},
     {"info", no_argument, NULL, ARG_INFO},
     {"stream", required_argument, NULL, ARG_STREAM},
+    {"threads", required_argument, NULL, ARG_THREADS},
     {NULL, 0, NULL, 0},
 };
 
@@ -117,7 +119,10 @@ static void usage(const char *app, const char *reason) {
             "    print canvas, animation and per-frame timing to stdout\n"
             " --stream u32\n"
             "    decode incrementally, appending this many bytes at a time,\n"
-            "    instead of opening the file whole\n",
+            "    instead of opening the file whole\n"
+            " --threads u32\n"
+            "    threads a decode may use; 0 chooses automatically and 1\n"
+            "    keeps everything on the calling thread; default 0\n",
             app);
 }
 
@@ -131,6 +136,19 @@ static int parse_repeat(const char *value, int *repeat) {
         parsed < 1 || parsed > INT_MAX)
         return -1;
     *repeat = (int)parsed;
+    return 0;
+}
+
+static int parse_threads(const char *value, int *threads) {
+    char         *end;
+    unsigned long parsed;
+
+    errno  = 0;
+    parsed = strtoul(value, &end, 10);
+    if (errno == ERANGE || end == value || *end || value[0] == '-' ||
+        parsed > INT_MAX)
+        return -1;
+    *threads = (int)parsed;
     return 0;
 }
 
@@ -511,7 +529,7 @@ int main(int argc, char **argv) {
     const char    *muxer = NULL, *pixel_format = NULL, *verify = NULL;
     WPDPixelFormat out_format = WPD_PIX_FMT_NONE;
     const char    *input_name, *output_name;
-    int            info = 0, stream = 0;
+    int            info = 0, stream = 0, threads = 0;
     int            frames = 0, output_opened = 0, repeat = 1, ret, status = 1;
     unsigned       cpumask;
 
@@ -548,6 +566,12 @@ int main(int argc, char **argv) {
             if (parse_repeat(optarg, &stream) < 0) {
                 usage(argv[0],
                       "invalid stream chunk size; expected 1..INT_MAX");
+                return 2;
+            }
+            break;
+        case ARG_THREADS:
+            if (parse_threads(optarg, &threads) < 0) {
+                usage(argv[0], "invalid thread count; expected 0..INT_MAX");
                 return 2;
             }
             break;
@@ -625,6 +649,15 @@ int main(int argc, char **argv) {
             wpd_decoder_set_output_format(decoder, out_format) < 0) {
             fprintf(stderr, "cannot select %s output\n", pixel_format);
             goto done;
+        }
+        if (threads) {
+            WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
+
+            options.n_threads = threads;
+            if (wpd_decoder_set_options(decoder, &options) < 0) {
+                fprintf(stderr, "cannot select %d threads\n", threads);
+                goto done;
+            }
         }
         if (stream) {
             ret = decode_stream(decoder, data, size, (size_t)stream, &ctx);

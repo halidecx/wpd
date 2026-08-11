@@ -1682,20 +1682,16 @@ int vp8_rows_finalized(const WpdCodecContext *avctx) {
     return rows < 0 ? 0 : rows > avctx->height ? avctx->height : rows;
 }
 
-int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
-    VP8Context *s = avctx->priv_data;
-    int         ret;
+int vp8_decode_frame_rows(WpdCodecContext *avctx, void *data) {
+    VP8Context *s   = avctx->priv_data;
+    const int   ret = decode_rows_tmpl(s, 0);
 
-    ret = vp8_decode_frame_init(avctx, avpkt->data, avpkt->size, avpkt->size);
-    if (ret)
-        return ret < 0 ? ret : WPD_ERROR_INVALID_DATA;
-
-    if ((ret = decode_rows_tmpl(s, 0)) < 0)
+    if (ret < 0)
         return ret;
 
     *(WpdFrame *)data = s->frame;
 
-    return avpkt->size;
+    return 0;
 }
 
 wpd_cold int vp8_decode_init(WpdCodecContext *avctx) {

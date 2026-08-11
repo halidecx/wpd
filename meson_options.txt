@@ -24,6 +24,11 @@ option('testdata_dir',
     value: '',
     description: 'Path to wpd-test-data; defaults to wpd-test-data in the source root')
 
+option('threads',
+    type: 'feature',
+    value: 'auto',
+    description: 'Decode a lossy frame and its alpha plane in parallel')
+
 option('force_rac32',
     type: 'boolean',
     value: false,

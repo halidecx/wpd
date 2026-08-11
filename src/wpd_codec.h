@@ -18,9 +18,4 @@ typedef struct WpdCodecContext {
     int   bypass_filtering;
 } WpdCodecContext;
 
-typedef struct WpdPacket {
-    const uint8_t *data;
-    int            size;
-} WpdPacket;
-
 #endif

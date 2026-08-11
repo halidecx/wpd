@@ -87,6 +87,9 @@ if get_option('force_rac32')
   lib_c_args += '-DWPD_FORCE_RAC32'
 endif
 
+threads_dep = dependency('threads', required: get_option('threads'))
+lib_c_args += '-DWPD_HAVE_THREADS=@0@'.format(threads_dep.found() ? 1 : 0)
+
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or
   cpu_family.startswith('arm') or
@@ -219,6 +222,7 @@ libwpd = library(
   lib_objects,
   include_directories: inc_dirs,
   c_args: lib_c_args + trim_c_args,
+  dependencies: threads_dep,
   version: meson.project_version(),
   soversion: meson.project_version().split('.')[0],
   gnu_symbol_visibility: 'hidden',
@@ -232,6 +236,7 @@ import('pkgconfig').generate(
   name: 'wpd',
   filebase: 'wpd',
   description: 'A fast WebP decoder',
+  libraries_private: threads_dep,
 )
 
 # The bundled tools reach past the public API (cpu flag overrides), which the
@@ -247,6 +252,7 @@ else
     lib_objects,
     include_directories: inc_dirs,
     c_args: lib_c_args + trim_c_args,
+    dependencies: threads_dep,
     build_by_default: false,
     install: false,
   )
@@ -254,6 +260,7 @@ endif
 
 wpd_dep = declare_dependency(
   link_with: libwpd_internal,
+  dependencies: threads_dep,
   include_directories: inc_dirs,
   compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
 )
@@ -402,12 +409,14 @@ if asm_enabled and checkasm_dep.found()
     lib_objects,
     include_directories: inc_dirs,
     c_args: lib_c_args + ['-DWPD_CHECKASM=1'],
+    dependencies: threads_dep,
     build_by_default: false,
     install: false,
   )
 
   wpd_checkasm_dep = declare_dependency(
     link_with: libwpd_checkasm,
+    dependencies: threads_dep,
     include_directories: inc_dirs,
   )
 

@@ -222,6 +222,15 @@ libwebp. EXIF and XMP follow the image data, so in a stream they arrive after
 the frames do; the flags in `info.metadata` are set as soon as the header is in.
 `--info` lists whatever is present.
 
+A lossy frame's alpha channel is a lossless image of its own that shares
+nothing with the colour planes, so the decoder hands it to a worker thread and
+decodes luma and chroma alongside it. This is on by default for frames large
+enough to earn back the handoff, and costs one thread for as long as the
+decoder lives. Set `options.n_threads` to 1 to keep everything on the calling
+thread, or configure the build with `-Dthreads=disabled` to leave the code out
+entirely; `build/wpd --threads 1` selects the single-threaded path for
+comparison. Nothing else is threaded yet, so no value above 2 does anything.
+
 Every entry point that can fail returns a `WPDStatus`, negative on error;
 `wpd_decoder_status()` retrieves the last one and `wpd_decoder_error()`
 describes it for a log. Diagnostics are silent by default. Passing a callback to

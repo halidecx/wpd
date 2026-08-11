@@ -5,6 +5,7 @@
 #include "vp8.h"
 #include "vp8l_dsp.h"
 #include "wpd_codec.h"
+#include "wpd_thread.h"
 #include "yuvdsp.h"
 
 #include <stdio.h>
@@ -649,6 +650,27 @@ typedef struct ImageContext {
     int            is_alpha_primary;
 } ImageContext;
 
+#if WPD_HAVE_THREADS
+/* A lossy frame's alpha is a VP8L image of its own, sharing nothing with the
+   luma and chroma planes, so it decodes on this worker while the calling
+   thread decodes the rest of the frame. The worker outlives a single frame to
+   keep an animation from paying for a thread per frame. */
+typedef struct AlphaWorker {
+    wpd_thread     thread;
+    wpd_mutex      lock;
+    wpd_cond       cond;
+    WPDDecoder    *decoder;
+    WebPImage     *image;
+    const uint8_t *data;
+    unsigned       size;
+    int            result;
+    int            running;
+    int            quit;
+    int            pending;
+    int            done;
+} AlphaWorker;
+#endif
+
 struct WPDDecoder {
     WpdCodecContext   codec;
     VP8Context        vp8;
@@ -689,6 +711,9 @@ struct WPDDecoder {
     int      alpha_data_size;
     uint8_t *alpha_plane;
     size_t   alpha_plane_size;
+#if WPD_HAVE_THREADS
+    AlphaWorker alpha_worker;
+#endif
 
     LEBitReader        gb;
     uint8_t           *alpha_dst;
@@ -2039,9 +2064,74 @@ static void vp8_lossy_export_planes(const WPDDecoder *s, WebPImage *out,
     }
 }
 
-static int vp8_lossy_alpha_plane(WPDDecoder *s, WebPImage *out) {
+#if WPD_HAVE_THREADS
+WPD_THREAD_ENTRY(alpha_worker_main) {
+    AlphaWorker *w = arg;
+
+    wpd_mutex_lock(&w->lock);
+    for (;;) {
+        int result;
+
+        while (!w->pending && !w->quit) wpd_cond_wait(&w->cond, &w->lock);
+        if (w->quit)
+            break;
+        wpd_mutex_unlock(&w->lock);
+        result = vp8_lossy_decode_alpha(w->decoder, w->image, w->data, w->size);
+        wpd_mutex_lock(&w->lock);
+        w->result  = result;
+        w->pending = 0;
+        w->done    = 1;
+        wpd_cond_broadcast(&w->cond);
+    }
+    wpd_mutex_unlock(&w->lock);
+    return 0;
+}
+
+static int alpha_worker_launch(AlphaWorker *w) {
+    if (w->running)
+        return 0;
+    if (wpd_mutex_init(&w->lock) < 0)
+        return -1;
+    if (wpd_cond_init(&w->cond) < 0) {
+        wpd_mutex_destroy(&w->lock);
+        return -1;
+    }
+    if (wpd_thread_create(&w->thread, alpha_worker_main, w) < 0) {
+        wpd_cond_destroy(&w->cond);
+        wpd_mutex_destroy(&w->lock);
+        return -1;
+    }
+    w->running = 1;
+    return 0;
+}
+
+static void alpha_worker_stop(AlphaWorker *w) {
+    if (!w->running)
+        return;
+    wpd_mutex_lock(&w->lock);
+    w->quit = 1;
+    wpd_cond_broadcast(&w->cond);
+    wpd_mutex_unlock(&w->lock);
+    wpd_thread_join(&w->thread);
+    wpd_cond_destroy(&w->cond);
+    wpd_mutex_destroy(&w->lock);
+    w->running = 0;
+}
+
+/* A handoff costs a few microseconds, so a plane has to be big enough to earn
+   it back. Below this the alpha decode stays on the calling thread. */
+#define ALPHA_THREAD_MIN_PIXELS (128 * 128)
+
+static int alpha_worker_wanted(const WPDDecoder *s) {
+    return s->options.n_threads != 1 &&
+        (int64_t)s->width * s->height >= ALPHA_THREAD_MIN_PIXELS;
+}
+#endif
+
+/* Points 'out' at the alpha plane and starts filling it. Returns 1 when the
+   worker took the job, so that alpha_end() has something to collect. */
+static int alpha_begin(WPDDecoder *s, WebPImage *out) {
     const size_t alpha_size = (size_t)s->width * s->height;
-    int          ret;
 
     if (s->alpha_plane_size < alpha_size) {
         uint8_t *plane = realloc(s->alpha_plane, alpha_size);
@@ -2054,8 +2144,48 @@ static int vp8_lossy_alpha_plane(WPDDecoder *s, WebPImage *out) {
     out->data[3]     = s->alpha_plane;
     out->linesize[3] = s->width;
     out->format      = WPD_PIX_FMT_YUVA420P;
-    ret              = vp8_lossy_decode_alpha(
+
+#if WPD_HAVE_THREADS
+    if (alpha_worker_wanted(s) && alpha_worker_launch(&s->alpha_worker) == 0) {
+        AlphaWorker *w = &s->alpha_worker;
+
+        wpd_mutex_lock(&w->lock);
+        w->decoder = s;
+        w->image   = out;
+        w->data    = file_at(s, s->alpha_data_offset);
+        w->size    = s->alpha_data_size;
+        w->pending = 1;
+        w->done    = 0;
+        wpd_cond_broadcast(&w->cond);
+        wpd_mutex_unlock(&w->lock);
+        return 1;
+    }
+#endif
+
+    s->alpha_pending = 0;
+    return vp8_lossy_decode_alpha(
         s, out, file_at(s, s->alpha_data_offset), s->alpha_data_size);
+}
+
+/* Collects the job alpha_begin() handed to the worker. Must be called for
+   every alpha_begin() that returned 1, including on the error paths of the
+   work that ran alongside it. */
+static int alpha_end(WPDDecoder *s, int begun) {
+    int ret = 0;
+
+    if (begun <= 0)
+        return begun;
+#if WPD_HAVE_THREADS
+    {
+        AlphaWorker *w = &s->alpha_worker;
+
+        wpd_mutex_lock(&w->lock);
+        while (!w->done) wpd_cond_wait(&w->cond, &w->lock);
+        w->done = 0;
+        ret     = w->result;
+        wpd_mutex_unlock(&w->lock);
+    }
+#endif
     s->alpha_pending = 0;
     return ret;
 }
@@ -2117,7 +2247,7 @@ static int vp8_lossy_step(WPDDecoder *s, WebPImage *out,
                           const uint8_t *data_start, unsigned int avail,
                           unsigned int data_size) {
     WpdFrame decoded;
-    int      ret;
+    int      alpha = 0, ret;
 
     if ((ret = vp8_lossy_init(s)) < 0)
         return ret;
@@ -2133,8 +2263,8 @@ static int vp8_lossy_step(WPDDecoder *s, WebPImage *out,
 
         update_canvas_size(s, s->codec.width, s->codec.height);
         vp8_lossy_export_planes(s, out, &s->vp8.frame);
-        if (s->has_alpha && (ret = vp8_lossy_alpha_plane(s, out)) < 0)
-            return ret;
+        if (s->has_alpha && (alpha = alpha_begin(s, out)) < 0)
+            return alpha;
         s->still_lossy = !s->animation;
         s->vp8_active  = 1;
     } else {
@@ -2142,6 +2272,11 @@ static int vp8_lossy_step(WPDDecoder *s, WebPImage *out,
     }
 
     ret = vp8_decode_rows(&s->codec, &decoded);
+    if (alpha > 0) {
+        const int alpha_ret = alpha_end(s, alpha);
+        if (ret >= 0 && alpha_ret < 0)
+            ret = alpha_ret;
+    }
     if (ret < 0)
         return ret;
     vp8_lossy_export_planes(s, out, &decoded);
@@ -2155,24 +2290,35 @@ static int vp8_lossy_step(WPDDecoder *s, WebPImage *out,
 static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
                                   const uint8_t *data_start,
                                   unsigned int   data_size) {
-    WpdPacket packet;
-    WpdFrame  decoded;
-    int       ret;
+    WpdFrame decoded;
+    int      alpha = 0, ret;
 
     if ((ret = vp8_lossy_init(s)) < 0)
         return ret;
     update_filter_bypass(s);
 
-    packet.data = data_start;
-    packet.size = data_size;
-    ret         = vp8_decode_frame(&s->codec, &decoded, &packet);
+    /* Parsing the header before the rows gives the alpha worker the frame
+       dimensions it needs, and something to overlap with. */
+    ret = vp8_decode_frame_init(
+        &s->codec, data_start, (int)data_size, (int)data_size);
+    if (ret)
+        return ret < 0 ? ret : WPD_ERROR_INVALID_DATA;
+
+    update_canvas_size(s, s->codec.width, s->codec.height);
+    vp8_lossy_export_planes(s, out, &s->vp8.frame);
+    if (s->has_alpha && (alpha = alpha_begin(s, out)) < 0)
+        return alpha;
+
+    ret = vp8_decode_frame_rows(&s->codec, &decoded);
+    if (alpha > 0) {
+        const int alpha_ret = alpha_end(s, alpha);
+        if (ret >= 0 && alpha_ret < 0)
+            ret = alpha_ret;
+    }
     if (ret < 0)
         return ret;
 
-    update_canvas_size(s, s->codec.width, s->codec.height);
     vp8_lossy_export_planes(s, out, &decoded);
-    if (s->has_alpha && (ret = vp8_lossy_alpha_plane(s, out)) < 0)
-        return ret;
     s->still_lossy = !s->animation;
     return 0;
 }
@@ -3629,29 +3775,33 @@ WPDDecoder *wpd_decoder_create(void) {
 
 WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
                                   const WPDDecoderOptions *options) {
+    WPDDecoderOptions copy = WPD_DECODER_OPTIONS_INIT;
+
     if (!decoder)
         return WPD_ERR_INVALID_ARG;
     if (!options ||
         options->struct_size < WPD_FIELD_END(WPDDecoderOptions, flip))
         return set_error(
             decoder, "invalid decoder options", WPD_ERR_INVALID_ARG);
-    if ((options->bypass_filtering != 0 && options->bypass_filtering != 1) ||
-        (options->no_fancy_upsampling != 0 &&
-         options->no_fancy_upsampling != 1) ||
-        (options->use_cropping != 0 && options->use_cropping != 1) ||
-        (options->use_scaling != 0 && options->use_scaling != 1) ||
-        (options->flip != 0 && options->flip != 1) ||
-        (options->use_cropping &&
-         (options->crop_left < 0 || options->crop_top < 0 ||
-          options->crop_width <= 0 || options->crop_height <= 0)) ||
-        (options->use_scaling &&
-         (options->scaled_width < 0 || options->scaled_height < 0 ||
-          (!options->scaled_width && !options->scaled_height))))
+    /* A caller built against an older header passes a shorter struct; the
+       fields it does not carry keep their defaults. */
+    memcpy(&copy, options, WPD_MIN(options->struct_size, sizeof(copy)));
+    copy.struct_size = sizeof(copy);
+    if ((copy.bypass_filtering != 0 && copy.bypass_filtering != 1) ||
+        (copy.no_fancy_upsampling != 0 && copy.no_fancy_upsampling != 1) ||
+        (copy.use_cropping != 0 && copy.use_cropping != 1) ||
+        (copy.use_scaling != 0 && copy.use_scaling != 1) ||
+        (copy.flip != 0 && copy.flip != 1) || copy.n_threads < 0 ||
+        (copy.use_cropping &&
+         (copy.crop_left < 0 || copy.crop_top < 0 || copy.crop_width <= 0 ||
+          copy.crop_height <= 0)) ||
+        (copy.use_scaling &&
+         (copy.scaled_width < 0 || copy.scaled_height < 0 ||
+          (!copy.scaled_width && !copy.scaled_height))))
         return set_error(
             decoder, "invalid decoder options", WPD_ERR_INVALID_ARG);
-    decoder->options                = *options;
-    decoder->options.struct_size    = sizeof(decoder->options);
-    decoder->codec.bypass_filtering = options->bypass_filtering;
+    decoder->options                = copy;
+    decoder->codec.bypass_filtering = copy.bypass_filtering;
     return WPD_OK;
 }
 
@@ -4709,6 +4859,9 @@ const char *wpd_decoder_error(const WPDDecoder *decoder) {
 void wpd_decoder_free(WPDDecoder *decoder) {
     if (!decoder)
         return;
+#if WPD_HAVE_THREADS
+    alpha_worker_stop(&decoder->alpha_worker);
+#endif
     if (decoder->vp8_initialized)
         vp8_decode_free(&decoder->codec);
     image_free(&decoder->canvas);

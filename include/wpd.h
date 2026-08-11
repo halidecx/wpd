@@ -197,10 +197,14 @@ typedef struct WPDDecoderOptions {
     int scaled_height;
     /* Reverse the final output vertically. */
     int flip;
+    /* How many threads a decode may use. 0 lets the decoder choose, 1 keeps
+       everything on the calling thread. A lossy frame's alpha decodes
+       alongside its colour planes, so nothing above 2 is used yet. */
+    int n_threads;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 /* Replace the decoder's processing options. Cropping is applied before
    scaling. A lossy frame is cropped in its native YUV, whose chroma is
