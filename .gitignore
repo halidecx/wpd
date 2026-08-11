@@ -28,7 +28,7 @@ wpd-test-data/
 
 .DS_Store
 
-build/
+build*
 
 *.y4m
 *.yuv
@@ -36,4 +36,8 @@ build/
 *.ivf
 
 subprojects/checkasm/
+subprojects/libwebp/
 subprojects/.wraplock
+
+.agents/
+.codex/
