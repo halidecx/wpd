@@ -57,6 +57,11 @@ void ff_premultiply_row_4444_ssse3(uint8_t *rgba4444, int num_pixels);
 void ff_premultiply_row_4444_avx2(uint8_t *rgba4444, int num_pixels);
 void ff_argb_to_y_ssse3(uint8_t *y, const uint8_t *argb, int num_pixels);
 void ff_argb_to_y_avx2(uint8_t *y, const uint8_t *argb, int num_pixels);
+#if WPD_ARCH_X86_64
+void ff_argb_to_uv_avx2(uint8_t *u, uint8_t *v, const uint8_t *argb,
+                        ptrdiff_t argb_stride, int num_pixels,
+                        int weight_alpha);
+#endif
 
 static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
     const unsigned flags = wpd_get_cpu_flags();
@@ -93,6 +98,7 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_BGRA] = ff_upsample_block_bgra_avx2;
         dsp->upsample_block[WPD_LAYOUT_RGB]  = ff_upsample_block_rgb_avx2;
         dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_avx2;
+        dsp->argb_to_uv                      = ff_argb_to_uv_avx2;
 #endif
         dsp->dispatch_alpha       = ff_dispatch_alpha_avx2;
         dsp->pack_rgba            = ff_pack_rgba_avx2;

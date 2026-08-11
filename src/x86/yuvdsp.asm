@@ -80,6 +80,27 @@ pd_y_rnd: times 8 dd 1081344
 ; Undoes the lane interleave the two packssdw and the packuswb leave behind.
 permd_y:  dd 0, 4, 1, 5, 2, 6, 3, 7
 
+pd_255:   times 8 dd 255
+pd_511:   times 8 dd 511
+pd_512:   times 8 dd 512
+pd_64:    times 8 dd 64
+pd_1020:  times 8 dd 1020
+pd_65535: times 8 dd 65535
+pd_1:     times 8 dd 1
+ps_1_19:  times 8 dd 524288.0
+; U = (-9719 R - 19081 G + 28800 B) and V = (28800 R - 24116 G - 4684 B), each
+; rounded by half an output step plus the 128 offset before a shift of 18. R
+; and G ride in one word pair; B keeps a lane of its own, its second word being
+; the zero the sums never carry into.
+pw_u_rg:   times 8 dw -9719, -19081
+pw_u_b:    times 8 dw 28800, 0
+pw_v_rg:   times 8 dw 28800, -24116
+pw_v_b:    times 8 dw -4684, 0
+pd_uv_rnd: times 8 dd 33685504
+
+cextern_naked wpd_gamma_to_linear_tab
+cextern_naked wpd_linear_to_gamma_tab
+
 SECTION .text
 
 %if ARCH_X86_64
@@ -299,6 +320,209 @@ UPSAMPLE_ARGB_BLOCK rgba, 4
 UPSAMPLE_ARGB_BLOCK bgra, 4
 UPSAMPLE_ARGB_BLOCK rgb, 3
 UPSAMPLE_ARGB_BLOCK bgr, 3
+
+; Splits sixteen ARGB columns of both rows into the four samples every output
+; pixel averages: even and odd column of the top row, then of the bottom one.
+%macro ARGB_TO_UV_COLUMNS 2 ; src, stride
+    movu      m0, [%1]
+    movu      m1, [%1 + 32]
+    shufps    m2, m0, m1, q2020
+    shufps    m3, m0, m1, q3131
+    vpermq    m2, m2, q3120
+    vpermq    m3, m3, q3120
+    mova      [rsp +  0], m2
+    mova      [rsp + 32], m3
+    movu      m0, [%1 + %2]
+    movu      m1, [%1 + %2 + 32]
+    shufps    m2, m0, m1, q2020
+    shufps    m3, m0, m1, q3131
+    vpermq    m2, m2, q3120
+    vpermq    m3, m3, q3120
+    mova      [rsp + 64], m2
+    mova      [rsp + 96], m3
+%endmacro
+
+%macro ARGB_TO_UV_IDX 1 ; channel shift
+%if %1
+    psrld     m0, [rsp +  0], %1
+    psrld     m1, [rsp + 32], %1
+    psrld     m2, [rsp + 64], %1
+    psrld     m3, [rsp + 96], %1
+%else
+    mova      m0, [rsp +  0]
+    mova      m1, [rsp + 32]
+    mova      m2, [rsp + 64]
+    mova      m3, [rsp + 96]
+%endif
+%if %1 != 24
+    pand      m0, [pd_255]
+    pand      m1, [pd_255]
+    pand      m2, [pd_255]
+    pand      m3, [pd_255]
+%endif
+%endmacro
+
+; One channel of eight output pixels. A gather with a scale of two lands the
+; wanted entry in the low word of each dword and its neighbour in the high one,
+; which the four-sample sum can ignore: the sum of four 12-bit entries never
+; carries into bit 16. The same overlap is what makes the interpolation of the
+; inverse table a single pmaddwd, its two entries arriving in one dword.
+%macro ARGB_TO_UV_CHANNEL 2 ; channel shift, dst
+    ARGB_TO_UV_IDX %1
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m4, [r6 + m0 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m5, [r6 + m1 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m6, [r6 + m2 * 2], m7
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m0, [r6 + m3 * 2], m7
+    paddd      m1, m4, m5
+    paddd      m2, m6, m0
+    paddd      m1, m2
+    pand       m1, [pd_65535]
+    test       r5d, r5d
+    jz         %%unweighted
+    pand       m4, [pd_65535]
+    pand       m6, [pd_65535]
+    pslld      m5, 16
+    pslld      m0, 16
+    por        m4, m5
+    por        m6, m0
+    pmaddwd    m4, m13
+    pmaddwd    m6, m12
+    paddd      m4, m6
+    pmulld     m4, m9
+    psrld      m4, 17
+    vpblendvb  m1, m1, m4, m10
+%%unweighted:
+    psrld      m2, m1, 9
+    pand       m1, [pd_511]
+    pcmpeqd    m7, m7, m7
+    vpgatherdd m3, [r7 + m2 * 2], m7
+    pslld      m2, m1, 16
+    mova       m0, [pd_512]
+    psubd      m0, m1
+    por        m2, m0
+    pmaddwd    m3, m2
+    paddd      m3, [pd_64]
+    psrad      %2, m3, 7
+%endmacro
+
+%macro ARGB_TO_UV_BODY 2 ; src, stride
+    ARGB_TO_UV_COLUMNS %1, %2
+    ARGB_TO_UV_IDX 0
+    paddd     m5, m0, m1
+    paddd     m6, m2, m3
+    paddd     m5, m6
+    pslld     m1, 16
+    pslld     m3, 16
+    por       m13, m0, m1
+    por       m12, m2, m3
+    pxor      m6, m6
+    pcmpeqd   m4, m5, m6
+    pcmpeqd   m7, m5, [pd_1020]
+    por       m4, m7
+    ; A block that is opaque, fully transparent, or whose alpha the caller does
+    ; not want kept is averaged unweighted; when none of the eight need the
+    ; weighted average, which is every block of an opaque image, skip it.
+    pandn     m10, m4, m11
+    pmovmskb  r5d, m10
+    pmaxsd    m5, [pd_1]
+    cvtdq2ps  m5, m5
+    mova      m9, [ps_1_19]
+    divps     m9, m5
+    ; 2^19 / total_a is never within a float rounding error of an integer from
+    ; below, so truncating agrees with the integer divide.
+    cvttps2dq m9, m9
+    ARGB_TO_UV_CHANNEL  8, m8
+    ARGB_TO_UV_CHANNEL 16, m14
+    ARGB_TO_UV_CHANNEL 24, m15
+    pslld     m0, m14, 16
+    por       m0, m8
+    pmaddwd   m1, m0, [pw_u_rg]
+    pmaddwd   m2, m15, [pw_u_b]
+    paddd     m1, m2
+    paddd     m1, [pd_uv_rnd]
+    psrad     m1, 18
+    pmaddwd   m2, m0, [pw_v_rg]
+    pmaddwd   m3, m15, [pw_v_b]
+    paddd     m2, m3
+    paddd     m2, [pd_uv_rnd]
+    psrad     m2, 18
+    packssdw  m1, m2
+    packuswb  m1, m1
+    vextracti128 xm2, m1, 1
+    punpckldq xm1, xm1, xm2
+%endmacro
+
+INIT_YMM avx2
+cglobal argb_to_uv, 6, 10, 16, 288, u, v, argb, argb_stride, n, weight_alpha
+    lea       r6, [wpd_gamma_to_linear_tab]
+    lea       r7, [wpd_linear_to_gamma_tab]
+    pxor      m11, m11
+    test      weight_alphad, weight_alphad
+    jz        .no_weight
+    pcmpeqd   m11, m11
+.no_weight:
+    mov       r8d, nd
+    sar       r8d, 4
+    jz        .tail
+.loop:
+    ARGB_TO_UV_BODY argbq, argb_strideq
+    movq      [uq], xm1
+    movhps    [vq], xm1
+    add       argbq, 64
+    add       uq, 8
+    add       vq, 8
+    dec       r8d
+    jg        .loop
+.tail:
+    and       nd, 15
+    jz        .end
+    ; Fewer than sixteen columns left: gather them into a zeroed block, with
+    ; the last column doubled up when the width is odd, which is exactly how
+    ; the scalar path folds a lone column onto itself.
+    pxor      m0, m0
+    mova      [rsp + 128], m0
+    mova      [rsp + 160], m0
+    mova      [rsp + 192], m0
+    mova      [rsp + 224], m0
+    mov       r8d, nd
+    lea       r9, [rsp + 128]
+.copy:
+    mov       r5d, [argbq]
+    mov       [r9], r5d
+    mov       r5d, [argbq + argb_strideq]
+    mov       [r9 + 64], r5d
+    add       argbq, 4
+    add       r9, 4
+    dec       r8d
+    jg        .copy
+    test      nd, 1
+    jz        .no_dup
+    mov       r5d, [r9 - 4]
+    mov       [r9], r5d
+    mov       r5d, [r9 + 60]
+    mov       [r9 + 64], r5d
+.no_dup:
+    lea       r9, [rsp + 128]
+    ARGB_TO_UV_BODY r9, 64
+    movq      [rsp + 256], xm1
+    movhps    [rsp + 264], xm1
+    add       nd, 1
+    shr       nd, 1
+    xor       r9d, r9d
+.store:
+    mov       r5b, [rsp + 256 + r9]
+    mov       [uq + r9], r5b
+    mov       r5b, [rsp + 264 + r9]
+    mov       [vq + r9], r5b
+    inc       r9
+    dec       nd
+    jg        .store
+.end:
+    RET
 
 %endif ; ARCH_X86_64
 
