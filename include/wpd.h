@@ -80,6 +80,10 @@ typedef enum WPDPixelFormat {
     WPD_PIX_FMT_ARGB_PRE,
     WPD_PIX_FMT_RGBA_PRE,
     WPD_PIX_FMT_BGRA_PRE,
+    /* Two bytes per pixel, most-significant component bits first. */
+    WPD_PIX_FMT_RGB565,
+    WPD_PIX_FMT_RGBA4444,
+    WPD_PIX_FMT_RGBA4444_PRE,
 } WPDPixelFormat;
 
 typedef struct WPDFrame {

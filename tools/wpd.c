@@ -148,6 +148,9 @@ static const struct {
     {"Argb", WPD_PIX_FMT_ARGB_PRE},
     {"rgbA", WPD_PIX_FMT_RGBA_PRE},
     {"bgrA", WPD_PIX_FMT_BGRA_PRE},
+    {"rgb565", WPD_PIX_FMT_RGB565},
+    {"rgba4444", WPD_PIX_FMT_RGBA4444},
+    {"rgbA4444", WPD_PIX_FMT_RGBA4444_PRE},
 };
 
 static int parse_format(const char *value, const char **pixel_format,
@@ -318,6 +321,10 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
         const int bpp = frame->format == WPD_PIX_FMT_RGB ||
                 frame->format == WPD_PIX_FMT_BGR
             ? 3
+            : frame->format == WPD_PIX_FMT_RGB565 ||
+                frame->format == WPD_PIX_FMT_RGBA4444 ||
+                frame->format == WPD_PIX_FMT_RGBA4444_PRE
+            ? 2
             : 4;
 
         if (strcmp(pixel_format, format_name(frame->format))) {
