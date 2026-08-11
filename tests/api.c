@@ -1506,25 +1506,25 @@ static void test_partial_matches_whole(const char *path, WPDPixelFormat format,
     free(data);
 }
 
-/* A lossy frame's alpha decodes on a worker thread, which must not change a
-   pixel: the same file decoded on one thread has to agree frame for frame. */
-static void test_threads_match(const char *path, WPDPixelFormat format) {
-    size_t            size;
-    uint8_t          *data     = read_file(path, &size);
+/* Work handed to the pool must not change a pixel, whatever the pool's size:
+   every thread count has to agree with the single-threaded decode frame for
+   frame. Counts that are not powers of two matter, since they change how work
+   is divided. */
+static void check_threads_match(const uint8_t *data, size_t size,
+                                WPDPixelFormat format, int n_threads) {
     WPDDecoder       *serial   = wpd_decoder_create();
     WPDDecoder       *parallel = wpd_decoder_create();
     WPDDecoderOptions options  = WPD_DECODER_OPTIONS_INIT;
     WPDFrame          a = WPD_FRAME_INIT, b = WPD_FRAME_INIT;
     int               frames = 0, ret;
 
-    CHECK(data != NULL);
     CHECK(serial != NULL && parallel != NULL);
-    if (!data || !serial || !parallel)
+    if (!serial || !parallel)
         goto done;
 
     options.n_threads = 1;
     CHECK(wpd_decoder_set_options(serial, &options) == WPD_OK);
-    options.n_threads = 0;
+    options.n_threads = n_threads;
     CHECK(wpd_decoder_set_options(parallel, &options) == WPD_OK);
     CHECK(wpd_decoder_set_output_format(serial, format) == WPD_OK);
     CHECK(wpd_decoder_set_output_format(parallel, format) == WPD_OK);
@@ -1543,6 +1543,17 @@ static void test_threads_match(const char *path, WPDPixelFormat format) {
 done:
     wpd_decoder_free(serial);
     wpd_decoder_free(parallel);
+}
+
+static void test_threads_match(const char *path, WPDPixelFormat format) {
+    static const int counts[] = {0, 2, 3, 5, 8};
+    size_t           size;
+    uint8_t         *data = read_file(path, &size);
+
+    CHECK(data != NULL);
+    if (data)
+        for (size_t i = 0; i < sizeof(counts) / sizeof(*counts); i++)
+            check_threads_match(data, size, format, counts[i]);
     free(data);
 }
 
@@ -2408,6 +2419,7 @@ int main(int argc, char **argv) {
         test_stream_errors(path);
 
         snprintf(path, sizeof(path), "%s/lossless.webp", dir);
+        test_threads_match(path, WPD_PIX_FMT_RGBA);
         test_stream(path, WPD_PIX_FMT_RGBA, 4096, 0);
         snprintf(path, sizeof(path), "%s/lossy.webp", dir);
         test_replacement_api_file(path, "VP8 ", 0);

@@ -73,6 +73,7 @@ lib_sources = files(
   'src/yuvdsp.c',
   'src/rescaler.c',
   'src/wpd_compat.c',
+  'src/wpd_task.c',
   'src/cpu.c',
 )
 lib_objects = []

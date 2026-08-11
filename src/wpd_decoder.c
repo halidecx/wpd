@@ -5,7 +5,7 @@
 #include "vp8.h"
 #include "vp8l_dsp.h"
 #include "wpd_codec.h"
-#include "wpd_thread.h"
+#include "wpd_task.h"
 #include "yuvdsp.h"
 
 #include <stdio.h>
@@ -675,27 +675,6 @@ typedef struct Vp8lDecoder {
     int    rows_done;
 } Vp8lDecoder;
 
-#if WPD_HAVE_THREADS
-/* A lossy frame's alpha is a VP8L image of its own, sharing nothing with the
-   luma and chroma planes, so it decodes on this worker while the calling
-   thread decodes the rest of the frame. The worker outlives a single frame to
-   keep an animation from paying for a thread per frame. */
-typedef struct AlphaWorker {
-    wpd_thread     thread;
-    wpd_mutex      lock;
-    wpd_cond       cond;
-    WPDDecoder    *decoder;
-    WebPImage     *image;
-    const uint8_t *data;
-    unsigned       size;
-    int            result;
-    int            running;
-    int            quit;
-    int            pending;
-    int            done;
-} AlphaWorker;
-#endif
-
 struct WPDDecoder {
     WpdCodecContext   codec;
     VP8Context        vp8;
@@ -734,9 +713,13 @@ struct WPDDecoder {
     int      alpha_data_size;
     uint8_t *alpha_plane;
     size_t   alpha_plane_size;
-#if WPD_HAVE_THREADS
-    AlphaWorker alpha_worker;
-#endif
+    /* The image the alpha job fills, valid between alpha_begin() and
+       alpha_end(). */
+    WebPImage *alpha_image;
+    WpdTaskJob alpha_job;
+
+    WpdTaskPool *pool;
+    int          pool_threads;
 
     int width, height;
     /* The colour image, and the alpha plane that can decode alongside it. */
@@ -2090,74 +2073,37 @@ static void vp8_lossy_export_planes(const WPDDecoder *s, WebPImage *out,
     }
 }
 
-#if WPD_HAVE_THREADS
-WPD_THREAD_ENTRY(alpha_worker_main) {
-    AlphaWorker *w = arg;
-
-    wpd_mutex_lock(&w->lock);
-    for (;;) {
-        int result;
-
-        while (!w->pending && !w->quit) wpd_cond_wait(&w->cond, &w->lock);
-        if (w->quit)
-            break;
-        wpd_mutex_unlock(&w->lock);
-        result = vp8_lossy_decode_alpha(w->decoder, w->image, w->data, w->size);
-        wpd_mutex_lock(&w->lock);
-        w->result  = result;
-        w->pending = 0;
-        w->done    = 1;
-        wpd_cond_broadcast(&w->cond);
-    }
-    wpd_mutex_unlock(&w->lock);
-    return 0;
-}
-
-static int alpha_worker_launch(AlphaWorker *w) {
-    if (w->running)
-        return 0;
-    if (wpd_mutex_init(&w->lock) < 0)
-        return -1;
-    if (wpd_cond_init(&w->cond) < 0) {
-        wpd_mutex_destroy(&w->lock);
-        return -1;
-    }
-    if (wpd_thread_create(&w->thread, alpha_worker_main, w) < 0) {
-        wpd_cond_destroy(&w->cond);
-        wpd_mutex_destroy(&w->lock);
-        return -1;
-    }
-    w->running = 1;
-    return 0;
-}
-
-static void alpha_worker_stop(AlphaWorker *w) {
-    if (!w->running)
-        return;
-    wpd_mutex_lock(&w->lock);
-    w->quit = 1;
-    wpd_cond_broadcast(&w->cond);
-    wpd_mutex_unlock(&w->lock);
-    wpd_thread_join(&w->thread);
-    wpd_cond_destroy(&w->cond);
-    wpd_mutex_destroy(&w->lock);
-    w->running = 0;
-}
-
 /* A handoff costs a few microseconds, so a plane has to be big enough to earn
    it back. Below this the alpha decode stays on the calling thread. */
 #define ALPHA_THREAD_MIN_PIXELS (128 * 128)
 
-static int alpha_worker_wanted(const WPDDecoder *s) {
-    return s->options.n_threads != 1 &&
-        (int64_t)s->width * s->height >= ALPHA_THREAD_MIN_PIXELS;
-}
-#endif
+static WpdTaskPool *decoder_pool(WPDDecoder *s) {
+    const int want = s->options.n_threads ? s->options.n_threads
+                                          : wpd_num_logical_processors();
 
-/* Points 'out' at the alpha plane and starts filling it. Returns 1 when the
-   worker took the job, so that alpha_end() has something to collect. */
+    if (want == s->pool_threads)
+        return s->pool;
+    wpd_task_pool_free(s->pool);
+    s->pool         = wpd_task_pool_create(want);
+    s->pool_threads = want;
+    return s->pool;
+}
+
+static int alpha_task(void *arg, int index) {
+    WPDDecoder *s = arg;
+
+    (void)index;
+    return vp8_lossy_decode_alpha(s,
+                                  s->alpha_image,
+                                  file_at(s, s->alpha_data_offset),
+                                  s->alpha_data_size);
+}
+
+/* Points 'out' at the alpha plane and starts filling it. Returns 1 once the
+   job is out, so that alpha_end() knows to collect it. */
 static int alpha_begin(WPDDecoder *s, WebPImage *out) {
     const size_t alpha_size = (size_t)s->width * s->height;
+    WpdTaskPool *pool       = NULL;
 
     if (s->alpha_plane_size < alpha_size) {
         uint8_t *plane = realloc(s->alpha_plane, alpha_size);
@@ -2171,47 +2117,28 @@ static int alpha_begin(WPDDecoder *s, WebPImage *out) {
     out->linesize[3] = s->width;
     out->format      = WPD_PIX_FMT_YUVA420P;
 
-#if WPD_HAVE_THREADS
-    if (alpha_worker_wanted(s) && alpha_worker_launch(&s->alpha_worker) == 0) {
-        AlphaWorker *w = &s->alpha_worker;
-
-        wpd_mutex_lock(&w->lock);
-        w->decoder = s;
-        w->image   = out;
-        w->data    = file_at(s, s->alpha_data_offset);
-        w->size    = s->alpha_data_size;
-        w->pending = 1;
-        w->done    = 0;
-        wpd_cond_broadcast(&w->cond);
-        wpd_mutex_unlock(&w->lock);
-        return 1;
+    if ((int64_t)s->width * s->height >= ALPHA_THREAD_MIN_PIXELS)
+        pool = decoder_pool(s);
+    if (!pool) {
+        s->alpha_pending = 0;
+        return vp8_lossy_decode_alpha(
+            s, out, file_at(s, s->alpha_data_offset), s->alpha_data_size);
     }
-#endif
 
-    s->alpha_pending = 0;
-    return vp8_lossy_decode_alpha(
-        s, out, file_at(s, s->alpha_data_offset), s->alpha_data_size);
+    s->alpha_image = out;
+    wpd_task_submit(pool, &s->alpha_job, alpha_task, s, 1);
+    return 1;
 }
 
-/* Collects the job alpha_begin() handed to the worker. Must be called for
-   every alpha_begin() that returned 1, including on the error paths of the
-   work that ran alongside it. */
+/* Collects the job alpha_begin() started. Must be called for every
+   alpha_begin() that returned 1, including on the error paths of the work
+   that ran alongside it. */
 static int alpha_end(WPDDecoder *s, int begun) {
-    int ret = 0;
+    int ret;
 
     if (begun <= 0)
         return begun;
-#if WPD_HAVE_THREADS
-    {
-        AlphaWorker *w = &s->alpha_worker;
-
-        wpd_mutex_lock(&w->lock);
-        while (!w->done) wpd_cond_wait(&w->cond, &w->lock);
-        w->done = 0;
-        ret     = w->result;
-        wpd_mutex_unlock(&w->lock);
-    }
-#endif
+    ret              = wpd_task_wait(s->pool, &s->alpha_job);
     s->alpha_pending = 0;
     return ret;
 }
@@ -4895,9 +4822,7 @@ const char *wpd_decoder_error(const WPDDecoder *decoder) {
 void wpd_decoder_free(WPDDecoder *decoder) {
     if (!decoder)
         return;
-#if WPD_HAVE_THREADS
-    alpha_worker_stop(&decoder->alpha_worker);
-#endif
+    wpd_task_pool_free(decoder->pool);
     if (decoder->vp8_initialized)
         vp8_decode_free(&decoder->codec);
     image_free(&decoder->canvas);
