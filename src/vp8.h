@@ -102,10 +102,30 @@ typedef struct VP8Context {
     VP56RangeCoder coeff_partition[8];
     VP8DSPContext  vp8dsp;
     VP8PredContext pred;
+
+    uint16_t       mb_x, mb_y;
+    uint16_t       mb_rows_done;
+    const uint8_t *chunk;
+    int            chunk_avail;
+    int            chunk_size;
+    uint32_t       partition_start[8];
+    uint32_t       partition_size[8];
+    uint8_t        partition_ready;
+    uint8_t        partition_clamped;
+    VP56RacOffsets coder_offsets;
+    VP56RacOffsets partition_offsets[8];
 } VP8Context;
 
-int vp8_decode_init(WpdCodecContext *context);
-int vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
-int vp8_decode_free(WpdCodecContext *context);
+#define VP8_NEED_MORE 1
+
+int  vp8_decode_init(WpdCodecContext *context);
+int  vp8_decode_frame(WpdCodecContext *context, void *frame, WpdPacket *packet);
+int  vp8_decode_frame_init(WpdCodecContext *context, const uint8_t *chunk,
+                           int avail, int size);
+void vp8_decode_extend(WpdCodecContext *context, const uint8_t *chunk,
+                       int avail);
+int  vp8_decode_rows(WpdCodecContext *context, void *frame);
+int  vp8_rows_finalized(const WpdCodecContext *context);
+int  vp8_decode_free(WpdCodecContext *context);
 
 #endif
