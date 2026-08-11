@@ -1,6 +1,7 @@
 #ifndef WPD_UTIL_H
 #define WPD_UTIL_H
 
+#include "wpd.h"
 #include "wpd_compat.h"
 
 #include <errno.h>
@@ -15,8 +16,7 @@
 
 #define WPD_ERROR(e) (-(e))
 #define WPD_ERROR_INVALID_DATA (-1094995529)
-#define WPD_LOG_ERROR 0
-#define WPD_LOG_WARNING 1
+#define WPD_ERROR_TOO_LARGE (-558319938)
 
 static wpd_always_inline unsigned wpd_clip_uint8(int value) {
     return value & ~255 ? (unsigned)((-value >> 31) & 255) : (unsigned)value;

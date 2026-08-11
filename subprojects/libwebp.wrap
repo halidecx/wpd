@@ -1,0 +1,6 @@
+[wrap-git]
+url = https://github.com/webmproject/libwebp.git
+revision = 94d3c4a7b85aa34ca68963e3b3f00298f47c0bbb
+depth = 1
+method = cmake
+directory = libwebp

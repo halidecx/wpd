@@ -1,8 +1,5 @@
 #include "vp8.h"
 #include "wpd_codec.h"
-#if WPD_HAVE_ASM && WPD_ARCH_ARM
-#include "arm/vp8.h"
-#endif
 
 static const uint8_t vp8_pred4x4_mode[] = {
     [DC_PRED8x8]    = DC_PRED,
@@ -686,29 +683,63 @@ static void update_lf_deltas(VP8Context *s) {
     }
 }
 
-static int setup_partitions(VP8Context *s, const uint8_t *buf, int buf_size) {
-    const uint8_t *sizes = buf;
-    int            i;
+static int setup_partitions(VP8Context *s, int table, int avail, int total) {
+    const uint8_t *sizes = s->chunk + table;
+    int            i, off, n;
 
-    s->num_coeff_partitions = 1 << vp8_rac_get_uint(&s->c, 2);
+    n = s->num_coeff_partitions = 1 << vp8_rac_get_uint(&s->c, 2);
 
-    buf += 3 * (s->num_coeff_partitions - 1);
-    buf_size -= 3 * (s->num_coeff_partitions - 1);
-    if (buf_size < 0)
-        return -1;
+    if (total - table < 3 * (n - 1))
+        return WPD_ERROR_INVALID_DATA;
+    if (avail - table < 3 * (n - 1))
+        return VP8_NEED_MORE;
 
-    for (i = 0; i < s->num_coeff_partitions - 1; i++) {
+    off = table + 3 * (n - 1);
+    for (i = 0; i < n - 1; i++) {
         int size = WPD_RL24(sizes + 3 * i);
-        if (buf_size - size < 0)
-            return -1;
+        if (total - off < size)
+            return WPD_ERROR_INVALID_DATA;
 
-        wpd_vp56_init_range_decoder(&s->coeff_partition[i], buf, size);
-        buf += size;
-        buf_size -= size;
+        s->partition_start[i] = off;
+        s->partition_size[i]  = size;
+        off += size;
     }
-    wpd_vp56_init_range_decoder(&s->coeff_partition[i], buf, buf_size);
+    s->partition_start[i] = off;
+    s->partition_size[i]  = total - off;
 
+    s->partition_ready   = 0;
+    s->partition_clamped = 0;
     return 0;
+}
+
+static void open_partitions(VP8Context *s) {
+    const int init_bytes = WPD_RAC_64 ? 0 : 3;
+
+    for (int i = 0; i < s->num_coeff_partitions; i++) {
+        const uint8_t *start = s->chunk + s->partition_start[i];
+        const int      size  = (int)s->partition_size[i];
+        const int      have  = s->chunk_avail - (int)s->partition_start[i];
+        int            win;
+
+        if (have >= size)
+            win = size;
+        else if (have >= init_bytes)
+            win = have;
+        else
+            continue;
+
+        if (!(s->partition_ready & (1 << i))) {
+            wpd_vp56_init_range_decoder(&s->coeff_partition[i], start, win);
+            s->partition_ready |= 1 << i;
+        } else if (s->coeff_partition[i].end != start + win) {
+            wpd_vp56_extend(&s->coeff_partition[i], start + win);
+        }
+
+        if (win < size)
+            s->partition_clamped |= 1 << i;
+        else
+            s->partition_clamped &= ~(1 << i);
+    }
 }
 
 static void get_quants(VP8Context *s) {
@@ -748,9 +779,9 @@ static void get_quants(VP8Context *s) {
     }
 }
 
-static int decode_frame_header(VP8Context *s, const uint8_t *buf,
-                               int buf_size) {
-    VP56RangeCoder *c = &s->c;
+static int decode_frame_header(VP8Context *s, int avail, int total) {
+    const uint8_t  *buf = s->chunk;
+    VP56RangeCoder *c   = &s->c;
     int             header_size, hscale, vscale, i, j, k, l, m, ret;
     int             width, height;
 
@@ -761,16 +792,17 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
     s->profile  = (buf[0] >> 1) & 7;
     header_size = WPD_RL24(buf) >> 5;
     buf += 3;
-    buf_size -= 3;
 
     if (s->profile > 3)
         wpd_log(s->avctx, WPD_LOG_WARNING, "Unknown profile %d\n", s->profile);
 
-    if (header_size > buf_size - 7) {
+    if (header_size > total - 10) {
         wpd_log(
             s->avctx, WPD_LOG_ERROR, "Header size larger than data provided\n");
         return WPD_ERROR_INVALID_DATA;
     }
+    if (avail - 10 < header_size)
+        return VP8_NEED_MORE;
 
     if (WPD_RL24(buf) != 0x2a019d) {
         wpd_log(s->avctx,
@@ -784,7 +816,6 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
     hscale = buf[4] >> 6;
     vscale = buf[6] >> 6;
     buf += 7;
-    buf_size -= 7;
 
     if (hscale || vscale)
         wpd_log(s->avctx, WPD_LOG_WARNING, "Upscaling is not supported\n");
@@ -801,8 +832,6 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
         return ret;
 
     wpd_vp56_init_range_decoder(c, buf, header_size);
-    buf += header_size;
-    buf_size -= header_size;
 
     if (vp8_rac_get(c))
         wpd_log(s->avctx, WPD_LOG_WARNING, "Unspecified colorspace\n");
@@ -821,9 +850,10 @@ static int decode_frame_header(VP8Context *s, const uint8_t *buf,
         if (vp8_rac_get(c))
             update_lf_deltas(s);
 
-    if (setup_partitions(s, buf, buf_size)) {
-        wpd_log(s->avctx, WPD_LOG_ERROR, "Invalid partitions\n");
-        return WPD_ERROR_INVALID_DATA;
+    if ((ret = setup_partitions(s, 10 + header_size, avail, total))) {
+        if (ret < 0)
+            wpd_log(s->avctx, WPD_LOG_ERROR, "Invalid partitions\n");
+        return ret;
     }
 
     get_quants(s);
@@ -894,9 +924,10 @@ static wpd_always_inline void decode_mb_mode(VP8Context *s, VP8Macroblock *mb,
         c, vp8_pred8x8c_tree, vp8_pred8x8c_prob_intra);
 }
 
-static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
-                                 uint8_t probs[16][3][NUM_DCT_TOKENS - 1],
-                                 int i, uint8_t *token_prob, int16_t qmul[2]) {
+static wpd_noclone int decode_block_coeffs_c(
+    VP56RangeCoder *c, WpdDctElem block[16],
+    uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, uint8_t *token_prob,
+    int16_t qmul[2]) {
     goto skip_eob;
     do {
         int coeff;
@@ -946,18 +977,6 @@ static int decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
     return i;
 }
 
-#ifndef decode_block_coeffs_internal
-#define decode_block_coeffs_internal decode_block_coeffs_c
-#endif
-
-#ifdef WPD_CHECKASM
-int wpd_decode_block_coeffs_c(VP56RangeCoder *c, WpdDctElem block[16],
-                              uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i,
-                              uint8_t *token_prob, int16_t qmul[2]) {
-    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
-}
-#endif
-
 static wpd_always_inline int decode_block_coeffs(
     VP56RangeCoder *c, WpdDctElem block[16],
     uint8_t probs[16][3][NUM_DCT_TOKENS - 1], int i, int zero_nhood,
@@ -965,7 +984,7 @@ static wpd_always_inline int decode_block_coeffs(
     uint8_t *token_prob = probs[i][zero_nhood];
     if (!vp56_rac_get_prob_branchy(c, token_prob[0]))
         return 0;
-    return decode_block_coeffs_internal(c, block, probs, i, token_prob, qmul);
+    return decode_block_coeffs_c(c, block, probs, i, token_prob, qmul);
 }
 
 static wpd_always_inline void decode_mb_coeffs(VP8Context *s, VP56RangeCoder *c,
@@ -1442,13 +1461,53 @@ static void filter_mb_row_simple(VP8Context *s, WpdFrame *curframe, int mb_y) {
     }
 }
 
-int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
-    VP8Context   *s        = avctx->priv_data;
-    WpdFrame     *curframe = &s->frame;
-    VP8Macroblock mb;
-    int           ret, mb_x, mb_y, i, y;
+typedef struct VP8ResumeState {
+    VP56RangeCoder c;
+    VP56RangeCoder part;
+    uint8_t        intra4x4_top[4];
+    uint8_t        intra4x4_left[4];
+    uint8_t        top_nnz[9];
+    uint8_t        left_nnz[9];
+} VP8ResumeState;
 
-    if ((ret = decode_frame_header(s, avpkt->data, avpkt->size)) < 0)
+static void save_mb_state(const VP8Context *s, VP8ResumeState *snap,
+                          const VP56RangeCoder *c, int mb_x) {
+    snap->c    = s->c;
+    snap->part = *c;
+    memcpy(snap->intra4x4_top, s->intra4x4_pred_mode_top + 4 * mb_x, 4);
+    memcpy(snap->intra4x4_left, s->intra4x4_pred_mode_left, 4);
+    memcpy(snap->top_nnz, s->top_nnz[mb_x], 9);
+    memcpy(snap->left_nnz, s->left_nnz, 9);
+}
+
+static void restore_mb_state(VP8Context *s, const VP8ResumeState *snap,
+                             VP56RangeCoder *c, int mb_x) {
+    s->c = snap->c;
+    *c   = snap->part;
+    memcpy(s->intra4x4_pred_mode_top + 4 * mb_x, snap->intra4x4_top, 4);
+    memcpy(s->intra4x4_pred_mode_left, snap->intra4x4_left, 4);
+    memcpy(s->top_nnz[mb_x], snap->top_nnz, 9);
+    memcpy(s->left_nnz, snap->left_nnz, 9);
+    memset(s->block, 0, sizeof(s->block));
+    memset(s->block_dc, 0, sizeof(s->block_dc));
+}
+
+int vp8_decode_frame_init(WpdCodecContext *avctx, const uint8_t *chunk,
+                          int avail, int size) {
+    VP8Context *s        = avctx->priv_data;
+    WpdFrame   *curframe = &s->frame;
+    int         ret;
+
+    if (size < 10)
+        return WPD_ERROR_INVALID_DATA;
+    if (avail < 10)
+        return VP8_NEED_MORE;
+
+    s->chunk       = chunk;
+    s->chunk_avail = avail;
+    s->chunk_size  = size;
+
+    if ((ret = decode_frame_header(s, avail, size)))
         return ret;
 
     if (!curframe->allocation[0] &&
@@ -1457,7 +1516,7 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
         return ret;
     }
 
-    s->deblock_filter = s->filter.level != 0;
+    s->deblock_filter = s->filter.level != 0 && !avctx->bypass_filtering;
     s->linesize       = curframe->linesize[0];
     s->uvlinesize     = curframe->linesize[1];
 
@@ -1469,28 +1528,93 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
     memset(
         &s->top_border[0][31], 127, s->mb_width * sizeof(*s->top_border) + 1);
 
-    for (mb_y = 0; mb_y < s->mb_height; mb_y++) {
-        VP56RangeCoder *c =
-            &s->coeff_partition[mb_y & (s->num_coeff_partitions - 1)];
-        uint8_t *dst[3] = {curframe->data[0] + 16 * mb_y * s->linesize,
-                           curframe->data[1] + 8 * mb_y * s->uvlinesize,
-                           curframe->data[2] + 8 * mb_y * s->uvlinesize};
+    s->mb_x         = 0;
+    s->mb_y         = 0;
+    s->mb_rows_done = 0;
+    open_partitions(s);
+    return 0;
+}
 
-        memset(s->left_nnz, 0, sizeof(s->left_nnz));
-        WPD_WN32A(s->intra4x4_pred_mode_left, DC_PRED * 0x01010101);
+void vp8_decode_extend(WpdCodecContext *avctx, const uint8_t *chunk,
+                       int avail) {
+    VP8Context *s = avctx->priv_data;
 
-        for (i = 0; i < 3; i++)
-            for (y = 0; y < 16 >> !!i; y++)
-                dst[i][y * curframe->linesize[i] - 1] = 129;
-        if (mb_y == 1)
-            s->top_border[0][15] = s->top_border[0][23] = s->top_border[0][31] =
-                129;
+    wpd_vp56_restore_offsets(&s->c, chunk, &s->coder_offsets);
+    for (int i = 0; i < s->num_coeff_partitions; i++)
+        if (s->partition_ready & (1 << i))
+            wpd_vp56_restore_offsets(
+                &s->coeff_partition[i], chunk, &s->partition_offsets[i]);
 
-        for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
+    s->chunk       = chunk;
+    s->chunk_avail = avail;
+    open_partitions(s);
+}
+
+static void save_coder_offsets(VP8Context *s) {
+    wpd_vp56_save_offsets(&s->c, s->chunk, &s->coder_offsets);
+    for (int i = 0; i < s->num_coeff_partitions; i++)
+        if (s->partition_ready & (1 << i))
+            wpd_vp56_save_offsets(
+                &s->coeff_partition[i], s->chunk, &s->partition_offsets[i]);
+}
+
+static wpd_always_inline int decode_rows_tmpl(VP8Context *s,
+                                              const int   resumable) {
+    WpdFrame     *curframe = &s->frame;
+    VP8Macroblock mb;
+    int           mb_x, mb_y, i, y;
+
+    for (mb_y = resumable ? s->mb_y : 0; mb_y < s->mb_height; mb_y++) {
+        const int       part  = mb_y & (s->num_coeff_partitions - 1);
+        VP56RangeCoder *c     = &s->coeff_partition[part];
+        int             mb_x0 = 0, check = 0;
+        uint8_t        *dst[3] = {curframe->data[0] + 16 * mb_y * s->linesize,
+                                  curframe->data[1] + 8 * mb_y * s->uvlinesize,
+                                  curframe->data[2] + 8 * mb_y * s->uvlinesize};
+
+        if (resumable) {
+            if (!(s->partition_ready & (1 << part))) {
+                s->mb_x = 0;
+                s->mb_y = mb_y;
+                return VP8_NEED_MORE;
+            }
+            check = (s->partition_clamped >> part) & 1;
+            mb_x0 = s->mb_x;
+        }
+
+        if (!resumable || !mb_x0) {
+            memset(s->left_nnz, 0, sizeof(s->left_nnz));
+            WPD_WN32A(s->intra4x4_pred_mode_left, DC_PRED * 0x01010101);
+
+            for (i = 0; i < 3; i++)
+                for (y = 0; y < 16 >> !!i; y++)
+                    dst[i][y * curframe->linesize[i] - 1] = 129;
+            if (mb_y == 1)
+                s->top_border[0][15]     = s->top_border[0][23] =
+                    s->top_border[0][31] = 129;
+        } else {
+            dst[0] += 16 * mb_x0;
+            dst[1] += 8 * mb_x0;
+            dst[2] += 8 * mb_x0;
+        }
+
+        for (mb_x = mb_x0; mb_x < s->mb_width; mb_x++) {
+            VP8ResumeState snap;
+
+            if (resumable && check)
+                save_mb_state(s, &snap, c, mb_x);
+
             decode_mb_mode(s, &mb, mb_x);
 
             if (!mb.skip)
                 decode_mb_coeffs(s, c, &mb, s->top_nnz[mb_x], s->left_nnz);
+
+            if (resumable && check && vp56_rac_overran(c)) {
+                restore_mb_state(s, &snap, c, mb_x);
+                s->mb_x = mb_x;
+                s->mb_y = mb_y;
+                return VP8_NEED_MORE;
+            }
 
             intra_predict(s, dst, &mb, mb_x, mb_y);
 
@@ -1520,9 +1644,56 @@ int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
             else
                 filter_mb_row(s, curframe, mb_y);
         }
+
+        if (resumable) {
+            s->mb_x         = 0;
+            s->mb_rows_done = mb_y + 1;
+        }
     }
 
-    *(WpdFrame *)data = *curframe;
+    s->mb_y         = s->mb_height;
+    s->mb_rows_done = s->mb_height;
+    return 0;
+}
+
+int vp8_decode_rows(WpdCodecContext *avctx, void *data) {
+    VP8Context *s   = avctx->priv_data;
+    const int   ret = decode_rows_tmpl(s, 1);
+
+    if (ret == VP8_NEED_MORE)
+        save_coder_offsets(s);
+
+    *(WpdFrame *)data = s->frame;
+    return ret;
+}
+
+int vp8_rows_finalized(const WpdCodecContext *avctx) {
+    static const int  extra[3] = {0, 2, 8};
+    const VP8Context *s        = avctx->priv_data;
+    int               rows;
+
+    if (s->mb_rows_done >= s->mb_height)
+        return avctx->height;
+
+    rows = 16 * s->mb_rows_done -
+        extra[!s->deblock_filter     ? 0
+                  : s->filter.simple ? 1
+                                     : 2];
+    return rows < 0 ? 0 : rows > avctx->height ? avctx->height : rows;
+}
+
+int vp8_decode_frame(WpdCodecContext *avctx, void *data, WpdPacket *avpkt) {
+    VP8Context *s = avctx->priv_data;
+    int         ret;
+
+    ret = vp8_decode_frame_init(avctx, avpkt->data, avpkt->size, avpkt->size);
+    if (ret)
+        return ret < 0 ? ret : WPD_ERROR_INVALID_DATA;
+
+    if ((ret = decode_rows_tmpl(s, 0)) < 0)
+        return ret;
+
+    *(WpdFrame *)data = s->frame;
 
     return avpkt->size;
 }

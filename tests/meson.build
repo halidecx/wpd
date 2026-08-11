@@ -90,8 +90,10 @@ testdata = [
   ['palette2bpp_rgb',     'argb',     '3573fb55c12dd909d0031a061abe60ea'],
   ['palette4bpp_rgb',     'argb',     'a2947b69d2cf6ff6bce54039588259c3'],
   ['palette_rgb',         'argb',     'c8787aa91807ccd5aeddaa20e5c1385c'],
+  ['predict_topright',    'argb',     '3230e15952c4cd1950c2145b1fbbdb8f'],
   ['simplelf-lossy',      'argb',     '0b4304a51219d871cdc67e6e43c63d13'],
   ['simplelf-lossy',      'yuv420p',  '902f82e8c7df48a81824df5cc944d815'],
+  ['transforms_before_palette', 'argb', '99deeacd41a60584c9f93aa4a6dd1f03'],
   ['transparent_over',    'Argb',     'b76238e7781ef9f04bff376b2c4060da'],
   ['transparent_over',    'bgr',      '091bcafcbd34c25b011dd575f5daf2ee'],
   ['transparent_over',    'bgra',     '8e90439c51b61ebd3246c8c43b980d55'],
@@ -102,6 +104,9 @@ testdata = [
   ['transparent_over',    'argb',     'e4aed005e206bc6b220e24210af98aa6'],
 ]
 
+test('api-testdata', api_test, suite: ['testdata', 'api'], args: [testdata_dir])
+test('parity', parity_test, suite: ['testdata', 'parity'], args: [testdata_dir],
+     timeout: 300)
 foreach t : testdata
   input = testdata_dir / t[0] + '.webp'
   if not fs.exists(input)
@@ -110,4 +115,10 @@ foreach t : testdata
   test('@0@-@1@'.format(t[0], t[1]), wpd,
        suite: ['testdata', 'testdata-' + t[1]],
        args: ['--verify', t[2], '-f', t[1], input])
+  # The same decode driven incrementally must be bit-identical. The chunk size
+  # is deliberately not a power of two, so chunk boundaries land inside chunk
+  # headers and payloads rather than lining up with them.
+  test('@0@-@1@-stream'.format(t[0], t[1]), wpd,
+       suite: ['testdata', 'testdata-stream'],
+       args: ['--verify', t[2], '-f', t[1], '--stream', '1021', input])
 endforeach

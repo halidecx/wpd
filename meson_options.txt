@@ -3,6 +3,12 @@ option('enable_asm',
     value: true,
     description: 'Build asm files, if available')
 
+option('libwebp',
+    type: 'combo',
+    choices: ['auto', 'subproject', 'system', 'disabled'],
+    value: 'auto',
+    description: 'Where the libwebp compared against comes from')
+
 option('libwebpdecoder',
     type: 'string',
     value: '',
@@ -17,6 +23,11 @@ option('testdata_dir',
     type: 'string',
     value: '',
     description: 'Path to wpd-test-data; defaults to wpd-test-data in the source root')
+
+option('force_rac32',
+    type: 'boolean',
+    value: false,
+    description: 'Use the 32-bit range coder even where the 64-bit one fits')
 
 option('trim_dsp',
   type: 'combo',

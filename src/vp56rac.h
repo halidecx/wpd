@@ -4,11 +4,19 @@
 
 #include "wpd_codec.h"
 
-#if UINTPTR_MAX > 0xffffffffu && defined(__GNUC__)
+#if defined(WPD_FORCE_RAC32)
+#define WPD_RAC_64 0
+#elif UINTPTR_MAX > 0xffffffffu && defined(__GNUC__)
 #define WPD_RAC_64 1
 #else
 #define WPD_RAC_64 0
 #endif
+
+typedef struct VP56RacOffsets {
+    ptrdiff_t buffer;
+    ptrdiff_t buf_max;
+    ptrdiff_t end;
+} VP56RacOffsets;
 
 #if WPD_RAC_64
 
@@ -25,6 +33,7 @@ typedef struct VP56RangeCoder {
 void wpd_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf,
                                  int buf_size);
 void wpd_vp56_load_final_bytes(VP56RangeCoder *c);
+void wpd_vp56_extend(VP56RangeCoder *c, const uint8_t *end);
 
 static wpd_always_inline void vp56_rac_refill(VP56RangeCoder *c) {
     if (c->buffer < c->buf_max) {
@@ -115,11 +124,13 @@ typedef struct VP56RangeCoder {
     const uint8_t *buffer;
     const uint8_t *end;
     unsigned int   code_word;
+    int            eof;
 } VP56RangeCoder;
 
 extern const uint8_t wpd_vp56_norm_shift[256];
 void wpd_vp56_init_range_decoder(VP56RangeCoder *c, const uint8_t *buf,
                                  int buf_size);
+void wpd_vp56_extend(VP56RangeCoder *c, const uint8_t *end);
 
 static wpd_always_inline unsigned int vp56_rac_renorm(VP56RangeCoder *c) {
     int          shift     = wpd_vp56_norm_shift[c->high];
@@ -129,9 +140,17 @@ static wpd_always_inline unsigned int vp56_rac_renorm(VP56RangeCoder *c) {
     c->high <<= shift;
     code_word <<= shift;
     bits += shift;
-    if (bits >= 0 && c->buffer < c->end) {
-        code_word |= wpd_bytestream_get_be16(&c->buffer) << bits;
-        bits -= 16;
+    if (bits >= 0) {
+        if (c->end - c->buffer >= 2) {
+            code_word |= wpd_bytestream_get_be16(&c->buffer) << bits;
+            bits -= 16;
+        } else if (c->buffer < c->end) {
+            code_word |= (unsigned)*c->buffer++ << (bits + 8);
+            bits -= 16;
+            c->eof = 1;
+        } else {
+            c->eof = 1;
+        }
     }
     c->bits = bits;
     return code_word;
@@ -172,6 +191,15 @@ static wpd_always_inline int vp8_rac_get_signed(VP56RangeCoder *c, int v) {
 }
 
 #endif
+
+void wpd_vp56_save_offsets(const VP56RangeCoder *c, const uint8_t *base,
+                           VP56RacOffsets *offsets);
+void wpd_vp56_restore_offsets(VP56RangeCoder *c, const uint8_t *base,
+                              const VP56RacOffsets *offsets);
+
+static wpd_always_inline int vp56_rac_overran(const VP56RangeCoder *c) {
+    return c->eof;
+}
 
 static wpd_always_inline int vp8_rac_get(VP56RangeCoder *c) {
     return vp56_rac_get_prob(c, 128);

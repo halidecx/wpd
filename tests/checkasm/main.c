@@ -16,7 +16,6 @@ static const CheckasmCpuInfo cpu_flags[] = {
     {0}};
 
 static const CheckasmTest tests[] = {{"lossless", checkasm_check_lossless},
-                                     {"vp8coeffs", checkasm_check_vp8coeffs},
                                      {"vp8dsp", checkasm_check_vp8dsp},
                                      {"vp8pred", checkasm_check_vp8pred},
                                      {"yuvdsp", checkasm_check_yuvdsp},

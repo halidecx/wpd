@@ -15,6 +15,7 @@ typedef struct WpdFrame {
 typedef struct WpdCodecContext {
     void *priv_data;
     int   width, height;
+    int   bypass_filtering;
 } WpdCodecContext;
 
 typedef struct WpdPacket {

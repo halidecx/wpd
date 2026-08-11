@@ -1,6 +1,7 @@
 
 #include "wpd.h"
 
+#include "rescaler.h"
 #include "vp8.h"
 #include "vp8l_dsp.h"
 #include "wpd_codec.h"
@@ -9,8 +10,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define VP8X_FLAG_XMP 0x04
+#define VP8X_FLAG_EXIF 0x08
+#define VP8X_FLAG_ICCP 0x20
 #define VP8X_FLAG_ANIMATION 0x02
 #define VP8X_FLAG_ALPHA 0x10
+
+#define WPD_METADATA_NB 3
 
 #define ANMF_FLAG_DISPOSE (1 << 0)
 #define ANMF_FLAG_NO_BLEND (1 << 1)
@@ -180,6 +186,9 @@ static const uint32_t br_bit_mask[BR_MAX_BITS + 1] = {
     0x003fff, 0x007fff, 0x00ffff, 0x01ffff, 0x03ffff, 0x07ffff, 0x0fffff,
     0x1fffff, 0x3fffff, 0x7fffff, 0xffffff};
 
+#define VP8L_NEED_MORE 1
+#define VP8L_TAIL_MARGIN 64
+
 typedef struct LEBitReader {
     uint64_t       val;
     const uint8_t *buf;
@@ -265,7 +274,56 @@ static wpd_always_inline unsigned br_bit(LEBitReader *br) {
     return br_bits(br, 1);
 }
 
+/* Points a reader that has not overrun at a longer, possibly moved, copy of
+   the same bytes. Everything it tracks is an offset, so nothing else moves. */
+static void br_extend(LEBitReader *br, const uint8_t *buf, size_t size) {
+    br->buf = buf;
+    br->len = size;
+}
+
+typedef struct HeaderScan {
+    size_t    pos;
+    uint64_t  riff_end;
+    size_t    end;
+    int       width, height;
+    int       has_alpha;
+    int       animation;
+    int       images;
+    int       vp8x;
+    int       frame_count;
+    int       loop_count;
+    uint32_t  background_argb;
+    WPDCoding coding;
+    int       truncated;
+    int       metadata;
+    size_t    meta_offset[WPD_METADATA_NB];
+    uint32_t  meta_size[WPD_METADATA_NB];
+    int       raw_kind;
+    size_t    raw_image_offset;
+    size_t    raw_image_size;
+    size_t    raw_alpha_offset;
+    size_t    raw_alpha_size;
+} HeaderScan;
+
+/* The order of the WPDMetadata bits, so a bit indexes these tables. */
+static const uint32_t meta_tag[WPD_METADATA_NB] = {
+    MKTAG('I', 'C', 'C', 'P'),
+    MKTAG('E', 'X', 'I', 'F'),
+    MKTAG('X', 'M', 'P', ' '),
+};
+
+static const uint8_t meta_vp8x_flag[WPD_METADATA_NB] = {
+    VP8X_FLAG_ICCP,
+    VP8X_FLAG_EXIF,
+    VP8X_FLAG_XMP,
+};
+
 typedef struct WebPImage {
+    /* Set when the rescaler has brought U and V up to full resolution. */
+    int chroma_full;
+    /* Set when the colour channels already carry alpha, as the animation
+       canvas does for a premultiplied output format. */
+    int            premultiplied;
     uint8_t       *data[4];
     uint8_t       *alloc[4];
     size_t         alloc_size[4];
@@ -292,7 +350,16 @@ static uint8_t *image_alloc_plane(WebPImage *img, int p, size_t size) {
 
 static int image_alloc_packed(WebPImage *img, int w, int h, int bpp,
                               WPDPixelFormat format) {
-    const size_t size = (size_t)w * bpp * h + WPD_FILE_PADDING;
+    size_t row, size;
+
+    if (w <= 0 || h <= 0 || bpp <= 0 || (size_t)w > SIZE_MAX / (size_t)bpp)
+        return WPD_ERROR_TOO_LARGE;
+    row = (size_t)w * (size_t)bpp;
+    if ((size_t)h > (SIZE_MAX - WPD_FILE_PADDING) / row)
+        return WPD_ERROR_TOO_LARGE;
+    size = row * (size_t)h + WPD_FILE_PADDING;
+    if (row > INT_MAX)
+        return WPD_ERROR_TOO_LARGE;
 
     for (int p = 1; p < 4; p++) {
         wpd_free(img->alloc[p]);
@@ -301,7 +368,7 @@ static int image_alloc_packed(WebPImage *img, int w, int h, int bpp,
         img->data[p]       = NULL;
         img->linesize[p]   = 0;
     }
-    img->linesize[0] = w * bpp;
+    img->linesize[0] = (int)row;
     img->data[0]     = image_alloc_plane(img, 0, size);
     if (!img->data[0])
         return WPD_ERROR(ENOMEM);
@@ -315,13 +382,45 @@ static int image_alloc_argb(WebPImage *img, int w, int h) {
     return image_alloc_packed(img, w, h, 4, WPD_PIX_FMT_ARGB);
 }
 
-static int image_alloc_yuva(WebPImage *img, int w, int h) {
+static int image_alloc_yuv444(WebPImage *img, int w, int h) {
+    if (w <= 0 || h <= 0)
+        return WPD_ERROR_TOO_LARGE;
     for (int p = 0; p < 4; p++) {
-        int pw           = (p == 1 || p == 2) ? (w + 1) / 2 : w;
-        int ph           = (p == 1 || p == 2) ? (h + 1) / 2 : h;
+        size_t size;
+
+        if ((size_t)h > (SIZE_MAX - WPD_FILE_PADDING) / (size_t)w) {
+            image_free(img);
+            return WPD_ERROR_TOO_LARGE;
+        }
+        size             = (size_t)w * (size_t)h + WPD_FILE_PADDING;
+        img->linesize[p] = w;
+        img->data[p]     = image_alloc_plane(img, p, size);
+        if (!img->data[p]) {
+            image_free(img);
+            return WPD_ERROR(ENOMEM);
+        }
+    }
+    img->width  = w;
+    img->height = h;
+    img->format = WPD_PIX_FMT_YUVA420P;
+    return 0;
+}
+
+static int image_alloc_yuva(WebPImage *img, int w, int h) {
+    if (w <= 0 || h <= 0)
+        return WPD_ERROR_TOO_LARGE;
+    for (int p = 0; p < 4; p++) {
+        int    pw = (p == 1 || p == 2) ? (w + 1) / 2 : w;
+        int    ph = (p == 1 || p == 2) ? (h + 1) / 2 : h;
+        size_t size;
+
+        if ((size_t)ph > (SIZE_MAX - WPD_FILE_PADDING) / (size_t)pw) {
+            image_free(img);
+            return WPD_ERROR_TOO_LARGE;
+        }
+        size             = (size_t)pw * (size_t)ph + WPD_FILE_PADDING;
         img->linesize[p] = pw;
-        img->data[p]     = image_alloc_plane(
-            img, p, (size_t)pw * ph + WPD_FILE_PADDING);
+        img->data[p]     = image_alloc_plane(img, p, size);
         if (!img->data[p]) {
             image_free(img);
             return WPD_ERROR(ENOMEM);
@@ -551,29 +650,45 @@ typedef struct ImageContext {
 } ImageContext;
 
 struct WPDDecoder {
-    WpdCodecContext codec;
-    VP8Context      vp8;
-    int             vp8_initialized;
-    WPDLosslessDSP  ldsp;
-    WPDYUVDSP       ydsp;
-    WPDPixelFormat  out_format;
-    int             premultiply;
+    WpdCodecContext   codec;
+    VP8Context        vp8;
+    int               vp8_initialized;
+    WPDLosslessDSP    ldsp;
+    WPDYUVDSP         ydsp;
+    WPDPixelFormat    out_format;
+    int               premultiply;
+    WPDDecoderOptions options;
 
-    uint8_t *file;
-    size_t   file_size;
-    size_t   pos, end;
-    int      animation;
-    int      still_done;
-    int      frame_index;
-    int      canvas_width, canvas_height;
+    const uint8_t *file;
+    uint8_t       *file_alloc;
+    size_t         file_size;
+    size_t         discarded;
+    size_t         pos, end;
+    HeaderScan     scan;
+    int            animation;
+    int            still_done;
+    int            vp8_active;
+    int            still_lossy;
+    int            alpha_pending;
+    int            converted_rows;
+    WPDPixelFormat converted_format;
+    int            vp8l_active;
+    int            still_lossless;
+    size_t         vp8l_next_try;
+    size_t         vp8l_pos, vp8l_cached;
+    int            vp8l_x, vp8l_y, vp8l_hg;
+    int            vp8l_rows_done, vp8l_rows_out, vp8l_peeked;
+    int            frame_index;
+    int            canvas_width, canvas_height;
 
     int                   has_alpha;
     enum AlphaCompression alpha_compression;
     enum AlphaFilter      alpha_filter;
-    const uint8_t        *alpha_data;
-    int                   alpha_data_size;
-    uint8_t              *alpha_plane;
-    size_t                alpha_plane_size;
+    /* An offset, not a pointer: appending to a stream can move 'file'. */
+    size_t   alpha_data_offset;
+    int      alpha_data_size;
+    uint8_t *alpha_plane;
+    size_t   alpha_plane_size;
 
     LEBitReader        gb;
     uint8_t           *alpha_dst;
@@ -587,11 +702,20 @@ struct WPDDecoder {
     int                nb_huffman_groups;
     ImageContext       image[IMAGE_ROLE_NB];
 
-    WebPImage argb;
-    WebPImage alpha_argb;
-    WebPImage subframe;
-    WebPImage converted;
-    WebPImage output;
+    WebPImage  argb;
+    WebPImage  lossless_out;
+    WebPImage *lossless_frame;
+    uint8_t   *lossless_top;
+    size_t     lossless_top_size;
+    WebPImage  alpha_argb;
+    WebPImage  subframe;
+    WebPImage  converted;
+    WebPImage  output;
+    WebPImage  transformed;
+    uint32_t  *rescale_work;
+    size_t     rescale_work_size;
+    uint8_t   *rescale_row;
+    size_t     rescale_row_size;
 
     WebPImage canvas;
     int       anmf_flags, pos_x, pos_y;
@@ -606,8 +730,64 @@ struct WPDDecoder {
     int      frame_duration;
     int64_t  frame_timestamp;
 
-    char error[128];
+    int       info_has_alpha;
+    WPDCoding info_coding;
+
+    uint8_t *meta[WPD_METADATA_NB];
+    size_t   meta_size[WPD_METADATA_NB];
+
+    size_t file_capacity;
+    int    opened;
+    int    streaming;
+    int    eos;
+    int    headers_valid;
+    int    truncated;
+    int    borrowed;
+    int    input_mode;
+
+    WPDOutputPlane ext[4];
+    int            ext_active;
+
+    WPDStatus status;
+    char      error[128];
 };
+
+#define WPD_FIELD_END(type, field) \
+    (offsetof(type, field) + sizeof(((type *)0)->field))
+
+static int frame_valid(const WPDFrame *frame) {
+    return frame && frame->struct_size >= WPD_FIELD_END(WPDFrame, private_data);
+}
+
+static void frame_clear(WPDFrame *frame) {
+    const size_t struct_size = frame->struct_size;
+
+    memset((uint8_t *)frame + sizeof(frame->struct_size),
+           0,
+           WPD_FIELD_END(WPDFrame, private_data) - sizeof(frame->struct_size));
+    frame->struct_size = struct_size;
+}
+
+/* Copies past struct_size rather than assigning: the caller's frame may be a
+   newer, longer revision of the struct, and its own size has to survive. */
+static void frame_copy(WPDFrame *dst, const WPDFrame *src) {
+    memcpy((uint8_t *)dst + sizeof(dst->struct_size),
+           (const uint8_t *)src + sizeof(src->struct_size),
+           WPD_FIELD_END(WPDFrame, private_data) - sizeof(dst->struct_size));
+}
+
+static int info_valid(const WPDImageInfo *info) {
+    return info && info->struct_size >= WPD_FIELD_END(WPDImageInfo, metadata);
+}
+
+static void info_clear(WPDImageInfo *info) {
+    const size_t struct_size = info->struct_size;
+
+    memset((uint8_t *)info + sizeof(info->struct_size),
+           0,
+           WPD_FIELD_END(WPDImageInfo, metadata) - sizeof(info->struct_size));
+    info->struct_size = struct_size;
+}
 
 static void image_ctx_free(ImageContext *img) {
     wpd_free(img->color_cache);
@@ -876,13 +1056,14 @@ static wpd_always_inline void copy_block32(uint8_t *dst, int dist, int length) {
     }
 }
 
-static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
-                                      int h) {
+static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
+                                                       enum ImageRole role,
+                                                       int w, int h) {
     ImageContext *img;
     HTreeGroup   *hg;
     uint8_t      *code_lengths;
     uint16_t     *sorted;
-    int           i, j, ret, x, y, width, max_alphabet_size;
+    int           i, j, ret, max_alphabet_size;
 
     img       = &s->image[role];
     img->role = role;
@@ -963,6 +1144,16 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
     }
     free(sorted);
 
+    return 0;
+}
+
+static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
+                                                   enum ImageRole role,
+                                                   const int      resumable) {
+    ImageContext *img = &s->image[role];
+    HTreeGroup   *hg;
+    int           x, y, width;
+
     width = img->frame->width;
     if (role == IMAGE_ROLE_ARGB && s->reduced_width < width) {
         /* Decode packed palette rows contiguously; expansion re-strides. */
@@ -980,16 +1171,33 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
         const size_t   total       = (size_t)width * img->frame->height;
         const uint8_t *cached      = base;
         size_t         pos         = 0;
+        LEBitReader    snap;
+        int            near = 0;
 
         hg = &img->huffman_groups[0];
         x  = 0;
         y  = 0;
+        if (resumable) {
+            pos    = s->vp8l_pos;
+            x      = s->vp8l_x;
+            y      = s->vp8l_y;
+            cached = base + s->vp8l_cached;
+            hg     = &img->huffman_groups[s->vp8l_hg];
+        }
         while (pos < total) {
             uint8_t *p = base + 4 * pos;
             int      v;
 
-            if (br_is_eos(&s->gb))
+            if (!resumable && br_is_eos(&s->gb))
                 return WPD_ERROR_INVALID_DATA;
+            /* One pixel reads at most 108 bits, which draws the reader no
+               more than 20 bytes further in, so the margin leaves the loop
+               nothing to save or check until the end really is in sight. */
+            if (resumable) {
+                near = s->gb.len - s->gb.pos <= VP8L_TAIL_MARGIN;
+                if (near)
+                    snap = s->gb;
+            }
 
             if ((x & huff_mask) == 0)
                 hg = get_huffman_group(s, img, x, y);
@@ -997,6 +1205,8 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
             v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
             if (v < NUM_LITERAL_CODES) {
                 if (hg->trivial_literal) {
+                    if (resumable && near && br_is_eos(&s->gb))
+                        goto suspend;
                     copy32(p, hg->literal);
                     p[2] = v;
                 } else {
@@ -1004,10 +1214,12 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                                              &s->gb);
                     int b, a;
                     br_fill(&s->gb);
-                    b    = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table,
-                                            &s->gb);
-                    a    = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table,
-                                            &s->gb);
+                    b = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table,
+                                         &s->gb);
+                    a = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table,
+                                         &s->gb);
+                    if (resumable && near && br_is_eos(&s->gb))
+                        goto suspend;
                     p[0] = a;
                     p[1] = r;
                     p[2] = v;
@@ -1049,6 +1261,9 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                     distance       = offset + br_bits(&s->gb, extra_bits) + 1;
                 }
 
+                if (resumable && near && br_is_eos(&s->gb))
+                    goto suspend;
+
                 if (distance <= NUM_SHORT_DISTANCES) {
                     int xi   = lz77_distance_offsets[distance - 1][0];
                     int yi   = lz77_distance_offsets[distance - 1][1];
@@ -1074,6 +1289,8 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
             } else {
                 int cache_idx = v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES);
 
+                if (resumable && near && br_is_eos(&s->gb))
+                    goto suspend;
                 if (!img->color_cache_bits) {
                     wpd_log(NULL, WPD_LOG_ERROR, "color cache not found\n");
                     return WPD_ERROR_INVALID_DATA;
@@ -1093,38 +1310,73 @@ static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
                 }
             }
         }
-    }
+        if (resumable)
+            s->vp8l_rows_done = y;
+        return 0;
 
-    return 0;
+    suspend:
+        s->gb             = snap;
+        s->vp8l_pos       = pos;
+        s->vp8l_x         = x;
+        s->vp8l_y         = y;
+        s->vp8l_cached    = (size_t)(cached - base);
+        s->vp8l_hg        = (int)(hg - img->huffman_groups);
+        s->vp8l_rows_done = y;
+        return VP8L_NEED_MORE;
+    }
 }
 
-static int apply_predictor_transform(WPDDecoder *s) {
-    ImageContext              *img       = &s->image[IMAGE_ROLE_ARGB];
+static wpd_noclone int vp8l_resume_argb_pixels(WPDDecoder *s) {
+    return decode_entropy_pixels(s, IMAGE_ROLE_ARGB, 1);
+}
+
+static int decode_entropy_coded_image(WPDDecoder *s, enum ImageRole role, int w,
+                                      int h) {
+    int ret = read_entropy_image_header(s, role, w, h);
+
+    if (ret < 0)
+        return ret;
+    return decode_entropy_pixels(s, role, 0);
+}
+
+static wpd_always_inline int predictor_transform_rows(WPDDecoder *s,
+                                                      uint32_t   *rows,
+                                                      int         stride,
+                                                      uint32_t *upper0, int y0,
+                                                      int y1) {
     ImageContext              *pimg      = &s->image[IMAGE_ROLE_PREDICTOR];
     pred_add_func const *const pred_add  = s->ldsp.pred_add;
     const int                  width     = s->reduced_width;
-    const int                  height    = img->frame->height;
-    const int                  stride    = img->frame->linesize[0] / 4;
     const int                  tile_bits = pimg->size_reduction;
     const int                  tile_size = 1 << tile_bits;
     const int                  tile_mask = tile_size - 1;
-    uint32_t                  *row       = (uint32_t *)img->frame->data[0];
-    int                        y;
+    uint32_t                  *upper     = upper0;
+    uint32_t                  *row       = rows;
+    int                        y         = y0;
 
-    if (width <= 0 || height <= 0)
+    if (width <= 0 || y1 <= y0)
         return 0;
 
-    pred_add[0](row, NULL, 1, row);
-    if (width > 1)
-        pred_add[1](row + 1, NULL, width - 1, row + 1);
+    if (!y0) {
+        pred_add[0](row, NULL, 1, row);
+        if (width > 1)
+            pred_add[1](row + 1, NULL, width - 1, row + 1);
+        upper = row;
+        row += stride;
+        y = 1;
+    }
 
-    for (y = 1, row += stride; y < height; y++, row += stride) {
-        const uint32_t *upper = row - stride;
-        const uint8_t  *modes = pimg->frame->data[0] +
+    for (; y < y1; y++, upper = row, row += stride) {
+        const uint8_t *modes = pimg->frame->data[0] +
             (y >> tile_bits) * pimg->frame->linesize[0];
         int x = 1;
 
         pred_add[2](row, upper, 1, row);
+        /* The top-right of the last pixel in a row is the leftmost pixel of
+           that same row, which falls out of the layout only while the row
+           above is physically adjacent. */
+        if (upper + width != row)
+            upper[width] = row[0];
 
         while (x < width) {
             const unsigned m     = modes[(x >> tile_bits) * 4 + 2];
@@ -1143,25 +1395,35 @@ static int apply_predictor_transform(WPDDecoder *s) {
     return 0;
 }
 
+static int apply_predictor_transform(WPDDecoder *s) {
+    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
+
+    return predictor_transform_rows(s,
+                                    (uint32_t *)img->frame->data[0],
+                                    img->frame->linesize[0] / 4,
+                                    NULL,
+                                    0,
+                                    img->frame->height);
+}
+
 static wpd_always_inline uint8_t color_transform_delta(uint8_t color_pred,
                                                        uint8_t color) {
     return u8_to_s8(color_pred) * u8_to_s8(color) >> 5;
 }
 
-static int apply_color_transform(WPDDecoder *s) {
-    ImageContext *img       = &s->image[IMAGE_ROLE_ARGB];
+static wpd_always_inline int color_transform_rows(WPDDecoder *s, uint8_t *rows,
+                                                  int stride, int y0, int y1) {
     ImageContext *cimg      = &s->image[IMAGE_ROLE_COLOR_TRANSFORM];
     const int     width     = s->reduced_width;
-    const int     height    = img->frame->height;
     const int     tile_bits = cimg->size_reduction;
     const int     tile_size = 1 << tile_bits;
     const int     tile_mask = tile_size - 1;
     int           y;
 
-    for (y = 0; y < height; y++) {
+    for (y = y0; y < y1; y++, rows += stride) {
         const uint8_t *mult_row = cimg->frame->data[0] +
             (y >> tile_bits) * cimg->frame->linesize[0];
-        uint8_t *p = GET_PIXEL(img->frame, 0, y);
+        uint8_t *p = rows;
         int      x = 0;
 
         while (x < width) {
@@ -1183,20 +1445,33 @@ static int apply_color_transform(WPDDecoder *s) {
     return 0;
 }
 
-static int apply_subtract_green_transform(WPDDecoder *s) {
-    ImageContext *img    = &s->image[IMAGE_ROLE_ARGB];
-    const int     width  = s->reduced_width;
-    const int     height = img->frame->height;
-    int           x, y;
+static int apply_color_transform(WPDDecoder *s) {
+    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
 
-    for (y = 0; y < height; y++) {
-        uint8_t *p = GET_PIXEL(img->frame, 0, y);
+    return color_transform_rows(
+        s, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
+}
+
+static wpd_always_inline int subtract_green_rows(WPDDecoder *s, uint8_t *rows,
+                                                 int stride, int y0, int y1) {
+    const int width = s->reduced_width;
+    int       x, y;
+
+    for (y = y0; y < y1; y++, rows += stride) {
+        uint8_t *p = rows;
         for (x = 0; x < width; x++, p += 4) {
             p[1] += p[2];
             p[3] += p[2];
         }
     }
     return 0;
+}
+
+static int apply_subtract_green_transform(WPDDecoder *s) {
+    ImageContext *img = &s->image[IMAGE_ROLE_ARGB];
+
+    return subtract_green_rows(
+        s, img->frame->data[0], img->frame->linesize[0], 0, img->frame->height);
 }
 
 static int apply_color_indexing_transform_alpha(WPDDecoder *s) {
@@ -1273,7 +1548,9 @@ static wpd_always_inline void expand_palette_rows(uint8_t *base, int dst_stride,
     }
 }
 
-static int apply_color_indexing_transform(WPDDecoder *s) {
+static wpd_always_inline int color_indexing_rows(WPDDecoder *s, uint8_t *base,
+                                                 int dst_stride, int src_stride,
+                                                 int height, int big) {
     ImageContext *img;
     ImageContext *pal;
     int           i, x, y;
@@ -1290,10 +1567,6 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
         const int      pal_size        = pal->frame->width * 4;
         uint8_t        palette[256 * 4];
         uint8_t        expand[256 * 8 * 4];
-        uint8_t       *base       = GET_PIXEL(img->frame, 0, 0);
-        const int      src_stride = img->frame->linesize[0];
-        const int      dst_stride = width * 4;
-        const int      height     = img->frame->height;
 
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), pal_size);
         memset(palette + pal_size, 0, sizeof(palette) - pal_size);
@@ -1322,30 +1595,25 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
                 base, dst_stride, src_stride, width, height, expand, 8);
             break;
         }
-        img->frame->linesize[0] = dst_stride;
-        s->reduced_width        = s->width;
         return 0;
     }
 
-    if (img->frame->height * img->frame->width > 300) {
-        uint32_t       palette[256];
-        const int      size     = pal->frame->width * 4;
-        const int      w        = img->frame->width;
-        const int      h        = img->frame->height;
-        const int      linesize = img->frame->linesize[0];
-        uint8_t *const base     = GET_PIXEL(img->frame, 0, 0);
+    if (big) {
+        uint32_t  palette[256];
+        const int size = pal->frame->width * 4;
+        const int w    = img->frame->width;
 
         memcpy(palette, GET_PIXEL(pal->frame, 0, 0), size);
         memset((uint8_t *)palette + size, 0, sizeof(palette) - size);
-        for (y = 0; y < h; y++) {
-            uint8_t *row = base + (size_t)y * linesize;
+        for (y = 0; y < height; y++) {
+            uint8_t *row = base + (size_t)y * dst_stride;
 
             s->ldsp.map_color32(row, row, palette, w);
         }
     } else {
-        for (y = 0; y < img->frame->height; y++) {
+        for (y = 0; y < height; y++) {
             for (x = 0; x < img->frame->width; x++) {
-                p = GET_PIXEL(img->frame, x, y);
+                p = base + (size_t)y * dst_stride + 4 * x;
                 i = p[2];
                 if (i >= pal->frame->width) {
                     wb32(p, 0x00000000);
@@ -1360,6 +1628,36 @@ static int apply_color_indexing_transform(WPDDecoder *s) {
     return 0;
 }
 
+static int apply_color_indexing_transform(WPDDecoder *s) {
+    ImageContext *img    = &s->image[IMAGE_ROLE_ARGB];
+    ImageContext *pal    = &s->image[IMAGE_ROLE_COLOR_INDEXING];
+    const int     width  = img->frame->width;
+    const int     height = img->frame->height;
+    int           ret;
+
+    ret = color_indexing_rows(s,
+                              GET_PIXEL(img->frame, 0, 0),
+                              width * 4,
+                              img->frame->linesize[0],
+                              height,
+                              height * width > 300);
+    if (ret < 0)
+        return ret;
+    if (pal->size_reduction > 0) {
+        img->frame->linesize[0] = width * 4;
+        s->reduced_width        = s->width;
+    }
+    return 0;
+}
+
+static size_t file_buffered(const WPDDecoder *decoder) {
+    return decoder->file_size - decoder->discarded;
+}
+
+static const uint8_t *file_at(const WPDDecoder *decoder, size_t offset) {
+    return decoder->file + (offset - decoder->discarded);
+}
+
 static void update_canvas_size(WPDDecoder *s, int w, int h) {
     if (s->width && s->width != w)
         wpd_log(
@@ -1371,11 +1669,10 @@ static void update_canvas_size(WPDDecoder *s, int w, int h) {
     s->height = h;
 }
 
-static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
-                                     const uint8_t *data_start,
-                                     unsigned int   data_size,
-                                     int            is_alpha_chunk) {
-    int      w, h, ret, i;
+static wpd_always_inline int vp8l_read_frame_header(
+    WPDDecoder *s, WebPImage *out, const uint8_t *data_start,
+    unsigned int data_size, int is_alpha_chunk, int *w_out, int *h_out) {
+    int      w, h, ret;
     unsigned used;
 
     br_init(&s->gb, data_start, data_size);
@@ -1418,8 +1715,7 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
                     WPD_LOG_ERROR,
                     "Transform %d used more than once\n",
                     transform);
-            ret = WPD_ERROR_INVALID_DATA;
-            goto free_and_return;
+            return WPD_ERROR_INVALID_DATA;
         }
         used |= (1 << transform);
         s->transforms[s->nb_transforms++] = transform;
@@ -1433,17 +1729,22 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
         case SUBTRACT_GREEN: break;
         }
         if (ret < 0)
-            goto free_and_return;
+            return ret;
     }
 
     s->image[IMAGE_ROLE_ARGB].frame = out;
     if (is_alpha_chunk)
         s->image[IMAGE_ROLE_ARGB].is_alpha_primary = 1;
-    ret = decode_entropy_coded_image(s, IMAGE_ROLE_ARGB, w, h);
-    if (ret < 0)
-        goto free_and_return;
+    *w_out = w;
+    *h_out = h;
+    return read_entropy_image_header(s, IMAGE_ROLE_ARGB, w, h);
+}
+
+static wpd_noclone int vp8l_apply_transforms(WPDDecoder *s) {
+    int i, ret;
 
     for (i = s->nb_transforms - 1; i >= 0; i--) {
+        ret = 0;
         switch (s->transforms[i]) {
         case PREDICTOR_TRANSFORM: ret = apply_predictor_transform(s); break;
         case COLOR_TRANSFORM: ret = apply_color_transform(s); break;
@@ -1456,16 +1757,190 @@ static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
             break;
         }
         if (ret < 0)
-            goto free_and_return;
+            return ret;
     }
+    return 0;
+}
 
-    ret = 0;
+static int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
+                                     const uint8_t *data_start,
+                                     unsigned int   data_size,
+                                     int            is_alpha_chunk) {
+    int w, h, ret, i;
+
+    ret = vp8l_read_frame_header(
+        s, out, data_start, data_size, is_alpha_chunk, &w, &h);
+    if (ret < 0)
+        goto free_and_return;
+
+    ret = decode_entropy_pixels(s, IMAGE_ROLE_ARGB, 0);
+    if (ret < 0)
+        goto free_and_return;
+
+    ret = vp8l_apply_transforms(s);
 
 free_and_return:
     out->linesize[0] = out->width * 4;
     for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
 
     return ret;
+}
+
+#define VP8L_ROW_BATCH 16
+
+static int vp8l_transform_rows(WPDDecoder *s, int y0, int y1) {
+    ImageContext *img        = &s->image[IMAGE_ROLE_ARGB];
+    WebPImage    *dst        = &s->lossless_out;
+    const int     stride     = dst->linesize[0];
+    const int     src_stride = img->frame->linesize[0];
+    const int     packed     = s->reduced_width;
+    const size_t  packed_row = (size_t)packed * 4;
+    uint8_t      *rows       = dst->data[0] + (size_t)y0 * stride;
+    int           i, ret = 0;
+
+    for (i = 0; i < y1 - y0; i++)
+        memcpy(rows + (size_t)i * stride,
+               img->frame->data[0] + (size_t)(y0 + i) * src_stride,
+               packed_row);
+
+    for (i = s->nb_transforms - 1; i >= 0 && ret >= 0; i--) {
+        switch (s->transforms[i]) {
+        case PREDICTOR_TRANSFORM:
+            ret = predictor_transform_rows(
+                s,
+                (uint32_t *)rows,
+                stride / 4,
+                y0 ? (uint32_t *)s->lossless_top : NULL,
+                y0,
+                y1);
+            if (ret >= 0)
+                memcpy(s->lossless_top,
+                       rows + (size_t)(y1 - 1 - y0) * stride,
+                       (size_t)s->reduced_width * 4);
+            break;
+        case COLOR_TRANSFORM:
+            ret = color_transform_rows(s, rows, stride, y0, y1);
+            break;
+        case SUBTRACT_GREEN:
+            ret = subtract_green_rows(s, rows, stride, y0, y1);
+            break;
+        case COLOR_INDEXING_TRANSFORM:
+            ret = color_indexing_rows(s,
+                                      rows,
+                                      stride,
+                                      stride,
+                                      y1 - y0,
+                                      dst->height * dst->width > 300);
+            s->reduced_width = s->width;
+            break;
+        }
+    }
+    s->reduced_width = packed;
+    return ret;
+}
+
+static int vp8l_still_alloc(WPDDecoder *s) {
+    const size_t top = ((size_t)s->width + 1) * 4;
+    int          ret;
+
+    ret = image_alloc_argb(&s->lossless_out, s->width, s->height);
+    if (ret < 0)
+        return ret;
+    if (s->lossless_top_size < top) {
+        uint8_t *buf = realloc(s->lossless_top, top);
+
+        if (!buf)
+            return WPD_ERROR(ENOMEM);
+        s->lossless_top      = buf;
+        s->lossless_top_size = top;
+    }
+    return 0;
+}
+
+/* Decodes as much of a still lossless image as the buffered bytes allow.
+   Returns 1 once the whole image is out, 0 while more input is needed. */
+static int vp8l_still_step(WPDDecoder *s, const uint8_t *payload,
+                           unsigned avail, unsigned size, int complete) {
+    int rows, ret, i, w, h;
+
+    if (!s->vp8l_active) {
+        const size_t first = WPD_MAX((size_t)16, (size_t)size / 16);
+
+        if (avail < first || (!complete && avail < s->vp8l_next_try))
+            return 0;
+        for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+        s->width = s->height = 0;
+        ret = vp8l_read_frame_header(s, &s->argb, payload, avail, 0, &w, &h);
+        if (ret >= 0 && br_is_eos(&s->gb))
+            ret = WPD_ERROR_INVALID_DATA;
+        if (ret < 0) {
+            for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+            if (complete)
+                return ret;
+            s->vp8l_next_try = 2 * (size_t)avail;
+            return 0;
+        }
+        s->vp8l_pos    = 0;
+        s->vp8l_cached = 0;
+        s->vp8l_x = s->vp8l_y = s->vp8l_hg = 0;
+        s->vp8l_rows_done = s->vp8l_rows_out = 0;
+        s->vp8l_peeked                       = 0;
+        s->vp8l_active                       = 1;
+        s->still_lossless                    = 1;
+        s->lossless_frame                    = &s->argb;
+    } else {
+        br_extend(&s->gb, payload, avail);
+    }
+
+    ret = vp8l_resume_argb_pixels(s);
+    if (ret < 0)
+        return ret;
+    if (ret == VP8L_NEED_MORE && complete)
+        return WPD_ERROR_INVALID_DATA;
+
+    rows = s->vp8l_rows_done;
+    if (ret)
+        rows -= rows % VP8L_ROW_BATCH;
+    if (s->vp8l_peeked && rows > s->vp8l_rows_out) {
+        int done = vp8l_transform_rows(s, s->vp8l_rows_out, rows);
+
+        if (done < 0)
+            return done;
+        s->vp8l_rows_out = rows;
+    }
+    if (ret)
+        return 0;
+
+    /* Nobody looked, so the image can be transformed where it lies. */
+    if (!s->vp8l_peeked)
+        ret = vp8l_apply_transforms(s);
+    s->argb.linesize[0] = s->argb.width * 4;
+    for (i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&s->image[i]);
+    s->vp8l_active = 0;
+    return ret < 0 ? ret : 1;
+}
+
+/* Switches the in-progress image over to handing rows out as they finish,
+   which needs somewhere to put them: backward references keep reading the
+   untransformed pixels for as long as the image is being decoded. */
+static int vp8l_still_peek(WPDDecoder *s) {
+    int ret, rows;
+
+    if (!s->vp8l_peeked) {
+        ret = vp8l_still_alloc(s);
+        if (ret < 0)
+            return ret;
+        s->vp8l_peeked    = 1;
+        s->lossless_frame = &s->lossless_out;
+    }
+    rows = s->vp8l_rows_done - s->vp8l_rows_done % VP8L_ROW_BATCH;
+    if (rows > s->vp8l_rows_out) {
+        ret = vp8l_transform_rows(s, s->vp8l_rows_out, rows);
+        if (ret < 0)
+            return ret;
+        s->vp8l_rows_out = rows;
+    }
+    return 0;
 }
 
 static void alpha_inverse_prediction(WebPImage *frame, enum AlphaFilter m) {
@@ -1547,6 +2022,136 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
     return 0;
 }
 
+static void vp8_lossy_export_planes(const WPDDecoder *s, WebPImage *out,
+                                    const WpdFrame *decoded) {
+    memset(out, 0, sizeof(*out));
+    out->width  = s->width;
+    out->height = s->height;
+    out->format = WPD_PIX_FMT_YUV420P;
+    for (int plane = 0; plane < 3; plane++) {
+        out->data[plane]     = decoded->data[plane];
+        out->linesize[plane] = decoded->linesize[plane];
+    }
+    if (s->has_alpha) {
+        out->data[3]     = s->alpha_plane;
+        out->linesize[3] = s->width;
+        out->format      = WPD_PIX_FMT_YUVA420P;
+    }
+}
+
+static int vp8_lossy_alpha_plane(WPDDecoder *s, WebPImage *out) {
+    const size_t alpha_size = (size_t)s->width * s->height;
+    int          ret;
+
+    if (s->alpha_plane_size < alpha_size) {
+        uint8_t *plane = realloc(s->alpha_plane, alpha_size);
+        if (!plane)
+            return WPD_ERROR(ENOMEM);
+        s->alpha_plane      = plane;
+        s->alpha_plane_size = alpha_size;
+    }
+    memset(s->alpha_plane, 0, alpha_size);
+    out->data[3]     = s->alpha_plane;
+    out->linesize[3] = s->width;
+    out->format      = WPD_PIX_FMT_YUVA420P;
+    ret              = vp8_lossy_decode_alpha(
+        s, out, file_at(s, s->alpha_data_offset), s->alpha_data_size);
+    s->alpha_pending = 0;
+    return ret;
+}
+
+static int vp8_lossy_init(WPDDecoder *s) {
+    int ret;
+
+    if (s->vp8_initialized)
+        return 0;
+    s->codec.priv_data = &s->vp8;
+    ret                = vp8_decode_init(&s->codec);
+    if (ret < 0)
+        return ret;
+    s->vp8_initialized = 1;
+    return 0;
+}
+
+/* libwebp rounds an inferred dimension up, not to nearest. */
+static int scaled_size(const WPDDecoder *s, int src_width, int src_height,
+                       int *width, int *height) {
+    int w = s->options.scaled_width;
+    int h = s->options.scaled_height;
+
+    if (!w)
+        w = (int)(((int64_t)src_width * h + src_height - 1) / src_height);
+    if (!h)
+        h = (int)(((int64_t)src_height * w + src_width - 1) / src_width);
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
+        (uint64_t)w * h >= 1ULL << 32)
+        return WPD_ERR_TOO_LARGE;
+    *width  = w;
+    *height = h;
+    return 0;
+}
+
+/* libwebp drops the in-loop filter once a scaled decode shrinks the frame past
+   three quarters in both directions, on the grounds that nothing survives the
+   downscale, so a scaled lossy frame only matches it if the filter goes too.
+   The threshold is measured against the whole frame, not the cropped part. */
+static void update_filter_bypass(WPDDecoder *s) {
+    int width, height;
+
+    s->codec.bypass_filtering = s->options.bypass_filtering;
+    if (!s->options.use_scaling || !s->canvas_width || !s->canvas_height)
+        return;
+    if (scaled_size(
+            s,
+            s->options.use_cropping ? s->options.crop_width : s->canvas_width,
+            s->options.use_cropping ? s->options.crop_height : s->canvas_height,
+            &width,
+            &height) < 0)
+        return;
+    if (width < s->canvas_width * 3 / 4 && height < s->canvas_height * 3 / 4)
+        s->codec.bypass_filtering = 1;
+}
+
+/* Returns 1 when the frame is complete, 0 when more of the chunk is needed. */
+static int vp8_lossy_step(WPDDecoder *s, WebPImage *out,
+                          const uint8_t *data_start, unsigned int avail,
+                          unsigned int data_size) {
+    WpdFrame decoded;
+    int      ret;
+
+    if ((ret = vp8_lossy_init(s)) < 0)
+        return ret;
+    update_filter_bypass(s);
+
+    if (!s->vp8_active) {
+        ret = vp8_decode_frame_init(
+            &s->codec, data_start, (int)avail, (int)data_size);
+        if (ret < 0)
+            return ret;
+        if (ret)
+            return 0;
+
+        update_canvas_size(s, s->codec.width, s->codec.height);
+        vp8_lossy_export_planes(s, out, &s->vp8.frame);
+        if (s->has_alpha && (ret = vp8_lossy_alpha_plane(s, out)) < 0)
+            return ret;
+        s->still_lossy = !s->animation;
+        s->vp8_active  = 1;
+    } else {
+        vp8_decode_extend(&s->codec, data_start, (int)avail);
+    }
+
+    ret = vp8_decode_rows(&s->codec, &decoded);
+    if (ret < 0)
+        return ret;
+    vp8_lossy_export_planes(s, out, &decoded);
+    if (ret)
+        return 0;
+
+    s->vp8_active = 0;
+    return 1;
+}
+
 static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
                                   const uint8_t *data_start,
                                   unsigned int   data_size) {
@@ -1554,13 +2159,9 @@ static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
     WpdFrame  decoded;
     int       ret;
 
-    if (!s->vp8_initialized) {
-        s->codec.priv_data = &s->vp8;
-        ret                = vp8_decode_init(&s->codec);
-        if (ret < 0)
-            return ret;
-        s->vp8_initialized = 1;
-    }
+    if ((ret = vp8_lossy_init(s)) < 0)
+        return ret;
+    update_filter_bypass(s);
 
     packet.data = data_start;
     packet.size = data_size;
@@ -1569,33 +2170,10 @@ static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
         return ret;
 
     update_canvas_size(s, s->codec.width, s->codec.height);
-
-    memset(out, 0, sizeof(*out));
-    out->width  = s->width;
-    out->height = s->height;
-    out->format = WPD_PIX_FMT_YUV420P;
-    for (int plane = 0; plane < 3; plane++) {
-        out->data[plane]     = decoded.data[plane];
-        out->linesize[plane] = decoded.linesize[plane];
-    }
-
-    if (s->has_alpha) {
-        size_t alpha_size = (size_t)s->width * s->height;
-        if (s->alpha_plane_size < alpha_size) {
-            uint8_t *plane = realloc(s->alpha_plane, alpha_size);
-            if (!plane)
-                return WPD_ERROR(ENOMEM);
-            s->alpha_plane      = plane;
-            s->alpha_plane_size = alpha_size;
-        }
-        memset(s->alpha_plane, 0, alpha_size);
-        out->data[3]     = s->alpha_plane;
-        out->linesize[3] = s->width;
-        out->format      = WPD_PIX_FMT_YUVA420P;
-        ret = vp8_lossy_decode_alpha(s, out, s->alpha_data, s->alpha_data_size);
-        if (ret < 0)
-            return ret;
-    }
+    vp8_lossy_export_planes(s, out, &decoded);
+    if (s->has_alpha && (ret = vp8_lossy_alpha_plane(s, out)) < 0)
+        return ret;
+    s->still_lossy = !s->animation;
     return 0;
 }
 
@@ -1603,7 +2181,7 @@ static int image_nb_components(const WebPImage *img) {
     switch (img->format) {
     case WPD_PIX_FMT_YUV420P: return 3;
     case WPD_PIX_FMT_YUVA420P: return 4;
-    default: return 4;
+    default: return 1;
     }
 }
 
@@ -1616,11 +2194,19 @@ static int format_is_packed(WPDPixelFormat format) {
 }
 
 static int format_bpp(WPDPixelFormat format) {
+    if (format == WPD_PIX_FMT_RGB565 || format == WPD_PIX_FMT_RGBA4444 ||
+        format == WPD_PIX_FMT_RGBA4444_PRE)
+        return 2;
     return format == WPD_PIX_FMT_RGB || format == WPD_PIX_FMT_BGR ? 3 : 4;
 }
 
 static int format_is_premultiplied(WPDPixelFormat format) {
-    return format >= WPD_PIX_FMT_ARGB_PRE;
+    return format == WPD_PIX_FMT_ARGB_PRE || format == WPD_PIX_FMT_RGBA_PRE ||
+        format == WPD_PIX_FMT_BGRA_PRE || format == WPD_PIX_FMT_RGBA4444_PRE;
+}
+
+static int format_valid(WPDPixelFormat format) {
+    return format >= WPD_PIX_FMT_YUV420P && format <= WPD_PIX_FMT_RGBA4444_PRE;
 }
 
 static pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
@@ -1631,6 +2217,9 @@ static pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
     case WPD_PIX_FMT_BGRA_PRE: return s->ydsp.pack_bgra;
     case WPD_PIX_FMT_RGB: return s->ydsp.pack_rgb;
     case WPD_PIX_FMT_BGR: return s->ydsp.pack_bgr;
+    case WPD_PIX_FMT_RGB565: return s->ydsp.pack_rgb565;
+    case WPD_PIX_FMT_RGBA4444:
+    case WPD_PIX_FMT_RGBA4444_PRE: return s->ydsp.pack_rgba4444;
     default: return NULL;
     }
 }
@@ -1648,13 +2237,233 @@ static int format_layout(WPDPixelFormat format) {
     }
 }
 
+static int options_transform(const WPDDecoder *s) {
+    return s->options.use_cropping || s->options.use_scaling || s->options.flip;
+}
+
+static int crop_image(const WPDDecoder *s, const WebPImage *src,
+                      WebPImage *view) {
+    const int align = format_is_packed(src->format) ? 0 : 1;
+    int       left  = s->options.crop_left & ~align;
+    int       top   = s->options.crop_top & ~align;
+
+    *view = *src;
+    if (!s->options.use_cropping)
+        return 0;
+    if (left > src->width || top > src->height ||
+        s->options.crop_width > src->width - left ||
+        s->options.crop_height > src->height - top)
+        return WPD_ERR_INVALID_ARG;
+    for (int p = 0; p < image_nb_components(src); p++) {
+        const int shift = p == 1 || p == 2;
+        const int bpp = format_is_packed(src->format) ? format_bpp(src->format)
+                                                      : 1;
+
+        view->data[p] += (ptrdiff_t)(top >> shift) * src->linesize[p] +
+            (ptrdiff_t)(left >> shift) * bpp;
+    }
+    view->width  = s->options.crop_width;
+    view->height = s->options.crop_height;
+    return 0;
+}
+
+static int rescale_work(WPDDecoder *s, int dst_width, int src_width,
+                        int channels) {
+    const size_t need = 2 * (size_t)dst_width * (size_t)channels;
+    const size_t row  = (size_t)src_width * (size_t)channels;
+
+    if (s->rescale_work_size < need) {
+        uint32_t *grown = realloc(s->rescale_work, need * sizeof(*grown));
+
+        if (!grown)
+            return WPD_ERROR(ENOMEM);
+        s->rescale_work      = grown;
+        s->rescale_work_size = need;
+    }
+    if (s->rescale_row_size < row) {
+        uint8_t *grown = realloc(s->rescale_row, row);
+
+        if (!grown)
+            return WPD_ERROR(ENOMEM);
+        s->rescale_row      = grown;
+        s->rescale_row_size = row;
+    }
+    return 0;
+}
+
+/* libwebp carries alpha-weighted samples across the rescaler, so the plane it
+   feeds in is not the plane it decoded. Building each row into scratch keeps
+   the decoded image untouched, which matters because an animation blends the
+   next frame onto it and a still can be exported more than once. */
+static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
+                                   int dst_width, int dst_height,
+                                   const uint8_t *src, int src_stride,
+                                   const uint8_t *alpha, int alpha_stride,
+                                   int src_width, int src_height,
+                                   int channels) {
+    WPDRescaler r;
+    int         y = 0;
+
+    wpd_rescaler_init(&r,
+                      src_width,
+                      src_height,
+                      dst,
+                      dst_width,
+                      dst_height,
+                      dst_stride,
+                      channels,
+                      s->rescale_work);
+    while (y < src_height) {
+        memcpy(s->rescale_row,
+               src + (ptrdiff_t)y * src_stride,
+               (size_t)src_width * channels);
+        if (alpha)
+            wpd_multiply_row(s->rescale_row,
+                             alpha + (ptrdiff_t)y * alpha_stride,
+                             src_width,
+                             0);
+        else
+            wpd_premultiply_argb_row(s->rescale_row, src_width, 0);
+        if (wpd_rescaler_import(&r, 1, s->rescale_row, 0))
+            y++;
+        wpd_rescaler_export(&r);
+    }
+}
+
+/* Scales the way libwebp does: an area rescaler over each plane, with the
+   colour channels premultiplied across it so a transparent edge does not
+   bleed. 'chroma_full' brings U and V up to the output size instead of half
+   it, which is what libwebp feeds its point converter when a scaled lossy
+   frame is going to a packed format. */
+static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
+                       int width, int height, int chroma_full,
+                       int weight_luma) {
+    const int packed = format_is_packed(src->format);
+    const int bpp    = packed ? format_bpp(src->format) : 1;
+    /* An already premultiplied source resamples correctly on its own: the
+       weighted average of alpha-weighted colour is what the rescaler outputs
+       directly, so weighting it a second time would skew it. */
+    const int premult = packed && src->format == WPD_PIX_FMT_ARGB &&
+        !src->premultiplied;
+    int ret;
+
+    if (packed)
+        ret = image_alloc_packed(dst, width, height, bpp, src->format);
+    else if (chroma_full)
+        ret = image_alloc_yuv444(dst, width, height);
+    else
+        ret = image_alloc_yuva(dst, width, height);
+    if (ret < 0)
+        return ret;
+    dst->format = src->format;
+    ret         = rescale_work(s, width, src->width, bpp);
+    if (ret < 0)
+        return ret;
+
+    for (int p = 0; p < image_nb_components(src); p++) {
+        const int chroma = p == 1 || p == 2;
+        const int shift  = chroma && !chroma_full;
+        const int sw = packed ? src->width : CEIL_RSHIFT(src->width, chroma);
+        const int sh = packed ? src->height : CEIL_RSHIFT(src->height, chroma);
+        const int dw = CEIL_RSHIFT(width, shift);
+        const int dh = CEIL_RSHIFT(height, shift);
+
+        if (premult || (weight_luma && p == 0))
+            rescale_plane_weighted(s,
+                                   dst->data[p],
+                                   dst->linesize[p],
+                                   dw,
+                                   dh,
+                                   src->data[p],
+                                   src->linesize[p],
+                                   premult ? NULL : src->data[3],
+                                   premult ? 0 : src->linesize[3],
+                                   sw,
+                                   sh,
+                                   bpp);
+        else
+            wpd_rescale_plane(dst->data[p],
+                              dst->linesize[p],
+                              dw,
+                              dh,
+                              src->data[p],
+                              src->linesize[p],
+                              sw,
+                              sh,
+                              bpp,
+                              s->rescale_work);
+    }
+
+    if (premult)
+        for (int y = 0; y < height; y++)
+            wpd_premultiply_argb_row(
+                dst->data[0] + (ptrdiff_t)y * dst->linesize[0], width, 1);
+    else if (weight_luma)
+        for (int y = 0; y < height; y++)
+            wpd_multiply_row(dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
+                             dst->data[3] + (ptrdiff_t)y * dst->linesize[3],
+                             width,
+                             1);
+    if (!packed && image_nb_components(src) < 4) {
+        wpd_free(dst->alloc[3]);
+        dst->alloc[3]      = NULL;
+        dst->alloc_size[3] = 0;
+        dst->data[3]       = NULL;
+        dst->linesize[3]   = 0;
+        dst->format        = WPD_PIX_FMT_YUV420P;
+    }
+    dst->chroma_full   = !packed && chroma_full;
+    dst->premultiplied = src->premultiplied;
+    return 0;
+}
+
+static void flip_image(WebPImage *view) {
+    for (int p = 0; p < image_nb_components(view); p++) {
+        const int shift = p == 1 || p == 2;
+        const int h     = CEIL_RSHIFT(view->height, shift);
+
+        view->data[p] += (ptrdiff_t)(h - 1) * view->linesize[p];
+        view->linesize[p] = -view->linesize[p];
+    }
+}
+
+static int transform_image(WPDDecoder *s, const WebPImage *src, WebPImage *view,
+                           WebPImage **result, WPDPixelFormat format) {
+    int width, height, ret;
+
+    ret = crop_image(s, src, view);
+    if (ret < 0)
+        return ret;
+    *result = view;
+    if (s->options.use_scaling) {
+        const int planar = !format_is_packed(src->format);
+        /* Going to a packed format, libwebp brings U and V all the way up to
+           the output size and point-converts; staying planar, it keeps them
+           half size and weights the luma by alpha across the rescaler. */
+        const int chroma_full = planar && format_is_packed(format);
+        const int weight_luma = planar && !format_is_packed(format) &&
+            format != WPD_PIX_FMT_YUV420P && image_nb_components(src) == 4;
+
+        ret = scaled_size(s, view->width, view->height, &width, &height);
+        if (ret < 0)
+            return ret;
+        ret = scale_image(
+            s, &s->transformed, view, width, height, chroma_full, weight_luma);
+        if (ret < 0)
+            return ret;
+        *result = &s->transformed;
+    }
+    return 0;
+}
+
 static void blend_argb_region(WPDDecoder *s, WebPImage *dst,
                               const WebPImage *src, SubRect r) {
     for (int y = 0; y < r.h; y++) {
-        const uint8_t *src_argb = src->data[0] + (r.y + y) * src->linesize[0] +
-            r.x * 4;
+        const uint8_t *src_argb = src->data[0] +
+            (ptrdiff_t)(r.y + y) * src->linesize[0] + r.x * 4;
         uint8_t *dst_argb = dst->data[0] +
-            (s->pos_y + r.y + y) * dst->linesize[0] + (s->pos_x + r.x) * 4;
+            (ptrdiff_t)(s->pos_y + r.y + y) * dst->linesize[0] +
+            (s->pos_x + r.x) * 4;
 
         if (s->premultiply)
             s->ldsp.blend_row_argb_premult(dst_argb, src_argb, r.w);
@@ -1666,10 +2475,11 @@ static void blend_argb_region(WPDDecoder *s, WebPImage *dst,
 static void copy_argb_region(WPDDecoder *s, WebPImage *dst,
                              const WebPImage *src, SubRect r) {
     for (int y = 0; y < r.h; y++) {
-        const uint8_t *src_argb = src->data[0] + (r.y + y) * src->linesize[0] +
-            r.x * 4;
+        const uint8_t *src_argb = src->data[0] +
+            (ptrdiff_t)(r.y + y) * src->linesize[0] + r.x * 4;
         uint8_t *dst_argb = dst->data[0] +
-            (s->pos_y + r.y + y) * dst->linesize[0] + (s->pos_x + r.x) * 4;
+            (ptrdiff_t)(s->pos_y + r.y + y) * dst->linesize[0] +
+            (s->pos_x + r.x) * 4;
 
         memcpy(dst_argb, src_argb, (size_t)r.w * 4);
     }
@@ -1682,25 +2492,25 @@ static void blend_yuva_region(WPDDecoder *s, WebPImage *dst,
     for (int y = 0; y < CEIL_RSHIFT(r.h, 1); y++) {
         int            tile_h = WPD_MIN(r.h - y * 2, 2);
         const uint8_t *src_u  = src->data[1] +
-            ((r.y >> 1) + y) * src->linesize[1] + (r.x >> 1);
+            (ptrdiff_t)((r.y >> 1) + y) * src->linesize[1] + (r.x >> 1);
         const uint8_t *src_v = src->data[2] +
-            ((r.y >> 1) + y) * src->linesize[2] + (r.x >> 1);
-        uint8_t *dst_u = dst->data[1] + ((base_y >> 1) + y) * dst->linesize[1] +
-            (base_x >> 1);
-        uint8_t *dst_v = dst->data[2] + ((base_y >> 1) + y) * dst->linesize[2] +
-            (base_x >> 1);
+            (ptrdiff_t)((r.y >> 1) + y) * src->linesize[2] + (r.x >> 1);
+        uint8_t *dst_u = dst->data[1] +
+            (ptrdiff_t)((base_y >> 1) + y) * dst->linesize[1] + (base_x >> 1);
+        uint8_t *dst_v = dst->data[2] +
+            (ptrdiff_t)((base_y >> 1) + y) * dst->linesize[2] + (base_x >> 1);
         for (int x = 0; x < CEIL_RSHIFT(r.w, 1); x++) {
             int tile_w    = WPD_MIN(r.w - x * 2, 2);
             int src_alpha = 0;
             int dst_alpha = 0;
             for (int yy = 0; yy < tile_h; yy++) {
                 for (int xx = 0; xx < tile_w; xx++) {
-                    src_alpha +=
-                        src->data[3][(r.y + y * 2 + yy) * src->linesize[3] +
-                                     (r.x + x * 2 + xx)];
-                    dst_alpha +=
-                        dst->data[3][(base_y + y * 2 + yy) * dst->linesize[3] +
-                                     (base_x + x * 2 + xx)];
+                    src_alpha += src->data[3][(ptrdiff_t)(r.y + y * 2 + yy) *
+                                                  src->linesize[3] +
+                                              (r.x + x * 2 + xx)];
+                    dst_alpha += dst->data[3][(ptrdiff_t)(base_y + y * 2 + yy) *
+                                                  dst->linesize[3] +
+                                              (base_x + x * 2 + xx)];
                 }
             }
             int shift = (tile_h == 2) + (tile_w == 2);
@@ -1732,14 +2542,14 @@ static void blend_yuva_region(WPDDecoder *s, WebPImage *dst,
     }
 
     for (int y = 0; y < r.h; y++) {
-        const uint8_t *src_y = src->data[0] + (r.y + y) * src->linesize[0] +
-            r.x;
-        const uint8_t *src_a = src->data[3] + (r.y + y) * src->linesize[3] +
-            r.x;
-        uint8_t *dst_y = dst->data[0] + (base_y + y) * dst->linesize[0] +
-            base_x;
-        uint8_t *dst_a = dst->data[3] + (base_y + y) * dst->linesize[3] +
-            base_x;
+        const uint8_t *src_y = src->data[0] +
+            (ptrdiff_t)(r.y + y) * src->linesize[0] + r.x;
+        const uint8_t *src_a = src->data[3] +
+            (ptrdiff_t)(r.y + y) * src->linesize[3] + r.x;
+        uint8_t *dst_y = dst->data[0] +
+            (ptrdiff_t)(base_y + y) * dst->linesize[0] + base_x;
+        uint8_t *dst_a = dst->data[3] +
+            (ptrdiff_t)(base_y + y) * dst->linesize[3] + base_x;
         for (int x = 0; x < r.w; x++) {
             int src_alpha = *src_a;
             int dst_alpha = *dst_a;
@@ -1774,9 +2584,10 @@ static void copy_yuva_region(WPDDecoder *s, WebPImage *dst,
     for (int comp = 0; comp < nb_components; comp++) {
         int            shift = (comp == 1 || comp == 2) ? 1 : 0;
         const uint8_t *src_p = src->data[comp] +
-            (r.y >> shift) * src->linesize[comp] + (r.x >> shift);
+            (ptrdiff_t)(r.y >> shift) * src->linesize[comp] + (r.x >> shift);
         uint8_t *dst_p = dst->data[comp] +
-            (base_y >> shift) * dst->linesize[comp] + (base_x >> shift);
+            (ptrdiff_t)(base_y >> shift) * dst->linesize[comp] +
+            (base_x >> shift);
 
         for (int y = 0; y < CEIL_RSHIFT(r.h, shift); y++) {
             memcpy(dst_p, src_p, CEIL_RSHIFT(r.w, shift));
@@ -1798,30 +2609,159 @@ static void copy_yuva_region(WPDDecoder *s, WebPImage *dst,
 static int convert_to_packed(WPDDecoder *s, WebPImage *dst,
                              const WebPImage *src, WPDPixelFormat format) {
     const int layout = format_layout(format);
-    int       ret    = image_alloc_packed(
+    int       ret;
+
+    if (format_bpp(format) == 2) {
+        WebPImage        temp = {0};
+        const WebPImage *argb = src;
+
+        if (src->format != WPD_PIX_FMT_ARGB) {
+            ret = convert_to_packed(s, &temp, src, WPD_PIX_FMT_ARGB);
+            if (ret < 0)
+                return ret;
+            argb = &temp;
+        }
+        ret = image_alloc_packed(dst, argb->width, argb->height, 2, format);
+        if (ret >= 0) {
+            for (int y = 0; y < argb->height; y++)
+                format_packer(s, format)(
+                    dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
+                    argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
+                    argb->width);
+            if (format_is_premultiplied(format) && !s->animation)
+                for (int y = 0; y < argb->height; y++)
+                    s->ydsp.premultiply_row_4444(
+                        dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
+                        argb->width);
+        }
+        image_free(&temp);
+        return ret;
+    }
+
+    ret = image_alloc_packed(
         dst, src->width, src->height, format_bpp(format), format);
 
     if (ret < 0)
         return ret;
-    wpd_yuv420_to_packed(&s->ydsp,
-                         layout,
-                         dst->data[0],
-                         dst->linesize[0],
-                         src->data[0],
-                         src->linesize[0],
-                         src->data[1],
-                         src->data[2],
-                         src->linesize[1],
-                         src->data[3],
-                         src->linesize[3],
-                         src->width,
-                         src->height);
+    if (src->chroma_full) {
+        wpd_yuv444_to_packed(layout,
+                             dst->data[0],
+                             dst->linesize[0],
+                             src->data[0],
+                             src->linesize[0],
+                             src->data[1],
+                             src->data[2],
+                             src->linesize[1],
+                             src->width,
+                             src->height);
+        if (image_nb_components(src) == 4 && layout != WPD_LAYOUT_RGB &&
+            layout != WPD_LAYOUT_BGR)
+            for (int y = 0; y < src->height; y++)
+                s->ydsp.dispatch_alpha(
+                    dst->data[0] + (ptrdiff_t)y * dst->linesize[0] +
+                        (layout == WPD_LAYOUT_ARGB ? 0 : 3),
+                    src->data[3] + (ptrdiff_t)y * src->linesize[3],
+                    src->width);
+        return 0;
+    }
+    if (s->options.no_fancy_upsampling)
+        wpd_yuv420_to_packed_simple(&s->ydsp,
+                                    layout,
+                                    dst->data[0],
+                                    dst->linesize[0],
+                                    src->data[0],
+                                    src->linesize[0],
+                                    src->data[1],
+                                    src->data[2],
+                                    src->linesize[1],
+                                    src->data[3],
+                                    src->linesize[3],
+                                    src->width,
+                                    0,
+                                    src->height);
+    else
+        wpd_yuv420_to_packed(&s->ydsp,
+                             layout,
+                             dst->data[0],
+                             dst->linesize[0],
+                             src->data[0],
+                             src->linesize[0],
+                             src->data[1],
+                             src->data[2],
+                             src->linesize[1],
+                             src->data[3],
+                             src->linesize[3],
+                             src->width,
+                             src->height);
     return 0;
 }
 
 static int convert_to_argb(WPDDecoder *s, WebPImage *dst,
                            const WebPImage *src) {
     return convert_to_packed(s, dst, src, WPD_PIX_FMT_ARGB);
+}
+
+static int convert_argb_to_yuva(WPDDecoder *s, WebPImage *dst,
+                                const WebPImage *src, int want_alpha,
+                                int row_start, int row_end) {
+    int ret;
+
+    if (!row_start &&
+        (ret = image_alloc_yuva(dst, src->width, src->height)) < 0)
+        return ret;
+    wpd_argb_to_yuva(&s->ydsp,
+                     dst->data[0],
+                     dst->linesize[0],
+                     dst->data[1],
+                     dst->data[2],
+                     dst->linesize[1],
+                     want_alpha ? dst->data[3] : NULL,
+                     dst->linesize[3],
+                     src->data[0],
+                     src->linesize[0],
+                     src->width,
+                     row_start,
+                     row_end);
+    if (!want_alpha)
+        for (int y = row_start; y < row_end; y++)
+            memset(dst->data[3] + (ptrdiff_t)y * dst->linesize[3],
+                   255,
+                   (size_t)src->width);
+    return 0;
+}
+
+static int ensure_yuva_rows(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
+                            int want_alpha, int row_start, int row_end) {
+    int ret;
+
+    if (src->format == WPD_PIX_FMT_ARGB)
+        return convert_argb_to_yuva(
+            s, dst, src, want_alpha, row_start, row_end);
+    if (!row_start &&
+        (ret = image_alloc_yuva(dst, src->width, src->height)) < 0)
+        return ret;
+    for (int p = 0; p < 4; p++) {
+        const int shift = p == 1 || p == 2;
+        const int w     = CEIL_RSHIFT(src->width, shift);
+        const int h     = CEIL_RSHIFT(row_end, shift);
+
+        for (int y = row_start >> shift; y < h; y++) {
+            uint8_t *out = dst->data[p] + (ptrdiff_t)y * dst->linesize[p];
+
+            if (p == 3 && src->format == WPD_PIX_FMT_YUV420P)
+                memset(out, 255, (size_t)w);
+            else
+                memcpy(out,
+                       src->data[p] + (ptrdiff_t)y * src->linesize[p],
+                       (size_t)w);
+        }
+    }
+    return 0;
+}
+
+static int ensure_yuva(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
+                       int want_alpha) {
+    return ensure_yuva_rows(s, dst, src, want_alpha, 0, src->height);
 }
 
 static void composite_region(WPDDecoder *s, const WebPImage *frame, SubRect r,
@@ -1916,7 +2856,8 @@ static void clear_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
         for (int comp = 0; comp < 4; comp++) {
             int      shift = (comp == 1 || comp == 2) ? 1 : 0;
             uint8_t *dst   = canvas->data[comp] +
-                (pos_y >> shift) * canvas->linesize[comp] + (pos_x >> shift);
+                (ptrdiff_t)(pos_y >> shift) * canvas->linesize[comp] +
+                (pos_x >> shift);
             for (int y = 0; y < CEIL_RSHIFT(height, shift); y++) {
                 memset(dst, s->clear_yuva[comp], CEIL_RSHIFT(width, shift));
                 dst += canvas->linesize[comp];
@@ -1950,6 +2891,25 @@ static int is_key_frame(const WPDDecoder *s, const WebPImage *frame) {
         (is_full_frame(s, s->prev_width, s->prev_height) || s->prev_key_frame);
 }
 
+/* The canvas holds whichever alpha convention the output format asked for when
+   its pixels were composited, and the caller may change that format between
+   frames. Bring what is already there into the convention the next frame will
+   be blended in, so the two are never mixed. */
+static void reconcile_canvas_alpha(WPDDecoder *s) {
+    if (s->canvas.data[0] && s->canvas.format == WPD_PIX_FMT_ARGB &&
+        s->canvas.premultiplied != s->premultiply)
+        for (int y = 0; y < s->canvas.height; y++) {
+            uint8_t *row = s->canvas.data[0] +
+                (ptrdiff_t)y * s->canvas.linesize[0];
+
+            if (s->premultiply)
+                s->ydsp.premultiply_row(row, 1, s->canvas.width);
+            else
+                wpd_premultiply_argb_row(row, s->canvas.width, 1);
+        }
+    s->canvas.premultiplied = s->premultiply;
+}
+
 static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
                           WPDPixelFormat format) {
     int covers_canvas = s->pos_x == 0 && s->pos_y == 0 &&
@@ -1963,6 +2923,7 @@ static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
         ret = allocate_canvas(s, format);
         if (ret < 0)
             return ret;
+        s->canvas.premultiplied = s->premultiply;
         if (!covers_canvas)
             clear_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
     } else if (s->key_frame) {
@@ -1983,6 +2944,7 @@ static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
                 s, s->prev_pos_x, s->prev_pos_y, s->prev_width, s->prev_height);
     }
 
+    reconcile_canvas_alpha(s);
     return 0;
 }
 
@@ -2041,9 +3003,9 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
                 wpd_log(NULL, WPD_LOG_ERROR, "invalid ALPHA chunk size\n");
                 return WPD_ERROR_INVALID_DATA;
             }
-            int alpha_header   = p[0];
-            s->alpha_data      = p + 1;
-            s->alpha_data_size = payload_size - 1;
+            int alpha_header     = p[0];
+            s->alpha_data_offset = s->discarded + (size_t)(p + 1 - s->file);
+            s->alpha_data_size   = payload_size - 1;
 
             int filter_m    = (alpha_header >> 2) & 0x03;
             int compression = alpha_header & 0x03;
@@ -2157,8 +3119,12 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
 
 static void export_frame(const WPDDecoder *s, const WebPImage *img,
                          WPDPixelFormat format, WPDFrame *frame) {
-    memset(frame, 0, sizeof(*frame));
-    for (int p = 0; p < 4; p++) {
+    int planes = format == WPD_PIX_FMT_YUVA420P ? 4
+        : format == WPD_PIX_FMT_YUV420P         ? 3
+                                                : 1;
+
+    frame_clear(frame);
+    for (int p = 0; p < planes; p++) {
         frame->data[p]   = img->data[p];
         frame->stride[p] = img->linesize[p];
     }
@@ -2169,44 +3135,484 @@ static void export_frame(const WPDDecoder *s, const WebPImage *img,
     frame->timestamp = s->frame_timestamp - s->frame_duration;
 }
 
-static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
-    const WPDPixelFormat format = s->out_format;
-    pack_row_func        pack;
-    int                  ret;
+static size_t stride_magnitude(ptrdiff_t stride) {
+    return stride < 0 ? (size_t)(-(stride + 1)) + 1 : (size_t)stride;
+}
 
-    if (!format_is_packed(format)) {
-        export_frame(s, img, img->format, frame);
-        return 0;
+static int export_external_rows(WPDDecoder *s, const WebPImage *img,
+                                WPDPixelFormat format, WPDFrame *frame,
+                                int row_start, int row_end) {
+    const size_t  row     = (size_t)img->width * format_bpp(format);
+    const size_t  advance = stride_magnitude(s->ext[0].stride);
+    pack_row_func pack    = img->format == format ? NULL
+                                                  : format_packer(s, format);
+    uint8_t      *dst     = s->ext[0].data;
+
+    if (!pack && format_bpp(img->format) != format_bpp(format))
+        return WPD_ERR_UNSUPPORTED;
+    if (advance < row || (size_t)img->height > s->ext[0].size / advance)
+        return WPD_ERR_BUFFER_TOO_SMALL;
+
+    dst += (ptrdiff_t)row_start * s->ext[0].stride;
+    for (int y = row_start; y < row_end; y++) {
+        const uint8_t *src = img->data[0] + (ptrdiff_t)y * img->linesize[0];
+
+        if (pack) {
+            pack(dst, src, img->width);
+        } else {
+            memcpy(dst, src, row);
+        }
+        dst += s->ext[0].stride;
     }
-    /* Animation frames were premultiplied before compositing. */
-    if (s->premultiply && !s->animation)
-        for (int y = 0; y < img->height; y++)
-            s->ydsp.premultiply_row(
-                img->data[0] + (size_t)y * img->linesize[0],
-                format_layout(img->format) == WPD_LAYOUT_ARGB,
-                img->width);
 
-    pack = format_packer(s, format);
-    if (!pack || format_layout(img->format) == format_layout(format)) {
-        export_frame(s, img, format, frame);
-        return 0;
+    export_frame(s, img, format, frame);
+    for (int p = 1; p < 4; p++) {
+        frame->data[p]   = NULL;
+        frame->stride[p] = 0;
     }
-
-    ret = image_alloc_packed(
-        &s->output, img->width, img->height, format_bpp(format), format);
-    if (ret < 0)
-        return ret;
-    for (int y = 0; y < img->height; y++)
-        pack(s->output.data[0] + (size_t)y * s->output.linesize[0],
-             img->data[0] + (size_t)y * img->linesize[0],
-             img->width);
-    export_frame(s, &s->output, format, frame);
+    frame->data[0]   = s->ext[0].data;
+    frame->stride[0] = s->ext[0].stride;
     return 0;
 }
 
-static int set_error(WPDDecoder *decoder, const char *message, int code) {
-    snprintf(decoder->error, sizeof(decoder->error), "%s (%d)", message, code);
-    return -1;
+static int export_external_planar_rows(WPDDecoder *s, const WebPImage *img,
+                                       WPDPixelFormat format, WPDFrame *frame,
+                                       int row_start, int row_end) {
+    const int planes = format == WPD_PIX_FMT_YUVA420P ? 4 : 3;
+
+    for (int p = 0; p < planes; p++) {
+        const int    shift = p == 1 || p == 2;
+        const int    w     = CEIL_RSHIFT(img->width, shift);
+        const int    h     = CEIL_RSHIFT(img->height, shift);
+        const size_t step  = stride_magnitude(s->ext[p].stride);
+
+        if (!s->ext[p].data || !s->ext[p].stride || step < (size_t)w ||
+            (size_t)h > s->ext[p].size / step)
+            return WPD_ERR_BUFFER_TOO_SMALL;
+    }
+
+    for (int p = 0; p < planes; p++) {
+        const int shift = p == 1 || p == 2;
+        const int w     = CEIL_RSHIFT(img->width, shift);
+        const int y0    = row_start >> shift;
+        const int h     = CEIL_RSHIFT(row_end, shift);
+        uint8_t  *dst   = s->ext[p].data + (ptrdiff_t)y0 * s->ext[p].stride;
+
+        for (int y = y0; y < h; y++) {
+            memcpy(
+                dst, img->data[p] + (ptrdiff_t)y * img->linesize[p], (size_t)w);
+            dst += s->ext[p].stride;
+        }
+    }
+
+    export_frame(s, img, format, frame);
+    for (int p = 0; p < 4; p++) {
+        frame->data[p]   = p < planes ? s->ext[p].data : NULL;
+        frame->stride[p] = p < planes ? s->ext[p].stride : 0;
+    }
+    return 0;
+}
+
+static int export_external_planar(WPDDecoder *s, const WebPImage *img,
+                                  WPDPixelFormat format, WPDFrame *frame) {
+    return export_external_planar_rows(s, img, format, frame, 0, img->height);
+}
+
+static int export_external(WPDDecoder *s, const WebPImage *img,
+                           WPDPixelFormat format, WPDFrame *frame) {
+    return export_external_rows(s, img, format, frame, 0, img->height);
+}
+
+static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
+    const WPDPixelFormat format = s->out_format;
+    WebPImage            view;
+    WebPImage           *processed;
+    WebPImage           *planar;
+    pack_row_func        pack;
+    int                  ret;
+
+    ret = transform_image(s, img, &view, &processed, format);
+    if (ret < 0)
+        return ret;
+    img = processed;
+
+    if (format == WPD_PIX_FMT_YUV420P || format == WPD_PIX_FMT_YUVA420P) {
+        if ((img->format == WPD_PIX_FMT_YUV420P &&
+             format == WPD_PIX_FMT_YUV420P) ||
+            (img->format == WPD_PIX_FMT_YUVA420P)) {
+            planar = img;
+        } else {
+            ret = ensure_yuva(
+                s, &s->output, img, format == WPD_PIX_FMT_YUVA420P);
+            if (ret < 0)
+                return ret;
+            planar = &s->output;
+        }
+        if (s->options.flip) {
+            view = *planar;
+            flip_image(&view);
+            planar = &view;
+        }
+        if (s->ext_active)
+            return export_external_planar(s, planar, format, frame);
+        export_frame(s, planar, format, frame);
+        return 0;
+    }
+    if (!format_is_packed(format)) {
+        if (s->options.flip) {
+            view = *img;
+            flip_image(&view);
+            img = &view;
+        }
+        if (!s->ext_active) {
+            export_frame(s, img, img->format, frame);
+            return 0;
+        }
+        if (!format_is_packed(img->format))
+            return export_external_planar(s, img, img->format, frame);
+        return export_external(s, img, img->format, frame);
+    }
+    if (!format_is_packed(img->format) || format_bpp(format) == 2) {
+        ret = convert_to_packed(s, &s->output, img, format);
+        if (ret < 0)
+            return ret;
+        img = &s->output;
+    } else if (img->format != format) {
+        pack = format_packer(s, format);
+        if (!pack) {
+            if (format != WPD_PIX_FMT_ARGB_PRE ||
+                img->format != WPD_PIX_FMT_ARGB)
+                return WPD_ERR_UNSUPPORTED;
+            if (s->animation) {
+                view        = *img;
+                view.format = format;
+                img         = &view;
+            } else {
+                ret = image_alloc_packed(
+                    &s->output, img->width, img->height, 4, format);
+                if (ret < 0)
+                    return ret;
+                for (int y = 0; y < img->height; y++)
+                    memcpy(s->output.data[0] +
+                               (ptrdiff_t)y * s->output.linesize[0],
+                           img->data[0] + (ptrdiff_t)y * img->linesize[0],
+                           (size_t)img->width * 4);
+                img = &s->output;
+            }
+        } else {
+            ret = image_alloc_packed(&s->output,
+                                     img->width,
+                                     img->height,
+                                     format_bpp(format),
+                                     format);
+            if (ret < 0)
+                return ret;
+            for (int y = 0; y < img->height; y++)
+                pack(s->output.data[0] + (ptrdiff_t)y * s->output.linesize[0],
+                     img->data[0] + (ptrdiff_t)y * img->linesize[0],
+                     img->width);
+            img = &s->output;
+        }
+    }
+    if (s->premultiply && !s->animation && format_bpp(format) != 2)
+        for (int y = 0; y < img->height; y++)
+            s->ydsp.premultiply_row(
+                img->data[0] + (ptrdiff_t)y * img->linesize[0],
+                format_layout(img->format) == WPD_LAYOUT_ARGB,
+                img->width);
+    if (s->options.flip) {
+        view = *img;
+        flip_image(&view);
+        img = &view;
+    }
+    if (s->ext_active)
+        return export_external(s, img, format, frame);
+    export_frame(s, img, format, frame);
+    return 0;
+}
+
+/* Converts and hands out rows [0, upto) of the still lossy frame, converting
+   each row exactly once however many times it is asked for. */
+static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
+    const WPDPixelFormat format = s->out_format;
+    const WebPImage     *src    = &s->subframe;
+    WebPImage           *dst    = &s->converted;
+    const int first = s->converted_format == format ? s->converted_rows : 0;
+    int       converted_from = first;
+    int       ret;
+
+    if (upto < s->converted_rows)
+        upto = s->converted_rows;
+
+    /* The two-byte formats are packed from ARGB, so the intermediate has to be
+       carried between calls too, rather than rebuilt for the whole frame. */
+    if (format_bpp(format) == 2) {
+        WebPImage *argb = &s->output;
+
+        if (!first) {
+            ret = image_alloc_argb(argb, src->width, src->height);
+            if (ret < 0)
+                return ret;
+            ret = image_alloc_packed(dst, src->width, src->height, 2, format);
+            if (ret < 0)
+                return ret;
+        }
+        if (upto > first) {
+            if (s->options.no_fancy_upsampling)
+                wpd_yuv420_to_packed_simple(&s->ydsp,
+                                            WPD_LAYOUT_ARGB,
+                                            argb->data[0],
+                                            argb->linesize[0],
+                                            src->data[0],
+                                            src->linesize[0],
+                                            src->data[1],
+                                            src->data[2],
+                                            src->linesize[1],
+                                            src->data[3],
+                                            src->linesize[3],
+                                            src->width,
+                                            first,
+                                            upto);
+            else
+                converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
+                                                           WPD_LAYOUT_ARGB,
+                                                           argb->data[0],
+                                                           argb->linesize[0],
+                                                           src->data[0],
+                                                           src->linesize[0],
+                                                           src->data[1],
+                                                           src->data[2],
+                                                           src->linesize[1],
+                                                           src->data[3],
+                                                           src->linesize[3],
+                                                           src->width,
+                                                           src->height,
+                                                           first,
+                                                           upto);
+            for (int y = converted_from; y < upto; y++) {
+                uint8_t *row = dst->data[0] + (ptrdiff_t)y * dst->linesize[0];
+
+                format_packer(s, format)(
+                    row,
+                    argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
+                    src->width);
+                if (s->premultiply)
+                    s->ydsp.premultiply_row_4444(row, src->width);
+            }
+        }
+        if (s->ext_active) {
+            ret = export_external_rows(
+                s, dst, format, frame, converted_from, upto);
+            if (ret < 0)
+                return ret;
+        } else {
+            export_frame(s, dst, format, frame);
+        }
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    if (!first) {
+        ret = image_alloc_packed(
+            dst, src->width, src->height, format_bpp(format), format);
+        if (ret < 0)
+            return ret;
+    }
+
+    if (s->options.no_fancy_upsampling) {
+        wpd_yuv420_to_packed_simple(&s->ydsp,
+                                    format_layout(format),
+                                    dst->data[0],
+                                    dst->linesize[0],
+                                    src->data[0],
+                                    src->linesize[0],
+                                    src->data[1],
+                                    src->data[2],
+                                    src->linesize[1],
+                                    src->data[3],
+                                    src->linesize[3],
+                                    src->width,
+                                    first,
+                                    upto);
+    } else if (upto > first) {
+        converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
+                                                   format_layout(format),
+                                                   dst->data[0],
+                                                   dst->linesize[0],
+                                                   src->data[0],
+                                                   src->linesize[0],
+                                                   src->data[1],
+                                                   src->data[2],
+                                                   src->linesize[1],
+                                                   src->data[3],
+                                                   src->linesize[3],
+                                                   src->width,
+                                                   src->height,
+                                                   first,
+                                                   upto);
+    }
+    if (s->premultiply)
+        for (int y = converted_from; y < upto; y++)
+            s->ydsp.premultiply_row(dst->data[0] + (size_t)y * dst->linesize[0],
+                                    format_layout(format) == WPD_LAYOUT_ARGB,
+                                    dst->width);
+
+    if (s->ext_active) {
+        ret = export_external_rows(s, dst, format, frame, converted_from, upto);
+        if (ret < 0)
+            return ret;
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+    s->converted_rows   = upto;
+    s->converted_format = format;
+    export_frame(s, dst, format, frame);
+    return 0;
+}
+
+/* Hands out rows [0, upto) of the still lossless frame, premultiplying and
+   packing each row exactly once however many times it is asked for. */
+static int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
+    const WPDPixelFormat format = s->out_format;
+    WebPImage           *img    = s->lossless_frame;
+    const int     first = s->converted_format == format ? s->converted_rows : 0;
+    pack_row_func pack;
+    int           ret;
+
+    if (upto < s->converted_rows)
+        upto = s->converted_rows;
+
+    if (format == WPD_PIX_FMT_YUV420P || format == WPD_PIX_FMT_YUVA420P) {
+        ret = ensure_yuva_rows(
+            s, &s->output, img, format == WPD_PIX_FMT_YUVA420P, first, upto);
+        if (ret < 0)
+            return ret;
+        if (s->ext_active)
+            ret = export_external_planar_rows(
+                s, &s->output, format, frame, first, upto);
+        else {
+            export_frame(s, &s->output, format, frame);
+            ret = 0;
+        }
+        if (ret < 0)
+            return ret;
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    if (!format_is_packed(format)) {
+        if (!s->ext_active) {
+            export_frame(s, img, img->format, frame);
+            s->converted_rows   = upto;
+            s->converted_format = format;
+            return 0;
+        }
+        ret = export_external_rows(s, img, img->format, frame, first, upto);
+        if (ret < 0)
+            return ret;
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    if (s->ext_active) {
+        ret = export_external_rows(s, img, format, frame, first, upto);
+        if (ret < 0)
+            return ret;
+        if (s->premultiply)
+            for (int y = first; y < upto; y++) {
+                uint8_t *row = s->ext[0].data + (ptrdiff_t)y * s->ext[0].stride;
+
+                if (format_bpp(format) == 2)
+                    s->ydsp.premultiply_row_4444(row, img->width);
+                else
+                    s->ydsp.premultiply_row(
+                        row,
+                        format_layout(format) == WPD_LAYOUT_ARGB,
+                        img->width);
+            }
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    pack = format_packer(s, format);
+    if (!s->premultiply && (!pack || img->format == format)) {
+        export_frame(s, img, format, frame);
+        s->converted_rows   = upto;
+        s->converted_format = format;
+        return 0;
+    }
+
+    if (!first) {
+        ret = image_alloc_packed(
+            &s->output, img->width, img->height, format_bpp(format), format);
+        if (ret < 0)
+            return ret;
+    }
+    for (int y = first; y < upto; y++) {
+        uint8_t *dst = s->output.data[0] + (size_t)y * s->output.linesize[0];
+        const uint8_t *src = img->data[0] + (size_t)y * img->linesize[0];
+
+        if (pack)
+            pack(dst, src, img->width);
+        else
+            memcpy(dst, src, (size_t)img->width * 4);
+        if (s->premultiply) {
+            if (format_bpp(format) == 2)
+                s->ydsp.premultiply_row_4444(dst, img->width);
+            else
+                s->ydsp.premultiply_row(
+                    dst, format_layout(format) == WPD_LAYOUT_ARGB, img->width);
+        }
+    }
+    export_frame(s, &s->output, format, frame);
+    s->converted_rows   = upto;
+    s->converted_format = format;
+    return 0;
+}
+
+const char *wpd_status_string(WPDStatus status) {
+    switch (status) {
+    case WPD_OK: return "success";
+    case WPD_ERR_INVALID_ARG: return "invalid argument";
+    case WPD_ERR_NOT_WEBP: return "not a WebP file";
+    case WPD_ERR_BITSTREAM: return "invalid bitstream";
+    case WPD_ERR_TRUNCATED: return "truncated file";
+    case WPD_ERR_UNSUPPORTED: return "unsupported feature";
+    case WPD_ERR_NO_MEMORY: return "out of memory";
+    case WPD_ERR_TOO_LARGE: return "image too large";
+    case WPD_ERR_BUFFER_TOO_SMALL: return "output buffer too small";
+    }
+    return "unknown error";
+}
+
+/* Internal failures are either a WPDStatus or a negated errno. */
+static WPDStatus status_from_internal(int code) {
+    switch (code) {
+    case 0: return WPD_OK;
+    case WPD_ERROR_INVALID_DATA: return WPD_ERR_BITSTREAM;
+    case WPD_ERROR(ENOMEM): return WPD_ERR_NO_MEMORY;
+    case WPD_ERROR_TOO_LARGE: return WPD_ERR_TOO_LARGE;
+    case WPD_ERROR(EINVAL): return WPD_ERR_INVALID_ARG;
+    default: break;
+    }
+    if (code <= WPD_ERR_INVALID_ARG && code >= WPD_ERR_BUFFER_TOO_SMALL)
+        return (WPDStatus)code;
+    return WPD_ERR_BITSTREAM;
+}
+
+static WPDStatus set_error(WPDDecoder *decoder, const char *message, int code) {
+    decoder->status = status_from_internal(code);
+    snprintf(decoder->error,
+             sizeof(decoder->error),
+             "%s (%s)",
+             message,
+             wpd_status_string(decoder->status));
+    return decoder->status;
 }
 
 WPDDecoder *wpd_decoder_create(void) {
@@ -2216,93 +3622,386 @@ WPDDecoder *wpd_decoder_create(void) {
     wpd_init_cpu();
     wpd_vp8l_dsp_init(&decoder->ldsp);
     wpd_yuv_dsp_init(&decoder->ydsp);
-    decoder->out_format = WPD_PIX_FMT_NONE;
+    decoder->out_format          = WPD_PIX_FMT_NONE;
+    decoder->options.struct_size = sizeof(decoder->options);
     return decoder;
 }
 
-int wpd_decoder_set_output_format(WPDDecoder *decoder, WPDPixelFormat format) {
-    if (!decoder || (format != WPD_PIX_FMT_NONE && !format_is_packed(format)) ||
-        format > WPD_PIX_FMT_BGRA_PRE)
-        return -1;
-    decoder->out_format  = format;
-    decoder->premultiply = format_is_premultiplied(format);
-    return 0;
+WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
+                                  const WPDDecoderOptions *options) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!options ||
+        options->struct_size < WPD_FIELD_END(WPDDecoderOptions, flip))
+        return set_error(
+            decoder, "invalid decoder options", WPD_ERR_INVALID_ARG);
+    if ((options->bypass_filtering != 0 && options->bypass_filtering != 1) ||
+        (options->no_fancy_upsampling != 0 &&
+         options->no_fancy_upsampling != 1) ||
+        (options->use_cropping != 0 && options->use_cropping != 1) ||
+        (options->use_scaling != 0 && options->use_scaling != 1) ||
+        (options->flip != 0 && options->flip != 1) ||
+        (options->use_cropping &&
+         (options->crop_left < 0 || options->crop_top < 0 ||
+          options->crop_width <= 0 || options->crop_height <= 0)) ||
+        (options->use_scaling &&
+         (options->scaled_width < 0 || options->scaled_height < 0 ||
+          (!options->scaled_width && !options->scaled_height))))
+        return set_error(
+            decoder, "invalid decoder options", WPD_ERR_INVALID_ARG);
+    decoder->options                = *options;
+    decoder->options.struct_size    = sizeof(decoder->options);
+    decoder->codec.bypass_filtering = options->bypass_filtering;
+    return WPD_OK;
 }
 
-static void scan_still_size(WPDDecoder *s, uint32_t tag, const uint8_t *p,
-                            uint32_t size) {
+WPDStatus wpd_decoder_set_output_format(WPDDecoder    *decoder,
+                                        WPDPixelFormat format) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (format != WPD_PIX_FMT_NONE && !format_valid(format))
+        return set_error(decoder, "invalid output format", WPD_ERR_INVALID_ARG);
+    decoder->out_format  = format;
+    decoder->premultiply = format_is_premultiplied(format);
+    return WPD_OK;
+}
+
+static int same_output_planes(const WPDOutputPlane *a,
+                              const WPDOutputPlane *b) {
+    for (int p = 0; p < 4; p++)
+        if (a[p].data != b[p].data || a[p].size != b[p].size ||
+            a[p].stride != b[p].stride)
+            return 0;
+    return 1;
+}
+
+/* Rows already handed out live in whichever buffer was current at the time, so
+   a new destination has to be filled from the top again. */
+static void drop_converted_rows(WPDDecoder *decoder) {
+    decoder->converted_rows   = 0;
+    decoder->converted_format = WPD_PIX_FMT_NONE;
+}
+
+WPDStatus wpd_decoder_set_output_buffer(WPDDecoder            *decoder,
+                                        const WPDOutputBuffer *buffer) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!buffer) {
+        if (decoder->ext_active)
+            drop_converted_rows(decoder);
+        decoder->ext_active = 0;
+        memset(decoder->ext, 0, sizeof(decoder->ext));
+        return WPD_OK;
+    }
+    if (buffer->struct_size < WPD_FIELD_END(WPDOutputBuffer, plane) ||
+        !buffer->plane[0].data || !buffer->plane[0].stride)
+        return set_error(decoder, "invalid output buffer", WPD_ERR_INVALID_ARG);
+    for (int p = 0; p < 4; p++) {
+        if ((buffer->plane[p].data && !buffer->plane[p].stride) ||
+            (!buffer->plane[p].data && buffer->plane[p].stride))
+            return set_error(
+                decoder, "invalid output buffer", WPD_ERR_INVALID_ARG);
+    }
+    if (!decoder->ext_active ||
+        !same_output_planes(decoder->ext, buffer->plane))
+        drop_converted_rows(decoder);
+    memcpy(decoder->ext, buffer->plane, sizeof(decoder->ext));
+    decoder->ext_active = 1;
+    return WPD_OK;
+}
+
+static void scan_still_header(HeaderScan *hs, uint32_t tag, const uint8_t *p,
+                              size_t avail, size_t size) {
     if (tag == MKTAG('V', 'P', '8', 'L')) {
-        if (size >= 5 && p[0] == 0x2f) {
+        hs->coding = WPD_CODING_LOSSLESS;
+        if (avail >= 5 && p[0] == 0x2f) {
             uint32_t bits = WPD_RL32(p + 1);
 
-            s->canvas_width  = (bits & 0x3fff) + 1;
-            s->canvas_height = ((bits >> 14) & 0x3fff) + 1;
+            if (bits >> 29)
+                return;
+            hs->width  = (bits & 0x3fff) + 1;
+            hs->height = ((bits >> 14) & 0x3fff) + 1;
+            hs->has_alpha |= (bits >> 28) & 1;
         }
-    } else if (size >= 10 && p[3] == 0x9d && p[4] == 0x01 && p[5] == 0x2a) {
-        s->canvas_width  = WPD_RL16(p + 6) & 0x3fff;
-        s->canvas_height = WPD_RL16(p + 8) & 0x3fff;
+    } else {
+        hs->coding = WPD_CODING_LOSSY;
+        if (avail >= 10 && size >= 10 && p[3] == 0x9d && p[4] == 0x01 &&
+            p[5] == 0x2a) {
+            uint32_t bits = WPD_RL24(p);
+
+            if ((bits & 1) || ((bits >> 1) & 7) > 3 || !(bits & 0x10) ||
+                (bits >> 5) > size - 10)
+                return;
+            hs->width  = WPD_RL16(p + 6) & 0x3fff;
+            hs->height = WPD_RL16(p + 8) & 0x3fff;
+        }
     }
 }
 
-static void scan_headers(WPDDecoder *s) {
-    size_t pos    = 12;
-    int    images = 0;
+static WPDStatus scan_raw_headers(HeaderScan *hs, const uint8_t *data,
+                                  size_t size, int partial) {
+    uint32_t tag;
 
-    while (pos + 8 <= s->end) {
-        const uint8_t *chunk = s->file + pos;
+    hs->truncated = 0;
+    if (!size)
+        return WPD_ERR_TRUNCATED;
+    if (data[0] == 0x2f) {
+        hs->raw_kind         = 1;
+        hs->raw_image_offset = 0;
+        hs->raw_image_size   = size;
+        if (size < 5)
+            return WPD_ERR_TRUNCATED;
+        scan_still_header(hs, MKTAG('V', 'P', '8', 'L'), data, size, size);
+    } else if (size >= 6 && data[3] == 0x9d && data[4] == 0x01 &&
+               data[5] == 0x2a) {
+        /* A bare stream declares no payload length, so until the caller says
+           the stream has ended the keyframe header's own first partition is
+           the only length to measure it against. */
+        size_t payload;
+
+        hs->raw_kind         = 2;
+        hs->raw_image_offset = 0;
+        hs->raw_image_size   = size;
+        if (size < 10)
+            return WPD_ERR_TRUNCATED;
+        payload = 10 + (size_t)(WPD_RL24(data) >> 5);
+        if (!partial || payload < size)
+            payload = size;
+        scan_still_header(hs, MKTAG('V', 'P', '8', ' '), data, size, payload);
+        if (hs->width && payload > size)
+            hs->truncated = 1;
+    } else if (size >= 4 && WPD_RL32(data) == MKTAG('A', 'L', 'P', 'H')) {
+        uint32_t alpha_size, image_size;
+        uint64_t padded;
+        size_t   image_header, have;
+
+        hs->raw_kind = 3;
+        if (size < 8)
+            return WPD_ERR_TRUNCATED;
+        alpha_size = WPD_RL32(data + 4);
+        if (alpha_size == UINT32_MAX)
+            return WPD_ERR_BITSTREAM;
+        padded = (uint64_t)alpha_size + (alpha_size & 1);
+        if (padded > (uint64_t)(size - 8) || size - 8 - padded < 8)
+            return WPD_ERR_TRUNCATED;
+        image_header = 8 + (size_t)padded;
+        tag          = WPD_RL32(data + image_header);
+        if (tag != MKTAG('V', 'P', '8', ' '))
+            return WPD_ERR_BITSTREAM;
+        image_size = WPD_RL32(data + image_header + 4);
+        have       = image_size;
+        if ((size_t)image_size > size - image_header - 8) {
+            hs->truncated = 1;
+            if (!partial)
+                return WPD_ERR_TRUNCATED;
+            have = size - image_header - 8;
+        }
+        hs->raw_alpha_offset = 8;
+        hs->raw_alpha_size   = alpha_size;
+        hs->raw_image_offset = image_header + 8;
+        hs->raw_image_size   = have;
+        hs->has_alpha        = 1;
+        if (have < 10)
+            return WPD_ERR_TRUNCATED;
+        scan_still_header(
+            hs, tag, data + hs->raw_image_offset, have, image_size);
+    } else {
+        return size < 12 && partial ? WPD_ERR_TRUNCATED : WPD_ERR_NOT_WEBP;
+    }
+    hs->frame_count = 1;
+    hs->images      = 1;
+    hs->end         = size;
+    return hs->width && hs->height ? WPD_OK : WPD_ERR_BITSTREAM;
+}
+
+/* Walks the chunk list without decoding anything, so it is safe to run on the
+   caller's memory before the file is copied. Resumes from where it stopped
+   last time, so feeding a stream one piece at a time stays linear; 'base' is
+   the stream offset the buffer now starts at, once earlier bytes have been
+   dropped. */
+static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
+                              size_t size, int partial) {
+    int partial_still = 0;
+
+    hs->truncated = 0;
+
+    if (!hs->pos) {
+        if (size < 12 && size >= 4 &&
+            WPD_RL32(data) == MKTAG('R', 'I', 'F', 'F'))
+            return WPD_ERR_TRUNCATED;
+        if (size < 12 || WPD_RL32(data) != MKTAG('R', 'I', 'F', 'F') ||
+            WPD_RL32(data + 8) != MKTAG('W', 'E', 'B', 'P'))
+            return scan_raw_headers(hs, data, size, partial);
+        hs->riff_end = (uint64_t)WPD_RL32(data + 4) + 8;
+        hs->pos      = 12;
+    }
+
+    hs->end = size;
+    if (hs->riff_end < (uint64_t)size)
+        hs->end = (size_t)hs->riff_end;
+    else if (hs->riff_end > (uint64_t)size)
+        hs->truncated = 1;
+
+    while (hs->pos + 8 <= hs->end) {
+        const uint8_t *chunk = data + (hs->pos - base);
         uint32_t       tag   = WPD_RL32(chunk);
-        uint32_t       size  = WPD_RL32(chunk + 4);
+        uint32_t       size_ = WPD_RL32(chunk + 4);
         uint32_t       padded_size;
 
-        if (size == UINT32_MAX)
+        if (size_ == UINT32_MAX) {
+            hs->truncated = 1;
             break;
-        padded_size = size + (size & 1);
-        if (s->end - (pos + 8) < padded_size)
+        }
+        padded_size = size_ + (size_ & 1);
+        if (hs->end - (hs->pos + 8) < padded_size) {
+            hs->truncated = 1;
+            if (partial && !hs->images &&
+                (tag == MKTAG('V', 'P', '8', ' ') ||
+                 tag == MKTAG('V', 'P', '8', 'L'))) {
+                const int width = hs->width, height = hs->height;
+
+                partial_still = 1;
+                scan_still_header(
+                    hs, tag, chunk + 8, hs->end - (hs->pos + 8), size_);
+                if (hs->vp8x && width && height) {
+                    hs->width  = width;
+                    hs->height = height;
+                }
+            }
             break;
+        }
 
         switch (tag) {
         case MKTAG('V', 'P', '8', 'X'):
-            if (size >= 10) {
-                s->canvas_width  = WPD_RL24(chunk + 12) + 1;
-                s->canvas_height = WPD_RL24(chunk + 15) + 1;
+            hs->vp8x = 1;
+            if (size_ >= 10) {
+                hs->has_alpha |= (chunk[8] & VP8X_FLAG_ALPHA) != 0;
+                for (int i = 0; i < WPD_METADATA_NB; i++)
+                    if (chunk[8] & meta_vp8x_flag[i])
+                        hs->metadata |= 1 << i;
+                hs->width  = WPD_RL24(chunk + 12) + 1;
+                hs->height = WPD_RL24(chunk + 15) + 1;
+                if ((uint64_t)hs->width * (uint64_t)hs->height >= 1ULL << 32)
+                    return WPD_ERR_TOO_LARGE;
             }
             break;
+        case MKTAG('A', 'L', 'P', 'H'): hs->has_alpha = 1; break;
         case MKTAG('A', 'N', 'I', 'M'):
-            s->animation = 1;
-            if (size >= 6) {
-                s->anim_background_argb = WPD_RL32(chunk + 8);
-                s->anim_loop_count      = WPD_RL16(chunk + 12);
+            hs->animation = 1;
+            if (size_ >= 6) {
+                hs->background_argb = WPD_RL32(chunk + 8);
+                hs->loop_count      = WPD_RL16(chunk + 12);
             }
             break;
-        case MKTAG('A', 'N', 'M', 'F'): s->anim_frame_count++; break;
+        case MKTAG('A', 'N', 'M', 'F'): hs->frame_count++; break;
         case MKTAG('V', 'P', '8', ' '):
         case MKTAG('V', 'P', '8', 'L'):
-            if (!images++ && !s->canvas_width)
-                scan_still_size(s, tag, chunk + 8, size);
+            if (!hs->images++) {
+                int width = hs->width, height = hs->height;
+
+                scan_still_header(hs, tag, chunk + 8, size_, size_);
+                if (hs->vp8x && width && height) {
+                    hs->width  = width;
+                    hs->height = height;
+                }
+            }
             break;
-        default: break;
+        default:
+            for (int i = 0; i < WPD_METADATA_NB; i++) {
+                if (tag != meta_tag[i])
+                    continue;
+                hs->metadata |= 1 << i;
+                if (!hs->meta_offset[i] && size_) {
+                    hs->meta_offset[i] = hs->pos + 8;
+                    hs->meta_size[i]   = size_;
+                }
+            }
+            break;
         }
-        pos += 8 + padded_size;
+        hs->pos += 8 + padded_size;
     }
 
-    if (!s->animation)
-        s->anim_frame_count = images ? 1 : 0;
+    /* An animation may mix lossy and lossless frames, which libwebp reports as
+       an undefined coding; only the first still's coding is meaningful. */
+    if (hs->animation)
+        hs->coding = WPD_CODING_UNKNOWN;
+    else
+        hs->frame_count = hs->images || partial_still ? 1 : 0;
+
+    if (!hs->width || !hs->height)
+        return hs->truncated ? WPD_ERR_TRUNCATED : WPD_ERR_BITSTREAM;
+    return WPD_OK;
 }
 
-int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
-    uint32_t riff_size;
+static void info_from_scan(WPDImageInfo *info, const HeaderScan *hs) {
+    info->width           = hs->width;
+    info->height          = hs->height;
+    info->has_alpha       = hs->has_alpha;
+    info->is_animation    = hs->animation;
+    info->frame_count     = hs->frame_count;
+    info->loop_count      = hs->loop_count;
+    info->background_argb = hs->background_argb;
+    info->coding          = hs->coding;
+    info->metadata        = hs->metadata;
+}
 
-    if (!decoder || !data)
-        return -1;
+WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
+    HeaderScan hs;
+    WPDStatus  status;
 
+    if (!data || !info_valid(info))
+        return WPD_ERR_INVALID_ARG;
+
+    info_clear(info);
+    memset(&hs, 0, sizeof(hs));
+    status = scan_headers(&hs, data, 0, size, 1);
+    if (status != WPD_OK)
+        return status;
+    info_from_scan(info, &hs);
+    return WPD_OK;
+}
+
+/* Clears everything derived from a file but keeps the input allocation, which
+   a stream grows across many calls. */
+static void decoder_reset(WPDDecoder *decoder) {
+    for (int i = 0; i < WPD_METADATA_NB; i++) {
+        free(decoder->meta[i]);
+        decoder->meta[i]      = NULL;
+        decoder->meta_size[i] = 0;
+    }
+    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
     image_free(&decoder->canvas);
     image_free(&decoder->argb);
+    image_free(&decoder->lossless_out);
     image_free(&decoder->converted);
     image_free(&decoder->output);
+    image_free(&decoder->transformed);
     memset(&decoder->subframe, 0, sizeof(decoder->subframe));
-    decoder->animation    = 0;
-    decoder->still_done   = 0;
-    decoder->frame_index  = 0;
+    decoder->file_size = 0;
+    decoder->discarded = 0;
+    decoder->file      = decoder->file_alloc;
+    memset(&decoder->scan, 0, sizeof(decoder->scan));
+    decoder->pos = decoder->end = 0;
+    decoder->opened             = 0;
+    decoder->streaming          = 0;
+    decoder->eos                = 0;
+    decoder->headers_valid      = 0;
+    decoder->truncated          = 0;
+    decoder->borrowed           = 0;
+    decoder->input_mode         = 0;
+    decoder->animation          = 0;
+    decoder->still_done         = 0;
+    decoder->vp8_active         = 0;
+    decoder->still_lossy        = 0;
+    decoder->alpha_pending      = 0;
+    decoder->converted_rows     = 0;
+    decoder->converted_format   = WPD_PIX_FMT_NONE;
+    decoder->vp8l_active        = 0;
+    decoder->still_lossless     = 0;
+    decoder->vp8l_next_try      = 0;
+    decoder->vp8l_peeked        = 0;
+    decoder->lossless_frame     = NULL;
+    decoder->frame_index        = 0;
     decoder->canvas_width = decoder->canvas_height = 0;
     decoder->width = decoder->height = 0;
     decoder->has_alpha               = 0;
@@ -2316,57 +4015,440 @@ int wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data, size_t size) {
     decoder->frame_duration                              = 0;
     decoder->frame_timestamp                             = 0;
     memset(decoder->clear_argb, 0, sizeof(decoder->clear_argb));
-    decoder->clear_yuva[0] = RGB_TO_Y_CCIR(0, 0, 0);
-    decoder->clear_yuva[1] = RGB_TO_U_CCIR(0, 0, 0, 0);
-    decoder->clear_yuva[2] = RGB_TO_V_CCIR(0, 0, 0, 0);
-    decoder->clear_yuva[3] = 0;
-    decoder->error[0]      = 0;
-
-    if (size < 12 || size > INT_MAX - WPD_FILE_PADDING)
-        return set_error(decoder, "not a WebP file", WPD_ERROR_INVALID_DATA);
-
-    free(decoder->file);
-    decoder->file = malloc(size + WPD_FILE_PADDING);
-    if (!decoder->file) {
-        decoder->file_size = 0;
-        return set_error(decoder, "out of memory", WPD_ERROR(ENOMEM));
-    }
-    memcpy(decoder->file, data, size);
-    memset(decoder->file + size, 0, WPD_FILE_PADDING);
-    decoder->file_size = size;
-
-    if (WPD_RL32(decoder->file) != MKTAG('R', 'I', 'F', 'F') ||
-        WPD_RL32(decoder->file + 8) != MKTAG('W', 'E', 'B', 'P'))
-        return set_error(decoder, "not a WebP file", WPD_ERROR_INVALID_DATA);
-
-    riff_size    = WPD_RL32(decoder->file + 4);
-    decoder->pos = 12;
-    decoder->end = WPD_MIN((size_t)riff_size + 8, size);
-    scan_headers(decoder);
-    return 0;
+    decoder->clear_yuva[0]  = RGB_TO_Y_CCIR(0, 0, 0);
+    decoder->clear_yuva[1]  = RGB_TO_U_CCIR(0, 0, 0, 0);
+    decoder->clear_yuva[2]  = RGB_TO_V_CCIR(0, 0, 0, 0);
+    decoder->clear_yuva[3]  = 0;
+    decoder->info_has_alpha = 0;
+    decoder->info_coding    = WPD_CODING_UNKNOWN;
+    decoder->status         = WPD_OK;
+    decoder->error[0]       = 0;
 }
 
-int wpd_decoder_anim_info(const WPDDecoder *decoder, WPDAnimInfo *info) {
-    if (!decoder || !info || !decoder->file)
-        return -1;
+/* Drops input the decoder can no longer look at. The chunk at 'pos' is kept
+   whole: a VP8 chunk decoded row by row keeps range coders pointing into it
+   until the frame is done, and those are rebased on the next step. */
+static void file_compact(WPDDecoder *decoder) {
+    size_t keep = decoder->pos;
 
-    info->canvas_width    = decoder->canvas_width;
-    info->canvas_height   = decoder->canvas_height;
+    if (decoder->alpha_pending && decoder->alpha_data_offset < keep)
+        keep = decoder->alpha_data_offset;
+    if (keep < decoder->discarded || keep - decoder->discarded < 1 << 16)
+        return;
+
+    memmove(decoder->file_alloc,
+            file_at(decoder, keep),
+            decoder->file_size - keep + WPD_FILE_PADDING);
+    decoder->file      = decoder->file_alloc;
+    decoder->discarded = keep;
+}
+
+static WPDStatus file_reserve(WPDDecoder *decoder, size_t size) {
+    const size_t buffered = file_buffered(decoder);
+    const size_t needed   = buffered + size + WPD_FILE_PADDING;
+    size_t       capacity;
+    uint8_t     *grown;
+
+    if (size > (size_t)INT_MAX - WPD_FILE_PADDING ||
+        buffered > (size_t)INT_MAX - WPD_FILE_PADDING - size)
+        return WPD_ERR_TOO_LARGE;
+    if (decoder->file_capacity >= needed)
+        return WPD_OK;
+
+    capacity = decoder->file_capacity ? decoder->file_capacity : 1 << 16;
+    while (capacity < needed) capacity *= 2;
+    grown = realloc(decoder->file_alloc, capacity);
+    if (!grown)
+        return WPD_ERR_NO_MEMORY;
+    decoder->file_alloc    = grown;
+    decoder->file          = grown;
+    decoder->file_capacity = capacity;
+    return WPD_OK;
+}
+
+/* Takes a copy of each metadata chunk the scanner has reached, since the
+   buffer it sits in is dropped as the stream moves past it. */
+static WPDStatus capture_metadata(WPDDecoder *decoder) {
+    const HeaderScan *hs = &decoder->scan;
+
+    for (int i = 0; i < WPD_METADATA_NB; i++) {
+        const size_t offset = hs->meta_offset[i];
+        const size_t size   = hs->meta_size[i];
+
+        if (!offset || decoder->meta[i])
+            continue;
+        if (offset < decoder->discarded || offset > decoder->file_size ||
+            size > decoder->file_size - offset)
+            continue;
+        decoder->meta[i] = malloc(size);
+        if (!decoder->meta[i])
+            return WPD_ERR_NO_MEMORY;
+        memcpy(decoder->meta[i], file_at(decoder, offset), size);
+        decoder->meta_size[i] = size;
+    }
+    return WPD_OK;
+}
+
+static WPDStatus rescan_headers(WPDDecoder *decoder) {
+    const HeaderScan *hs     = &decoder->scan;
+    WPDStatus         status = scan_headers(&decoder->scan,
+                                            decoder->file,
+                                            decoder->discarded,
+                                            decoder->file_size,
+                                            decoder->streaming);
+    WPDStatus         meta   = capture_metadata(decoder);
+
+    if (status != WPD_OK)
+        return status;
+    if (meta != WPD_OK)
+        return meta;
+
+    decoder->end                  = hs->end;
+    decoder->canvas_width         = hs->width;
+    decoder->canvas_height        = hs->height;
+    decoder->animation            = hs->animation;
+    decoder->anim_frame_count     = hs->frame_count;
+    decoder->anim_loop_count      = hs->loop_count;
+    decoder->anim_background_argb = hs->background_argb;
+    decoder->info_has_alpha       = hs->has_alpha;
+    decoder->info_coding          = hs->coding;
+    decoder->truncated            = hs->truncated;
+    if (!decoder->headers_valid) {
+        decoder->pos           = hs->raw_kind ? 0 : 12;
+        decoder->headers_valid = 1;
+    }
+    return WPD_OK;
+}
+
+/* No more input is coming, so a chunk list that stops short of what it
+   promised, or that never carried an image, cannot be completed. */
+static WPDStatus check_final_headers(WPDDecoder *decoder, const char *message) {
+    const HeaderScan *hs = &decoder->scan;
+
+    if (hs->truncated)
+        return set_error(decoder, message, WPD_ERR_TRUNCATED);
+    if (!hs->images && !hs->frame_count)
+        return set_error(decoder, "no image data found", WPD_ERR_BITSTREAM);
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data,
+                           size_t size) {
+    WPDStatus status;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data)
+        return set_error(decoder, "invalid input data", WPD_ERR_INVALID_ARG);
+
+    decoder_reset(decoder);
+
+    status = file_reserve(decoder, size);
+    if (status != WPD_OK)
+        return set_error(decoder, "cannot buffer input", status);
+    memcpy(decoder->file_alloc, data, size);
+    memset(decoder->file_alloc + size, 0, WPD_FILE_PADDING);
+    decoder->file      = decoder->file_alloc;
+    decoder->file_size = size;
+    decoder->discarded = 0;
+
+    status = rescan_headers(decoder);
+    if (status != WPD_OK) {
+        decoder->file_size = 0;
+        return set_error(decoder, "cannot read headers", status);
+    }
+    status = check_final_headers(decoder, "file ends inside a chunk");
+    if (status != WPD_OK) {
+        decoder->file_size     = 0;
+        decoder->headers_valid = 0;
+        return status;
+    }
+    decoder->opened = 1;
+    decoder->eos    = 1;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_open_borrowed(WPDDecoder *decoder, const uint8_t *data,
+                                    size_t size) {
+    WPDStatus status;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data)
+        return set_error(decoder, "invalid input data", WPD_ERR_INVALID_ARG);
+
+    decoder_reset(decoder);
+    decoder->file      = data;
+    decoder->file_size = size;
+    decoder->borrowed  = 1;
+
+    status = rescan_headers(decoder);
+    if (status != WPD_OK)
+        status = set_error(decoder, "cannot read headers", status);
+    else
+        status = check_final_headers(decoder, "file ends inside a chunk");
+    if (status != WPD_OK) {
+        decoder->file          = decoder->file_alloc;
+        decoder->file_size     = 0;
+        decoder->borrowed      = 0;
+        decoder->headers_valid = 0;
+        return status;
+    }
+    decoder->opened = 1;
+    decoder->eos    = 1;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_open_stream(WPDDecoder *decoder) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    decoder_reset(decoder);
+    decoder->opened    = 1;
+    decoder->streaming = 1;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_append(WPDDecoder *decoder, const uint8_t *data,
+                             size_t size) {
+    WPDStatus status;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data)
+        return set_error(decoder, "invalid input data", WPD_ERR_INVALID_ARG);
+    if (!decoder->streaming || decoder->eos)
+        return set_error(decoder, "not an open stream", WPD_ERR_INVALID_ARG);
+    if (!size)
+        return WPD_OK;
+    if (decoder->input_mode == 2)
+        return set_error(
+            decoder, "cannot mix append and update", WPD_ERR_INVALID_ARG);
+    decoder->input_mode = 1;
+
+    file_compact(decoder);
+    status = file_reserve(decoder, size);
+    if (status != WPD_OK)
+        return set_error(decoder, "cannot buffer input", status);
+    memcpy(decoder->file_alloc + file_buffered(decoder), data, size);
+    decoder->file_size += size;
+    memset(decoder->file_alloc + file_buffered(decoder), 0, WPD_FILE_PADDING);
+
+    status = rescan_headers(decoder);
+    /* Headers that are merely incomplete are the normal state of a stream. */
+    if (status == WPD_ERR_TRUNCATED)
+        return WPD_OK;
+    if (status != WPD_OK)
+        return set_error(decoder, "cannot read headers", status);
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_update(WPDDecoder *decoder, const uint8_t *data,
+                             size_t size) {
+    WPDStatus status;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data)
+        return set_error(decoder, "invalid input data", WPD_ERR_INVALID_ARG);
+    if (!decoder->streaming || decoder->eos)
+        return set_error(decoder, "not an open stream", WPD_ERR_INVALID_ARG);
+    if (decoder->input_mode == 1)
+        return set_error(
+            decoder, "cannot mix append and update", WPD_ERR_INVALID_ARG);
+    if (size < decoder->file_size)
+        return set_error(decoder, "stream buffer shrank", WPD_ERR_INVALID_ARG);
+
+    decoder->input_mode = 2;
+    decoder->borrowed   = 1;
+    decoder->file       = data;
+    decoder->file_size  = size;
+    decoder->discarded  = 0;
+
+    status = rescan_headers(decoder);
+    if (status == WPD_ERR_TRUNCATED)
+        return WPD_OK;
+    if (status != WPD_OK) {
+        decoder->file          = decoder->file_alloc;
+        decoder->file_size     = 0;
+        decoder->borrowed      = 0;
+        decoder->headers_valid = 0;
+        return set_error(decoder, "cannot read headers", status);
+    }
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_end_of_stream(WPDDecoder *decoder) {
+    WPDStatus status;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!decoder->streaming)
+        return set_error(decoder, "not an open stream", WPD_ERR_INVALID_ARG);
+
+    decoder->eos = 1;
+    status       = rescan_headers(decoder);
+    if (status != WPD_OK)
+        return set_error(decoder, "cannot read headers", status);
+    return check_final_headers(decoder, "stream ended early");
+}
+
+WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder, WPDImageInfo *info) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!info_valid(info) || !decoder->opened)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid decoder state",
+                         WPD_ERR_INVALID_ARG);
+    if (!decoder->headers_valid)
+        return set_error(
+            (WPDDecoder *)decoder, "headers incomplete", WPD_ERR_TRUNCATED);
+
+    info_clear(info);
+    info->width           = decoder->canvas_width;
+    info->height          = decoder->canvas_height;
+    info->has_alpha       = decoder->info_has_alpha;
+    info->is_animation    = decoder->animation;
     info->frame_count     = decoder->anim_frame_count;
     info->loop_count      = decoder->anim_loop_count;
     info->background_argb = decoder->anim_background_argb;
-    info->is_animation    = decoder->animation;
-    return 0;
+    info->coding          = decoder->info_coding;
+    info->metadata        = decoder->scan.metadata;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_metadata(const WPDDecoder *decoder, WPDMetadata which,
+                               const uint8_t **data, size_t *size) {
+    int index;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!data || !size || !decoder->opened)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid decoder state",
+                         WPD_ERR_INVALID_ARG);
+    if (which <= 0 || (which & (which - 1)) || which >> WPD_METADATA_NB)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid metadata type",
+                         WPD_ERR_INVALID_ARG);
+
+    for (index = 0; !(which >> index & 1); index++) continue;
+    *data = decoder->meta[index];
+    *size = decoder->meta_size[index];
+    return WPD_OK;
+}
+
+static int still_lossy_pending(const WPDDecoder *decoder, uint32_t chunk_type) {
+    return chunk_type == MKTAG('V', 'P', '8', ' ') && !decoder->animation &&
+        !decoder->still_done;
+}
+
+static int still_lossless_pending(const WPDDecoder *decoder,
+                                  uint32_t          chunk_type) {
+    return chunk_type == MKTAG('V', 'P', '8', 'L') && !decoder->animation &&
+        !decoder->still_done;
+}
+
+static int emit_still_lossless(WPDDecoder *decoder, WPDFrame *frame) {
+    int ret;
+
+    decoder->still_done = 1;
+    if (options_transform(decoder))
+        ret = export_packed(decoder, decoder->lossless_frame, frame);
+    else
+        ret = export_still_lossless(
+            decoder, frame, decoder->lossless_frame->height);
+    if (ret < 0)
+        return set_error(decoder, "cannot output frame", ret);
+    return 1;
+}
+
+static int emit_still_lossy(WPDDecoder *decoder, WPDFrame *frame) {
+    int ret;
+
+    decoder->still_done = 1;
+    if (options_transform(decoder))
+        ret = export_packed(decoder, &decoder->subframe, frame);
+    else if (format_is_packed(decoder->out_format))
+        ret = export_still_packed(decoder, frame, decoder->subframe.height);
+    else
+        ret = export_packed(decoder, &decoder->subframe, frame);
+    if (ret < 0)
+        return set_error(decoder, "cannot output frame", ret);
+    return 1;
+}
+
+static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
+    const HeaderScan *hs   = &decoder->scan;
+    const uint8_t    *data = file_at(decoder, hs->raw_image_offset);
+    int               ret;
+
+    if (!decoder->eos)
+        return 0;
+    if (hs->truncated)
+        return set_error(decoder, "raw image is truncated", WPD_ERR_TRUNCATED);
+    if (hs->raw_image_size > INT_MAX)
+        return set_error(decoder, "raw image is too large", WPD_ERR_TOO_LARGE);
+
+    decoder->width = decoder->height = 0;
+    if (hs->raw_kind == 1) {
+        ret = vp8_lossless_decode_frame(
+            decoder, &decoder->argb, data, (unsigned)hs->raw_image_size, 0);
+        if (ret < 0)
+            return set_error(decoder, "VP8L decode failed", ret);
+        decoder->still_done     = 1;
+        decoder->still_lossless = 1;
+        decoder->lossless_frame = &decoder->argb;
+        decoder->converted_rows = decoder->argb.height;
+        ret                     = export_packed(decoder, &decoder->argb, frame);
+    } else {
+        if (hs->raw_kind == 3) {
+            const uint8_t *alpha = file_at(decoder, hs->raw_alpha_offset);
+            int            header;
+
+            if (!hs->raw_alpha_size)
+                return set_error(
+                    decoder, "invalid ALPHA chunk", WPD_ERR_BITSTREAM);
+            header = alpha[0];
+            if ((header & 3) > ALPHA_COMPRESSION_VP8L)
+                return set_error(decoder,
+                                 "unsupported ALPHA compression",
+                                 WPD_ERR_UNSUPPORTED);
+            decoder->has_alpha         = 1;
+            decoder->alpha_compression = header & 3;
+            decoder->alpha_filter      = header >> 2 & 3;
+            decoder->alpha_data_offset = hs->raw_alpha_offset + 1;
+            decoder->alpha_data_size   = (int)hs->raw_alpha_size - 1;
+        }
+        ret = vp8_lossy_decode_frame(
+            decoder, &decoder->subframe, data, (unsigned)hs->raw_image_size);
+        if (ret < 0)
+            return set_error(decoder, "VP8 decode failed", ret);
+        decoder->still_done = 1;
+        ret                 = export_packed(decoder, &decoder->subframe, frame);
+    }
+    if (ret < 0)
+        return set_error(decoder, "cannot output frame", ret);
+    return 1;
 }
 
 int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
-    if (!decoder || !frame)
-        return -1;
-    if (!decoder->file)
-        return set_error(decoder, "no file opened", WPD_ERROR_INVALID_DATA);
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!frame_valid(frame))
+        return set_error(decoder, "invalid frame", WPD_ERR_INVALID_ARG);
+    if (!decoder->opened)
+        return set_error(decoder, "no file opened", WPD_ERR_INVALID_ARG);
+    if (!decoder->headers_valid) {
+        if (!decoder->eos)
+            return 0; /* the headers have not arrived yet */
+        return set_error(decoder, "no image data found", WPD_ERR_TRUNCATED);
+    }
+    if (decoder->scan.raw_kind)
+        return decoder->still_done ? 0 : decode_raw(decoder, frame);
 
     while (decoder->pos + 8 <= decoder->end) {
-        const uint8_t *chunk      = decoder->file + decoder->pos;
+        const size_t   chunk_pos  = decoder->pos;
+        const uint8_t *chunk      = file_at(decoder, chunk_pos);
         uint32_t       chunk_type = WPD_RL32(chunk);
         uint32_t       size       = WPD_RL32(chunk + 4);
         uint32_t       padded_size;
@@ -2379,7 +4461,35 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
         padded_size = size + (size & 1);
 
         if (decoder->end - (decoder->pos + 8) < padded_size) {
-            break;
+            if (!decoder->eos) {
+                if (still_lossy_pending(decoder, chunk_type)) {
+                    ret = vp8_lossy_step(
+                        decoder,
+                        &decoder->subframe,
+                        payload,
+                        (unsigned)(decoder->end - (decoder->pos + 8)),
+                        size);
+                    if (ret < 0)
+                        return set_error(decoder, "VP8 decode failed", ret);
+                    if (ret)
+                        return emit_still_lossy(decoder, frame);
+                } else if (still_lossless_pending(decoder, chunk_type)) {
+                    ret = vp8l_still_step(
+                        decoder,
+                        payload,
+                        (unsigned)(decoder->end - (decoder->pos + 8)),
+                        size,
+                        0);
+                    if (ret < 0)
+                        return set_error(decoder, "VP8L decode failed", ret);
+                    if (ret)
+                        return emit_still_lossless(decoder, frame);
+                }
+                return 0; /* the rest of this chunk has not arrived yet */
+            }
+            return set_error(decoder,
+                             "chunk runs past the end of the file",
+                             WPD_ERR_TRUNCATED);
         }
         decoder->pos += 8 + padded_size;
 
@@ -2391,9 +4501,10 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                 return set_error(decoder,
                                  "invalid ALPHA chunk size",
                                  WPD_ERROR_INVALID_DATA);
-            alpha_header             = payload[0];
-            decoder->alpha_data      = payload + 1;
-            decoder->alpha_data_size = size - 1;
+            alpha_header               = payload[0];
+            decoder->alpha_data_offset = chunk_pos + 9;
+            decoder->alpha_pending     = 1;
+            decoder->alpha_data_size   = size - 1;
 
             filter_m    = (alpha_header >> 2) & 0x03;
             compression = alpha_header & 0x03;
@@ -2412,30 +4523,30 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
         case MKTAG('V', 'P', '8', ' '):
             if (decoder->animation || decoder->still_done)
                 break;
-            decoder->width = decoder->height = 0;
-            ret                              = vp8_lossy_decode_frame(
-                decoder, &decoder->subframe, payload, size);
+            if (decoder->vp8_active) {
+                ret = vp8_lossy_step(
+                    decoder, &decoder->subframe, payload, size, size);
+                if (ret == 0)
+                    ret = WPD_ERROR_INVALID_DATA;
+            } else {
+                decoder->width = decoder->height = 0;
+                ret                              = vp8_lossy_decode_frame(
+                    decoder, &decoder->subframe, payload, size);
+            }
             if (ret < 0)
                 return set_error(decoder, "VP8 decode failed", ret);
-            decoder->still_done = 1;
-            if (format_is_packed(decoder->out_format)) {
-                ret = convert_to_packed(decoder,
-                                        &decoder->converted,
-                                        &decoder->subframe,
-                                        decoder->out_format);
-                if (ret < 0)
-                    return set_error(decoder, "out of memory", ret);
-                ret = export_packed(decoder, &decoder->converted, frame);
-                if (ret < 0)
-                    return set_error(decoder, "out of memory", ret);
-                return 1;
-            }
-            export_frame(
-                decoder, &decoder->subframe, decoder->subframe.format, frame);
-            return 1;
+            return emit_still_lossy(decoder, frame);
         case MKTAG('V', 'P', '8', 'L'):
             if (decoder->animation || decoder->still_done)
                 break;
+            if (decoder->vp8l_active) {
+                ret = vp8l_still_step(decoder, payload, size, size, 1);
+                if (ret == 0)
+                    ret = WPD_ERROR_INVALID_DATA;
+                if (ret < 0)
+                    return set_error(decoder, "VP8L decode failed", ret);
+                return emit_still_lossless(decoder, frame);
+            }
             decoder->width = decoder->height = 0;
             ret                              = vp8_lossless_decode_frame(
                 decoder, &decoder->argb, payload, size, 0);
@@ -2444,7 +4555,10 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             decoder->still_done = 1;
             ret                 = export_packed(decoder, &decoder->argb, frame);
             if (ret < 0)
-                return set_error(decoder, "out of memory", ret);
+                return set_error(decoder, "cannot output frame", ret);
+            decoder->still_lossless = 1;
+            decoder->lossless_frame = &decoder->argb;
+            decoder->converted_rows = decoder->argb.height;
             return 1;
         case MKTAG('A', 'N', 'M', 'F'):
             if (!decoder->animation || !decoder->canvas_width ||
@@ -2457,13 +4571,134 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                 return set_error(decoder, "animation frame decode failed", ret);
             ret = export_packed(decoder, &decoder->canvas, frame);
             if (ret < 0)
-                return set_error(decoder, "out of memory", ret);
+                return set_error(decoder, "cannot output frame", ret);
             return 1;
         default: break;
         }
     }
 
     return 0;
+}
+
+WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
+                                    int *rows_valid) {
+    int rows, ret;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!frame_valid(frame))
+        return set_error(decoder, "invalid frame", WPD_ERR_INVALID_ARG);
+    if (!decoder->opened)
+        return set_error(decoder, "no file opened", WPD_ERR_INVALID_ARG);
+
+    frame_clear(frame);
+    if (rows_valid)
+        *rows_valid = 0;
+
+    if (options_transform(decoder)) {
+        if (decoder->still_lossless) {
+            if (decoder->vp8l_active) {
+                ret = vp8l_still_peek(decoder);
+                if (ret < 0)
+                    return set_error(decoder, "VP8L decode failed", ret);
+            }
+            rows = decoder->vp8l_active ? decoder->vp8l_rows_out
+                                        : decoder->lossless_frame->height;
+            if (rows < decoder->lossless_frame->height)
+                return WPD_OK;
+            ret = export_packed(decoder, decoder->lossless_frame, frame);
+        } else if (decoder->still_lossy) {
+            rows = decoder->vp8_active ? vp8_rows_finalized(&decoder->codec)
+                                       : decoder->subframe.height;
+            if (rows < decoder->subframe.height)
+                return WPD_OK;
+            ret = export_packed(decoder, &decoder->subframe, frame);
+        } else {
+            return WPD_OK;
+        }
+        if (ret < 0)
+            return set_error(decoder, "cannot output frame", ret);
+        if (rows_valid)
+            *rows_valid = frame->height;
+        return WPD_OK;
+    }
+
+    if (decoder->still_lossless) {
+        if (decoder->vp8l_active) {
+            ret = vp8l_still_peek(decoder);
+            if (ret < 0)
+                return set_error(decoder, "VP8L decode failed", ret);
+        }
+        ret = export_still_lossless(decoder,
+                                    frame,
+                                    decoder->vp8l_active
+                                        ? decoder->vp8l_rows_out
+                                        : decoder->lossless_frame->height);
+        if (ret < 0)
+            return set_error(decoder, "cannot output frame", ret);
+        if (rows_valid)
+            *rows_valid = decoder->converted_rows;
+        return WPD_OK;
+    }
+    if (!decoder->still_lossy)
+        return WPD_OK;
+
+    rows = decoder->vp8_active ? vp8_rows_finalized(&decoder->codec)
+                               : decoder->subframe.height;
+
+    if (!format_is_packed(decoder->out_format)) {
+        const WPDPixelFormat format = decoder->out_format == WPD_PIX_FMT_NONE
+            ? decoder->subframe.format
+            : decoder->out_format;
+        const WPDPixelFormat have   = decoder->subframe.format;
+        const WebPImage     *plane  = &decoder->subframe;
+        const int            first  = decoder->converted_format == format
+            ? decoder->converted_rows
+            : 0;
+
+        if (rows < first)
+            rows = first;
+        if (have != WPD_PIX_FMT_YUVA420P && format != have) {
+            ret = ensure_yuva_rows(decoder,
+                                   &decoder->output,
+                                   &decoder->subframe,
+                                   format == WPD_PIX_FMT_YUVA420P,
+                                   first,
+                                   rows);
+            if (ret < 0)
+                return set_error(decoder, "cannot output frame", ret);
+            plane = &decoder->output;
+        }
+        if (decoder->ext_active) {
+            ret = export_external_planar_rows(
+                decoder, plane, format, frame, first, rows);
+            if (ret < 0)
+                return set_error(decoder, "cannot output frame", ret);
+        } else {
+            export_frame(decoder, plane, format, frame);
+        }
+        decoder->converted_rows   = rows;
+        decoder->converted_format = format;
+        if (rows_valid)
+            *rows_valid = rows;
+        return WPD_OK;
+    }
+
+    /* The fancy upsampler pairs a row with the one below it, so the last
+       finished row cannot be converted until the row after it exists. */
+    if (rows && rows < decoder->subframe.height)
+        rows--;
+
+    ret = export_still_packed(decoder, frame, rows);
+    if (ret < 0)
+        return set_error(decoder, "cannot output frame", ret);
+    if (rows_valid)
+        *rows_valid = decoder->converted_rows;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_status(const WPDDecoder *decoder) {
+    return decoder ? decoder->status : WPD_ERR_INVALID_ARG;
 }
 
 const char *wpd_decoder_error(const WPDDecoder *decoder) {
@@ -2480,9 +4715,133 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     image_free(&decoder->argb);
     image_free(&decoder->converted);
     image_free(&decoder->output);
+    image_free(&decoder->transformed);
     image_free(&decoder->alpha_argb);
+    image_free(&decoder->lossless_out);
     for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
+    free(decoder->rescale_work);
+    free(decoder->rescale_row);
+    free(decoder->lossless_top);
     free(decoder->alpha_plane);
-    free(decoder->file);
+    free(decoder->file_alloc);
     free(decoder);
+}
+
+typedef struct WPDFrameOwner {
+    uint8_t *plane[4];
+} WPDFrameOwner;
+
+WPDStatus wpd_decode_into(const uint8_t *data, size_t size,
+                          WPDPixelFormat           format,
+                          const WPDDecoderOptions *options,
+                          const WPDOutputBuffer *buffer, WPDFrame *frame) {
+    WPDDecoder *decoder;
+    WPDStatus   status;
+    int         ret;
+
+    if (!data || !buffer || !frame_valid(frame))
+        return WPD_ERR_INVALID_ARG;
+    if (frame->private_data)
+        wpd_frame_free(frame);
+    decoder = wpd_decoder_create();
+    if (!decoder)
+        return WPD_ERR_NO_MEMORY;
+    status = options ? wpd_decoder_set_options(decoder, options) : WPD_OK;
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_format(decoder, format);
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_buffer(decoder, buffer);
+    if (status == WPD_OK)
+        status = wpd_decoder_open_borrowed(decoder, data, size);
+    ret = status == WPD_OK ? wpd_decoder_next_frame(decoder, frame) : status;
+    if (ret == 0)
+        status = WPD_ERR_BITSTREAM;
+    else if (ret < 0)
+        status = (WPDStatus)ret;
+    wpd_decoder_free(decoder);
+    return status;
+}
+
+WPDStatus wpd_decode(const uint8_t *data, size_t size, WPDPixelFormat format,
+                     const WPDDecoderOptions *options, WPDFrame *frame) {
+    WPDFrameOwner *owner;
+    WPDDecoder    *decoder;
+    WPDFrame       decoded = WPD_FRAME_INIT;
+    WPDStatus      status;
+    int            planes, ret;
+
+    if (!data || !frame_valid(frame))
+        return WPD_ERR_INVALID_ARG;
+    if (frame->private_data)
+        wpd_frame_free(frame);
+    decoder = wpd_decoder_create();
+    if (!decoder)
+        return WPD_ERR_NO_MEMORY;
+    status = options ? wpd_decoder_set_options(decoder, options) : WPD_OK;
+    if (status == WPD_OK)
+        status = wpd_decoder_set_output_format(decoder, format);
+    if (status == WPD_OK)
+        status = wpd_decoder_open_borrowed(decoder, data, size);
+    ret = status == WPD_OK ? wpd_decoder_next_frame(decoder, &decoded) : status;
+    if (ret <= 0) {
+        wpd_decoder_free(decoder);
+        return ret < 0 ? (WPDStatus)ret : WPD_ERR_BITSTREAM;
+    }
+
+    owner = calloc(1, sizeof(*owner));
+    if (!owner) {
+        wpd_decoder_free(decoder);
+        return WPD_ERR_NO_MEMORY;
+    }
+    frame_clear(frame);
+    frame_copy(frame, &decoded);
+    frame->private_data = owner;
+    planes              = decoded.format == WPD_PIX_FMT_YUVA420P ? 4
+        : decoded.format == WPD_PIX_FMT_YUV420P                  ? 3
+                                                                 : 1;
+    for (int p = 0; p < planes; p++) {
+        const int shift = p == 1 || p == 2;
+        const int w = planes == 1 ? decoded.width * format_bpp(decoded.format)
+                                  : CEIL_RSHIFT(decoded.width, shift);
+        const int h = CEIL_RSHIFT(decoded.height, shift);
+        size_t    bytes;
+
+        if ((size_t)h > SIZE_MAX / (size_t)w) {
+            status = WPD_ERR_TOO_LARGE;
+            goto fail;
+        }
+        bytes           = (size_t)w * (size_t)h;
+        owner->plane[p] = malloc(bytes);
+        if (!owner->plane[p]) {
+            status = WPD_ERR_NO_MEMORY;
+            goto fail;
+        }
+        for (int y = 0; y < h; y++)
+            memcpy(owner->plane[p] + (size_t)y * w,
+                   decoded.data[p] + (ptrdiff_t)y * decoded.stride[p],
+                   (size_t)w);
+        frame->data[p]   = owner->plane[p];
+        frame->stride[p] = w;
+    }
+    wpd_decoder_free(decoder);
+    return WPD_OK;
+
+fail:
+    wpd_decoder_free(decoder);
+    wpd_frame_free(frame);
+    return status;
+}
+
+void wpd_frame_free(WPDFrame *frame) {
+    WPDFrameOwner *owner;
+
+    if (!frame_valid(frame))
+        return;
+    owner = frame->private_data;
+    if (owner) {
+        for (int p = 0; p < 4; p++) free(owner->plane[p]);
+        free(owner);
+    }
+    frame_clear(frame);
 }

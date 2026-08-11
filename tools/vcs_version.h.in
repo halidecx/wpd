@@ -1,1 +1,1 @@
-#define WPD_VERSION "@VCS_TAG@"
+#define WPD_VCS_VERSION "@VCS_TAG@"

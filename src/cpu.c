@@ -10,22 +10,24 @@
 #define __has_feature(x) 0
 #endif
 
-unsigned wpd_cpu_flags      = 0U;
-unsigned wpd_cpu_flags_mask = ~0U;
+atomic_uint wpd_cpu_flags      = 0U;
+atomic_uint wpd_cpu_flags_mask = ~0U;
 
 wpd_cold void wpd_init_cpu(void) {
 #if WPD_HAVE_ASM && !__has_feature(memory_sanitizer)
 /* memory sanitizer is inherently incompatible with asm */
 #if WPD_ARCH_AARCH64 || WPD_ARCH_ARM
-    wpd_cpu_flags = wpd_get_cpu_flags_arm();
+    atomic_store_explicit(
+        &wpd_cpu_flags, wpd_get_cpu_flags_arm(), memory_order_release);
 #elif WPD_ARCH_X86
-    wpd_cpu_flags = wpd_get_cpu_flags_x86();
+    atomic_store_explicit(
+        &wpd_cpu_flags, wpd_get_cpu_flags_x86(), memory_order_release);
 #endif
 #endif
 }
 
 wpd_cold void wpd_set_cpu_flags_mask(const unsigned mask) {
-    wpd_cpu_flags_mask = mask;
+    atomic_store_explicit(&wpd_cpu_flags_mask, mask, memory_order_relaxed);
 }
 
 wpd_cold unsigned long wpd_getauxval(unsigned long type) {
