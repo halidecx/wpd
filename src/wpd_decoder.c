@@ -321,8 +321,6 @@ static const uint8_t meta_vp8x_flag[WPD_METADATA_NB] = {
 typedef struct WebPImage {
     /* Set when the rescaler has brought U and V up to full resolution. */
     int chroma_full;
-    /* Set on an image the rescaler produced. */
-    int rescaled;
     /* Set when the colour channels already carry alpha, as the animation
        canvas does for a premultiplied output format. */
     int            premultiplied;
@@ -2415,7 +2413,6 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
         dst->format        = WPD_PIX_FMT_YUV420P;
     }
     dst->chroma_full   = !packed && chroma_full;
-    dst->rescaled      = 1;
     dst->premultiplied = src->premultiplied;
     return 0;
 }
