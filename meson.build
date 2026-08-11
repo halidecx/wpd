@@ -271,6 +271,14 @@ wpd = executable(
   install: false,
 )
 
+api_test = executable(
+  'test_api',
+  files('tests/api.c'),
+  dependencies: [wpd_dep, cc.find_library('m', required: false)],
+  install: false,
+)
+test('api', api_test, suite: 'api')
+
 md5_test = executable(
   'test_md5',
   files(

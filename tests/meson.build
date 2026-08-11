@@ -102,6 +102,7 @@ testdata = [
   ['transparent_over',    'argb',     'e4aed005e206bc6b220e24210af98aa6'],
 ]
 
+test('api-testdata', api_test, suite: ['testdata', 'api'], args: [testdata_dir])
 foreach t : testdata
   input = testdata_dir / t[0] + '.webp'
   if not fs.exists(input)
