@@ -6,9 +6,10 @@
 #include "src/wpd_codec.h"
 
 #define PRED4(name, opt) \
-    void ff_pred4x4_##name##_8_##opt(uint8_t *, const uint8_t *, int)
-#define PRED8(name, opt) void ff_pred8x8_##name##_8_##opt(uint8_t *, int)
-#define PRED16(name, opt) void ff_pred16x16_##name##_8_##opt(uint8_t *, int)
+    void ff_pred4x4_##name##_8_##opt(uint8_t *, const uint8_t *, ptrdiff_t)
+#define PRED8(name, opt) void ff_pred8x8_##name##_8_##opt(uint8_t *, ptrdiff_t)
+#define PRED16(name, opt) \
+    void ff_pred16x16_##name##_8_##opt(uint8_t *, ptrdiff_t)
 
 PRED4(dc, sse2);
 PRED4(horizontal_vp8, sse2);
