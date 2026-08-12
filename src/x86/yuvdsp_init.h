@@ -43,18 +43,24 @@ PACK_ROW(rgb, ssse3)
 PACK_ROW(bgr, ssse3)
 PACK_ROW(rgb565, ssse3)
 PACK_ROW(rgba4444, ssse3)
+PACK_ROW(bgr565, ssse3)
+PACK_ROW(bgra4444, ssse3)
 PACK_ROW(rgba, avx2)
 PACK_ROW(bgra, avx2)
 PACK_ROW(rgb, avx2)
 PACK_ROW(bgr, avx2)
 PACK_ROW(rgb565, avx2)
 PACK_ROW(rgba4444, avx2)
+PACK_ROW(bgr565, avx2)
+PACK_ROW(bgra4444, avx2)
 #undef PACK_ROW
 
 void ff_premultiply_row_ssse3(uint8_t *rgba, int alpha_first, int num_pixels);
 void ff_premultiply_row_avx2(uint8_t *rgba, int alpha_first, int num_pixels);
 void ff_premultiply_row_4444_ssse3(uint8_t *rgba4444, int num_pixels);
 void ff_premultiply_row_4444_avx2(uint8_t *rgba4444, int num_pixels);
+void ff_premultiply_row_4444_swap_ssse3(uint8_t *bgra4444, int num_pixels);
+void ff_premultiply_row_4444_swap_avx2(uint8_t *bgra4444, int num_pixels);
 void ff_argb_to_y_ssse3(uint8_t *y, const uint8_t *argb, int num_pixels);
 void ff_argb_to_y_avx2(uint8_t *y, const uint8_t *argb, int num_pixels);
 #if WPD_ARCH_X86_64
@@ -81,15 +87,18 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_RGB] = ff_upsample_block_rgb_ssse3;
         dsp->upsample_block[WPD_LAYOUT_BGR] = ff_upsample_block_bgr_ssse3;
 #endif
-        dsp->pack_rgba            = ff_pack_rgba_ssse3;
-        dsp->pack_bgra            = ff_pack_bgra_ssse3;
-        dsp->pack_rgb             = ff_pack_rgb_ssse3;
-        dsp->pack_bgr             = ff_pack_bgr_ssse3;
-        dsp->pack_rgb565          = ff_pack_rgb565_ssse3;
-        dsp->pack_rgba4444        = ff_pack_rgba4444_ssse3;
-        dsp->premultiply_row      = ff_premultiply_row_ssse3;
-        dsp->premultiply_row_4444 = ff_premultiply_row_4444_ssse3;
-        dsp->argb_to_y            = ff_argb_to_y_ssse3;
+        dsp->pack_rgba                 = ff_pack_rgba_ssse3;
+        dsp->pack_bgra                 = ff_pack_bgra_ssse3;
+        dsp->pack_rgb                  = ff_pack_rgb_ssse3;
+        dsp->pack_bgr                  = ff_pack_bgr_ssse3;
+        dsp->pack_rgb565               = ff_pack_rgb565_ssse3;
+        dsp->pack_rgba4444             = ff_pack_rgba4444_ssse3;
+        dsp->pack_bgr565               = ff_pack_bgr565_ssse3;
+        dsp->pack_bgra4444             = ff_pack_bgra4444_ssse3;
+        dsp->premultiply_row           = ff_premultiply_row_ssse3;
+        dsp->premultiply_row_4444      = ff_premultiply_row_4444_ssse3;
+        dsp->premultiply_row_4444_swap = ff_premultiply_row_4444_swap_ssse3;
+        dsp->argb_to_y                 = ff_argb_to_y_ssse3;
     }
     if (flags & WPD_X86_CPU_FLAG_AVX2) {
 #if WPD_ARCH_X86_64
@@ -100,16 +109,19 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_avx2;
         dsp->argb_to_uv                      = ff_argb_to_uv_avx2;
 #endif
-        dsp->dispatch_alpha       = ff_dispatch_alpha_avx2;
-        dsp->pack_rgba            = ff_pack_rgba_avx2;
-        dsp->pack_bgra            = ff_pack_bgra_avx2;
-        dsp->pack_rgb             = ff_pack_rgb_avx2;
-        dsp->pack_bgr             = ff_pack_bgr_avx2;
-        dsp->pack_rgb565          = ff_pack_rgb565_avx2;
-        dsp->pack_rgba4444        = ff_pack_rgba4444_avx2;
-        dsp->premultiply_row      = ff_premultiply_row_avx2;
-        dsp->premultiply_row_4444 = ff_premultiply_row_4444_avx2;
-        dsp->argb_to_y            = ff_argb_to_y_avx2;
+        dsp->dispatch_alpha            = ff_dispatch_alpha_avx2;
+        dsp->pack_rgba                 = ff_pack_rgba_avx2;
+        dsp->pack_bgra                 = ff_pack_bgra_avx2;
+        dsp->pack_rgb                  = ff_pack_rgb_avx2;
+        dsp->pack_bgr                  = ff_pack_bgr_avx2;
+        dsp->pack_rgb565               = ff_pack_rgb565_avx2;
+        dsp->pack_rgba4444             = ff_pack_rgba4444_avx2;
+        dsp->pack_bgr565               = ff_pack_bgr565_avx2;
+        dsp->pack_bgra4444             = ff_pack_bgra4444_avx2;
+        dsp->premultiply_row           = ff_premultiply_row_avx2;
+        dsp->premultiply_row_4444      = ff_premultiply_row_4444_avx2;
+        dsp->premultiply_row_4444_swap = ff_premultiply_row_4444_swap_avx2;
+        dsp->argb_to_y                 = ff_argb_to_y_avx2;
     }
 }
 

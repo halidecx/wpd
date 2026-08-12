@@ -35,7 +35,8 @@ typedef void (*premultiply_row_func)(uint8_t *rgba, int alpha_first,
                                      int num_pixels);
 
 /* The same in the packed 4-bit layout, which libwebp multiplies in its own
-   precision rather than in 8-bit and then truncating. */
+   precision rather than in 8-bit and then truncating. The _swap variant takes
+   the two bytes of each pixel the other way round. */
 typedef void (*premultiply_4444_row_func)(uint8_t *rgba4444, int num_pixels);
 
 /* Luma for one ARGB row. */
@@ -62,11 +63,15 @@ typedef struct WPDYUVDSP {
     pack_row_func            pack_bgra;
     pack_row_func            pack_rgb;
     pack_row_func            pack_bgr;
-    /* These two write two bytes per pixel, not three or four. */
+    /* These four write two bytes per pixel, not three or four. The bgr ones
+       lay the same two bytes down in the opposite order. */
     pack_row_func             pack_rgb565;
     pack_row_func             pack_rgba4444;
+    pack_row_func             pack_bgr565;
+    pack_row_func             pack_bgra4444;
     premultiply_row_func      premultiply_row;
     premultiply_4444_row_func premultiply_row_4444;
+    premultiply_4444_row_func premultiply_row_4444_swap;
     argb_to_y_func            argb_to_y;
     argb_to_uv_func           argb_to_uv;
 } WPDYUVDSP;

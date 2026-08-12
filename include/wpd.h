@@ -87,6 +87,14 @@ typedef enum WPDPixelFormat {
     WPD_PIX_FMT_RGB565,
     WPD_PIX_FMT_RGBA4444,
     WPD_PIX_FMT_RGBA4444_PRE,
+    /* The two bytes of each unit in the opposite order to the three above,
+       which is what Skia's kRGB_565_SkColorType and kARGB_4444_SkColorType
+       expect on a little-endian host: its libwebp is built with
+       WEBP_SWAP_16BIT_CSP. Not a channel swizzle; the fields keep their
+       widths and their order within the sixteen bits. */
+    WPD_PIX_FMT_BGR565, /* byte0 = gggbbbbb, byte1 = rrrrrggg */
+    WPD_PIX_FMT_BGRA4444, /* byte0 = bbbbaaaa, byte1 = rrrrgggg */
+    WPD_PIX_FMT_BGRA4444_PRE,
 } WPDPixelFormat;
 
 typedef struct WPDFrame {

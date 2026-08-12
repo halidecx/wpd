@@ -101,10 +101,13 @@ static void usage(const char *app, const char *reason) {
             " -f, --fmt str\n"
             "    output pixel format; default auto. one of\n"
             "    auto, yuv420p, yuva420p,\n"
-            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
+            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA,\n"
+            "    rgb565, rgba4444, rgbA4444,\n"
+            "    bgr565, bgra4444, bgrA4444\n"
             "    the packed formats convert lossy frames and match the\n"
             "    like-named libwebp colorspace bit-exactly; a lowercase\n"
-            "    letter marks the channels alpha is multiplied into\n"
+            "    letter marks the channels alpha is multiplied into, and\n"
+            "    the bgr 16-bit ones swap the two bytes of every pixel\n"
             " --muxer str\n"
             "    output muxer (raw, md5); default raw\n"
             " --verify md5\n"
@@ -151,6 +154,9 @@ static const struct {
     {"rgb565", WPD_PIX_FMT_RGB565},
     {"rgba4444", WPD_PIX_FMT_RGBA4444},
     {"rgbA4444", WPD_PIX_FMT_RGBA4444_PRE},
+    {"bgr565", WPD_PIX_FMT_BGR565},
+    {"bgra4444", WPD_PIX_FMT_BGRA4444},
+    {"bgrA4444", WPD_PIX_FMT_BGRA4444_PRE},
 };
 
 static int parse_format(const char *value, const char **pixel_format,
@@ -323,7 +329,10 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
             ? 3
             : frame->format == WPD_PIX_FMT_RGB565 ||
                 frame->format == WPD_PIX_FMT_RGBA4444 ||
-                frame->format == WPD_PIX_FMT_RGBA4444_PRE
+                frame->format == WPD_PIX_FMT_RGBA4444_PRE ||
+                frame->format == WPD_PIX_FMT_BGR565 ||
+                frame->format == WPD_PIX_FMT_BGRA4444 ||
+                frame->format == WPD_PIX_FMT_BGRA4444_PRE
             ? 2
             : 4;
 

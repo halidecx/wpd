@@ -2194,19 +2194,27 @@ static int format_is_packed(WPDPixelFormat format) {
 }
 
 static int format_bpp(WPDPixelFormat format) {
-    if (format == WPD_PIX_FMT_RGB565 || format == WPD_PIX_FMT_RGBA4444 ||
-        format == WPD_PIX_FMT_RGBA4444_PRE)
-        return 2;
-    return format == WPD_PIX_FMT_RGB || format == WPD_PIX_FMT_BGR ? 3 : 4;
+    switch (format) {
+    case WPD_PIX_FMT_RGB565:
+    case WPD_PIX_FMT_RGBA4444:
+    case WPD_PIX_FMT_RGBA4444_PRE:
+    case WPD_PIX_FMT_BGR565:
+    case WPD_PIX_FMT_BGRA4444:
+    case WPD_PIX_FMT_BGRA4444_PRE: return 2;
+    case WPD_PIX_FMT_RGB:
+    case WPD_PIX_FMT_BGR: return 3;
+    default: return 4;
+    }
 }
 
 static int format_is_premultiplied(WPDPixelFormat format) {
     return format == WPD_PIX_FMT_ARGB_PRE || format == WPD_PIX_FMT_RGBA_PRE ||
-        format == WPD_PIX_FMT_BGRA_PRE || format == WPD_PIX_FMT_RGBA4444_PRE;
+        format == WPD_PIX_FMT_BGRA_PRE || format == WPD_PIX_FMT_RGBA4444_PRE ||
+        format == WPD_PIX_FMT_BGRA4444_PRE;
 }
 
 static int format_valid(WPDPixelFormat format) {
-    return format >= WPD_PIX_FMT_YUV420P && format <= WPD_PIX_FMT_RGBA4444_PRE;
+    return format >= WPD_PIX_FMT_YUV420P && format <= WPD_PIX_FMT_BGRA4444_PRE;
 }
 
 static pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
@@ -2220,8 +2228,18 @@ static pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
     case WPD_PIX_FMT_RGB565: return s->ydsp.pack_rgb565;
     case WPD_PIX_FMT_RGBA4444:
     case WPD_PIX_FMT_RGBA4444_PRE: return s->ydsp.pack_rgba4444;
+    case WPD_PIX_FMT_BGR565: return s->ydsp.pack_bgr565;
+    case WPD_PIX_FMT_BGRA4444:
+    case WPD_PIX_FMT_BGRA4444_PRE: return s->ydsp.pack_bgra4444;
     default: return NULL;
     }
+}
+
+static premultiply_4444_row_func format_premultiplier_4444(
+    const WPDDecoder *s, WPDPixelFormat format) {
+    return format == WPD_PIX_FMT_BGRA4444_PRE
+        ? s->ydsp.premultiply_row_4444_swap
+        : s->ydsp.premultiply_row_4444;
 }
 
 /* The byte layouts the upsampler can emit without a second pass. */
@@ -2628,11 +2646,14 @@ static int convert_to_packed(WPDDecoder *s, WebPImage *dst,
                     dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
                     argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
                     argb->width);
-            if (format_is_premultiplied(format) && !s->animation)
+            if (format_is_premultiplied(format) && !s->animation) {
+                const premultiply_4444_row_func premultiply =
+                    format_premultiplier_4444(s, format);
+
                 for (int y = 0; y < argb->height; y++)
-                    s->ydsp.premultiply_row_4444(
-                        dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
-                        argb->width);
+                    premultiply(dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
+                                argb->width);
+            }
         }
         image_free(&temp);
         return ret;
@@ -3358,6 +3379,9 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 return ret;
         }
         if (upto > first) {
+            const premultiply_4444_row_func premultiply =
+                format_premultiplier_4444(s, format);
+
             if (s->options.no_fancy_upsampling)
                 wpd_yuv420_to_packed_simple(&s->ydsp,
                                             WPD_LAYOUT_ARGB,
@@ -3397,7 +3421,7 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                     argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
                     src->width);
                 if (s->premultiply)
-                    s->ydsp.premultiply_row_4444(row, src->width);
+                    premultiply(row, src->width);
             }
         }
         if (s->ext_active) {
@@ -3477,7 +3501,9 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
 static int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
     const WPDPixelFormat format = s->out_format;
     WebPImage           *img    = s->lossless_frame;
-    const int     first = s->converted_format == format ? s->converted_rows : 0;
+    const int first = s->converted_format == format ? s->converted_rows : 0;
+    const premultiply_4444_row_func premultiply = format_premultiplier_4444(
+        s, format);
     pack_row_func pack;
     int           ret;
 
@@ -3527,7 +3553,7 @@ static int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
                 uint8_t *row = s->ext[0].data + (ptrdiff_t)y * s->ext[0].stride;
 
                 if (format_bpp(format) == 2)
-                    s->ydsp.premultiply_row_4444(row, img->width);
+                    premultiply(row, img->width);
                 else
                     s->ydsp.premultiply_row(
                         row,
@@ -3563,7 +3589,7 @@ static int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
             memcpy(dst, src, (size_t)img->width * 4);
         if (s->premultiply) {
             if (format_bpp(format) == 2)
-                s->ydsp.premultiply_row_4444(dst, img->width);
+                premultiply(dst, img->width);
             else
                 s->ydsp.premultiply_row(
                     dst, format_layout(format) == WPD_LAYOUT_ARGB, img->width);

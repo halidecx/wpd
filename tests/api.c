@@ -1746,6 +1746,44 @@ static void test_16bit(const uint8_t *data, size_t size,
     wpd_frame_free(&rgba4444pre);
 }
 
+/* The bgr 16-bit formats differ from their rgb counterparts by nothing but
+   the order the two bytes of each unit are written in, so pairing them off is
+   the whole specification. The rgb side is already held to libwebp by
+   tests/parity.c, which is where the absolute values are pinned; libwebp only
+   produces the swapped ones when built with WEBP_SWAP_16BIT_CSP, which the
+   pinned subproject is not. */
+static void test_16bit_swapped(const uint8_t *data, size_t size) {
+    static const struct {
+        WPDPixelFormat stock, swapped;
+    } pairs[] = {
+        {WPD_PIX_FMT_RGB565, WPD_PIX_FMT_BGR565},
+        {WPD_PIX_FMT_RGBA4444, WPD_PIX_FMT_BGRA4444},
+        {WPD_PIX_FMT_RGBA4444_PRE, WPD_PIX_FMT_BGRA4444_PRE},
+    };
+
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(*pairs); i++) {
+        WPDFrame stock = WPD_FRAME_INIT, swapped = WPD_FRAME_INIT;
+
+        CHECK(wpd_decode(data, size, pairs[i].stock, NULL, &stock) == WPD_OK);
+        CHECK(wpd_decode(data, size, pairs[i].swapped, NULL, &swapped) ==
+              WPD_OK);
+        CHECK(swapped.format == pairs[i].swapped);
+        CHECK(swapped.width == stock.width && swapped.height == stock.height);
+        for (int y = 0; y < stock.height; y++) {
+            const uint8_t *a = stock.data[0] + (ptrdiff_t)y * stock.stride[0];
+            const uint8_t *b = swapped.data[0] +
+                (ptrdiff_t)y * swapped.stride[0];
+
+            for (int x = 0; x < stock.width; x++) {
+                CHECK(b[2 * x] == a[2 * x + 1]);
+                CHECK(b[2 * x + 1] == a[2 * x]);
+            }
+        }
+        wpd_frame_free(&stock);
+        wpd_frame_free(&swapped);
+    }
+}
+
 /* An independent, floating-point rendering of the RGB-to-YUV conversion
    libwebp applies to a lossless image: chroma is averaged over a 2x2 block in
    linear light, weighted by alpha when the block is partly transparent. The
@@ -2084,6 +2122,7 @@ static void test_replacement_api_file(const char *path, const char tag[4],
     test_borrowed_and_update(data, size, &reference);
     test_transforms(data, size, &reference, !memcmp(tag, "VP8L", 4));
     test_16bit(data, size, &reference);
+    test_16bit_swapped(data, size);
     test_planar(data, size);
     if (!memcmp(tag, "VP8L", 4)) {
         test_lossless_yuv_reference(data, size, 0);

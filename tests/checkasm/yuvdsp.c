@@ -130,12 +130,15 @@ static void check_pack_row(pack_row_func func, const char *name, int bpp) {
     }
 }
 
-static void check_premultiply_row_4444(WPDYUVDSP *dsp) {
+/* 'alpha_byte' is which of a pixel's two bytes carries alpha in its low
+   nibble: the second for the rgba layout, the first for the swapped one. */
+static void check_premultiply_row_4444(premultiply_4444_row_func func,
+                                       const char *name, int alpha_byte) {
     LOCAL_ALIGNED_16(uint8_t, rgba0, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
     LOCAL_ALIGNED_16(uint8_t, rgba1, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
     declare_func(void, uint8_t *, int);
 
-    if (check_func(dsp->premultiply_row_4444, "premultiply_row_4444")) {
+    if (check_func(func, "%s", name)) {
         for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
              i++) {
             const int n = row_lengths[i];
@@ -143,9 +146,10 @@ static void check_premultiply_row_4444(WPDYUVDSP *dsp) {
             for (int x = 0; x < 2 * (MAX_PIXELS + GUARD_PIXELS); x++)
                 rgba0[x] = rgba1[x] = (uint8_t)rnd();
             /* Opaque and fully transparent pixels bound the multiply. */
-            rgba0[1] = rgba1[1] = (uint8_t)(rnd() | 0x0f);
+            rgba0[alpha_byte] = rgba1[alpha_byte] = (uint8_t)(rnd() | 0x0f);
             if (n > 1)
-                rgba0[3] = rgba1[3] = (uint8_t)(rnd() & 0xf0);
+                rgba0[2 + alpha_byte] = rgba1[2 + alpha_byte] =
+                    (uint8_t)(rnd() & 0xf0);
 
             call_ref(rgba0, n);
             call_new(rgba1, n);
@@ -487,9 +491,14 @@ void checkasm_check_yuvdsp(void) {
     check_pack_row(dsp.pack_bgr, "pack_bgr", 3);
     check_pack_row(dsp.pack_rgb565, "pack_rgb565", 2);
     check_pack_row(dsp.pack_rgba4444, "pack_rgba4444", 2);
+    check_pack_row(dsp.pack_bgr565, "pack_bgr565", 2);
+    check_pack_row(dsp.pack_bgra4444, "pack_bgra4444", 2);
     report("pack_row");
     check_premultiply_row(&dsp);
-    check_premultiply_row_4444(&dsp);
+    check_premultiply_row_4444(
+        dsp.premultiply_row_4444, "premultiply_row_4444", 1);
+    check_premultiply_row_4444(
+        dsp.premultiply_row_4444_swap, "premultiply_row_4444_swap", 0);
     report("premultiply_row");
     check_argb_to_y(&dsp);
     report("argb_to_y");
