@@ -2077,9 +2077,13 @@ static void vp8_lossy_export_planes(const WPDDecoder *s, WebPImage *out,
    it back. Below this the alpha decode stays on the calling thread. */
 #define ALPHA_THREAD_MIN_PIXELS (128 * 128)
 
+static int decoder_threads(const WPDDecoder *s) {
+    return s->options.n_threads ? s->options.n_threads
+                                : wpd_num_logical_processors();
+}
+
 static WpdTaskPool *decoder_pool(WPDDecoder *s) {
-    const int want = s->options.n_threads ? s->options.n_threads
-                                          : wpd_num_logical_processors();
+    const int want = decoder_threads(s);
 
     if (want == s->pool_threads)
         return s->pool;
@@ -3431,6 +3435,134 @@ static int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
     return 0;
 }
 
+/* Bands short enough to fit in cache but long enough that handing one to
+   another thread is worth the trip through the queue. */
+#define CONVERT_MIN_BAND_ROWS 16
+#define CONVERT_BANDS_PER_THREAD 4
+
+typedef struct PackedRows {
+    WPDDecoder      *s;
+    const WebPImage *src;
+    /* Where the upsampler writes, and where a second per-row pass packs its
+       output; 'pack' is NULL when the upsampler already emits the format. */
+    WebPImage     *dst;
+    WebPImage     *pack;
+    pack_row_func  pack_row;
+    WPDPixelFormat format;
+    int            layout;
+    int            first, last;
+    int            nb_bands;
+    /* The first row band 0 actually wrote, which the caller hands out from. */
+    int converted_from;
+} PackedRows;
+
+/* The fancy upsampler emits an (odd, even) row pair at a time, so a band that
+   began on an even row would rewrite the row before it, which belongs to the
+   band ahead. Odd boundaries keep the bands disjoint, and leave a split
+   conversion bit-identical to one done in a single call. */
+static int packed_band_row(const PackedRows *c, int band) {
+    int row;
+
+    if (!band)
+        return c->first;
+    if (band >= c->nb_bands)
+        return c->last;
+    row = c->first + (int)((int64_t)(c->last - c->first) * band / c->nb_bands);
+    row |= 1;
+    return row < c->last ? row : c->last;
+}
+
+static int packed_band(void *arg, int band) {
+    PackedRows      *c    = arg;
+    WPDDecoder      *s    = c->s;
+    const WebPImage *src  = c->src;
+    const int        y0   = packed_band_row(c, band);
+    const int        y1   = packed_band_row(c, band + 1);
+    int              from = y0;
+
+    if (y0 >= y1)
+        return 0;
+
+    if (s->options.no_fancy_upsampling)
+        wpd_yuv420_to_packed_simple(&s->ydsp,
+                                    c->layout,
+                                    c->dst->data[0],
+                                    c->dst->linesize[0],
+                                    src->data[0],
+                                    src->linesize[0],
+                                    src->data[1],
+                                    src->data[2],
+                                    src->linesize[1],
+                                    src->data[3],
+                                    src->linesize[3],
+                                    src->width,
+                                    y0,
+                                    y1);
+    else
+        from = wpd_yuv420_to_packed_rows(&s->ydsp,
+                                         c->layout,
+                                         c->dst->data[0],
+                                         c->dst->linesize[0],
+                                         src->data[0],
+                                         src->linesize[0],
+                                         src->data[1],
+                                         src->data[2],
+                                         src->linesize[1],
+                                         src->data[3],
+                                         src->linesize[3],
+                                         src->width,
+                                         src->height,
+                                         y0,
+                                         y1);
+    if (!band)
+        c->converted_from = from;
+
+    if (c->pack) {
+        for (int y = from; y < y1; y++) {
+            uint8_t *row = c->pack->data[0] +
+                (ptrdiff_t)y * c->pack->linesize[0];
+
+            c->pack_row(row,
+                        c->dst->data[0] + (ptrdiff_t)y * c->dst->linesize[0],
+                        src->width);
+            if (s->premultiply)
+                s->ydsp.premultiply_row_4444(row, src->width);
+        }
+    } else if (s->premultiply) {
+        for (int y = from; y < y1; y++)
+            s->ydsp.premultiply_row(
+                c->dst->data[0] + (ptrdiff_t)y * c->dst->linesize[0],
+                c->layout == WPD_LAYOUT_ARGB,
+                src->width);
+    }
+    return 0;
+}
+
+/* Splits [first, last) over the pool and runs it. Returns the first row
+   written, which can be one behind 'first' where the upsampler reaches back. */
+static int packed_rows_run(WPDDecoder *s, PackedRows *c) {
+    WpdTaskJob   job;
+    WpdTaskPool *pool = NULL;
+    const int    rows = c->last - c->first;
+
+    c->s              = s;
+    c->converted_from = c->first;
+    if (rows <= 0)
+        return c->first;
+
+    c->nb_bands = rows / CONVERT_MIN_BAND_ROWS;
+    if (c->nb_bands > CONVERT_BANDS_PER_THREAD * decoder_threads(s))
+        c->nb_bands = CONVERT_BANDS_PER_THREAD * decoder_threads(s);
+    if (c->nb_bands > 1)
+        pool = decoder_pool(s);
+    if (!pool)
+        c->nb_bands = 1;
+
+    wpd_task_submit(pool, &job, packed_band, c, c->nb_bands);
+    wpd_task_wait(pool, &job);
+    return c->converted_from;
+}
+
 /* Converts and hands out rows [0, upto) of the still lossy frame, converting
    each row exactly once however many times it is asked for. */
 static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
@@ -3458,47 +3590,17 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 return ret;
         }
         if (upto > first) {
-            if (s->options.no_fancy_upsampling)
-                wpd_yuv420_to_packed_simple(&s->ydsp,
-                                            WPD_LAYOUT_ARGB,
-                                            argb->data[0],
-                                            argb->linesize[0],
-                                            src->data[0],
-                                            src->linesize[0],
-                                            src->data[1],
-                                            src->data[2],
-                                            src->linesize[1],
-                                            src->data[3],
-                                            src->linesize[3],
-                                            src->width,
-                                            first,
-                                            upto);
-            else
-                converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
-                                                           WPD_LAYOUT_ARGB,
-                                                           argb->data[0],
-                                                           argb->linesize[0],
-                                                           src->data[0],
-                                                           src->linesize[0],
-                                                           src->data[1],
-                                                           src->data[2],
-                                                           src->linesize[1],
-                                                           src->data[3],
-                                                           src->linesize[3],
-                                                           src->width,
-                                                           src->height,
-                                                           first,
-                                                           upto);
-            for (int y = converted_from; y < upto; y++) {
-                uint8_t *row = dst->data[0] + (ptrdiff_t)y * dst->linesize[0];
+            PackedRows bands = {0};
 
-                format_packer(s, format)(
-                    row,
-                    argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
-                    src->width);
-                if (s->premultiply)
-                    s->ydsp.premultiply_row_4444(row, src->width);
-            }
+            bands.src      = src;
+            bands.dst      = argb;
+            bands.pack     = dst;
+            bands.pack_row = format_packer(s, format);
+            bands.format   = format;
+            bands.layout   = WPD_LAYOUT_ARGB;
+            bands.first    = first;
+            bands.last     = upto;
+            converted_from = packed_rows_run(s, &bands);
         }
         if (s->ext_active) {
             ret = export_external_rows(
@@ -3520,43 +3622,17 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
             return ret;
     }
 
-    if (s->options.no_fancy_upsampling) {
-        wpd_yuv420_to_packed_simple(&s->ydsp,
-                                    format_layout(format),
-                                    dst->data[0],
-                                    dst->linesize[0],
-                                    src->data[0],
-                                    src->linesize[0],
-                                    src->data[1],
-                                    src->data[2],
-                                    src->linesize[1],
-                                    src->data[3],
-                                    src->linesize[3],
-                                    src->width,
-                                    first,
-                                    upto);
-    } else if (upto > first) {
-        converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
-                                                   format_layout(format),
-                                                   dst->data[0],
-                                                   dst->linesize[0],
-                                                   src->data[0],
-                                                   src->linesize[0],
-                                                   src->data[1],
-                                                   src->data[2],
-                                                   src->linesize[1],
-                                                   src->data[3],
-                                                   src->linesize[3],
-                                                   src->width,
-                                                   src->height,
-                                                   first,
-                                                   upto);
+    if (upto > first) {
+        PackedRows bands = {0};
+
+        bands.src      = src;
+        bands.dst      = dst;
+        bands.format   = format;
+        bands.layout   = format_layout(format);
+        bands.first    = first;
+        bands.last     = upto;
+        converted_from = packed_rows_run(s, &bands);
     }
-    if (s->premultiply)
-        for (int y = converted_from; y < upto; y++)
-            s->ydsp.premultiply_row(dst->data[0] + (size_t)y * dst->linesize[0],
-                                    format_layout(format) == WPD_LAYOUT_ARGB,
-                                    dst->width);
 
     if (s->ext_active) {
         ret = export_external_rows(s, dst, format, frame, converted_from, upto);
