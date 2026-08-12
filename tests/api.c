@@ -80,10 +80,13 @@ static size_t put_chunk(uint8_t *out, const char *tag, const uint8_t *payload,
 
 /* A decodable VP8L payload: no transforms, no colour cache and five prefix
    codes carrying one symbol each, so every pixel comes out zero without any
-   symbol costing a bit. */
-static size_t make_vp8l_blank(uint8_t *out, int width, int height) {
+   symbol costing a bit. The alpha bit of the header is a hint the scanner
+   reads and the decode itself ignores, so it may be set either way. */
+static size_t make_vp8l_blank(uint8_t *out, int width, int height, int alpha) {
     out[0] = 0x2f;
-    put32(out + 1, (uint32_t)(width - 1) | (uint32_t)(height - 1) << 14);
+    put32(out + 1,
+          (uint32_t)(width - 1) | (uint32_t)(height - 1) << 14 |
+              (uint32_t)(alpha != 0) << 28);
     out[5] = 0x88;
     out[6] = 0x88;
     out[7] = 0x08;
@@ -101,7 +104,85 @@ static size_t make_unsupported_alph(uint8_t *out) {
     out[size + 8] = 0x03;
     out[size + 9] = 0x00;
     size += 10;
-    size += put_chunk(out + size, "VP8L", image, make_vp8l_blank(image, 8, 8));
+    size += put_chunk(
+        out + size, "VP8L", image, make_vp8l_blank(image, 8, 8, 0));
+    put32(out + 4, (uint32_t)size - 8);
+    return size;
+}
+
+/* A one-frame animation whose ANMF payload is an odd number of bytes, so the
+   chunk carries a pad byte the declared size does not count. The trailing byte
+   inside the payload is what makes it odd; decode_anmf() stops at it because
+   fewer than eight bytes are left, so the frame still decodes. */
+static size_t make_odd_anmf(uint8_t *out) {
+    uint8_t image[8], anmf[33];
+    size_t  size = make_vp8x(out, 8, 8, 0x02);
+    uint8_t anim[6];
+
+    memset(anim, 0, sizeof(anim));
+    size += put_chunk(out + size, "ANIM", anim, sizeof(anim));
+
+    memset(anmf, 0, 16);
+    put24(anmf + 6, 7);
+    put24(anmf + 9, 7);
+    put24(anmf + 12, 40);
+    put_chunk(anmf + 16, "VP8L", image, make_vp8l_blank(image, 8, 8, 0));
+    anmf[32] = 0xff;
+    size += put_chunk(out + size, "ANMF", anmf, sizeof(anmf));
+    put32(out + 4, (uint32_t)size - 8);
+    return size;
+}
+
+enum {
+    ANMF_SUB_ALPH,
+    ANMF_SUB_VP8L_ALPHA,
+    ANMF_SUB_VP8L_OPAQUE,
+};
+
+/* The bytes make_anmf_subchunks() writes for 'frames' of 'pad_chunks'. */
+#define ANMF_SUBCHUNKS_SIZE(pad_chunks, frames) \
+    (30 + 14 + (size_t)(frames) * (8 + 16 + 8 * (size_t)(pad_chunks) + 10 + 16))
+
+/* One ANMF that hides the chunk deciding its alpha behind 'pad_chunks' empty
+   sub-chunks, which decode_anmf() skips. Streaming these is what makes the
+   scanner's walk of that list observable: it has to resume where the last
+   delivery left it rather than start over, and start over rather than resume
+   once it reaches the next frame. */
+static size_t put_anmf_subchunks(uint8_t *out, int pad_chunks, int kind) {
+    uint8_t        image[8], alph[2];
+    uint8_t *const anmf    = out + 8;
+    size_t         payload = 16;
+
+    memset(anmf, 0, 16);
+    put24(anmf + 6, 7);
+    put24(anmf + 9, 7);
+    put24(anmf + 12, 40);
+    for (int i = 0; i < pad_chunks; i++)
+        payload += put_chunk(anmf + payload, "XTRA", image, 0);
+    if (kind == ANMF_SUB_ALPH) {
+        alph[0] = 0;
+        alph[1] = 0;
+        payload += put_chunk(anmf + payload, "ALPH", alph, sizeof(alph));
+    }
+    payload += put_chunk(
+        anmf + payload,
+        "VP8L",
+        image,
+        make_vp8l_blank(image, 8, 8, kind == ANMF_SUB_VP8L_ALPHA));
+    memcpy(out, "ANMF", 4);
+    put32(out + 4, (uint32_t)payload);
+    return 8 + payload;
+}
+
+static size_t make_anmf_subchunks(uint8_t *out, int pad_chunks,
+                                  const int *kinds, int nb_kinds) {
+    uint8_t anim[6];
+    size_t  size = make_vp8x(out, 8, 8, 0x02);
+
+    memset(anim, 0, sizeof(anim));
+    size += put_chunk(out + size, "ANIM", anim, sizeof(anim));
+    for (int i = 0; i < nb_kinds; i++)
+        size += put_anmf_subchunks(out + size, pad_chunks, kinds[i]);
     put32(out + 4, (uint32_t)size - 8);
     return size;
 }
@@ -474,7 +555,10 @@ static int packed_bpp(WPDPixelFormat format) {
     case WPD_PIX_FMT_BGR: return 3;
     case WPD_PIX_FMT_RGB565:
     case WPD_PIX_FMT_RGBA4444:
-    case WPD_PIX_FMT_RGBA4444_PRE: return 2;
+    case WPD_PIX_FMT_RGBA4444_PRE:
+    case WPD_PIX_FMT_BGR565:
+    case WPD_PIX_FMT_BGRA4444:
+    case WPD_PIX_FMT_BGRA4444_PRE: return 2;
     default: return 4;
     }
 }
@@ -2349,6 +2433,759 @@ static void test_replacement_animation(const char *path) {
     free(data);
 }
 
+/* Premultiplied 'src over dst', which is what a host compositing wpd's
+   sub-frames writes. Over a transparent destination it reduces to a copy,
+   which is why this test asks for a premultiplied format: the decoder's own
+   compositor copies wherever it knows the canvas is clear, and the two agree
+   bit for bit only in that convention. */
+static void blend_over_premult(uint8_t *dst, const uint8_t *src, int pixels) {
+    for (int x = 0; x < pixels; x++, dst += 4, src += 4) {
+        const unsigned scale = 256 - src[0];
+
+        if (src[0] == 255) {
+            memcpy(dst, src, 4);
+            continue;
+        }
+        for (int c = 0; c < 4; c++)
+            dst[c] = (uint8_t)(src[c] + ((dst[c] * scale) >> 8));
+    }
+}
+
+/* Decodes an animation twice, once composited and once as sub-frames the test
+   composites itself out of pos_x, pos_y, dispose and blend alone, and requires
+   the two canvases to be identical at every frame. This is the consumer's use
+   case run end to end. */
+static void test_subframe_composite(const char *path) {
+    size_t       size;
+    uint8_t     *data         = read_file(path, &size);
+    WPDDecoder  *whole        = wpd_decoder_create();
+    WPDDecoder  *parts        = wpd_decoder_create();
+    WPDImageInfo info         = WPD_IMAGE_INFO_INIT;
+    uint8_t     *canvas       = NULL;
+    int          frames       = 0;
+    int          prev_dispose = WPD_DISPOSE_NONE;
+    int          prev_x = 0, prev_y = 0, prev_w = 0, prev_h = 0;
+
+    if (!data || !whole || !parts)
+        goto done;
+    CHECK(wpd_get_info(data, size, &info) == WPD_OK);
+    CHECK(info.is_animation);
+    canvas = calloc((size_t)info.width * info.height, 4);
+    CHECK(canvas != NULL);
+    if (!canvas)
+        goto done;
+
+    CHECK(wpd_decoder_set_output_format(whole, WPD_PIX_FMT_ARGB_PRE) == WPD_OK);
+    CHECK(wpd_decoder_set_output_format(parts, WPD_PIX_FMT_ARGB_PRE) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(parts, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(whole, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(parts, data, size) == WPD_OK);
+
+    for (;;) {
+        WPDFrame reference = WPD_FRAME_INIT, sub = WPD_FRAME_INIT;
+        int      got_reference = wpd_decoder_next_frame(whole, &reference);
+        int      got_sub       = wpd_decoder_next_frame(parts, &sub);
+
+        CHECK(got_reference == got_sub);
+        if (got_reference <= 0 || got_sub <= 0)
+            break;
+
+        /* The previous frame's own dispose flag decides what survives it. */
+        if (prev_dispose == WPD_DISPOSE_BACKGROUND)
+            for (int y = 0; y < prev_h; y++)
+                memset(
+                    canvas + ((size_t)(prev_y + y) * info.width + prev_x) * 4,
+                    0,
+                    (size_t)prev_w * 4);
+
+        CHECK(sub.pos_x == reference.pos_x && sub.pos_y == reference.pos_y);
+        CHECK(sub.dispose == reference.dispose && sub.blend == reference.blend);
+        CHECK(sub.duration == reference.duration);
+        CHECK(sub.timestamp == reference.timestamp);
+        CHECK(reference.width == info.width && reference.height == info.height);
+        CHECK(sub.pos_x + sub.width <= info.width);
+        CHECK(sub.pos_y + sub.height <= info.height);
+
+        for (int y = 0; y < sub.height; y++) {
+            uint8_t *row = canvas +
+                ((size_t)(sub.pos_y + y) * info.width + sub.pos_x) * 4;
+            const uint8_t *src = sub.data[0] + (ptrdiff_t)y * sub.stride[0];
+
+            if (sub.blend == WPD_BLEND_ALPHA)
+                blend_over_premult(row, src, sub.width);
+            else
+                memcpy(row, src, (size_t)sub.width * 4);
+        }
+
+        for (int y = 0; y < info.height; y++)
+            if (memcmp(canvas + (size_t)y * info.width * 4,
+                       reference.data[0] + (ptrdiff_t)y * reference.stride[0],
+                       (size_t)info.width * 4)) {
+                fprintf(stderr,
+                        "%s: frame %d row %d differs from the composited "
+                        "canvas\n",
+                        path,
+                        frames,
+                        y);
+                failures++;
+                goto done;
+            }
+
+        prev_dispose = sub.dispose;
+        prev_x       = sub.pos_x;
+        prev_y       = sub.pos_y;
+        prev_w       = sub.width;
+        prev_h       = sub.height;
+        frames++;
+    }
+    CHECK(frames == info.frame_count);
+
+done:
+    free(canvas);
+    wpd_decoder_free(whole);
+    wpd_decoder_free(parts);
+    free(data);
+}
+
+/* A sub-frame is composited by the host, not the decoder, so a premultiplied
+   4444 sub-frame is quantized first and multiplied in the four-bit domain
+   afterwards, exactly as a still is. Weighting the eight-bit pixel first and
+   quantizing the product rounds differently: ARGB (127, 255, 165, 0) comes out
+   as 74 07 the one way and 75 07 the other. */
+static void test_subframe_4444_premultiply(const char *path) {
+    size_t      size;
+    uint8_t    *data     = read_file(path, &size);
+    WPDDecoder *straight = wpd_decoder_create();
+    WPDDecoder *pre      = wpd_decoder_create();
+    WPDDecoder *swapped  = wpd_decoder_create();
+    int         frames   = 0;
+
+    CHECK(data && straight && pre && swapped);
+    if (!data || !straight || !pre || !swapped)
+        goto done;
+
+    CHECK(wpd_decoder_set_output_format(straight, WPD_PIX_FMT_RGBA4444) ==
+          WPD_OK);
+    CHECK(wpd_decoder_set_output_format(pre, WPD_PIX_FMT_RGBA4444_PRE) ==
+          WPD_OK);
+    CHECK(wpd_decoder_set_output_format(swapped, WPD_PIX_FMT_BGRA4444_PRE) ==
+          WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(straight, WPD_ANIM_SUBFRAME) ==
+          WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(pre, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(swapped, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(straight, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(pre, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(swapped, data, size) == WPD_OK);
+
+    for (;;) {
+        WPDFrame  a = WPD_FRAME_INIT, b = WPD_FRAME_INIT, c = WPD_FRAME_INIT;
+        const int got_a = wpd_decoder_next_frame(straight, &a);
+        const int got_b = wpd_decoder_next_frame(pre, &b);
+        const int got_c = wpd_decoder_next_frame(swapped, &c);
+
+        CHECK(got_a == got_b && got_b == got_c);
+        if (got_a <= 0 || got_b <= 0 || got_c <= 0)
+            break;
+        CHECK(b.format == WPD_PIX_FMT_RGBA4444_PRE);
+        CHECK(c.format == WPD_PIX_FMT_BGRA4444_PRE);
+        CHECK(a.width == b.width && a.height == b.height);
+        CHECK(b.width == c.width && b.height == c.height);
+        CHECK(a.pos_x == b.pos_x && a.pos_y == b.pos_y);
+
+        for (int y = 0; y < a.height; y++) {
+            const uint8_t *pa = a.data[0] + (ptrdiff_t)y * a.stride[0];
+            const uint8_t *pb = b.data[0] + (ptrdiff_t)y * b.stride[0];
+            const uint8_t *pc = c.data[0] + (ptrdiff_t)y * c.stride[0];
+
+            for (int x = 0; x < a.width; x++) {
+                uint8_t want[2];
+
+                want[0] = pa[2 * x];
+                want[1] = pa[2 * x + 1];
+                premultiply_4444(want);
+                CHECK(pb[2 * x] == want[0] && pb[2 * x + 1] == want[1]);
+                CHECK(pc[2 * x] == want[1] && pc[2 * x + 1] == want[0]);
+            }
+        }
+        frames++;
+    }
+    CHECK(frames > 0);
+
+done:
+    wpd_decoder_free(straight);
+    wpd_decoder_free(pre);
+    wpd_decoder_free(swapped);
+    free(data);
+}
+
+/* The composited canvas is the one exception: libwebp weights each frame by
+   alpha in eight bits before blending it, so the finished canvas is already
+   premultiplied and packing it must not weight it again. Nothing else holds
+   this down, since animcheck.sh has no 4444 mode and parity.c skips
+   animations. */
+static void test_composited_4444_premultiply(const char *path) {
+    size_t      size;
+    uint8_t    *data   = read_file(path, &size);
+    WPDDecoder *canvas = wpd_decoder_create();
+    WPDDecoder *packed = wpd_decoder_create();
+    int         frames = 0;
+
+    CHECK(data && canvas && packed);
+    if (!data || !canvas || !packed)
+        goto done;
+
+    CHECK(wpd_decoder_set_output_format(canvas, WPD_PIX_FMT_ARGB_PRE) ==
+          WPD_OK);
+    CHECK(wpd_decoder_set_output_format(packed, WPD_PIX_FMT_RGBA4444_PRE) ==
+          WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(canvas, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(packed, data, size) == WPD_OK);
+
+    for (;;) {
+        WPDFrame  a = WPD_FRAME_INIT, b = WPD_FRAME_INIT;
+        const int got_a = wpd_decoder_next_frame(canvas, &a);
+        const int got_b = wpd_decoder_next_frame(packed, &b);
+
+        CHECK(got_a == got_b);
+        if (got_a <= 0 || got_b <= 0)
+            break;
+        CHECK(a.width == b.width && a.height == b.height);
+
+        for (int y = 0; y < a.height; y++) {
+            const uint8_t *pa = a.data[0] + (ptrdiff_t)y * a.stride[0];
+            const uint8_t *pb = b.data[0] + (ptrdiff_t)y * b.stride[0];
+
+            for (int x = 0; x < a.width; x++) {
+                const uint8_t want[2] = {
+                    (uint8_t)((pa[4 * x + 1] & 0xf0) | pa[4 * x + 2] >> 4),
+                    (uint8_t)((pa[4 * x + 3] & 0xf0) | pa[4 * x] >> 4),
+                };
+
+                CHECK(pb[2 * x] == want[0] && pb[2 * x + 1] == want[1]);
+            }
+        }
+        frames++;
+    }
+    CHECK(frames > 0);
+
+done:
+    wpd_decoder_free(canvas);
+    wpd_decoder_free(packed);
+    free(data);
+}
+
+/* Sub-frame mode owns no canvas, so the canvas-relative transforms have to be
+   refused in whichever order the two are set. */
+static void test_subframe_rejects_transforms(void) {
+    WPDDecoder       *decoder = wpd_decoder_create();
+    WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
+
+    CHECK(decoder != NULL);
+    if (!decoder)
+        return;
+
+    options.use_scaling   = 1;
+    options.scaled_width  = 8;
+    options.scaled_height = 8;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) ==
+          WPD_ERR_INVALID_ARG);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_COMPOSITED) ==
+          WPD_OK);
+
+    options = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
+
+    options.use_cropping = 1;
+    options.crop_width = options.crop_height = 4;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_ERR_INVALID_ARG);
+    options.use_cropping = 0;
+    options.flip         = 1;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_ERR_INVALID_ARG);
+    options.flip = 0;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_OK);
+
+    CHECK(wpd_decoder_set_animation_mode(decoder, 7) == WPD_ERR_INVALID_ARG);
+    wpd_decoder_free(decoder);
+}
+
+/* A rewound decoder has to produce the very same bytes again, and has to say
+   so plainly when the input it was given cannot be replayed. 'format' has to
+   be one of the packed ones, since the comparison flattens plane zero alone. */
+static void test_rewind(const char *path, WPDPixelFormat format, int mode) {
+    size_t       size;
+    uint8_t     *data    = read_file(path, &size);
+    WPDDecoder  *decoder = wpd_decoder_create();
+    WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
+    uint8_t    **pass    = NULL;
+    size_t      *bytes   = NULL;
+    int          frames = 0, pass_frames = 0;
+
+    if (!data || !decoder)
+        goto done;
+    CHECK(wpd_get_info(data, size, &info) == WPD_OK);
+    pass  = calloc((size_t)info.frame_count, sizeof(*pass));
+    bytes = calloc((size_t)info.frame_count, sizeof(*bytes));
+    CHECK(pass && bytes);
+    if (!pass || !bytes)
+        goto done;
+
+    CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(decoder, mode) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
+
+    for (int loop = 0; loop < 3; loop++) {
+        WPDFrame frame = WPD_FRAME_INIT;
+
+        if (loop)
+            CHECK(wpd_decoder_rewind(decoder) == WPD_OK);
+        pass_frames = 0;
+        while (wpd_decoder_next_frame(decoder, &frame) > 0) {
+            const size_t row = (size_t)frame.width *
+                (size_t)packed_bpp(frame.format);
+            uint8_t *flat;
+
+            if (pass_frames >= info.frame_count) {
+                failures++;
+                break;
+            }
+            flat = malloc(row * (size_t)frame.height);
+            CHECK(flat != NULL);
+            if (!flat)
+                break;
+            for (int y = 0; y < frame.height; y++)
+                memcpy(flat + (size_t)y * row,
+                       frame.data[0] + (ptrdiff_t)y * frame.stride[0],
+                       row);
+            if (!loop) {
+                pass[pass_frames]  = flat;
+                bytes[pass_frames] = row * (size_t)frame.height;
+            } else {
+                CHECK(bytes[pass_frames] == row * (size_t)frame.height);
+                CHECK(!memcmp(pass[pass_frames], flat, bytes[pass_frames]));
+                free(flat);
+            }
+            pass_frames++;
+        }
+        if (!loop)
+            frames = pass_frames;
+        CHECK(pass_frames == frames);
+    }
+    CHECK(frames == info.frame_count);
+
+done:
+    for (int i = 0; pass && i < info.frame_count; i++) free(pass[i]);
+    free(pass);
+    free(bytes);
+    wpd_decoder_free(decoder);
+    free(data);
+}
+
+static void test_rewind_errors(const char *path) {
+    size_t      size;
+    uint8_t    *data    = read_file(path, &size);
+    WPDDecoder *decoder = wpd_decoder_create();
+    WPDFrame    frame   = WPD_FRAME_INIT;
+
+    if (!data || !decoder) {
+        free(data);
+        wpd_decoder_free(decoder);
+        return;
+    }
+    CHECK(wpd_decoder_rewind(NULL) == WPD_ERR_INVALID_ARG);
+    CHECK(wpd_decoder_rewind(decoder) == WPD_ERR_INVALID_ARG);
+
+    /* An appended stream may already have dropped the bytes a replay needs. */
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    for (size_t off = 0; off < size; off += 4096) {
+        const size_t n = size - off < 4096 ? size - off : 4096;
+
+        CHECK(wpd_decoder_append(decoder, data + off, n) == WPD_OK);
+        while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
+    }
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_rewind(decoder) == WPD_ERR_UNSUPPORTED);
+
+    /* One fed through update() keeps the caller's whole prefix, so it can. */
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_update(decoder, data, size) == WPD_OK);
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
+    CHECK(wpd_decoder_rewind(decoder) == WPD_OK);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+
+    wpd_decoder_free(decoder);
+    free(data);
+}
+
+/* Every entry of the table has to agree with the frame decoding actually
+   produces, which is the promise a host lays its cache out on. */
+static void test_frame_table(const char *path) {
+    size_t       size;
+    uint8_t     *data    = read_file(path, &size);
+    WPDDecoder  *decoder = wpd_decoder_create();
+    WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
+    WPDFrameInfo entry   = WPD_FRAME_INFO_INIT;
+    WPDFrame     frame   = WPD_FRAME_INIT;
+    int          index   = 0;
+
+    if (!data || !decoder) {
+        free(data);
+        wpd_decoder_free(decoder);
+        return;
+    }
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_ERR_INVALID_ARG);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
+    CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, -1, &entry) == WPD_ERR_INVALID_ARG);
+    CHECK(wpd_decoder_frame_info(decoder, 0, NULL) == WPD_ERR_INVALID_ARG);
+
+    while (wpd_decoder_next_frame(decoder, &frame) > 0) {
+        CHECK(wpd_decoder_frame_info(decoder, index, &entry) == WPD_OK);
+        CHECK(entry.pos_x == frame.pos_x && entry.pos_y == frame.pos_y);
+        CHECK(entry.duration == frame.duration);
+        CHECK(entry.dispose == frame.dispose && entry.blend == frame.blend);
+        CHECK(entry.has_alpha == frame.has_alpha);
+        CHECK(entry.complete == 1);
+        if (info.is_animation)
+            CHECK(entry.width == frame.width && entry.height == frame.height);
+        else
+            CHECK(entry.width == info.width && entry.height == info.height);
+        index++;
+    }
+    CHECK(index == info.frame_count);
+    CHECK(wpd_decoder_frame_info(decoder, index, &entry) ==
+          WPD_ERR_INVALID_ARG);
+    wpd_decoder_free(decoder);
+    free(data);
+}
+
+static int frame_info_equal(const WPDFrameInfo *a, const WPDFrameInfo *b) {
+    return a->pos_x == b->pos_x && a->pos_y == b->pos_y &&
+        a->width == b->width && a->height == b->height &&
+        a->duration == b->duration && a->dispose == b->dispose &&
+        a->blend == b->blend && a->has_alpha == b->has_alpha &&
+        a->complete == b->complete;
+}
+
+/* Fed a piece at a time, the table has to grow an entry as soon as each ANMF
+   header lands and flip its 'complete' once the payload follows. A settled
+   entry has to say what opening the whole file says, which is the part the
+   scanner's resumed walk of an ANMF's sub-chunks could get wrong. */
+static void test_frame_table_stream(const char *path, size_t chunk,
+                                    int use_append) {
+    size_t       size;
+    uint8_t     *data    = read_file(path, &size);
+    WPDDecoder  *decoder = wpd_decoder_create();
+    WPDDecoder  *whole   = wpd_decoder_create();
+    WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
+    int          seen = 0, saw_incomplete = 0;
+
+    if (!data || !decoder || !whole) {
+        free(data);
+        wpd_decoder_free(decoder);
+        wpd_decoder_free(whole);
+        return;
+    }
+    CHECK(wpd_decoder_open_borrowed(whole, data, size) == WPD_OK);
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    for (size_t off = 0; off < size; off += chunk) {
+        const size_t n         = size - off < chunk ? size - off : chunk;
+        int          available = 0;
+
+        if (use_append)
+            CHECK(wpd_decoder_append(decoder, data + off, n) == WPD_OK);
+        else
+            CHECK(wpd_decoder_update(decoder, data, off + n) == WPD_OK);
+        for (;;) {
+            WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
+            WPDFrameInfo want  = WPD_FRAME_INFO_INIT;
+
+            if (wpd_decoder_frame_info(decoder, available, &entry) != WPD_OK)
+                break;
+            /* Only the last entry may be incomplete, and only ever from
+               incomplete towards complete. */
+            saw_incomplete |= !entry.complete;
+            if (entry.complete) {
+                CHECK(wpd_decoder_frame_info(whole, available, &want) ==
+                      WPD_OK);
+                CHECK(frame_info_equal(&entry, &want));
+            }
+            available++;
+        }
+        /* The table never shrinks and never rewrites a settled entry. */
+        CHECK(available >= seen);
+        seen = available;
+    }
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    CHECK(seen == info.frame_count);
+    CHECK(saw_incomplete);
+    wpd_decoder_free(decoder);
+    wpd_decoder_free(whole);
+    free(data);
+}
+
+/* The scanner keeps its place inside an ANMF that has not all arrived, rather
+   than walking that frame's sub-chunk list again on every delivery. Its
+   answers must still be the ones a scan from scratch over the very same
+   prefix gives, at every prefix, or the retained place has gone stale. */
+static void test_anmf_subchunk_scan(int pad_chunks, const int *kinds,
+                                    int nb_kinds) {
+    uint8_t     *file   = malloc(ANMF_SUBCHUNKS_SIZE(pad_chunks, nb_kinds));
+    WPDDecoder  *stream = wpd_decoder_create();
+    WPDImageInfo info   = WPD_IMAGE_INFO_INIT;
+    int          alph   = 0;
+    size_t       size;
+
+    CHECK(file && stream);
+    if (!file || !stream) {
+        free(file);
+        wpd_decoder_free(stream);
+        return;
+    }
+    size = make_anmf_subchunks(file, pad_chunks, kinds, nb_kinds);
+    CHECK(size <= ANMF_SUBCHUNKS_SIZE(pad_chunks, nb_kinds));
+    CHECK(wpd_decoder_open_stream(stream) == WPD_OK);
+
+    for (size_t prefix = 1; prefix <= size; prefix++) {
+        WPDDecoder *fresh = wpd_decoder_create();
+
+        CHECK(wpd_decoder_update(stream, file, prefix) == WPD_OK);
+        CHECK(fresh != NULL);
+        if (!fresh)
+            break;
+        CHECK(wpd_decoder_open_stream(fresh) == WPD_OK);
+        CHECK(wpd_decoder_update(fresh, file, prefix) == WPD_OK);
+        for (int i = 0;; i++) {
+            WPDFrameInfo    a  = WPD_FRAME_INFO_INIT;
+            WPDFrameInfo    b  = WPD_FRAME_INFO_INIT;
+            const WPDStatus sa = wpd_decoder_frame_info(stream, i, &a);
+            const WPDStatus sb = wpd_decoder_frame_info(fresh, i, &b);
+
+            CHECK(sa == sb);
+            if (sa != WPD_OK || sb != WPD_OK)
+                break;
+            CHECK(frame_info_equal(&a, &b));
+        }
+        wpd_decoder_free(fresh);
+    }
+
+    CHECK(wpd_decoder_end_of_stream(stream) == WPD_OK);
+    CHECK(wpd_decoder_get_info(stream, &info) == WPD_OK);
+    CHECK(info.frame_count == nb_kinds);
+    for (int i = 0; i < nb_kinds; i++) {
+        WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
+
+        CHECK(wpd_decoder_frame_info(stream, i, &entry) == WPD_OK);
+        CHECK(entry.complete == 1);
+        CHECK(entry.has_alpha == (kinds[i] != ANMF_SUB_VP8L_OPAQUE));
+        alph |= kinds[i] == ANMF_SUB_ALPH;
+    }
+    /* The ALPH of that variant belongs to a lossy image the file does not
+       carry, so only the two VP8L ones can be held to the decoded frame. */
+    if (!alph)
+        for (int i = 0; i < nb_kinds; i++) {
+            WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
+            WPDFrame     frame = WPD_FRAME_INIT;
+
+            CHECK(wpd_decoder_frame_info(stream, i, &entry) == WPD_OK);
+            CHECK(wpd_decoder_next_frame(stream, &frame) > 0);
+            CHECK(frame.has_alpha == entry.has_alpha);
+        }
+    wpd_decoder_free(stream);
+    free(file);
+}
+
+/* The same shape, long enough that walking that sub-chunk list again on every
+   one of the deliveries it takes to fill would cost quadratically more than
+   walking it once. Nothing here asserts a time; a scanner that lost its place
+   simply overruns the test timeout by orders of magnitude. */
+static void test_anmf_subchunk_scan_stress(void) {
+    static const int kind       = ANMF_SUB_VP8L_ALPHA;
+    const int        pad_chunks = 80000;
+    uint8_t         *file       = malloc(ANMF_SUBCHUNKS_SIZE(pad_chunks, 1));
+    WPDDecoder      *decoder    = wpd_decoder_create();
+    WPDFrameInfo     entry      = WPD_FRAME_INFO_INIT;
+    WPDFrame         frame      = WPD_FRAME_INIT;
+    size_t           size, fed = 0;
+
+    CHECK(file && decoder);
+    if (!file || !decoder) {
+        free(file);
+        wpd_decoder_free(decoder);
+        return;
+    }
+    size = make_anmf_subchunks(file, pad_chunks, &kind, 1);
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    while (fed < size && wpd_decoder_append(decoder, file + fed, 1) == WPD_OK)
+        fed++;
+    CHECK(fed == size);
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 1);
+    CHECK(entry.has_alpha == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+    CHECK(frame.has_alpha == entry.has_alpha);
+    wpd_decoder_free(decoder);
+    free(file);
+}
+
+/* An ANMF of odd declared size is buffered in full one byte before the scan
+   may step over it, since the pad byte is not counted. The entry must stay
+   partial until then, or the frame lands in the table twice: once on the scan
+   that sees every declared byte and again on the one that walks past. */
+static void test_frame_table_odd_anmf(void) {
+    uint8_t      file[128];
+    const size_t size    = make_odd_anmf(file);
+    WPDDecoder  *decoder = wpd_decoder_create();
+    WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
+    WPDFrame     frame   = WPD_FRAME_INIT;
+    int          frames  = 0;
+
+    CHECK(decoder != NULL);
+    if (!decoder)
+        return;
+
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    for (size_t prefix = 1; prefix <= size; prefix++) {
+        WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
+
+        CHECK(wpd_decoder_update(decoder, file, prefix) == WPD_OK);
+        /* There is one ANMF in the file, so a second entry is a duplicate
+           however much of it has arrived. */
+        CHECK(wpd_decoder_frame_info(decoder, 1, &entry) != WPD_OK);
+        if (wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK)
+            CHECK(entry.complete == (prefix >= size));
+    }
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    CHECK(info.frame_count == 1);
+    while (wpd_decoder_next_frame(decoder, &frame) > 0) frames++;
+    CHECK(frames == 1);
+    wpd_decoder_free(decoder);
+}
+
+/* A VP8X may declare alpha the image itself does not carry. WPDImageInfo
+   reports the declaration, the frame table the image, and the table is what a
+   decoded frame has to agree with. */
+static void test_frame_table_declared_alpha(void) {
+    uint8_t      file[64];
+    uint8_t      image[8];
+    size_t       size    = make_vp8x(file, 8, 8, 0x10);
+    WPDDecoder  *decoder = wpd_decoder_create();
+    WPDImageInfo info    = WPD_IMAGE_INFO_INIT;
+    WPDFrameInfo entry   = WPD_FRAME_INFO_INIT;
+    WPDFrame     frame   = WPD_FRAME_INIT;
+
+    CHECK(decoder != NULL);
+    if (!decoder)
+        return;
+    size += put_chunk(
+        file + size, "VP8L", image, make_vp8l_blank(image, 8, 8, 0));
+    put32(file + 4, (uint32_t)size - 8);
+
+    CHECK(wpd_decoder_open(decoder, file, size) == WPD_OK);
+    CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    CHECK(info.has_alpha == 1);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.has_alpha == 0);
+    CHECK(entry.width == 8 && entry.height == 8);
+    CHECK(entry.complete == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+    CHECK(frame.has_alpha == entry.has_alpha);
+    wpd_decoder_free(decoder);
+}
+
+static void test_frame_table_still_completion(void) {
+    uint8_t      raw[10], file[80], metadata[8] = {0};
+    const size_t raw_size = make_vp8l_blank(raw, 8, 8, 0);
+    WPDDecoder  *decoder  = wpd_decoder_create();
+    WPDFrameInfo entry    = WPD_FRAME_INFO_INIT;
+    WPDFrame     frame    = WPD_FRAME_INIT;
+    size_t       image_end, size;
+
+    CHECK(decoder != NULL);
+    if (!decoder)
+        return;
+
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_update(decoder, raw, 5) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 0);
+    CHECK(wpd_decoder_update(decoder, raw, raw_size) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 0);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) == 0);
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+
+    memset(raw, 0, sizeof(raw));
+    raw[0] = 0x10;
+    raw[3] = 0x9d;
+    raw[4] = 0x01;
+    raw[5] = 0x2a;
+    raw[6] = raw[8] = 8;
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_update(decoder, raw, sizeof(raw)) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 0);
+    CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 1);
+
+    make_vp8l_blank(raw, 8, 8, 0);
+    size = make_vp8x(file, 8, 8, 0x08);
+    size += put_chunk(file + size, "VP8L", raw, raw_size);
+    image_end = size;
+    size += put_chunk(file + size, "EXIF", metadata, sizeof(metadata));
+    put32(file + 4, (uint32_t)size - 8);
+
+    CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
+    CHECK(wpd_decoder_update(decoder, file, image_end) == WPD_OK);
+    CHECK(wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK);
+    CHECK(entry.complete == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+    wpd_decoder_free(decoder);
+}
+
+/* The composited canvas is state sub-frame mode never builds, so the two
+   cannot be exchanged part-way through an animation. */
+static void test_animation_mode_switch(const char *path) {
+    size_t      size;
+    uint8_t    *data    = read_file(path, &size);
+    WPDDecoder *decoder = wpd_decoder_create();
+    WPDFrame    frame   = WPD_FRAME_INIT;
+
+    if (!data || !decoder) {
+        free(data);
+        wpd_decoder_free(decoder);
+        return;
+    }
+    CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
+    /* Before the first frame either mode is still free to be chosen. */
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_COMPOSITED) ==
+          WPD_OK);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) ==
+          WPD_ERR_INVALID_ARG);
+    /* Re-stating the mode in force is not a change. */
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_COMPOSITED) ==
+          WPD_OK);
+    /* Rewinding drops the canvas and reopens the choice. */
+    CHECK(wpd_decoder_rewind(decoder) == WPD_OK);
+    CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
+    wpd_decoder_free(decoder);
+    free(data);
+}
+
 int main(int argc, char **argv) {
     test_version();
     test_status_strings();
@@ -2357,6 +3194,27 @@ int main(int argc, char **argv) {
     test_decoder_errors();
     test_metadata();
     test_structs_and_limits();
+    test_subframe_rejects_transforms();
+    test_frame_table_odd_anmf();
+    test_frame_table_declared_alpha();
+    test_frame_table_still_completion();
+    {
+        /* Frames whose answers differ, so a place kept from the frame before
+           is caught, and a run of them in either order. */
+        static const int mixed[]        = {ANMF_SUB_VP8L_ALPHA,
+                                           ANMF_SUB_VP8L_OPAQUE,
+                                           ANMF_SUB_ALPH,
+                                           ANMF_SUB_VP8L_ALPHA};
+        static const int opaque_first[] = {ANMF_SUB_VP8L_OPAQUE,
+                                           ANMF_SUB_VP8L_ALPHA};
+        static const int lone[]         = {ANMF_SUB_VP8L_ALPHA};
+
+        test_anmf_subchunk_scan(64, mixed, 4);
+        test_anmf_subchunk_scan(64, opaque_first, 2);
+        test_anmf_subchunk_scan(0, opaque_first, 2);
+        test_anmf_subchunk_scan(1, lone, 1);
+    }
+    test_anmf_subchunk_scan_stress();
 
     if (argc > 1) {
         const char *dir = argv[1];
@@ -2370,6 +3228,8 @@ int main(int argc, char **argv) {
         test_output_buffer(path, WPD_PIX_FMT_NONE);
         test_output_buffer(path, WPD_PIX_FMT_RGBA);
         test_output_buffer(path, WPD_PIX_FMT_BGR);
+        test_rewind(path, WPD_PIX_FMT_RGBA, WPD_ANIM_COMPOSITED);
+        test_frame_table(path);
 
         snprintf(path, sizeof(path), "%s/a_lossy.webp", dir);
         test_file_info(path, 600, 600, 1, 0, 1, WPD_CODING_LOSSY);
@@ -2377,10 +3237,22 @@ int main(int argc, char **argv) {
         test_output_buffer(path, WPD_PIX_FMT_BGRA);
         test_output_buffer(path, WPD_PIX_FMT_ARGB_PRE);
         test_output_buffer_incomplete_yuv(path);
+        test_rewind(path, WPD_PIX_FMT_BGRA, WPD_ANIM_COMPOSITED);
+        test_frame_table(path);
 
         snprintf(path, sizeof(path), "%s/anim_yuva.webp", dir);
         test_file_info(path, 422, 480, 1, 1, 14, WPD_CODING_UNKNOWN);
         test_replacement_animation(path);
+        test_subframe_composite(path);
+        test_subframe_4444_premultiply(path);
+        test_composited_4444_premultiply(path);
+        test_rewind(path, WPD_PIX_FMT_BGRA, WPD_ANIM_COMPOSITED);
+        test_rewind(path, WPD_PIX_FMT_ARGB_PRE, WPD_ANIM_SUBFRAME);
+        test_rewind_errors(path);
+        test_animation_mode_switch(path);
+        test_frame_table(path);
+        test_frame_table_stream(path, 997, 0);
+        test_frame_table_stream(path, 251, 1);
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);
         test_animation_format_switch(path);
@@ -2403,14 +3275,26 @@ int main(int argc, char **argv) {
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);
         test_animation_format_switch(path);
+        test_subframe_composite(path);
+        test_subframe_4444_premultiply(path);
+        test_composited_4444_premultiply(path);
+        test_frame_table(path);
         snprintf(path, sizeof(path), "%s/transparent_over.webp", dir);
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);
         test_animation_format_switch(path);
+        test_subframe_composite(path);
+        test_subframe_4444_premultiply(path);
+        test_composited_4444_premultiply(path);
         snprintf(path, sizeof(path), "%s/kitchen_sink.webp", dir);
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);
         test_animation_format_switch(path);
+        test_subframe_composite(path);
+        test_subframe_4444_premultiply(path);
+        test_composited_4444_premultiply(path);
+        test_frame_table(path);
+        test_rewind(path, WPD_PIX_FMT_RGBA, WPD_ANIM_SUBFRAME);
 
         {
             snprintf(path, sizeof(path), "%s/lossy.webp", dir);
@@ -2545,6 +3429,45 @@ int main(int argc, char **argv) {
             snprintf(path, sizeof(path), "%s/a_lossy.webp", dir);
             test_scale_keeps_source(path, WPD_PIX_FMT_YUVA420P, 300, 300, 0);
             test_scale_keeps_source(path, WPD_PIX_FMT_BGR, 700, 200, 0);
+
+            /* The single-purpose animations, which between them cover every
+               dispose and blend combination and every way two sub-frames can
+               overlap. Sub-frame mode has to survive all of them. */
+            {
+                static const char *const anims[] = {
+                    "dispose_bg_blend",
+                    "dispose_bg_fullframe",
+                    "dispose_bg_noblend",
+                    "dispose_none_blend",
+                    "dispose_none_noblend",
+                    "durations",
+                    "edge_frames",
+                    "keyframe_midstream",
+                    "odd_canvas",
+                    "odd_frames",
+                    "overlap_bottom",
+                    "overlap_contains",
+                    "overlap_corner",
+                    "overlap_disjoint",
+                    "overlap_exact",
+                    "overlap_inside",
+                    "overlap_left",
+                    "overlap_odd",
+                    "overlap_right",
+                    "overlap_single",
+                    "overlap_top",
+                    "anim_rgb",
+                    "anim_yuv",
+                };
+
+                for (size_t i = 0; i < sizeof(anims) / sizeof(*anims); i++) {
+                    snprintf(path, sizeof(path), "%s/%s.webp", dir, anims[i]);
+                    test_subframe_composite(path);
+                    test_subframe_4444_premultiply(path);
+                    test_composited_4444_premultiply(path);
+                    test_frame_table(path);
+                }
+            }
         }
     }
 

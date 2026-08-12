@@ -16,6 +16,8 @@ static const WPDPixelFormat formats[] = {
     WPD_PIX_FMT_RGBA4444_PRE,
     WPD_PIX_FMT_YUVA420P,
     WPD_PIX_FMT_BGR,
+    WPD_PIX_FMT_BGR565,
+    WPD_PIX_FMT_BGRA4444_PRE,
 };
 
 static uint32_t seed = 0x9e3779b9u;
@@ -117,6 +119,26 @@ static void decode_every_way(const uint8_t *data, size_t size,
     wpd_decoder_set_output_format(decoder, format);
     if (wpd_decoder_open(decoder, data, size) == WPD_OK)
         while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
+    wpd_decoder_free(decoder);
+
+    /* Uncomposited sub-frames, the frame table and a replay, all of which read
+       geometry straight out of a damaged ANMF header. */
+    decoder = wpd_decoder_create();
+    if (!decoder)
+        return;
+    wpd_decoder_set_output_format(decoder, format);
+    wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME);
+    if (wpd_decoder_open(decoder, data, size) == WPD_OK) {
+        for (int i = 0;; i++) {
+            WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
+
+            if (wpd_decoder_frame_info(decoder, i, &entry) != WPD_OK)
+                break;
+        }
+        while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
+        if (wpd_decoder_rewind(decoder) == WPD_OK)
+            while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
+    }
     wpd_decoder_free(decoder);
 
     decoder = wpd_decoder_create();

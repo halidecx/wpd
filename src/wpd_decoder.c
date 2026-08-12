@@ -281,12 +281,30 @@ static void br_extend(LEBitReader *br, const uint8_t *buf, size_t size) {
     br->len = size;
 }
 
+/* One ANMF header, as the scanner reads it without decoding anything. */
+typedef struct FrameEntry {
+    int pos_x, pos_y;
+    int width, height;
+    int duration;
+    int dispose, blend;
+    int has_alpha;
+    int complete;
+} FrameEntry;
+
+/* Far above any animation a player would sit through, and low enough that the
+   table cannot be made to eat memory by a file that is all ANMF headers. A
+   file past it still decodes; the table simply stops growing. */
+#define WPD_MAX_FRAMES (1 << 20)
+
 typedef struct HeaderScan {
-    size_t    pos;
-    uint64_t  riff_end;
-    size_t    end;
-    int       width, height;
-    int       has_alpha;
+    size_t   pos;
+    uint64_t riff_end;
+    size_t   end;
+    int      width, height;
+    int      has_alpha;
+    /* Alpha the image chunks themselves carry, without the VP8X declaration
+       folded in, which is what a decoded frame reports. */
+    int       image_has_alpha;
     int       animation;
     int       images;
     int       vp8x;
@@ -303,7 +321,36 @@ typedef struct HeaderScan {
     size_t    raw_image_size;
     size_t    raw_alpha_offset;
     size_t    raw_alpha_size;
+    /* The frame table, built only when 'collect_frames' asks for it, so that
+       wpd_get_info() keeps its promise not to allocate. 'nb_frames' counts the
+       frames whose payload is all here; a frame whose ANMF header has arrived
+       but whose payload has not occupies the slot past them and is rebuilt on
+       every rescan until it completes. */
+    int collect_frames;
+    int partial_frame;
+    int frames_capped;
+    int nb_frames;
+    int frames_capacity;
+    /* How far the alpha scan has walked into the sub-chunk list starting at
+       'anmf_scan_at', so an ANMF arriving in pieces is not re-walked from its
+       first sub-chunk on every delivery. The offset is never zero, so a scan
+       that has moved on to another ANMF invalidates this by itself. */
+    size_t      anmf_scan_at;
+    size_t      anmf_scan_pos;
+    int         anmf_scan_done;
+    int         anmf_scan_alpha;
+    FrameEntry *frames;
 } HeaderScan;
+
+static void scan_free(HeaderScan *hs) {
+    wpd_free(hs->frames);
+    hs->frames          = NULL;
+    hs->frames_capacity = 0;
+    hs->nb_frames       = 0;
+    hs->partial_frame   = 0;
+    hs->frames_capped   = 0;
+    hs->collect_frames  = 0;
+}
 
 /* The order of the WPDMetadata bits, so a bit indexes these tables. */
 static const uint32_t meta_tag[WPD_METADATA_NB] = {
@@ -718,12 +765,16 @@ struct WPDDecoder {
     size_t     rescale_row_size;
 
     WebPImage canvas;
-    int       anmf_flags, pos_x, pos_y;
-    int       frame_has_alpha, key_frame;
-    int       prev_anmf_flags, prev_width, prev_height, prev_pos_x, prev_pos_y;
-    int       prev_key_frame;
-    uint8_t   clear_argb[4];
-    uint8_t   clear_yuva[4];
+    /* The sub-frame WPD_ANIM_SUBFRAME hands out, borrowed from whichever of
+       subframe, argb and converted decode_anmf() finished with. */
+    WebPImage       *subframe_out;
+    WPDAnimationMode anim_mode;
+    int              anmf_flags, pos_x, pos_y;
+    int              frame_has_alpha, key_frame;
+    int     prev_anmf_flags, prev_width, prev_height, prev_pos_x, prev_pos_y;
+    int     prev_key_frame;
+    uint8_t clear_argb[4];
+    uint8_t clear_yuva[4];
 
     int      anim_loop_count, anim_frame_count;
     uint32_t anim_background_argb;
@@ -759,21 +810,33 @@ static int frame_valid(const WPDFrame *frame) {
     return frame && frame->struct_size >= WPD_FIELD_END(WPDFrame, private_data);
 }
 
+/* How much of the caller's frame this build may touch: the newest revision of
+   the struct it declares room for in full, capped at the newest this build
+   knows about. A size landing between two revisions rounds down to the older
+   one rather than writing part of a field pair the caller may not have. */
+static size_t frame_extent(const WPDFrame *frame) {
+    return frame->struct_size >= WPD_FIELD_END(WPDFrame, has_alpha)
+        ? WPD_FIELD_END(WPDFrame, has_alpha)
+        : WPD_FIELD_END(WPDFrame, private_data);
+}
+
 static void frame_clear(WPDFrame *frame) {
     const size_t struct_size = frame->struct_size;
 
     memset((uint8_t *)frame + sizeof(frame->struct_size),
            0,
-           WPD_FIELD_END(WPDFrame, private_data) - sizeof(frame->struct_size));
+           frame_extent(frame) - sizeof(frame->struct_size));
     frame->struct_size = struct_size;
 }
 
 /* Copies past struct_size rather than assigning: the caller's frame may be a
    newer, longer revision of the struct, and its own size has to survive. */
 static void frame_copy(WPDFrame *dst, const WPDFrame *src) {
+    const size_t extent = WPD_MIN(frame_extent(dst), frame_extent(src));
+
     memcpy((uint8_t *)dst + sizeof(dst->struct_size),
            (const uint8_t *)src + sizeof(src->struct_size),
-           WPD_FIELD_END(WPDFrame, private_data) - sizeof(dst->struct_size));
+           extent - sizeof(dst->struct_size));
 }
 
 static int info_valid(const WPDImageInfo *info) {
@@ -2242,6 +2305,10 @@ static premultiply_4444_row_func format_premultiplier_4444(
         : s->ydsp.premultiply_row_4444;
 }
 
+static int premultiply_after_pack(const WPDDecoder *s) {
+    return !s->animation || s->anim_mode == WPD_ANIM_SUBFRAME;
+}
+
 /* The byte layouts the upsampler can emit without a second pass. */
 static int format_layout(WPDPixelFormat format) {
     switch (format) {
@@ -2641,12 +2708,13 @@ static int convert_to_packed(WPDDecoder *s, WebPImage *dst,
         }
         ret = image_alloc_packed(dst, argb->width, argb->height, 2, format);
         if (ret >= 0) {
+            const pack_row_func pack = format_packer(s, format);
+
             for (int y = 0; y < argb->height; y++)
-                format_packer(s, format)(
-                    dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
-                    argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
-                    argb->width);
-            if (format_is_premultiplied(format) && !s->animation) {
+                pack(dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
+                     argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
+                     argb->width);
+            if (format_is_premultiplied(format) && premultiply_after_pack(s)) {
                 const premultiply_4444_row_func premultiply =
                     format_premultiplier_4444(s, format);
 
@@ -2970,10 +3038,10 @@ static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
 }
 
 static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
-    const uint8_t   *p = data, *end = data + size;
-    const WebPImage *sub = NULL;
-    int              declared_width, declared_height;
-    int              ret;
+    const uint8_t *p = data, *end = data + size;
+    WebPImage     *sub = NULL;
+    int            declared_width, declared_height;
+    int            ret;
 
     if (size < 16)
         return WPD_ERROR_INVALID_DATA;
@@ -3109,22 +3177,31 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
     }
 
     /* libwebp premultiplies each frame before compositing it, which is not
-       the same as premultiplying the finished canvas. */
-    if (s->premultiply) {
-        WebPImage *frame = sub == &s->converted ? &s->converted : &s->argb;
-
-        for (int y = 0; y < frame->height; y++)
+       the same as premultiplying the finished canvas. Premultiplying only ever
+       goes with a packed output format, which forces the ARGB target above, so
+       'sub' is four-byte ARGB here whatever the frame coded as. A sub-frame
+       feeds no canvas, so a two-byte output premultiplies after the pack
+       instead, in the four-bit domain a still uses. */
+    if (s->premultiply &&
+        !(premultiply_after_pack(s) && format_bpp(s->out_format) == 2))
+        for (int y = 0; y < sub->height; y++)
             s->ydsp.premultiply_row(
-                frame->data[0] + (size_t)y * frame->linesize[0],
-                1,
-                frame->width);
+                sub->data[0] + (size_t)y * sub->linesize[0], 1, sub->width);
+
+    s->subframe_out = sub;
+
+    /* Sub-frame mode owns no canvas, so it skips the allocation and the blend
+       altogether; the dispose latch below is bookkeeping the canvas never fed.
+       Nothing above reads the canvas except the ARGB target rule, which wants
+       a canvas to stay compatible with and correctly declines when there is
+       none. Switching modes mid-animation is refused for that reason. */
+    if (s->anim_mode != WPD_ANIM_SUBFRAME) {
+        ret = prepare_canvas(s, sub, target);
+        if (ret < 0)
+            return ret;
+
+        composite_subframe(s, sub);
     }
-
-    ret = prepare_canvas(s, sub, target);
-    if (ret < 0)
-        return ret;
-
-    composite_subframe(s, sub);
 
     s->frame_timestamp += s->frame_duration;
     s->prev_anmf_flags = s->anmf_flags;
@@ -3154,6 +3231,18 @@ static void export_frame(const WPDDecoder *s, const WebPImage *img,
     frame->format    = format;
     frame->duration  = s->frame_duration;
     frame->timestamp = s->frame_timestamp - s->frame_duration;
+    if (frame_extent(frame) < WPD_FIELD_END(WPDFrame, has_alpha))
+        return;
+    frame->pos_x   = s->pos_x;
+    frame->pos_y   = s->pos_y;
+    frame->dispose = s->anmf_flags & ANMF_FLAG_DISPOSE ? WPD_DISPOSE_BACKGROUND
+                                                       : WPD_DISPOSE_NONE;
+    frame->blend   = s->anmf_flags & ANMF_FLAG_NO_BLEND ? WPD_BLEND_NONE
+                                                        : WPD_BLEND_ALPHA;
+    /* An animation latches each sub-frame's alpha as it decodes it; a still
+       has only the one image, whose two decoders report it separately. */
+    frame->has_alpha = s->animation ? s->frame_has_alpha
+                                    : s->has_alpha || s->lossless_has_alpha;
 }
 
 static size_t stride_magnitude(ptrdiff_t stride) {
@@ -3379,6 +3468,7 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 return ret;
         }
         if (upto > first) {
+            const pack_row_func             pack = format_packer(s, format);
             const premultiply_4444_row_func premultiply =
                 format_premultiplier_4444(s, format);
 
@@ -3416,10 +3506,9 @@ static int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
             for (int y = converted_from; y < upto; y++) {
                 uint8_t *row = dst->data[0] + (ptrdiff_t)y * dst->linesize[0];
 
-                format_packer(s, format)(
-                    row,
-                    argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
-                    src->width);
+                pack(row,
+                     argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
+                     src->width);
                 if (s->premultiply)
                     premultiply(row, src->width);
             }
@@ -3675,9 +3764,40 @@ WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
           (!options->scaled_width && !options->scaled_height))))
         return set_error(
             decoder, "invalid decoder options", WPD_ERR_INVALID_ARG);
+    if (decoder->anim_mode == WPD_ANIM_SUBFRAME &&
+        (options->use_cropping || options->use_scaling || options->flip))
+        return set_error(decoder,
+                         "cropping, scaling and flipping are defined against "
+                         "the canvas, which sub-frame mode does not produce",
+                         WPD_ERR_INVALID_ARG);
     decoder->options                = *options;
     decoder->options.struct_size    = sizeof(decoder->options);
     decoder->codec.bypass_filtering = options->bypass_filtering;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_set_animation_mode(WPDDecoder      *decoder,
+                                         WPDAnimationMode mode) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (mode != WPD_ANIM_COMPOSITED && mode != WPD_ANIM_SUBFRAME)
+        return set_error(
+            decoder, "invalid animation mode", WPD_ERR_INVALID_ARG);
+    if (mode == WPD_ANIM_SUBFRAME && options_transform(decoder))
+        return set_error(decoder,
+                         "sub-frame mode cannot be combined with cropping, "
+                         "scaling or flipping",
+                         WPD_ERR_INVALID_ARG);
+    /* Sub-frame mode never builds the canvas the composited one carries from
+       frame to frame, so the two cannot be swapped part-way through an
+       animation. wpd_decoder_rewind() clears the frame index and reopens the
+       choice. */
+    if (mode != decoder->anim_mode && decoder->animation &&
+        decoder->frame_index)
+        return set_error(decoder,
+                         "the animation mode cannot change mid-animation",
+                         WPD_ERR_INVALID_ARG);
+    decoder->anim_mode = mode;
     return WPD_OK;
 }
 
@@ -3747,6 +3867,7 @@ static void scan_still_header(HeaderScan *hs, uint32_t tag, const uint8_t *p,
                 return;
             hs->width  = (bits & 0x3fff) + 1;
             hs->height = ((bits >> 14) & 0x3fff) + 1;
+            hs->image_has_alpha |= (bits >> 28) & 1;
             hs->has_alpha |= (bits >> 28) & 1;
         }
     } else {
@@ -3762,6 +3883,110 @@ static void scan_still_header(HeaderScan *hs, uint32_t tag, const uint8_t *p,
             hs->height = WPD_RL16(p + 8) & 0x3fff;
         }
     }
+}
+
+/* Walks an ANMF's sub-chunks for the one WebPIterator field the 16-byte ANMF
+   header does not carry. Stops at the image chunk either way, and simply
+   leaves has_alpha alone when the payload has not all arrived. Resumes where
+   the last delivery of the same ANMF left off, so a frame that arrives in many
+   pieces costs one walk of its sub-chunks in total rather than one per piece;
+   only a sub-chunk stepped over whole advances that mark. */
+static void scan_anmf_alpha(HeaderScan *hs, FrameEntry *entry, const uint8_t *p,
+                            size_t size) {
+    const uint8_t *const start = p;
+    const uint8_t *const end   = p + size;
+    const size_t         at    = hs->pos + 24;
+
+    if (hs->anmf_scan_at != at || hs->anmf_scan_pos > size) {
+        hs->anmf_scan_at    = at;
+        hs->anmf_scan_pos   = 0;
+        hs->anmf_scan_done  = 0;
+        hs->anmf_scan_alpha = 0;
+    }
+    if (hs->anmf_scan_done) {
+        entry->has_alpha = hs->anmf_scan_alpha;
+        return;
+    }
+
+    p += hs->anmf_scan_pos;
+    while (end - p >= 8) {
+        const uint32_t tag   = WPD_RL32(p);
+        const uint32_t size_ = WPD_RL32(p + 4);
+        uint32_t       padded;
+
+        if (size_ == UINT32_MAX)
+            return;
+        padded = size_ + (size_ & 1);
+        p += 8;
+        if ((size_t)(end - p) < padded)
+            return;
+        if (tag == MKTAG('A', 'L', 'P', 'H')) {
+            hs->anmf_scan_alpha = 1;
+        } else if (tag == MKTAG('V', 'P', '8', 'L')) {
+            if (size_ >= 5 && p[0] == 0x2f)
+                hs->anmf_scan_alpha = WPD_RL32(p + 1) >> 28 & 1;
+        } else if (tag != MKTAG('V', 'P', '8', ' ')) {
+            p += padded;
+            hs->anmf_scan_pos = (size_t)(p - start);
+            continue;
+        }
+        hs->anmf_scan_done = 1;
+        entry->has_alpha   = hs->anmf_scan_alpha;
+        return;
+    }
+}
+
+/* Records the ANMF at 'p', of which 'avail' bytes are buffered. 'complete'
+   says whether the scan is stepping past the whole padded chunk, which is the
+   only thing that may promote the entry: a frame still arriving takes the slot
+   past the complete ones and is rewritten by the next scan, so the table never
+   double-counts. Deriving it from 'avail' instead would count an odd-sized
+   chunk twice, once when every byte but its pad has landed and again once the
+   scan finally walks over it. */
+static WPDStatus scan_anmf(HeaderScan *hs, const uint8_t *p, size_t avail,
+                           int complete) {
+    FrameEntry *entry;
+
+    if (avail < 16)
+        return WPD_OK;
+    if (hs->nb_frames >= WPD_MAX_FRAMES) {
+        if (!hs->frames_capped)
+            wpd_log(NULL,
+                    WPD_LOG_WARNING,
+                    "frame table capped at %d entries\n",
+                    WPD_MAX_FRAMES);
+        hs->frames_capped = 1;
+        return WPD_OK;
+    }
+    if (hs->nb_frames == hs->frames_capacity) {
+        const int capacity = hs->frames_capacity ? hs->frames_capacity * 2 : 16;
+        FrameEntry *grown  = wpd_realloc(hs->frames,
+                                         (size_t)capacity * sizeof(*grown));
+
+        if (!grown)
+            return WPD_ERR_NO_MEMORY;
+        hs->frames          = grown;
+        hs->frames_capacity = capacity;
+    }
+
+    entry = &hs->frames[hs->nb_frames];
+    memset(entry, 0, sizeof(*entry));
+    entry->pos_x    = WPD_RL24(p) * 2;
+    entry->pos_y    = WPD_RL24(p + 3) * 2;
+    entry->width    = WPD_RL24(p + 6) + 1;
+    entry->height   = WPD_RL24(p + 9) + 1;
+    entry->duration = WPD_RL24(p + 12);
+    entry->dispose  = p[15] & ANMF_FLAG_DISPOSE ? WPD_DISPOSE_BACKGROUND
+                                                : WPD_DISPOSE_NONE;
+    entry->blend    = p[15] & ANMF_FLAG_NO_BLEND ? WPD_BLEND_NONE
+                                                 : WPD_BLEND_ALPHA;
+    entry->complete = complete;
+    scan_anmf_alpha(hs, entry, p + 16, avail - 16);
+    if (entry->complete)
+        hs->nb_frames++;
+    else
+        hs->partial_frame = 1;
+    return WPD_OK;
 }
 
 static WPDStatus scan_raw_headers(HeaderScan *hs, const uint8_t *data,
@@ -3826,7 +4051,7 @@ static WPDStatus scan_raw_headers(HeaderScan *hs, const uint8_t *data,
         hs->raw_alpha_size   = alpha_size;
         hs->raw_image_offset = image_header + 8;
         hs->raw_image_size   = have;
-        hs->has_alpha        = 1;
+        hs->has_alpha = hs->image_has_alpha = 1;
         if (have < 10)
             return WPD_ERR_TRUNCATED;
         scan_still_header(
@@ -3849,7 +4074,8 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
                               size_t size, int partial) {
     int partial_still = 0;
 
-    hs->truncated = 0;
+    hs->truncated     = 0;
+    hs->partial_frame = 0;
 
     if (!hs->pos) {
         if (size < 12 && size >= 4 &&
@@ -3881,6 +4107,13 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
         padded_size = size_ + (size_ & 1);
         if (hs->end - (hs->pos + 8) < padded_size) {
             hs->truncated = 1;
+            if (hs->collect_frames && tag == MKTAG('A', 'N', 'M', 'F')) {
+                const WPDStatus status = scan_anmf(
+                    hs, chunk + 8, hs->end - (hs->pos + 8), 0);
+
+                if (status != WPD_OK)
+                    return status;
+            }
             if (partial && !hs->images &&
                 (tag == MKTAG('V', 'P', '8', ' ') ||
                  tag == MKTAG('V', 'P', '8', 'L'))) {
@@ -3911,7 +4144,9 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
                     return WPD_ERR_TOO_LARGE;
             }
             break;
-        case MKTAG('A', 'L', 'P', 'H'): hs->has_alpha = 1; break;
+        case MKTAG('A', 'L', 'P', 'H'):
+            hs->has_alpha = hs->image_has_alpha = 1;
+            break;
         case MKTAG('A', 'N', 'I', 'M'):
             hs->animation = 1;
             if (size_ >= 6) {
@@ -3919,7 +4154,15 @@ static WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
                 hs->loop_count      = WPD_RL16(chunk + 12);
             }
             break;
-        case MKTAG('A', 'N', 'M', 'F'): hs->frame_count++; break;
+        case MKTAG('A', 'N', 'M', 'F'):
+            hs->frame_count++;
+            if (hs->collect_frames) {
+                const WPDStatus status = scan_anmf(hs, chunk + 8, size_, 1);
+
+                if (status != WPD_OK)
+                    return status;
+            }
+            break;
         case MKTAG('V', 'P', '8', ' '):
         case MKTAG('V', 'P', '8', 'L'):
             if (!hs->images++) {
@@ -3979,12 +4222,45 @@ WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
         return WPD_ERR_INVALID_ARG;
 
     info_clear(info);
+    /* collect_frames stays clear, so this allocates nothing, as documented. */
     memset(&hs, 0, sizeof(hs));
     status = scan_headers(&hs, data, 0, size, 1);
-    if (status != WPD_OK)
-        return status;
-    info_from_scan(info, &hs);
-    return WPD_OK;
+    if (status == WPD_OK)
+        info_from_scan(info, &hs);
+    scan_free(&hs);
+    return status;
+}
+
+/* Everything a decode builds up as it walks the frames, which both opening a
+   new file and rewinding the current one have to put back. The buffers the
+   frames are decoded into are kept: they are sized on use and reused. */
+static void anim_state_reset(WPDDecoder *decoder) {
+    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    image_free(&decoder->canvas);
+    decoder->still_done       = 0;
+    decoder->vp8_active       = 0;
+    decoder->still_lossy      = 0;
+    decoder->alpha_pending    = 0;
+    decoder->converted_rows   = 0;
+    decoder->converted_format = WPD_PIX_FMT_NONE;
+    decoder->vp8l_active      = 0;
+    decoder->still_lossless   = 0;
+    decoder->vp8l_next_try    = 0;
+    decoder->vp8l_peeked      = 0;
+    decoder->lossless_frame   = NULL;
+    decoder->subframe_out     = NULL;
+    decoder->frame_index      = 0;
+    decoder->width = decoder->height = 0;
+    decoder->has_alpha               = 0;
+    decoder->lossless_has_alpha      = 0;
+    decoder->frame_has_alpha         = 0;
+    decoder->key_frame = decoder->prev_key_frame = 0;
+    decoder->prev_anmf_flags = decoder->anmf_flags = 0;
+    decoder->prev_width = decoder->prev_height = 0;
+    decoder->prev_pos_x = decoder->prev_pos_y = 0;
+    decoder->pos_x = decoder->pos_y = 0;
+    decoder->frame_duration         = 0;
+    decoder->frame_timestamp        = 0;
 }
 
 /* Clears everything derived from a file but keeps the input allocation, which
@@ -3995,8 +4271,7 @@ static void decoder_reset(WPDDecoder *decoder) {
         decoder->meta[i]      = NULL;
         decoder->meta_size[i] = 0;
     }
-    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
-    image_free(&decoder->canvas);
+    anim_state_reset(decoder);
     image_free(&decoder->argb);
     image_free(&decoder->lossless_out);
     image_free(&decoder->converted);
@@ -4006,6 +4281,7 @@ static void decoder_reset(WPDDecoder *decoder) {
     decoder->file_size = 0;
     decoder->discarded = 0;
     decoder->file      = decoder->file_alloc;
+    scan_free(&decoder->scan);
     memset(&decoder->scan, 0, sizeof(decoder->scan));
     decoder->pos = decoder->end = 0;
     decoder->opened             = 0;
@@ -4016,30 +4292,9 @@ static void decoder_reset(WPDDecoder *decoder) {
     decoder->borrowed           = 0;
     decoder->input_mode         = 0;
     decoder->animation          = 0;
-    decoder->still_done         = 0;
-    decoder->vp8_active         = 0;
-    decoder->still_lossy        = 0;
-    decoder->alpha_pending      = 0;
-    decoder->converted_rows     = 0;
-    decoder->converted_format   = WPD_PIX_FMT_NONE;
-    decoder->vp8l_active        = 0;
-    decoder->still_lossless     = 0;
-    decoder->vp8l_next_try      = 0;
-    decoder->vp8l_peeked        = 0;
-    decoder->lossless_frame     = NULL;
-    decoder->frame_index        = 0;
     decoder->canvas_width = decoder->canvas_height = 0;
-    decoder->width = decoder->height = 0;
-    decoder->has_alpha               = 0;
-    decoder->frame_has_alpha         = 0;
-    decoder->key_frame = decoder->prev_key_frame = 0;
-    decoder->prev_anmf_flags = decoder->anmf_flags = 0;
-    decoder->prev_width = decoder->prev_height = 0;
-    decoder->prev_pos_x = decoder->prev_pos_y = 0;
     decoder->anim_loop_count = decoder->anim_frame_count = 0;
     decoder->anim_background_argb                        = 0;
-    decoder->frame_duration                              = 0;
-    decoder->frame_timestamp                             = 0;
     memset(decoder->clear_argb, 0, sizeof(decoder->clear_argb));
     decoder->clear_yuva[0]  = RGB_TO_Y_CCIR(0, 0, 0);
     decoder->clear_yuva[1]  = RGB_TO_U_CCIR(0, 0, 0, 0);
@@ -4116,13 +4371,16 @@ static WPDStatus capture_metadata(WPDDecoder *decoder) {
 }
 
 static WPDStatus rescan_headers(WPDDecoder *decoder) {
-    const HeaderScan *hs     = &decoder->scan;
-    WPDStatus         status = scan_headers(&decoder->scan,
-                                            decoder->file,
-                                            decoder->discarded,
-                                            decoder->file_size,
-                                            decoder->streaming);
-    WPDStatus         meta   = capture_metadata(decoder);
+    const HeaderScan *hs = &decoder->scan;
+    WPDStatus         status, meta;
+
+    decoder->scan.collect_frames = 1;
+    status                       = scan_headers(&decoder->scan,
+                                                decoder->file,
+                                                decoder->discarded,
+                                                decoder->file_size,
+                                                decoder->streaming);
+    meta                         = capture_metadata(decoder);
 
     if (status != WPD_OK)
         return status;
@@ -4339,6 +4597,87 @@ WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder, WPDImageInfo *info) {
     info->background_argb = decoder->anim_background_argb;
     info->coding          = decoder->info_coding;
     info->metadata        = decoder->scan.metadata;
+    return WPD_OK;
+}
+
+WPDStatus wpd_decoder_rewind(WPDDecoder *decoder) {
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!decoder->opened || !decoder->headers_valid)
+        return set_error(decoder, "invalid decoder state", WPD_ERR_INVALID_ARG);
+    /* wpd_decoder_append() is free to drop bytes the decoder has moved past,
+       so the head of the file may simply no longer be there. */
+    if (decoder->input_mode == 1)
+        return set_error(decoder,
+                         "an appended stream cannot be rewound",
+                         WPD_ERR_UNSUPPORTED);
+
+    anim_state_reset(decoder);
+    decoder->pos      = decoder->scan.raw_kind ? 0 : 12;
+    decoder->status   = WPD_OK;
+    decoder->error[0] = 0;
+    return WPD_OK;
+}
+
+/* The oldest WPDFrameInfo this build accepts, and equally how much of the
+   caller's struct it may touch. Appending a field leaves this where it is and
+   adds a longer extent above it, the way frame_extent() does for WPDFrame, so
+   a caller compiled against the shorter struct keeps working. */
+#define WPD_FRAME_INFO_V1 WPD_FIELD_END(WPDFrameInfo, complete)
+
+static int frame_info_valid(const WPDFrameInfo *info) {
+    return info && info->struct_size >= WPD_FRAME_INFO_V1;
+}
+
+WPDStatus wpd_decoder_frame_info(const WPDDecoder *decoder, int index,
+                                 WPDFrameInfo *info) {
+    const HeaderScan *hs;
+    const size_t      struct_size = info ? info->struct_size : 0;
+
+    if (!decoder)
+        return WPD_ERR_INVALID_ARG;
+    if (!frame_info_valid(info) || !decoder->opened)
+        return set_error((WPDDecoder *)decoder,
+                         "invalid decoder state",
+                         WPD_ERR_INVALID_ARG);
+    if (!decoder->headers_valid)
+        return set_error(
+            (WPDDecoder *)decoder, "headers incomplete", WPD_ERR_TRUNCATED);
+
+    hs = &decoder->scan;
+    memset((uint8_t *)info + sizeof(info->struct_size),
+           0,
+           WPD_FRAME_INFO_V1 - sizeof(info->struct_size));
+    info->struct_size = struct_size;
+
+    /* A still image is one frame covering the whole canvas, which is what
+       libwebp's demuxer reports for it too. */
+    if (!decoder->animation) {
+        if (index != 0)
+            return set_error(
+                (WPDDecoder *)decoder, "no such frame", WPD_ERR_INVALID_ARG);
+        info->width  = decoder->canvas_width;
+        info->height = decoder->canvas_height;
+        /* The image's own alpha, not the VP8X declaration WPDImageInfo
+           reports, so that this agrees with the frame decoding produces. */
+        info->has_alpha = hs->image_has_alpha;
+        info->complete  = hs->raw_kind ? decoder->eos : hs->images != 0;
+        return WPD_OK;
+    }
+
+    if (index < 0 || index >= hs->nb_frames + hs->partial_frame)
+        return set_error(
+            (WPDDecoder *)decoder, "no such frame", WPD_ERR_INVALID_ARG);
+
+    info->pos_x     = hs->frames[index].pos_x;
+    info->pos_y     = hs->frames[index].pos_y;
+    info->width     = hs->frames[index].width;
+    info->height    = hs->frames[index].height;
+    info->duration  = hs->frames[index].duration;
+    info->dispose   = hs->frames[index].dispose;
+    info->blend     = hs->frames[index].blend;
+    info->has_alpha = hs->frames[index].has_alpha;
+    info->complete  = hs->frames[index].complete;
     return WPD_OK;
 }
 
@@ -4595,7 +4934,11 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             ret = decode_anmf(decoder, payload, size);
             if (ret < 0)
                 return set_error(decoder, "animation frame decode failed", ret);
-            ret = export_packed(decoder, &decoder->canvas, frame);
+            ret = export_packed(decoder,
+                                decoder->anim_mode == WPD_ANIM_SUBFRAME
+                                    ? decoder->subframe_out
+                                    : &decoder->canvas,
+                                frame);
             if (ret < 0)
                 return set_error(decoder, "cannot output frame", ret);
             return 1;
@@ -4746,6 +5089,7 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     image_free(&decoder->lossless_out);
     for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
     for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
+    scan_free(&decoder->scan);
     free(decoder->rescale_work);
     free(decoder->rescale_row);
     free(decoder->lossless_top);
