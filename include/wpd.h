@@ -83,11 +83,35 @@ typedef enum WPDPixelFormat {
     WPD_PIX_FMT_ARGB_PRE,
     WPD_PIX_FMT_RGBA_PRE,
     WPD_PIX_FMT_BGRA_PRE,
-    /* Two bytes per pixel, most-significant component bits first. */
+    /* Two bytes per pixel, most-significant component bits first. The
+       premultiplied 4444 formats are multiplied in the four-bit domain, after
+       the quantization, as libwebp's rgbA4444 is. The exception is a
+       composited animation frame, whose canvas is premultiplied in eight bits
+       before each frame is blended into it and packed afterwards. */
     WPD_PIX_FMT_RGB565,
     WPD_PIX_FMT_RGBA4444,
     WPD_PIX_FMT_RGBA4444_PRE,
+    /* The two bytes of each unit in the opposite order to the three above,
+       which is what Skia's kRGB_565_SkColorType and kARGB_4444_SkColorType
+       expect on a little-endian host: its libwebp is built with
+       WEBP_SWAP_16BIT_CSP. Not a channel swizzle; the fields keep their
+       widths and their order within the sixteen bits. */
+    WPD_PIX_FMT_BGR565, /* byte0 = gggbbbbb, byte1 = rrrrrggg */
+    WPD_PIX_FMT_BGRA4444, /* byte0 = bbbbaaaa, byte1 = rrrrgggg */
+    WPD_PIX_FMT_BGRA4444_PRE,
 } WPDPixelFormat;
+
+/* What the canvas keeps of a frame once the next one is decoded. */
+typedef enum WPDDispose {
+    WPD_DISPOSE_NONE       = 0,
+    WPD_DISPOSE_BACKGROUND = 1,
+} WPDDispose;
+
+/* How a frame is combined with what the canvas already holds. */
+typedef enum WPDBlend {
+    WPD_BLEND_ALPHA = 0,
+    WPD_BLEND_NONE  = 1,
+} WPDBlend;
 
 typedef struct WPDFrame {
     /* Set to sizeof(WPDFrame), normally with WPD_FRAME_INIT. */
@@ -103,6 +127,16 @@ typedef struct WPDFrame {
     int64_t timestamp;
     /* Private ownership used only by wpd_decode(). */
     void *private_data;
+    /* The sub-frame this frame was built from, in canvas coordinates. Filled
+       in both animation modes: under WPD_ANIM_COMPOSITED they describe the
+       sub-frame that produced the canvas handed over, and 'width' and 'height'
+       above are still the canvas; under WPD_ANIM_SUBFRAME 'width' and 'height'
+       are the sub-frame's own. All zero for a still image apart from
+       'has_alpha'. */
+    int pos_x, pos_y;
+    int dispose; /* WPDDispose, this frame's own flag */
+    int blend; /* WPDBlend */
+    int has_alpha; /* whether this frame itself carries transparency */
 } WPDFrame;
 
 #define WPD_FRAME_INIT         \
@@ -114,7 +148,12 @@ typedef struct WPDFrame {
      WPD_PIX_FMT_NONE,         \
      0,                        \
      0,                        \
-     NULL}
+     NULL,                     \
+     0,                        \
+     0,                        \
+     WPD_DISPOSE_NONE,         \
+     WPD_BLEND_ALPHA,          \
+     0}
 
 /* How the image data is coded. Reported as WPD_CODING_UNKNOWN for animations,
    whose frames may mix the two, matching libwebp's WebPBitstreamFeatures. */
@@ -229,6 +268,42 @@ WPD_API WPDStatus wpd_decoder_set_options(WPDDecoder              *decoder,
 WPD_API WPDStatus wpd_decoder_set_output_format(WPDDecoder    *decoder,
                                                 WPDPixelFormat format);
 
+/* What wpd_decoder_next_frame() hands over for an animation. */
+typedef enum WPDAnimationMode {
+    /* A finished canvas, composited as libwebp's WebPAnimDecoder does. */
+    WPD_ANIM_COMPOSITED = 0,
+    /* Each ANMF sub-frame on its own, uncomposited, which is what a host
+       running its own frame-buffer cache wants. */
+    WPD_ANIM_SUBFRAME = 1,
+} WPDAnimationMode;
+
+/* Choose between a composited canvas and raw sub-frames. In
+   WPD_ANIM_SUBFRAME, a frame's 'width' and 'height' are the sub-frame's, not
+   the canvas', and 'pos_x', 'pos_y', 'dispose' and 'blend' say where and how
+   the host should draw it; nothing is composited on the caller's behalf.
+
+   Nothing normalizes the sub-frames either, so under the automatic output
+   format a frame's 'format' is whatever its own image chunk decoded to and may
+   differ from frame to frame: an animation mixing lossy frames with and
+   without an ALPH chunk yields WPD_PIX_FMT_YUV420P for some and
+   WPD_PIX_FMT_YUVA420P for others, which do not even agree on their plane
+   count. A host that reads 'format' once should pin it with
+   wpd_decoder_set_output_format(); the composited mode has one canvas and so
+   one format throughout.
+
+   The sub-frames are the bitstream's own, so cropping, scaling and flipping,
+   which are all defined against the canvas, cannot be combined with this mode:
+   setting either one while the other is in force returns WPD_ERR_INVALID_ARG.
+   Still images are unaffected by the mode.
+
+   Sub-frame mode never builds the canvas the composited mode carries from
+   frame to frame, so the mode has to be settled before an animation's first
+   frame: changing it once one has been decoded returns WPD_ERR_INVALID_ARG
+   until wpd_decoder_rewind() or a fresh open. Returns WPD_OK or
+   WPD_ERR_INVALID_ARG. */
+WPD_API WPDStatus wpd_decoder_set_animation_mode(WPDDecoder      *decoder,
+                                                 WPDAnimationMode mode);
+
 typedef struct WPDOutputPlane {
     uint8_t  *data;
     size_t    size;
@@ -339,6 +414,71 @@ WPD_API WPDStatus wpd_decoder_end_of_stream(WPDDecoder *decoder);
    the frames seen so far and grows as more arrives. */
 WPD_API WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder,
                                        WPDImageInfo     *info);
+
+typedef struct WPDFrameInfo {
+    /* Set to sizeof(WPDFrameInfo), normally with WPD_FRAME_INFO_INIT. */
+    size_t struct_size;
+    /* Where the sub-frame sits on the canvas, and how big it is. */
+    int pos_x, pos_y;
+    int width, height;
+    int duration;
+    int dispose; /* WPDDispose */
+    int blend; /* WPDBlend */
+    /* Whether the frame's own image data carries transparency, which is what
+       the decoded WPDFrame reports and may be narrower than the whole file's
+       WPDImageInfo.has_alpha, a VP8X declaration the image need not honour.
+       Only final once 'complete' is set. */
+    int has_alpha;
+    /* The frame's payload is entirely buffered, so decoding it will not stall.
+       0 for the last entry of a stream still arriving. */
+    int complete;
+} WPDFrameInfo;
+
+#define WPD_FRAME_INFO_INIT \
+    {sizeof(WPDFrameInfo),  \
+     0,                     \
+     0,                     \
+     0,                     \
+     0,                     \
+     0,                     \
+     WPD_DISPOSE_NONE,      \
+     WPD_BLEND_ALPHA,       \
+     0,                     \
+     0}
+
+/* Describe one frame from the chunk list alone, without decoding it, so a host
+   can lay out its own frame cache up front. This is what libwebp callers get
+   from WebPDemuxGetFrame() and WebPIterator.
+
+   Indices run from 0. An animation being streamed grows an entry as soon as
+   that frame's 16-byte ANMF header has arrived, so the last one may report
+   'complete' as 0 and flip to 1 later; everything but 'has_alpha' is final
+   from the moment the entry appears. A still image has exactly one entry
+   covering the whole canvas.
+
+   The table stops growing after 2^20 entries, far above any animation a player
+   would sit through. Such a file still decodes in full, and
+   WPDImageInfo.frame_count still counts every frame, so a host laying out a
+   cache from that count should treat the indices past the table the way it
+   treats a frame that has not arrived.
+
+   Returns WPD_OK, WPD_ERR_INVALID_ARG if no file is open or 'index' names no
+   frame yet, or WPD_ERR_TRUNCATED if a stream has not delivered enough of its
+   headers. */
+WPD_API WPDStatus wpd_decoder_frame_info(const WPDDecoder *decoder, int index,
+                                         WPDFrameInfo *info);
+
+/* Go back to frame 0 without re-parsing the file, for a player looping an
+   animation. The canvas is cleared and the frame index, timestamp and dispose
+   latch are reset; the headers, the frame table and the metadata are kept, as
+   are the output format, options and output buffer.
+
+   Returns WPD_OK, WPD_ERR_INVALID_ARG if no file is open, or
+   WPD_ERR_UNSUPPORTED for a stream driven by wpd_decoder_append(), which is
+   free to drop bytes the decoder has moved past. Streams fed through
+   wpd_decoder_update(), and files opened whole or borrowed, can always be
+   rewound. */
+WPD_API WPDStatus wpd_decoder_rewind(WPDDecoder *decoder);
 
 /* Point '*data' and '*size' at one metadata chunk's payload, where 'which' is
    a single WPDMetadata bit. The bytes belong to the decoder and stay valid

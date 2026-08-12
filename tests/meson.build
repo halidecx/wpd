@@ -107,6 +107,14 @@ testdata = [
 test('api-testdata', api_test, suite: ['testdata', 'api'], args: [testdata_dir])
 test('parity', parity_test, suite: ['testdata', 'parity'], args: [testdata_dir],
      timeout: 300)
+test('stream-reopen', wpd, suite: ['testdata', 'testdata-stream'],
+     args: ['--info', '--stream', '1021', '--loops', '2',
+            testdata_dir / 'anim_rgb.webp'])
+test('rewind-replay', wpd, suite: ['testdata', 'testdata-stream'],
+     args: ['--info', '--loops', '2', testdata_dir / 'anim_rgb.webp'])
+test('rewind-replay-subframe', wpd, suite: ['testdata', 'testdata-stream'],
+     args: ['--info', '--subframe', '--loops', '2',
+            testdata_dir / 'anim_rgb.webp'])
 foreach t : testdata
   input = testdata_dir / t[0] + '.webp'
   if not fs.exists(input)

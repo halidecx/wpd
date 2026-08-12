@@ -70,6 +70,7 @@ static wpd_always_inline unsigned wpd_bytestream_get_be24(const uint8_t **p) {
 }
 
 void *wpd_mallocz(size_t size);
+void *wpd_realloc(void *pointer, size_t size);
 void  wpd_free(void *pointer);
 void  wpd_freep(void *pointer);
 void  wpd_log(void *context, int level, const char *format, ...);

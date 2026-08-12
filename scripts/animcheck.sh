@@ -77,10 +77,31 @@ for input in "${inputs[@]}"; do
             problems+=("background $(get background) != $want_bg")
 
         want_durations=$(awk '/^ *[0-9]+:/ { print $7 }' <<<"$mux_info" | tr '\n' ' ')
-        got_durations=$(sed -n 's/.* duration \([0-9]*\) .*/\1/p' <<<"$wpd_info" |
-                        tr '\n' ' ')
+        got_durations=$(sed -n 's/^frame [0-9]*: .* duration \([0-9]*\) .*/\1/p' \
+                            <<<"$wpd_info" | tr '\n' ' ')
         [[ $want_durations == "$got_durations" ]] ||
             problems+=("durations [$got_durations] != [$want_durations]")
+
+        # The frame table wpd_decoder_frame_info() builds without decoding,
+        # against the same fields libwebp's demuxer hands Blink and Skia.
+        # webpmux spells dispose and blend out; wpd reports the enum values,
+        # where blend "yes" is WPD_BLEND_ALPHA, which is 0.
+        want_table=$(awk '/^ *[0-9]+:/ {
+                printf "%sx%s at %s,%s duration %s dispose %d blend %d alpha %d\n",
+                       $2, $3, $5, $6, $7,
+                       ($8 == "background"), ($9 == "no"), ($4 == "yes")
+            }' <<<"$mux_info")
+        got_table=$(sed -n 's/^table [0-9]*: \(.*\) complete .*/\1/p' <<<"$wpd_info")
+        [[ $want_table == "$got_table" ]] ||
+            problems+=("frame table does not match webpmux")
+
+        # Sub-frame mode has to hand out those very dimensions and offsets.
+        want_subframes=$(awk '/^ *[0-9]+:/ { printf "%sx%s at %s,%s\n", $2, $3, $5, $6 }' \
+                             <<<"$mux_info")
+        got_subframes=$("$WPD" --info --subframe "$input" 2>/dev/null |
+                        sed -n 's/^frame [0-9]*: \([0-9]*x[0-9]*\) .* at \([0-9]*,[0-9]*\) .*/\1 at \2/p')
+        [[ $want_subframes == "$got_subframes" ]] ||
+            problems+=("sub-frame geometry does not match webpmux")
     fi
 
     if (( ${#problems[@]} == 0 )); then

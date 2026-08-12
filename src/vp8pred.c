@@ -9,7 +9,7 @@
 #endif
 #endif
 
-static void fill(uint8_t *src, int stride, int width, int height,
+static void fill(uint8_t *src, ptrdiff_t stride, int width, int height,
                  uint8_t value) {
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) src[x] = value;
@@ -18,7 +18,7 @@ static void fill(uint8_t *src, int stride, int width, int height,
 }
 
 static void pred4x4_vertical_vp8(uint8_t *src, const uint8_t *topright,
-                                 int stride) {
+                                 ptrdiff_t stride) {
     const int     lt = src[-stride - 1];
     const int     t0 = src[-stride], t1 = src[1 - stride], t2 = src[2 - stride],
                   t3 = src[3 - stride], t4 = topright[0];
@@ -35,7 +35,7 @@ static void pred4x4_vertical_vp8(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_horizontal_vp8(uint8_t *src, const uint8_t *topright,
-                                   int stride) {
+                                   ptrdiff_t stride) {
     const int     lt = src[-stride - 1];
     const int     l0 = src[-1], l1 = src[stride - 1], l2 = src[2 * stride - 1],
                   l3   = src[3 * stride - 1];
@@ -48,14 +48,15 @@ static void pred4x4_horizontal_vp8(uint8_t *src, const uint8_t *topright,
     for (int y = 0; y < 4; y++) memset(src + y * stride, p[y], 4);
 }
 
-static void pred4x4_dc(uint8_t *src, const uint8_t *topright, int stride) {
+static void pred4x4_dc(uint8_t *src, const uint8_t *topright,
+                       ptrdiff_t stride) {
     int dc = 4;
     for (int i = 0; i < 4; i++) dc += src[i - stride] + src[i * stride - 1];
     fill(src, stride, 4, 4, dc >> 3);
 }
 
 static void pred4x4_down_right(uint8_t *src, const uint8_t *topright,
-                               int stride) {
+                               ptrdiff_t stride) {
     const int     lt = src[-stride - 1];
     const int     t0 = src[-stride], t1 = src[1 - stride], t2 = src[2 - stride],
                   t3 = src[3 - stride];
@@ -75,7 +76,7 @@ static void pred4x4_down_right(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_down_left(uint8_t *src, const uint8_t *topright,
-                              int stride) {
+                              ptrdiff_t stride) {
     uint8_t t[8] = {src[-stride],
                     src[1 - stride],
                     src[2 - stride],
@@ -93,7 +94,7 @@ static void pred4x4_down_left(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_vertical_right(uint8_t *src, const uint8_t *topright,
-                                   int stride) {
+                                   ptrdiff_t stride) {
     const int     lt = src[-stride - 1];
     const int     t0 = src[-stride], t1 = src[1 - stride], t2 = src[2 - stride],
                   t3 = src[3 - stride];
@@ -120,7 +121,7 @@ static void pred4x4_vertical_right(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_vertical_left(uint8_t *src, const uint8_t *topright,
-                                  int stride) {
+                                  ptrdiff_t stride) {
     const int t0 = src[-stride], t1 = src[1 - stride], t2 = src[2 - stride],
               t3 = src[3 - stride];
     const int t4 = topright[0], t5 = topright[1], t6 = topright[2],
@@ -139,7 +140,7 @@ static void pred4x4_vertical_left(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_horizontal_up(uint8_t *src, const uint8_t *topright,
-                                  int stride) {
+                                  ptrdiff_t stride) {
     uint8_t l[4] = {
         src[-1], src[stride - 1], src[2 * stride - 1], src[3 * stride - 1]};
     const uint8_t p[4][4] = {
@@ -158,7 +159,7 @@ static void pred4x4_horizontal_up(uint8_t *src, const uint8_t *topright,
 }
 
 static void pred4x4_horizontal_down(uint8_t *src, const uint8_t *topright,
-                                    int stride) {
+                                    ptrdiff_t stride) {
     const int     lt = src[-stride - 1];
     const int     t0 = src[-stride], t1 = src[1 - stride], t2 = src[2 - stride];
     const int     l0 = src[-1], l1 = src[stride - 1], l2 = src[2 * stride - 1],
@@ -184,7 +185,8 @@ static void pred4x4_horizontal_down(uint8_t *src, const uint8_t *topright,
     for (int y = 0; y < 4; y++) memcpy(src + y * stride, p[y], 4);
 }
 
-static void pred4x4_tm(uint8_t *src, const uint8_t *topright, int stride) {
+static void pred4x4_tm(uint8_t *src, const uint8_t *topright,
+                       ptrdiff_t stride) {
     const int top_left = src[-1 - stride];
     uint8_t  *top      = src - stride;
     for (int y = 0; y < 4; y++) {
@@ -194,16 +196,16 @@ static void pred4x4_tm(uint8_t *src, const uint8_t *topright, int stride) {
     }
 }
 
-static void pred_vertical(uint8_t *src, int stride, int size) {
+static void pred_vertical(uint8_t *src, ptrdiff_t stride, int size) {
     for (int y = 0; y < size; y++) memcpy(src + y * stride, src - stride, size);
 }
 
-static void pred_horizontal(uint8_t *src, int stride, int size) {
+static void pred_horizontal(uint8_t *src, ptrdiff_t stride, int size) {
     for (int y = 0; y < size; y++)
         memset(src + y * stride, src[y * stride - 1], size);
 }
 
-static void pred_tm(uint8_t *src, int stride, int size) {
+static void pred_tm(uint8_t *src, ptrdiff_t stride, int size) {
     const int top_left = src[-stride - 1];
     for (int y = 0; y < size; y++)
         for (int x = 0; x < size; x++)
@@ -211,57 +213,65 @@ static void pred_tm(uint8_t *src, int stride, int size) {
                                                  src[x - stride] - top_left);
 }
 
-static void pred_dc(uint8_t *src, int stride, int size) {
+static void pred_dc(uint8_t *src, ptrdiff_t stride, int size) {
     int dc = size;
     for (int i = 0; i < size; i++) dc += src[i - stride] + src[i * stride - 1];
     fill(src, stride, size, size, dc >> (size == 8 ? 4 : 5));
 }
 
-static void pred_left_dc(uint8_t *src, int stride, int size) {
+static void pred_left_dc(uint8_t *src, ptrdiff_t stride, int size) {
     int dc = size / 2;
     for (int i = 0; i < size; i++) dc += src[i * stride - 1];
     fill(src, stride, size, size, dc / size);
 }
 
-static void pred_top_dc(uint8_t *src, int stride, int size) {
+static void pred_top_dc(uint8_t *src, ptrdiff_t stride, int size) {
     int dc = size / 2;
     for (int i = 0; i < size; i++) dc += src[i - stride];
     fill(src, stride, size, size, dc / size);
 }
 
-static void pred8x8_vertical(uint8_t *src, int stride) {
+static void pred8x8_vertical(uint8_t *src, ptrdiff_t stride) {
     pred_vertical(src, stride, 8);
 }
-static void pred16x16_vertical(uint8_t *src, int stride) {
+static void pred16x16_vertical(uint8_t *src, ptrdiff_t stride) {
     pred_vertical(src, stride, 16);
 }
-static void pred8x8_horizontal(uint8_t *src, int stride) {
+static void pred8x8_horizontal(uint8_t *src, ptrdiff_t stride) {
     pred_horizontal(src, stride, 8);
 }
-static void pred16x16_horizontal(uint8_t *src, int stride) {
+static void pred16x16_horizontal(uint8_t *src, ptrdiff_t stride) {
     pred_horizontal(src, stride, 16);
 }
-static void pred8x8_tm(uint8_t *src, int stride) { pred_tm(src, stride, 8); }
-static void pred16x16_tm(uint8_t *src, int stride) { pred_tm(src, stride, 16); }
-static void pred8x8_dc(uint8_t *src, int stride) { pred_dc(src, stride, 8); }
-static void pred16x16_dc(uint8_t *src, int stride) { pred_dc(src, stride, 16); }
-static void pred8x8_left_dc(uint8_t *src, int stride) {
+static void pred8x8_tm(uint8_t *src, ptrdiff_t stride) {
+    pred_tm(src, stride, 8);
+}
+static void pred16x16_tm(uint8_t *src, ptrdiff_t stride) {
+    pred_tm(src, stride, 16);
+}
+static void pred8x8_dc(uint8_t *src, ptrdiff_t stride) {
+    pred_dc(src, stride, 8);
+}
+static void pred16x16_dc(uint8_t *src, ptrdiff_t stride) {
+    pred_dc(src, stride, 16);
+}
+static void pred8x8_left_dc(uint8_t *src, ptrdiff_t stride) {
     pred_left_dc(src, stride, 8);
 }
-static void pred16x16_left_dc(uint8_t *src, int stride) {
+static void pred16x16_left_dc(uint8_t *src, ptrdiff_t stride) {
     pred_left_dc(src, stride, 16);
 }
-static void pred8x8_top_dc(uint8_t *src, int stride) {
+static void pred8x8_top_dc(uint8_t *src, ptrdiff_t stride) {
     pred_top_dc(src, stride, 8);
 }
-static void pred16x16_top_dc(uint8_t *src, int stride) {
+static void pred16x16_top_dc(uint8_t *src, ptrdiff_t stride) {
     pred_top_dc(src, stride, 16);
 }
 
-static void pred8x8_dc128(uint8_t *src, int stride) {
+static void pred8x8_dc128(uint8_t *src, ptrdiff_t stride) {
     fill(src, stride, 8, 8, 128);
 }
-static void pred16x16_dc128(uint8_t *src, int stride) {
+static void pred16x16_dc128(uint8_t *src, ptrdiff_t stride) {
     fill(src, stride, 16, 16, 128);
 }
 

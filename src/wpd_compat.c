@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 
 void *wpd_mallocz(size_t size) { return calloc(1, size); }
+void *wpd_realloc(void *pointer, size_t size) { return realloc(pointer, size); }
 void  wpd_free(void *pointer) { free(pointer); }
 void  wpd_freep(void *pointer) {
     void **p = pointer;

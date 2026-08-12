@@ -54,6 +54,13 @@ shuf_bcasta3: db 3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15
 %define shuf_rgba4444 shuf_rgba
 mask_rgba4444: times 32 db 0xf0
 mul_rgba4444:  times 16 db 16, 1
+; A swapped layout lays the very same two bytes down the other way round, so it
+; only exchanges the two field pairs the shuffle gathers; the mask and the
+; multiplier are per-pair and ride along unchanged.
+shuf_bgra4444: db 3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14
+               db 3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14
+%define mask_bgra4444 mask_rgba4444
+%define mul_bgra4444  mul_rgba4444
 ; 565 needs the green byte twice, once per output byte. Weighting the masked
 ; fields by 32/1 and 64/1 lines them up for a right shift of 5 and 3, which
 ; pmulhuw does in one instruction with 2^11 and 2^13.
@@ -62,6 +69,13 @@ shuf_rgb565: db 1, 2, 2, 3, 5, 6, 6, 7, 9, 10, 10, 11, 13, 14, 14, 15
 mask_rgb565: times 8 db 0xf8, 0xe0, 0x1c, 0xf8
 mul_rgb565:  times 8 db 32, 1, 64, 1
 pw_565scale: times 8 dw 2048, 8192
+; The two 565 pairs carry a shift of their own, so exchanging them exchanges
+; the mask, the multiplier and the scale with them.
+shuf_bgr565: db 2, 3, 1, 2, 6, 7, 5, 6, 10, 11, 9, 10, 14, 15, 13, 14
+             db 2, 3, 1, 2, 6, 7, 5, 6, 10, 11, 9, 10, 14, 15, 13, 14
+mask_bgr565: times 8 db 0x1c, 0xf8, 0xf8, 0xe0
+mul_bgr565:  times 8 db 64, 1, 32, 1
+pw_bgr565scale: times 8 dw 8192, 2048
 
 pw_15:   times 16 dw 15
 pw_17:   times 16 dw 17
@@ -609,6 +623,8 @@ cglobal pack_%1, 3, 4, 3, dst, src, n
 %macro PACK16_SCALE 2 ; layout, reg
 %ifidn %1, rgb565
     pmulhuw   %2, [pw_565scale]
+%elifidn %1, bgr565
+    pmulhuw   %2, [pw_bgr565scale]
 %else
     psrlw     %2, 4
 %endif
@@ -730,36 +746,53 @@ cglobal argb_to_y, 3, 4, 6, y, argb, n
 ; Every channel is a nibble expanded to eight bits by a multiply by 17, and
 ; the alpha multiplier is the same expansion doubled up, so the truncating
 ; divide by 255 the C does with a 32-bit product is exactly pmulhuw here.
-%macro PREMULTIPLY_4444 6 ; word, scratch, r, g, b, a
-    psrlw     %2, %1, 4
-    pand      %3, %2, [pw_15]
-    pand      %4, %1, [pw_15]
+; Alpha keeps its nibble untouched and blue shares alpha's byte in either
+; layout, so a swap only moves which of the two bytes that pair lands in, and
+; with it the four nibble positions the extraction reads.
+%macro PREMULTIPLY_4444 7 ; word, scratch, a, b, r, g, swap
+%if %7
+    pand      %3, %1, [pw_15]
+    psrlw     %4, %1, 4
+    pand      %4, [pw_15]
     psrlw     %6, %1, 8
     pand      %6, [pw_15]
     psrlw     %5, %1, 12
-    pmullw    %2, %6, [pw_4369]
-    pmullw    %3, [pw_17]
+%else
+    psrlw     %2, %1, 4
+    pand      %5, %2, [pw_15]
+    pand      %6, %1, [pw_15]
+    psrlw     %3, %1, 8
+    pand      %3, [pw_15]
+    psrlw     %4, %1, 12
+%endif
+    pmullw    %2, %3, [pw_4369]
     pmullw    %4, [pw_17]
     pmullw    %5, [pw_17]
-    pmulhuw   %3, %2
+    pmullw    %6, [pw_17]
     pmulhuw   %4, %2
     pmulhuw   %5, %2
-    pand      %3, [pw_240]
-    psrlw     %4, 4
-    por       %3, %4
+    pmulhuw   %6, %2
+    pand      %4, [pw_240]
+    por       %4, %3
     pand      %5, [pw_240]
+    psrlw     %6, 4
     por       %5, %6
+%if %7
     psllw     %5, 8
-    por       %1, %3, %5
+    por       %1, %4, %5
+%else
+    psllw     %4, 8
+    por       %1, %5, %4
+%endif
 %endmacro
 
-%macro PREMULTIPLY_ROW_4444 0
-cglobal premultiply_row_4444, 2, 3, 6, rgba, n
+%macro PREMULTIPLY_ROW_4444 2 ; name, swap
+cglobal %1, 2, 3, 6, rgba, n
     sub       nd, mmsize / 2
     jl        .tail
 .loop:
     movu      m0, [rgbaq]
-    PREMULTIPLY_4444 m0, m1, m2, m3, m4, m5
+    PREMULTIPLY_4444 m0, m1, m2, m3, m4, m5, %2
     movu      [rgbaq], m0
     add       rgbaq, mmsize
     sub       nd, mmsize / 2
@@ -770,7 +803,7 @@ cglobal premultiply_row_4444, 2, 3, 6, rgba, n
 .tail_loop:
     movzx     r2d, word [rgbaq]
     movd      xm0, r2d
-    PREMULTIPLY_4444 xm0, xm1, xm2, xm3, xm4, xm5
+    PREMULTIPLY_4444 xm0, xm1, xm2, xm3, xm4, xm5, %2
     movd      r2d, xm0
     mov       [rgbaq], r2w
     add       rgbaq, 2
@@ -852,8 +885,11 @@ PACK24 rgb
 PACK24 bgr
 PACK16 rgb565
 PACK16 rgba4444
+PACK16 bgr565
+PACK16 bgra4444
 PREMULTIPLY_ROW
-PREMULTIPLY_ROW_4444
+PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
+PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
 INIT_YMM avx2
 PACK32 rgba
@@ -862,8 +898,11 @@ PACK24 rgb
 PACK24 bgr
 PACK16 rgb565
 PACK16 rgba4444
+PACK16 bgr565
+PACK16 bgra4444
 PREMULTIPLY_ROW
-PREMULTIPLY_ROW_4444
+PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
+PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
 
 INIT_XMM sse2

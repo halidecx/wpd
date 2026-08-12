@@ -321,34 +321,54 @@ pack24 bgr, 3, 2, 1
         sri             v\g\().\sz,  v\a\().\sz, #4
 .endm
 
-.macro  pack16 name
+// The swapped variants lay the very same two bytes down the other way round,
+// so they reuse the field macros and only reverse the store. st2 wants an
+// ascending register pair, hence the copy into v3, which the pack has already
+// finished with.
+.macro  pack16_store sz, bytes, swap
+    .if \swap
+        mov             v3.16b, v1.16b
+        st2             {v2.\sz, v3.\sz}, [x0], #\bytes
+    .else
+        st2             {v1.\sz, v2.\sz}, [x0], #\bytes
+    .endif
+.endm
+
+.macro  pack16 name, kind, swap
 function ff_pack_\name\()_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
         sub             w2,  w2,  #16
-        pack16_\name    16b, 0, 1, 2, 3
-        st2             {v1.16b, v2.16b}, [x0], #32
+        pack16_\kind    16b, 0, 1, 2, 3
+        pack16_store    16b, 32, \swap
         cmp             w2,  #16
         b.ge            1b
 2:      cmp             w2,  #8
         b.lt            3f
         ld4             {v0.8b-v3.8b}, [x1], #32
         sub             w2,  w2,  #8
-        pack16_\name    8b, 0, 1, 2, 3
-        st2             {v1.8b, v2.8b}, [x0], #16
+        pack16_\kind    8b, 0, 1, 2, 3
+        pack16_store    8b, 16, \swap
 3:      cbz             w2,  9f
 4:      ld4             {v0.b, v1.b, v2.b, v3.b}[0], [x1], #4
         subs            w2,  w2,  #1
-        pack16_\name    8b, 0, 1, 2, 3
+        pack16_\kind    8b, 0, 1, 2, 3
+    .if \swap
+        mov             v3.16b, v1.16b
+        st2             {v2.b, v3.b}[0], [x0], #2
+    .else
         st2             {v1.b, v2.b}[0], [x0], #2
+    .endif
         b.gt            4b
 9:      ret
 endfunc
 .endm
 
-pack16 rgb565
-pack16 rgba4444
+pack16 rgb565,   rgb565,   0
+pack16 rgba4444, rgba4444, 0
+pack16 bgr565,   rgb565,   1
+pack16 bgra4444, rgba4444, 1
 
 // Every channel is a nibble expanded to eight bits by a multiply by 17, and
 // the alpha multiplier is that expansion doubled up. Folding the 257 out of
@@ -368,30 +388,35 @@ pack16 rgba4444
     .endif
 .endm
 
-.macro  premultiply4444 sz, wide
-        and             v2.16b,  v1.16b, v16.16b
+// 'rg' and 'ba' name the two byte streams ld2 has separated and 'org'/'oba'
+// where each one's result goes, so the swapped layout is the same work with
+// the two exchanged: alpha still rides the low nibble of the ba byte either
+// way, and st2 still writes the lower-numbered register first.
+.macro  premultiply4444 sz, wide, rg, ba, org, oba
+        and             v2.16b,  v\ba\().16b, v16.16b
         mul             v3.16b,  v2.16b, v17.16b
-        ushr            v4.\sz,  v0.\sz, #4
-        and             v6.16b,  v0.16b, v16.16b
-        ushr            v5.\sz,  v1.\sz, #4
-        mul             v4.16b,  v4.16b, v17.16b
+        ushr            v\org\().\sz,  v\rg\().\sz, #4
+        and             v6.16b,  v\rg\().16b, v16.16b
+        ushr            v\oba\().\sz,  v\ba\().\sz, #4
+        mul             v\org\().16b,  v\org\().16b, v17.16b
         mul             v6.16b,  v6.16b, v17.16b
-        mul             v5.16b,  v5.16b, v17.16b
-        premultiply_mulhi 4, 3, \wide
+        mul             v\oba\().16b,  v\oba\().16b, v17.16b
+        premultiply_mulhi \org, 3, \wide
         premultiply_mulhi 6, 3, \wide
-        premultiply_mulhi 5, 3, \wide
-        sri             v4.\sz,  v6.\sz, #4
-        bit             v5.16b,  v1.16b, v16.16b
+        premultiply_mulhi \oba, 3, \wide
+        sri             v\org\().\sz,  v6.\sz, #4
+        bit             v\oba\().16b,  v\ba\().16b, v16.16b
 .endm
 
-function ff_premultiply_row_4444_neon, export=1
+.macro  premultiply_row_4444 name, rg, ba, org, oba
+function ff_premultiply_row_4444\name\()_neon, export=1
         movi            v16.16b, #15
         movi            v17.16b, #17
         cmp             w1,  #16
         b.lt            2f
 1:      ld2             {v0.16b, v1.16b}, [x0]
         sub             w1,  w1,  #16
-        premultiply4444 16b, 1
+        premultiply4444 16b, 1, \rg, \ba, \org, \oba
         st2             {v4.16b, v5.16b}, [x0], #32
         cmp             w1,  #16
         b.ge            1b
@@ -399,16 +424,20 @@ function ff_premultiply_row_4444_neon, export=1
         b.lt            3f
         ld2             {v0.8b, v1.8b}, [x0]
         sub             w1,  w1,  #8
-        premultiply4444 8b, 0
+        premultiply4444 8b, 0, \rg, \ba, \org, \oba
         st2             {v4.8b, v5.8b}, [x0], #16
 3:      cbz             w1,  9f
 4:      ld2             {v0.b, v1.b}[0], [x0]
         subs            w1,  w1,  #1
-        premultiply4444 8b, 0
+        premultiply4444 8b, 0, \rg, \ba, \org, \oba
         st2             {v4.b, v5.b}[0], [x0], #2
         b.gt            4b
 9:      ret
 endfunc
+.endm
+
+premultiply_row_4444 , 0, 1, 4, 5
+premultiply_row_4444 _swap, 1, 0, 5, 4
 
 // Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16. Splitting each
 // coefficient as 256 * hi + lo keeps either partial sum inside sixteen bits,
