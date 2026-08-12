@@ -197,9 +197,17 @@ typedef struct WPDDecoderOptions {
     int scaled_height;
     /* Reverse the final output vertically. */
     int flip;
-    /* How many threads a decode may use. 0 lets the decoder choose, 1 keeps
-       everything on the calling thread. A lossy frame's alpha decodes
-       alongside its colour planes, so nothing above 2 is used yet. */
+    /* How many threads a decode may use, counting the calling thread. 0 lets
+       the decoder choose, which is the number of processors it is allowed to
+       run on, and 1 keeps everything on the calling thread.
+
+       Threads are started as work appears and are shared by everything that
+       can be handed off: a lossy frame's alpha plane, its in-loop filter, the
+       rows of a colour conversion, a scaled image's planes, and an
+       animation's frames, which decode ahead of being composited. What a
+       given image can use depends on which of those it needs, so a still
+       image rarely uses more than three or four however many are allowed.
+       Decoding is bit-exact whatever the number. */
     int n_threads;
 } WPDDecoderOptions;
 

@@ -222,14 +222,32 @@ libwebp. EXIF and XMP follow the image data, so in a stream they arrive after
 the frames do; the flags in `info.metadata` are set as soon as the header is in.
 `--info` lists whatever is present.
 
-A lossy frame's alpha channel is a lossless image of its own that shares
-nothing with the colour planes, so the decoder hands it to a worker thread and
-decodes luma and chroma alongside it. This is on by default for frames large
-enough to earn back the handoff, and costs one thread for as long as the
-decoder lives. Set `options.n_threads` to 1 to keep everything on the calling
-thread, or configure the build with `-Dthreads=disabled` to leave the code out
-entirely; `build/wpd --threads 1` selects the single-threaded path for
-comparison. Nothing else is threaded yet, so no value above 2 does anything.
+The decoder keeps a pool of worker threads and hands it whatever a frame does
+not need to do in order:
+
+- a lossy frame's alpha channel, which is a lossless image of its own sharing
+  nothing with the colour planes;
+- the in-loop filter, which trails the row loop by two macroblock rows;
+- the rows of a colour conversion, split into bands;
+- the planes of a scaled image, one per thread;
+- an animation's frames, which decode ahead of the one being composited.
+
+`options.n_threads` counts the calling thread: 0 lets the decoder choose, which
+is the number of processors it is allowed to run on, and 1 keeps everything on
+the calling thread. Threads start as work appears rather than up front, so a
+decode that only overlaps two things pays for one worker however many it was
+allowed, and they live as long as the decoder. Which of the above an image needs
+decides what it can use, so a still rarely uses more than three or four. Output
+is bit-exact whatever the number, and `build/wpd --threads 1` selects the
+single-threaded path for comparison. Configure the build with
+`-Dthreads=disabled` to leave the code out entirely.
+
+Work only moves to another thread where measurement says it should. Overlapping
+the lossless inverse transforms with the pixel loop, and splitting a lossy
+frame's entropy decode from its reconstruction, were both built and measured:
+each cost more in cache locality and staging than it returned, so neither is
+here. Streamed animations stay serial, since a frame whose bytes have not
+arrived cannot be started ahead.
 
 Every entry point that can fail returns a `WPDStatus`, negative on error;
 `wpd_decoder_status()` retrieves the last one and `wpd_decoder_error()`
