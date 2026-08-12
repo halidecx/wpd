@@ -1,14 +1,11 @@
-/* Every row function is handed a row and a pixel count, and must write only
+/* Every row function is handed a row and a pixel count, and must touch only
    the bytes that row owns. Assembly that reads a group of pixels back, edits
    one byte of each and stores the group again writes bytes it did not change:
    comparing its output against the C reference cannot see that, because the
    bytes it puts back are the ones it found, and no sanitizer instruments hand
-   written assembly either. What does see it is the store itself failing, so
-   each destination row here ends against a page that is not mapped.
-
-   Only the destination is bounded this way. Several of these functions read a
-   whole group from the source however few pixels are left, which is safe on
-   the padded buffers the decoder hands them. */
+   written assembly either. What does see it is the access itself failing, so
+   each row here ends against a page that is not mapped, source and
+   destination alike. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -83,9 +80,8 @@ static int probe(const RowTest *t, int n) {
     int      failed = 0;
 
     dst = guarded(&dst_map, &dst_size, (size_t)n * t->dst_bpp);
-    src = t->src_bpp
-        ? guarded(&src_map, &src_size, (size_t)(n + 64) * t->src_bpp)
-        : NULL;
+    src = t->src_bpp ? guarded(&src_map, &src_size, (size_t)n * t->src_bpp)
+                     : NULL;
     if (!dst || (t->src_bpp && !src)) {
         fprintf(stderr, "mmap failed\n");
         return 1;
@@ -100,7 +96,7 @@ static int probe(const RowTest *t, int n) {
     signal(SIGBUS, SIG_DFL);
 
     if (trapped) {
-        printf("FAIL %s: n=%d wrote past the end of the row\n", t->name, n);
+        printf("FAIL %s: n=%d ran past the end of a row\n", t->name, n);
         failed = 1;
     }
     munmap(dst_map, dst_size);

@@ -684,8 +684,10 @@ cglobal pack_%1, 3, 4, 5, dst, src, n
 
 ; Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16, never leaving
 ; [16, 235], so neither pack saturates.
-%macro ARGB_TO_Y_GROUP 4 ; dst, scratch, src, offset
-    movu      %2, [%3 + %4]
+; The load is a parameter so the one-pixel tail can take its four bytes with a
+; movd rather than reading a whole group past the end of the row.
+%macro ARGB_TO_Y_GROUP 4-5 movu ; dst, scratch, src, offset, load
+    %5        %2, [%3 + %4]
     pshufb    %1, %2, [shuf_y_rg]
     pshufb    %2, [shuf_y_gb]
     pmaddwd   %1, [pw_y_rg]
@@ -733,7 +735,7 @@ cglobal argb_to_y, 3, 4, 6, y, argb, n
     test      nd, nd
     jz        .end
 .tail_loop:
-    ARGB_TO_Y_GROUP xm2, xm0, argbq, 0
+    ARGB_TO_Y_GROUP xm2, xm0, argbq, 0, movd
     movd      r3d, xm2
     mov       [yq], r3b
     add       argbq, 4
