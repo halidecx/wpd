@@ -22,7 +22,10 @@ UPSAMPLE_BLOCK(rgb)
 UPSAMPLE_BLOCK(bgr)
 #undef UPSAMPLE_BLOCK
 
-void ff_dispatch_alpha_neon(uint8_t *dst, const uint8_t *src, int num_pixels);
+void ff_dispatch_alpha_first_neon(uint8_t *dst, const uint8_t *src,
+                                  int num_pixels);
+void ff_dispatch_alpha_last_neon(uint8_t *dst, const uint8_t *src,
+                                 int num_pixels);
 
 #define PACK_ROW(name) \
     void ff_pack_##name##_neon(uint8_t *dst, const uint8_t *src, int n);
@@ -53,7 +56,8 @@ static wpd_always_inline void wpd_yuv_dsp_init_aarch64(WPDYUVDSP *dsp) {
     dsp->upsample_block[WPD_LAYOUT_BGRA] = ff_upsample_block_bgra_neon;
     dsp->upsample_block[WPD_LAYOUT_RGB]  = ff_upsample_block_rgb_neon;
     dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_neon;
-    dsp->dispatch_alpha                  = ff_dispatch_alpha_neon;
+    dsp->dispatch_alpha_first            = ff_dispatch_alpha_first_neon;
+    dsp->dispatch_alpha_last             = ff_dispatch_alpha_last_neon;
     dsp->pack_rgba                       = ff_pack_rgba_neon;
     dsp->pack_bgra                       = ff_pack_bgra_neon;
     dsp->pack_rgb                        = ff_pack_rgb_neon;

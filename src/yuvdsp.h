@@ -24,6 +24,12 @@ typedef void (*upsample_argb_block_func)(
     const uint8_t *top_v, const uint8_t *cur_u, const uint8_t *cur_v,
     uint8_t *top_dst, uint8_t *bottom_dst, int num_blocks);
 
+/* Writes one alpha byte into every pixel of a packed four-byte row, leaving
+   the three colour bytes as they were. 'dst' is the start of the first pixel,
+   not the alpha byte inside it; the assembly rewrites whole pixels, so it
+   would carry a bias of three into the row below. The two variants take alpha
+   at the front of the pixel, as ARGB has it, and at the back, as RGBA and
+   BGRA do. Neither touches a byte outside the num_pixels * 4 the row owns. */
 typedef void (*dispatch_alpha_func)(uint8_t *dst, const uint8_t *src,
                                     int num_pixels);
 
@@ -58,7 +64,8 @@ extern const uint16_t wpd_linear_to_gamma_tab[33];
 
 typedef struct WPDYUVDSP {
     upsample_argb_block_func upsample_block[WPD_LAYOUT_NB];
-    dispatch_alpha_func      dispatch_alpha;
+    dispatch_alpha_func      dispatch_alpha_first;
+    dispatch_alpha_func      dispatch_alpha_last;
     pack_row_func            pack_rgba;
     pack_row_func            pack_bgra;
     pack_row_func            pack_rgb;

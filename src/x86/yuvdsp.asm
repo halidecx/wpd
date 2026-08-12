@@ -13,6 +13,7 @@ pw_8708:    times 16 dw 8708
 pw_33050:   times 16 dw 33050
 pw_17685:   times 16 dw 17685
 pd_rgbmask: times  8 dd 0xffffff00
+pd_rgbmask3: times 8 dd 0x00ffffff
 pw_1:       times 16 dw 1
 pd_alpha:   times  8 dd 0x000000ff
 pd_alpha3:  times  8 dd 0xff000000
@@ -905,13 +906,45 @@ PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
 
-INIT_XMM sse2
-cglobal dispatch_alpha, 3, 4, 7, dst, src, n
+; Rewrites one byte of every pixel, reading back the other three and storing
+; them again unchanged. 'dst' is the start of the pixel, never the alpha byte
+; inside it: sixteen pixels are a whole 64-byte read-modify-write, so a 'dst'
+; biased by the alpha offset would make the last group of a row carry that
+; bias past the end of the row and into the row below.
+%macro DISPATCH_ALPHA 2 ; name, alpha offset within the pixel
+%if cpuflag(avx2)
+cglobal %1, 3, 4, 4, dst, src, n
+%if %2
+    mova      m3, [pd_rgbmask3]
+%else
+    mova      m3, [pd_rgbmask]
+%endif
+%else
+cglobal %1, 3, 4, 7, dst, src, n
     pxor      m5, m5
+%if %2
+    mova      m4, [pd_rgbmask3]
+%else
     mova      m4, [pd_rgbmask]
+%endif
+%endif
     sub       nd, 16
     jl        .tail
 .loop16:
+%if cpuflag(avx2)
+    pmovzxbd  m0, [srcq]
+    pmovzxbd  m1, [srcq + 8]
+%if %2
+    pslld     m0, 8 * %2
+    pslld     m1, 8 * %2
+%endif
+    pand      m2, m3, [dstq +  0]
+    por       m2, m0
+    movu      [dstq +  0], m2
+    pand      m2, m3, [dstq + 32]
+    por       m2, m1
+    movu      [dstq + 32], m2
+%else
     movu      m0, [srcq]
     punpckhbw m1, m0, m5
     punpcklbw m0, m5
@@ -919,6 +952,12 @@ cglobal dispatch_alpha, 3, 4, 7, dst, src, n
     punpcklwd m0, m5
     punpckhwd m3, m1, m5
     punpcklwd m1, m5
+%if %2
+    pslld     m0, 8 * %2
+    pslld     m1, 8 * %2
+    pslld     m2, 8 * %2
+    pslld     m3, 8 * %2
+%endif
     movu      m6, [dstq +  0]
     pand      m6, m4
     por       m6, m0
@@ -935,6 +974,7 @@ cglobal dispatch_alpha, 3, 4, 7, dst, src, n
     pand      m6, m4
     por       m6, m3
     movu      [dstq + 48], m6
+%endif
     add       srcq, 16
     add       dstq, 64
     sub       nd, 16
@@ -944,41 +984,19 @@ cglobal dispatch_alpha, 3, 4, 7, dst, src, n
     jz        .end
 .tail_loop:
     movzx     r3d, byte [srcq]
-    mov       [dstq], r3b
+    mov       [dstq + %2], r3b
     inc       srcq
     add       dstq, 4
     dec       nd
     jg        .tail_loop
 .end:
     RET
+%endmacro
+
+INIT_XMM sse2
+DISPATCH_ALPHA dispatch_alpha_first, 0
+DISPATCH_ALPHA dispatch_alpha_last,  3
 
 INIT_YMM avx2
-cglobal dispatch_alpha, 3, 4, 4, dst, src, n
-    mova      m3, [pd_rgbmask]
-    sub       nd, 16
-    jl        .tail
-.loop16:
-    pmovzxbd  m0, [srcq]
-    pmovzxbd  m1, [srcq + 8]
-    pand      m2, m3, [dstq +  0]
-    por       m2, m0
-    movu      [dstq +  0], m2
-    pand      m2, m3, [dstq + 32]
-    por       m2, m1
-    movu      [dstq + 32], m2
-    add       srcq, 16
-    add       dstq, 64
-    sub       nd, 16
-    jge       .loop16
-.tail:
-    add       nd, 16
-    jz        .end
-.tail_loop:
-    movzx     r3d, byte [srcq]
-    mov       [dstq], r3b
-    inc       srcq
-    add       dstq, 4
-    dec       nd
-    jg        .tail_loop
-.end:
-    RET
+DISPATCH_ALPHA dispatch_alpha_first, 0
+DISPATCH_ALPHA dispatch_alpha_last,  3

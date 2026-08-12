@@ -75,14 +75,18 @@ static void check_upsample_block(WPDYUVDSP *dsp, int layout, const char *name) {
     }
 }
 
-static void check_dispatch_alpha(WPDYUVDSP *dsp) {
+/* This only sees a byte that comes back with the wrong value in it. The row
+   is rewritten a group of pixels at a time, so a group that reaches past the
+   row puts back the bytes it found there and no comparison against the C
+   reference can tell; tests/rowbounds.c is what covers that. */
+static void check_dispatch_alpha(dispatch_alpha_func func, const char *name) {
     static const int lengths[] = {1, 3, 8, 15, 16, 17, 31, 63, 64, MAX_PIXELS};
     LOCAL_ALIGNED_16(uint8_t, src, [MAX_PIXELS]);
     LOCAL_ALIGNED_16(uint8_t, dst0, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
     LOCAL_ALIGNED_16(uint8_t, dst1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
     declare_func(void, uint8_t *, const uint8_t *, int);
 
-    if (check_func(dsp->dispatch_alpha, "dispatch_alpha")) {
+    if (check_func(func, "%s", name)) {
         for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
             const int n = lengths[i];
 
@@ -483,7 +487,8 @@ void checkasm_check_yuvdsp(void) {
     check_upsample_block(&dsp, WPD_LAYOUT_RGB, "rgb");
     check_upsample_block(&dsp, WPD_LAYOUT_BGR, "bgr");
     report("upsample_block");
-    check_dispatch_alpha(&dsp);
+    check_dispatch_alpha(dsp.dispatch_alpha_first, "dispatch_alpha_first");
+    check_dispatch_alpha(dsp.dispatch_alpha_last, "dispatch_alpha_last");
     report("dispatch_alpha");
     check_pack_row(dsp.pack_rgba, "pack_rgba", 4);
     check_pack_row(dsp.pack_bgra, "pack_bgra", 4);
