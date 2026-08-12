@@ -190,25 +190,33 @@ upsample_block bgra
 upsample_block rgb
 upsample_block bgr
 
-function ff_dispatch_alpha_neon, export=1
+.macro dispatch_alpha pos, off
+function ff_dispatch_alpha_\pos\()_neon, export=1
         cmp             w2,  #16
         b.lt            2f
-1:      ldr             q0,  [x1], #16
-        ld4             {v1.16b-v4.16b}, [x0]
+1:      ldr             q4,  [x1], #16
+        ld4             {v0.16b-v3.16b}, [x0]
         sub             w2,  w2,  #16
-        mov             v1.16b,  v2.16b
-        mov             v2.16b,  v3.16b
+.if \off == 0
+        mov             v0.16b,  v4.16b
+.else
         mov             v3.16b,  v4.16b
+.endif
         st4             {v0.16b-v3.16b}, [x0], #64
         cmp             w2,  #16
         b.ge            1b
 2:      cbz             w2,  9f
 3:      ldrb            w3,  [x1], #1
         subs            w2,  w2,  #1
-        strb            w3,  [x0], #4
+        strb            w3,  [x0, #\off]
+        add             x0,  x0,  #4
         b.gt            3b
 9:      ret
 endfunc
+.endm
+
+dispatch_alpha first, 0
+dispatch_alpha last,  3
 
 function ff_pack_rgba_neon, export=1
         cmp             w2,  #16

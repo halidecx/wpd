@@ -211,8 +211,14 @@ UPSAMPLE_PAIRS(rgb, 3)
 UPSAMPLE_PAIRS(bgr, 3)
 #undef UPSAMPLE_PAIRS
 
-static void dispatch_alpha_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
+static void dispatch_alpha_first_c(uint8_t *dst, const uint8_t *src,
+                                   int num_pixels) {
     for (int i = 0; i < num_pixels; i++) dst[4 * i] = src[i];
+}
+
+static void dispatch_alpha_last_c(uint8_t *dst, const uint8_t *src,
+                                  int num_pixels) {
+    for (int i = 0; i < num_pixels; i++) dst[4 * i + 3] = src[i];
 }
 
 static void pack_rgba_c(uint8_t *dst, const uint8_t *src, int num_pixels) {
@@ -597,7 +603,8 @@ int wpd_yuv420_to_packed_rows(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
                               const uint8_t *v, ptrdiff_t uv_stride,
                               const uint8_t *a, ptrdiff_t a_stride, int width,
                               int height, int row_start, int row_end) {
-    const int first = upsample_first_row(row_start);
+    const int           first = upsample_first_row(row_start);
+    dispatch_alpha_func dispatch;
 
     if (width <= 0 || height <= 0 || row_start >= row_end)
         return row_start;
@@ -677,11 +684,12 @@ int wpd_yuv420_to_packed_rows(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
 
     if (!a || layout == WPD_LAYOUT_RGB || layout == WPD_LAYOUT_BGR)
         return first;
-    dst += layout == WPD_LAYOUT_ARGB ? 0 : 3;
+    dispatch = layout == WPD_LAYOUT_ARGB ? dsp->dispatch_alpha_first
+                                         : dsp->dispatch_alpha_last;
     for (int j = first; j < row_end; j++)
-        dsp->dispatch_alpha(dst + (ptrdiff_t)j * dst_stride,
-                            a + (ptrdiff_t)j * a_stride,
-                            width);
+        dispatch(dst + (ptrdiff_t)j * dst_stride,
+                 a + (ptrdiff_t)j * a_stride,
+                 width);
     return first;
 }
 
@@ -767,9 +775,9 @@ void wpd_yuv420_to_packed_simple(const WPDYUVDSP *dsp, int layout, uint8_t *dst,
             }
         }
         if (a && layout != WPD_LAYOUT_RGB && layout != WPD_LAYOUT_BGR)
-            dsp->dispatch_alpha(out + (layout == WPD_LAYOUT_ARGB ? 0 : 3),
-                                a + (ptrdiff_t)j * a_stride,
-                                width);
+            (layout == WPD_LAYOUT_ARGB ? dsp->dispatch_alpha_first
+                                       : dsp->dispatch_alpha_last)(
+                out, a + (ptrdiff_t)j * a_stride, width);
     }
 }
 
@@ -780,7 +788,8 @@ wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {
                                       upsample_block_bgra_c,
                                       upsample_block_rgb_c,
                                       upsample_block_bgr_c},
-        .dispatch_alpha            = dispatch_alpha_c,
+        .dispatch_alpha_first      = dispatch_alpha_first_c,
+        .dispatch_alpha_last       = dispatch_alpha_last_c,
         .pack_rgba                 = pack_rgba_c,
         .pack_bgra                 = pack_bgra_c,
         .pack_rgb                  = pack_rgb_c,

@@ -2746,9 +2746,9 @@ static int convert_to_packed(WPDDecoder *s, WebPImage *dst,
         if (image_nb_components(src) == 4 && layout != WPD_LAYOUT_RGB &&
             layout != WPD_LAYOUT_BGR)
             for (int y = 0; y < src->height; y++)
-                s->ydsp.dispatch_alpha(
-                    dst->data[0] + (ptrdiff_t)y * dst->linesize[0] +
-                        (layout == WPD_LAYOUT_ARGB ? 0 : 3),
+                (layout == WPD_LAYOUT_ARGB ? s->ydsp.dispatch_alpha_first
+                                           : s->ydsp.dispatch_alpha_last)(
+                    dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
                     src->data[3] + (ptrdiff_t)y * src->linesize[3],
                     src->width);
         return 0;

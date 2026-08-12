@@ -31,8 +31,14 @@ UPSAMPLE_ARGB_BLOCK(bgr_avx2)
 #endif
 #undef UPSAMPLE_ARGB_BLOCK
 
-void ff_dispatch_alpha_sse2(uint8_t *dst, const uint8_t *src, int num_pixels);
-void ff_dispatch_alpha_avx2(uint8_t *dst, const uint8_t *src, int num_pixels);
+void ff_dispatch_alpha_first_sse2(uint8_t *dst, const uint8_t *src,
+                                  int num_pixels);
+void ff_dispatch_alpha_last_sse2(uint8_t *dst, const uint8_t *src,
+                                 int num_pixels);
+void ff_dispatch_alpha_first_avx2(uint8_t *dst, const uint8_t *src,
+                                  int num_pixels);
+void ff_dispatch_alpha_last_avx2(uint8_t *dst, const uint8_t *src,
+                                 int num_pixels);
 
 #define PACK_ROW(name, cpu) \
     void ff_pack_##name##_##cpu(uint8_t *dst, const uint8_t *src, int n);
@@ -80,7 +86,8 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_RGB]  = ff_upsample_block_rgb_sse2;
         dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_sse2;
 #endif
-        dsp->dispatch_alpha = ff_dispatch_alpha_sse2;
+        dsp->dispatch_alpha_first = ff_dispatch_alpha_first_sse2;
+        dsp->dispatch_alpha_last  = ff_dispatch_alpha_last_sse2;
     }
     if (flags & WPD_X86_CPU_FLAG_SSSE3) {
 #if WPD_ARCH_X86_64
@@ -109,7 +116,8 @@ static wpd_always_inline void wpd_yuv_dsp_init_x86(WPDYUVDSP *dsp) {
         dsp->upsample_block[WPD_LAYOUT_BGR]  = ff_upsample_block_bgr_avx2;
         dsp->argb_to_uv                      = ff_argb_to_uv_avx2;
 #endif
-        dsp->dispatch_alpha            = ff_dispatch_alpha_avx2;
+        dsp->dispatch_alpha_first      = ff_dispatch_alpha_first_avx2;
+        dsp->dispatch_alpha_last       = ff_dispatch_alpha_last_avx2;
         dsp->pack_rgba                 = ff_pack_rgba_avx2;
         dsp->pack_bgra                 = ff_pack_bgra_avx2;
         dsp->pack_rgb                  = ff_pack_rgb_avx2;

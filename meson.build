@@ -287,6 +287,19 @@ fuzz_test = executable(
   install: false,
 )
 
+# A row function writing outside its row is invisible to the reference
+# comparisons, so this one backs each row onto an unmapped page instead.
+if cc.has_header('sys/mman.h')
+  rowbounds_test = executable(
+    'test_rowbounds',
+    files('tests/rowbounds.c'),
+    dependencies: wpd_dep,
+    c_args: lib_c_args,
+    install: false,
+  )
+  test('rowbounds', rowbounds_test, suite: 'rowbounds')
+endif
+
 md5_test = executable(
   'test_md5',
   files(
