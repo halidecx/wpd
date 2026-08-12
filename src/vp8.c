@@ -631,7 +631,8 @@ static int update_dimensions(VP8Context *s, int width, int height) {
     s->mb_width  = (width + 15) / 16;
     s->mb_height = (height + 15) / 16;
 
-    s->filter_strength = wpd_mallocz(s->mb_width * sizeof(*s->filter_strength));
+    s->filter_strength        = wpd_mallocz((size_t)s->mb_width * s->mb_height *
+                                            sizeof(*s->filter_strength));
     s->intra4x4_pred_mode_top = wpd_mallocz(s->mb_width * 4);
     s->top_nnz                = wpd_mallocz(s->mb_width * sizeof(*s->top_nnz));
     s->top_border = wpd_mallocz((s->mb_width + 1) * sizeof(*s->top_border));
@@ -1426,21 +1427,36 @@ static wpd_always_inline void filter_mb_simple(VP8Context *s, uint8_t *dst,
     }
 }
 
-static void filter_mb_row(VP8Context *s, WpdFrame *curframe, int mb_y) {
-    VP8FilterStrength *f      = s->filter_strength;
-    uint8_t           *dst[3] = {curframe->data[0] + 16 * mb_y * s->linesize,
-                                 curframe->data[1] + 8 * mb_y * s->uvlinesize,
-                                 curframe->data[2] + 8 * mb_y * s->uvlinesize};
-    int                mb_x;
+/* Saves the unfiltered bottom edge of a decoded row for the row below to
+   predict from. It used to happen a macroblock ahead of filtering it, which
+   only works while the two run on the same thread in the same pass. */
+static void backup_mb_row(VP8Context *s, WpdFrame *curframe, int mb_y) {
+    uint8_t *dst[3] = {curframe->data[0] + 16 * mb_y * s->linesize,
+                       curframe->data[1] + 8 * mb_y * s->uvlinesize,
+                       curframe->data[2] + 8 * mb_y * s->uvlinesize};
 
-    for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
+    for (int mb_x = 0; mb_x < s->mb_width; mb_x++) {
         backup_mb_border(s->top_border[mb_x + 1],
                          dst[0],
                          dst[1],
                          dst[2],
                          s->linesize,
                          s->uvlinesize,
-                         0);
+                         s->filter.simple);
+        dst[0] += 16;
+        dst[1] += 8;
+        dst[2] += 8;
+    }
+}
+
+static void filter_mb_row(VP8Context *s, WpdFrame *curframe, int mb_y) {
+    VP8FilterStrength *f      = s->filter_strength + (size_t)mb_y * s->mb_width;
+    uint8_t           *dst[3] = {curframe->data[0] + 16 * mb_y * s->linesize,
+                                 curframe->data[1] + 8 * mb_y * s->uvlinesize,
+                                 curframe->data[2] + 8 * mb_y * s->uvlinesize};
+    int                mb_x;
+
+    for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
         filter_mb(s, dst, f++, mb_x, mb_y);
         dst[0] += 16;
         dst[1] += 8;
@@ -1449,16 +1465,21 @@ static void filter_mb_row(VP8Context *s, WpdFrame *curframe, int mb_y) {
 }
 
 static void filter_mb_row_simple(VP8Context *s, WpdFrame *curframe, int mb_y) {
-    VP8FilterStrength *f   = s->filter_strength;
+    VP8FilterStrength *f   = s->filter_strength + (size_t)mb_y * s->mb_width;
     uint8_t           *dst = curframe->data[0] + 16 * mb_y * s->linesize;
     int                mb_x;
 
     for (mb_x = 0; mb_x < s->mb_width; mb_x++) {
-        backup_mb_border(
-            s->top_border[mb_x + 1], dst, NULL, NULL, s->linesize, 0, 1);
         filter_mb_simple(s, dst, f++, mb_x, mb_y);
         dst += 16;
     }
+}
+
+void vp8_filter_row(VP8Context *s, int mb_y) {
+    if (s->filter.simple)
+        filter_mb_row_simple(s, &s->frame, mb_y);
+    else
+        filter_mb_row(s, &s->frame, mb_y);
 }
 
 typedef struct VP8ResumeState {
@@ -1631,7 +1652,10 @@ static wpd_always_inline int decode_rows_tmpl(VP8Context *s,
             }
 
             if (s->deblock_filter)
-                filter_level_for_mb(s, &mb, &s->filter_strength[mb_x]);
+                filter_level_for_mb(
+                    s,
+                    &mb,
+                    &s->filter_strength[(size_t)mb_y * s->mb_width + mb_x]);
 
             dst[0] += 16;
             dst[1] += 8;
@@ -1639,7 +1663,14 @@ static wpd_always_inline int decode_rows_tmpl(VP8Context *s,
         }
 
         if (s->deblock_filter) {
-            if (s->filter.simple)
+            backup_mb_row(s, curframe, mb_y);
+            /* Reconstructing the row below swaps unfiltered pixels through
+               this row's last line, so a row can only be filtered once the
+               row below it is decoded; the filter thread is told what is
+               decoded and stays two rows back. */
+            if (s->filter_progress)
+                wpd_progress_set(s->filter_progress, mb_y + 1);
+            else if (s->filter.simple)
                 filter_mb_row_simple(s, curframe, mb_y);
             else
                 filter_mb_row(s, curframe, mb_y);
@@ -1653,6 +1684,8 @@ static wpd_always_inline int decode_rows_tmpl(VP8Context *s,
 
     s->mb_y         = s->mb_height;
     s->mb_rows_done = s->mb_height;
+    if (s->deblock_filter && s->filter_progress)
+        wpd_progress_set(s->filter_progress, s->mb_height + 1);
     return 0;
 }
 

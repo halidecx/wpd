@@ -720,6 +720,10 @@ struct WPDDecoder {
 
     WpdTaskPool *pool;
     int          pool_threads;
+    /* The lossy loop filter, which trails the row loop by two rows. */
+    WpdProgress filter_progress;
+    int         filter_progress_ready;
+    WpdTaskJob  filter_job;
 
     int width, height;
     /* The colour image, and the alpha plane that can decode alongside it. */
@@ -2094,6 +2098,59 @@ static WpdTaskPool *decoder_pool(WPDDecoder *s) {
     return s->pool;
 }
 
+/* Reconstructing a row swaps unfiltered pixels through the last line of the
+   row above, so a row may only be filtered once the row below it has been
+   decoded. */
+static int filter_task(void *arg, int index) {
+    WPDDecoder *s   = arg;
+    VP8Context *vp8 = &s->vp8;
+
+    (void)index;
+    for (int mb_y = 0; mb_y < vp8->mb_height; mb_y++) {
+        const int target = mb_y + 2 < vp8->mb_height ? mb_y + 2
+                                                     : vp8->mb_height + 1;
+
+        if (wpd_progress_wait(&s->filter_progress, target) ==
+            WPD_PROGRESS_ERROR)
+            return 0;
+        vp8_filter_row(vp8, mb_y);
+    }
+    return 0;
+}
+
+/* Returns 1 when a worker took the filter, so that filter_end() collects it.
+   Frames small enough that the handoff costs more than it saves, and every
+   resumable decode, keep it on the calling thread. */
+static int filter_begin(WPDDecoder *s) {
+    if (!s->codec.bypass_filtering && s->vp8.deblock_filter &&
+        (int64_t)s->width * s->height >= ALPHA_THREAD_MIN_PIXELS) {
+        if (!s->filter_progress_ready) {
+            if (wpd_progress_init(&s->filter_progress) < 0)
+                return 0;
+            s->filter_progress_ready = 1;
+        }
+        wpd_progress_reset(&s->filter_progress);
+        s->vp8.filter_progress = &s->filter_progress;
+        if (wpd_task_submit_async(
+                decoder_pool(s), &s->filter_job, filter_task, s))
+            return 1;
+        s->vp8.filter_progress = NULL;
+    }
+    return 0;
+}
+
+static int filter_end(WPDDecoder *s, int begun, int failed) {
+    if (!begun)
+        return 0;
+    /* A row loop that stopped early would leave the filter waiting for rows
+       that are never coming. */
+    if (failed)
+        wpd_progress_set(&s->filter_progress, WPD_PROGRESS_ERROR);
+    wpd_task_wait(s->pool, &s->filter_job);
+    s->vp8.filter_progress = NULL;
+    return 0;
+}
+
 static int alpha_task(void *arg, int index) {
     WPDDecoder *s = arg;
 
@@ -2249,7 +2306,7 @@ static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
                                   const uint8_t *data_start,
                                   unsigned int   data_size) {
     WpdFrame decoded;
-    int      alpha = 0, ret;
+    int      alpha = 0, filter, ret;
 
     if ((ret = vp8_lossy_init(s)) < 0)
         return ret;
@@ -2267,7 +2324,9 @@ static int vp8_lossy_decode_frame(WPDDecoder *s, WebPImage *out,
     if (s->has_alpha && (alpha = alpha_begin(s, out)) < 0)
         return alpha;
 
-    ret = vp8_decode_frame_rows(&s->codec, &decoded);
+    filter = filter_begin(s);
+    ret    = vp8_decode_frame_rows(&s->codec, &decoded);
+    filter_end(s, filter, ret < 0);
     if (alpha > 0) {
         const int alpha_ret = alpha_end(s, alpha);
         if (ret >= 0 && alpha_ret < 0)
@@ -4941,6 +5000,8 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     if (!decoder)
         return;
     wpd_task_pool_free(decoder->pool);
+    if (decoder->filter_progress_ready)
+        wpd_progress_destroy(&decoder->filter_progress);
     if (decoder->vp8_initialized)
         vp8_decode_free(&decoder->codec);
     image_free(&decoder->canvas);

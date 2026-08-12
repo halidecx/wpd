@@ -167,6 +167,7 @@ void wpd_task_submit(WpdTaskPool *pool, WpdTaskJob *job, wpd_task_func func,
     job->arg   = arg;
     job->count = count;
     job->next  = NULL;
+    job->gated = 0;
     atomic_store(&job->error, 0);
 
     if (pool && count > 0)
@@ -193,6 +194,34 @@ void wpd_task_submit(WpdTaskPool *pool, WpdTaskJob *job, wpd_task_func func,
     wpd_mutex_unlock(&pool->lock);
 }
 
+int wpd_task_submit_async(WpdTaskPool *pool, WpdTaskJob *job,
+                          wpd_task_func func, void *arg) {
+    if (!pool)
+        return 0;
+    pool_grow(pool, 1);
+    if (!pool->nb_started)
+        return 0;
+
+    job->func  = func;
+    job->arg   = arg;
+    job->count = 1;
+    job->next  = NULL;
+    job->gated = 1;
+    atomic_store(&job->error, 0);
+    atomic_store(&job->claimed, 0);
+    atomic_store(&job->finished, 0);
+    wpd_mutex_lock(&pool->lock);
+    if (pool->tail)
+        pool->tail->next = job;
+    else
+        pool->head = job;
+    pool->tail = job;
+    if (!atomic_exchange(&pool->signaled, 1))
+        wpd_cond_signal(&pool->work);
+    wpd_mutex_unlock(&pool->lock);
+    return 1;
+}
+
 int wpd_task_wait(WpdTaskPool *pool, WpdTaskJob *job) {
     if (!pool || job->count <= 0)
         return atomic_load(&job->error);
@@ -206,7 +235,7 @@ int wpd_task_wait(WpdTaskPool *pool, WpdTaskJob *job) {
         if (atomic_load_explicit(&job->finished, memory_order_relaxed) >=
             job->count)
             break;
-        if (!pool_claim(pool, job, &index)) {
+        if (job->gated || !pool_claim(pool, job, &index)) {
             wpd_cond_wait(&pool->done, &pool->lock);
             continue;
         }
@@ -217,6 +246,45 @@ int wpd_task_wait(WpdTaskPool *pool, WpdTaskJob *job) {
     }
     wpd_mutex_unlock(&pool->lock);
     return atomic_load(&job->error);
+}
+
+int wpd_progress_init(WpdProgress *p) {
+    p->value = 0;
+    if (wpd_mutex_init(&p->lock) < 0)
+        return -1;
+    if (wpd_cond_init(&p->cond) < 0) {
+        wpd_mutex_destroy(&p->lock);
+        return -1;
+    }
+    return 0;
+}
+
+void wpd_progress_destroy(WpdProgress *p) {
+    wpd_cond_destroy(&p->cond);
+    wpd_mutex_destroy(&p->lock);
+}
+
+void wpd_progress_reset(WpdProgress *p) {
+    wpd_mutex_lock(&p->lock);
+    p->value = 0;
+    wpd_mutex_unlock(&p->lock);
+}
+
+void wpd_progress_set(WpdProgress *p, int value) {
+    wpd_mutex_lock(&p->lock);
+    p->value = value;
+    wpd_cond_broadcast(&p->cond);
+    wpd_mutex_unlock(&p->lock);
+}
+
+int wpd_progress_wait(WpdProgress *p, int target) {
+    int value;
+
+    wpd_mutex_lock(&p->lock);
+    while (p->value < target) wpd_cond_wait(&p->cond, &p->lock);
+    value = p->value;
+    wpd_mutex_unlock(&p->lock);
+    return value;
 }
 
 #else /* !WPD_HAVE_THREADS */
@@ -247,6 +315,29 @@ void wpd_task_submit(WpdTaskPool *pool, WpdTaskJob *job, wpd_task_func func,
 int wpd_task_wait(WpdTaskPool *pool, WpdTaskJob *job) {
     (void)pool;
     return atomic_load(&job->error);
+}
+
+int wpd_progress_init(WpdProgress *p) {
+    p->value = 0;
+    return 0;
+}
+
+void wpd_progress_destroy(WpdProgress *p) { (void)p; }
+void wpd_progress_reset(WpdProgress *p) { p->value = 0; }
+void wpd_progress_set(WpdProgress *p, int value) { p->value = value; }
+
+int wpd_progress_wait(WpdProgress *p, int target) {
+    (void)target;
+    return p->value;
+}
+
+int wpd_task_submit_async(WpdTaskPool *pool, WpdTaskJob *job,
+                          wpd_task_func func, void *arg) {
+    (void)pool;
+    (void)job;
+    (void)func;
+    (void)arg;
+    return 0;
 }
 
 #endif /* WPD_HAVE_THREADS */

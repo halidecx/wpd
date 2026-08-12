@@ -4,6 +4,7 @@
 #include "vp56rac.h"
 #include "vp8dsp.h"
 #include "vp8pred.h"
+#include "wpd_task.h"
 
 #define VP8_MAX_QUANT 127
 #define MODE_I4 4
@@ -65,6 +66,9 @@ typedef struct VP8Context {
     } filter;
 
     VP8FilterStrength *filter_strength;
+    /* Set while the loop filter runs on another thread, in which case the row
+       loop publishes what it has decoded instead of filtering. */
+    WpdProgress *filter_progress;
 
     uint8_t *intra4x4_pred_mode_top;
     uint8_t  intra4x4_pred_mode_left[4];
@@ -126,8 +130,11 @@ void vp8_decode_extend(WpdCodecContext *context, const uint8_t *chunk,
 /* Decodes every row of a frame whose data is all present, where
    vp8_decode_rows() resumes one that is still arriving. */
 int vp8_decode_frame_rows(WpdCodecContext *context, void *frame);
-int vp8_decode_rows(WpdCodecContext *context, void *frame);
-int vp8_rows_finalized(const WpdCodecContext *context);
-int vp8_decode_free(WpdCodecContext *context);
+/* Filters one macroblock row of the frame being decoded. Safe to run while the
+   row loop is at least two rows further on. */
+void vp8_filter_row(VP8Context *context, int mb_y);
+int  vp8_decode_rows(WpdCodecContext *context, void *frame);
+int  vp8_rows_finalized(const WpdCodecContext *context);
+int  vp8_decode_free(WpdCodecContext *context);
 
 #endif
