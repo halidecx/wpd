@@ -866,12 +866,17 @@ PREMULTIPLY_ROW
 PREMULTIPLY_ROW_4444
 ARGB_TO_Y
 
+; The 16-pixel body rewrites the colour bytes it read alongside the alpha it
+; sets, so its 64-byte store runs three bytes past the sixteenth alpha byte
+; where alpha is the last component. Those bytes belong to the pixel after,
+; which must therefore exist: the last group of up to sixteen goes one byte at
+; a time instead.
 INIT_XMM sse2
 cglobal dispatch_alpha, 3, 4, 7, dst, src, n
     pxor      m5, m5
     mova      m4, [pd_rgbmask]
     sub       nd, 16
-    jl        .tail
+    jle       .tail
 .loop16:
     movu      m0, [srcq]
     punpckhbw m1, m0, m5
@@ -899,7 +904,7 @@ cglobal dispatch_alpha, 3, 4, 7, dst, src, n
     add       srcq, 16
     add       dstq, 64
     sub       nd, 16
-    jge       .loop16
+    jg        .loop16
 .tail:
     add       nd, 16
     jz        .end
@@ -917,7 +922,7 @@ INIT_YMM avx2
 cglobal dispatch_alpha, 3, 4, 4, dst, src, n
     mova      m3, [pd_rgbmask]
     sub       nd, 16
-    jl        .tail
+    jle       .tail
 .loop16:
     pmovzxbd  m0, [srcq]
     pmovzxbd  m1, [srcq + 8]
@@ -930,7 +935,7 @@ cglobal dispatch_alpha, 3, 4, 4, dst, src, n
     add       srcq, 16
     add       dstq, 64
     sub       nd, 16
-    jge       .loop16
+    jg        .loop16
 .tail:
     add       nd, 16
     jz        .end

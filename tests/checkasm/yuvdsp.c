@@ -82,18 +82,26 @@ static void check_dispatch_alpha(WPDYUVDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, dst1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
     declare_func(void, uint8_t *, const uint8_t *, int);
 
+    /* The decoder points this at the alpha byte of the first pixel, which is
+       the last component for every layout but ARGB. An implementation that
+       rewrites whole pixels has to stop at the last one either way, so both
+       offsets have to be walked. */
+    static const int offsets[] = {0, 3};
+
     if (check_func(dsp->dispatch_alpha, "dispatch_alpha")) {
-        for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-            const int n = lengths[i];
+        for (size_t o = 0; o < sizeof(offsets) / sizeof(*offsets); o++) {
+            for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+                const int n = lengths[i];
 
-            for (int x = 0; x < MAX_PIXELS; x++) src[x] = (uint8_t)rnd();
-            for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
-                dst0[x] = dst1[x] = (uint8_t)rnd();
+                for (int x = 0; x < MAX_PIXELS; x++) src[x] = (uint8_t)rnd();
+                for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                    dst0[x] = dst1[x] = (uint8_t)rnd();
 
-            call_ref(dst0, src, n);
-            call_new(dst1, src, n);
-            if (memcmp(dst0, dst1, sizeof(dst0)))
-                fail();
+                call_ref(dst0 + offsets[o], src, n);
+                call_new(dst1 + offsets[o], src, n);
+                if (memcmp(dst0, dst1, sizeof(dst0)))
+                    fail();
+            }
         }
         bench_new(dst1, src, MAX_PIXELS);
     }

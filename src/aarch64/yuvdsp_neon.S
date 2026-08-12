@@ -190,8 +190,13 @@ upsample_block bgra
 upsample_block rgb
 upsample_block bgr
 
+// The 16-pixel body rewrites the colour bytes it read alongside the alpha it
+// sets, so its 64-byte store runs three bytes past the sixteenth alpha byte
+// where alpha is the last component. Those bytes belong to the pixel after,
+// which must therefore exist: the last group of up to sixteen goes one byte at
+// a time instead.
 function ff_dispatch_alpha_neon, export=1
-        cmp             w2,  #16
+        cmp             w2,  #17
         b.lt            2f
 1:      ldr             q0,  [x1], #16
         ld4             {v1.16b-v4.16b}, [x0]
@@ -200,7 +205,7 @@ function ff_dispatch_alpha_neon, export=1
         mov             v2.16b,  v3.16b
         mov             v3.16b,  v4.16b
         st4             {v0.16b-v3.16b}, [x0], #64
-        cmp             w2,  #16
+        cmp             w2,  #17
         b.ge            1b
 2:      cbz             w2,  9f
 3:      ldrb            w3,  [x1], #1

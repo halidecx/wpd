@@ -24,6 +24,13 @@ typedef void (*upsample_argb_block_func)(
     const uint8_t *top_v, const uint8_t *cur_u, const uint8_t *cur_v,
     uint8_t *top_dst, uint8_t *bottom_dst, int num_blocks);
 
+/* Writes one alpha byte every four bytes of 'dst'. An implementation may
+   rewrite the colour bytes in between with what it read, since it is given a
+   whole row, but it must not touch anything past the last pixel's alpha byte:
+   that belongs to the next row, which another thread may be converting. A
+   comparison against the C version cannot see a byte rewritten with the value
+   already there, and no sanitizer instruments assembly, so nothing but a
+   decode split across threads will catch it. */
 typedef void (*dispatch_alpha_func)(uint8_t *dst, const uint8_t *src,
                                     int num_pixels);
 
