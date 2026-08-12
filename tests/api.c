@@ -2334,6 +2334,38 @@ static void test_scaled_premultiply(const char *path) {
     free(data);
 }
 
+/* Frames are decoded ahead of the one being handed out, so a decoder can be
+   reopened, or handed different memory, while that work is still running
+   against the buffer it is about to lose. */
+static void test_reopen_midway(const char *path, const char *other) {
+    size_t      size, other_size;
+    uint8_t    *data    = read_file(path, &size);
+    uint8_t    *data2   = read_file(other, &other_size);
+    WPDDecoder *decoder = wpd_decoder_create();
+    WPDFrame    frame   = WPD_FRAME_INIT;
+    int         frames  = 0;
+
+    CHECK(data && data2 && decoder);
+    if (!data || !data2 || !decoder)
+        goto done;
+
+    for (int round = 0; round < 3; round++) {
+        CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
+        /* Stop one frame in, leaving the frames after it in flight. */
+        CHECK(wpd_decoder_next_frame(decoder, &frame) == 1);
+        CHECK(wpd_decoder_open_borrowed(decoder, data2, other_size) == WPD_OK);
+        while (wpd_decoder_next_frame(decoder, &frame) > 0) frames++;
+        CHECK(wpd_decoder_open(decoder, data, size) == WPD_OK);
+        CHECK(wpd_decoder_next_frame(decoder, &frame) == 1);
+    }
+    CHECK(frames > 0);
+
+done:
+    wpd_decoder_free(decoder);
+    free(data);
+    free(data2);
+}
+
 static void test_replacement_animation(const char *path) {
     size_t            size;
     uint8_t          *data    = read_file(path, &size);
@@ -2407,6 +2439,12 @@ int main(int argc, char **argv) {
         snprintf(path, sizeof(path), "%s/anim_yuva.webp", dir);
         test_file_info(path, 422, 480, 1, 1, 14, WPD_CODING_UNKNOWN);
         test_threads_match(path, WPD_PIX_FMT_ARGB);
+        {
+            char other[512];
+
+            snprintf(other, sizeof(other), "%s/anim_rgb.webp", dir);
+            test_reopen_midway(path, other);
+        }
         test_replacement_animation(path);
         test_scaled_premultiply(path);
         test_scaled_premultiply_identity(path);

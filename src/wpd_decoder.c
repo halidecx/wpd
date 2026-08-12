@@ -720,6 +720,12 @@ struct WPDDecoder {
 
     WpdTaskPool *pool;
     int          pool_threads;
+    /* Animation frames decoded ahead of being composited. Compositing depends
+       on every frame before it, but decoding one does not depend on anything
+       but its own bytes. */
+    struct AnimSlot *anim_slot;
+    int              nb_anim_slots;
+    int              anim_lookahead;
     /* The lossy loop filter, which trails the row loop by two rows. */
     WpdProgress filter_progress;
     int         filter_progress_ready;
@@ -3152,36 +3158,13 @@ static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
     return 0;
 }
 
-static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
-    const uint8_t   *p = data, *end = data + size;
-    const WebPImage *sub = NULL;
-    int              declared_width, declared_height;
-    int              ret;
-
-    if (size < 16)
-        return WPD_ERROR_INVALID_DATA;
-
-    s->pos_x          = WPD_RL24(p) * 2;
-    s->pos_y          = WPD_RL24(p + 3) * 2;
-    declared_width    = WPD_RL24(p + 6) + 1;
-    declared_height   = WPD_RL24(p + 9) + 1;
-    s->frame_duration = WPD_RL24(p + 12);
-    s->anmf_flags     = p[15];
-    p += 16;
-
-    if (s->pos_x + declared_width > s->canvas_width ||
-        s->pos_y + declared_height > s->canvas_height) {
-        wpd_log(NULL,
-                WPD_LOG_ERROR,
-                "Frame (%dx%d at pos %dx%d) does not fit into canvas (%dx%d)\n",
-                declared_width,
-                declared_height,
-                s->pos_x,
-                s->pos_y,
-                s->canvas_width,
-                s->canvas_height);
-        return WPD_ERROR_INVALID_DATA;
-    }
+/* Walks an ANMF frame's sub-chunks and decodes the image in them. Everything
+   it touches belongs to the decoder it is given, which is a slot of its own
+   when frames are decoded ahead of being composited. */
+static int anmf_decode_image(WPDDecoder *s, const uint8_t *p,
+                             const uint8_t *end, WebPImage **out) {
+    WebPImage *sub = NULL;
+    int        ret;
 
     s->has_alpha = 0;
     s->width     = 0;
@@ -3248,6 +3231,243 @@ static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         }
         p += padded_size;
     }
+
+    *out = sub;
+    return 0;
+}
+
+/* An animation frame decoded ahead of the one being composited. The decoder
+   inside is a plain one used for nothing but a subframe, so every function the
+   decode reaches works unchanged; it is kept single-threaded, since the
+   parallelism here is whole frames. */
+typedef struct AnimSlot {
+    WPDDecoder *dec;
+    WpdTaskJob  job;
+    size_t      offset; /* of the ANMF payload in the file, 0 when unused */
+    size_t      size;
+    WebPImage  *sub;
+    int         result;
+    int         running;
+} AnimSlot;
+
+/* Frames below this are not worth a handoff, and neither is an animation the
+   pool cannot outrun. */
+#define ANIM_SLOT_MIN_PIXELS (96 * 96)
+#define ANIM_MAX_SLOTS 8
+/* Planar luma and chroma, and the ARGB a frame is composited through. */
+#define ANIM_SLOT_BYTES_PER_PIXEL 6
+#define ANIM_SLOT_BUDGET (64 << 20)
+
+static int anim_slot_task(void *arg, int index) {
+    AnimSlot      *slot = arg;
+    WPDDecoder    *dec  = slot->dec;
+    const uint8_t *p    = file_at(dec, slot->offset);
+
+    (void)index;
+    /* The sub-chunks follow the 16-byte ANMF header, which the compositing
+       side reads for itself. */
+    slot->result = anmf_decode_image(dec, p + 16, p + slot->size, &slot->sub);
+    return 0;
+}
+
+static void anim_slots_join(WPDDecoder *s) {
+    for (int i = 0; i < s->nb_anim_slots; i++) {
+        AnimSlot *slot = &s->anim_slot[i];
+
+        if (slot->running) {
+            wpd_task_wait(s->pool, &slot->job);
+            slot->running = 0;
+        }
+        slot->offset = 0;
+    }
+}
+
+static void anim_slots_free(WPDDecoder *s) {
+    if (!s->anim_slot)
+        return;
+    anim_slots_join(s);
+    for (int i = 0; i < s->nb_anim_slots; i++)
+        wpd_decoder_free(s->anim_slot[i].dec);
+    free(s->anim_slot);
+    s->anim_slot     = NULL;
+    s->nb_anim_slots = 0;
+}
+
+/* Points a slot's decoder at the same input and canvas the parent has, which
+   is all a subframe decode reads besides its own bytes. */
+static void anim_slot_sync(WPDDecoder *s, AnimSlot *slot) {
+    WPDDecoder *dec = slot->dec;
+
+    dec->file          = s->file;
+    dec->file_size     = s->file_size;
+    dec->discarded     = s->discarded;
+    dec->canvas_width  = s->canvas_width;
+    dec->canvas_height = s->canvas_height;
+    dec->animation     = s->animation;
+    dec->out_format    = s->out_format;
+    dec->premultiply   = s->premultiply;
+}
+
+/* Reads the ANMF chunks after 'pos' and starts decoding the images in them.
+   Only ever called for a file that is all here, so a chunk it finds is a
+   chunk it can read to the end. */
+static void anim_slots_fill(WPDDecoder *s, size_t pos) {
+    size_t at     = pos;
+    int    queued = 0;
+
+    for (int i = 0; i < s->nb_anim_slots; i++)
+        if (s->anim_slot[i].running)
+            queued++;
+
+    while (queued < s->nb_anim_slots && at + 8 <= s->end) {
+        const uint8_t *hdr  = file_at(s, at);
+        const uint32_t tag  = WPD_RL32(hdr);
+        const uint32_t plen = WPD_RL32(hdr + 4);
+        size_t         padded;
+        AnimSlot      *slot = NULL;
+
+        if (plen == UINT32_MAX || plen < 16)
+            break;
+        padded = (size_t)plen + (plen & 1);
+        if (at + 8 + padded > s->end)
+            break;
+        if (tag == MKTAG('A', 'N', 'M', 'F')) {
+            int taken = 0;
+
+            for (int i = 0; i < s->nb_anim_slots; i++) {
+                if (s->anim_slot[i].offset == at + 8)
+                    taken = 1;
+                else if (!slot && !s->anim_slot[i].running)
+                    slot = &s->anim_slot[i];
+            }
+            if (!taken && slot) {
+                slot->offset = at + 8;
+                slot->size   = plen;
+                slot->sub    = NULL;
+                slot->result = 0;
+                anim_slot_sync(s, slot);
+                if (wpd_task_submit_async(
+                        s->pool, &slot->job, anim_slot_task, slot)) {
+                    slot->running = 1;
+                    queued++;
+                } else {
+                    slot->offset = 0;
+                    return;
+                }
+            }
+        }
+        at += 8 + padded;
+    }
+}
+
+/* Brings the slots up, and keeps them fed, for a file that is all here. A
+   streamed animation stays serial: a frame whose bytes have not arrived
+   cannot be started, and the input buffer it would be reading can move under
+   it as more is appended. */
+static void anim_slots_start(WPDDecoder *s) {
+    const int64_t pixels = (int64_t)s->canvas_width * s->canvas_height;
+
+    if (s->streaming && !s->eos)
+        return;
+    if (pixels < ANIM_SLOT_MIN_PIXELS)
+        return;
+    if (!s->anim_slot) {
+        const int threads = decoder_threads(s);
+        int       want    = threads < ANIM_MAX_SLOTS ? threads : ANIM_MAX_SLOTS;
+
+        /* Every slot holds a frame of its own, so a large canvas buys fewer
+           of them rather than however many threads there are. */
+        while (want > 2 &&
+               (int64_t)want * pixels * ANIM_SLOT_BYTES_PER_PIXEL >
+                   ANIM_SLOT_BUDGET)
+            want--;
+        if (want < 2 || !decoder_pool(s))
+            return;
+        s->anim_slot = calloc((size_t)want, sizeof(*s->anim_slot));
+        if (!s->anim_slot)
+            return;
+        for (int i = 0; i < want; i++) {
+            WPDDecoderOptions o = WPD_DECODER_OPTIONS_INIT;
+
+            s->anim_slot[i].dec = wpd_decoder_create();
+            if (!s->anim_slot[i].dec) {
+                s->nb_anim_slots = i;
+                anim_slots_free(s);
+                return;
+            }
+            o.n_threads = 1;
+            wpd_decoder_set_options(s->anim_slot[i].dec, &o);
+        }
+        s->nb_anim_slots = want;
+    }
+    anim_slots_fill(s, s->pos);
+}
+
+/* The slot holding the frame at 'offset', once its decode is in. */
+static AnimSlot *anim_slot_take(WPDDecoder *s, size_t offset) {
+    for (int i = 0; i < s->nb_anim_slots; i++) {
+        AnimSlot *slot = &s->anim_slot[i];
+
+        if (slot->running && slot->offset == offset) {
+            wpd_task_wait(s->pool, &slot->job);
+            slot->running = 0;
+            slot->offset  = 0;
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+/* 'ready' is the slot that already decoded this frame's image, or NULL to
+   decode it here. */
+static int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size,
+                       AnimSlot *ready) {
+    const uint8_t   *p = data, *end = data + size;
+    const WebPImage *sub = NULL;
+    int              declared_width, declared_height;
+    int              ret;
+
+    if (size < 16)
+        return WPD_ERROR_INVALID_DATA;
+
+    s->pos_x          = WPD_RL24(p) * 2;
+    s->pos_y          = WPD_RL24(p + 3) * 2;
+    declared_width    = WPD_RL24(p + 6) + 1;
+    declared_height   = WPD_RL24(p + 9) + 1;
+    s->frame_duration = WPD_RL24(p + 12);
+    s->anmf_flags     = p[15];
+    p += 16;
+
+    if (s->pos_x + declared_width > s->canvas_width ||
+        s->pos_y + declared_height > s->canvas_height) {
+        wpd_log(NULL,
+                WPD_LOG_ERROR,
+                "Frame (%dx%d at pos %dx%d) does not fit into canvas (%dx%d)\n",
+                declared_width,
+                declared_height,
+                s->pos_x,
+                s->pos_y,
+                s->canvas_width,
+                s->canvas_height);
+        return WPD_ERROR_INVALID_DATA;
+    }
+
+    if (ready) {
+        ret = ready->result;
+        sub = ready->sub;
+        /* The slot decoded into its own buffers, so the frame's own alpha and
+           dimensions came with it. */
+        s->frame_has_alpha = ready->dec->frame_has_alpha;
+        s->width           = ready->dec->width;
+        s->height          = ready->dec->height;
+    } else {
+        WebPImage *decoded;
+
+        ret = anmf_decode_image(s, p, end, &decoded);
+        sub = decoded;
+    }
+    if (ret < 0)
+        return ret;
 
     if (!sub) {
         wpd_log(NULL, WPD_LOG_ERROR, "image data not found\n");
@@ -4247,6 +4467,9 @@ WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
 /* Clears everything derived from a file but keeps the input allocation, which
    a stream grows across many calls. */
 static void decoder_reset(WPDDecoder *decoder) {
+    /* Slots read the input buffer directly, so none may still be running when
+       it is replaced or freed. */
+    anim_slots_join(decoder);
     for (int i = 0; i < WPD_METADATA_NB; i++) {
         free(decoder->meta[i]);
         decoder->meta[i]      = NULL;
@@ -4545,10 +4768,11 @@ WPDStatus wpd_decoder_update(WPDDecoder *decoder, const uint8_t *data,
         return set_error(decoder, "stream buffer shrank", WPD_ERR_INVALID_ARG);
 
     decoder->input_mode = 2;
-    decoder->borrowed   = 1;
-    decoder->file       = data;
-    decoder->file_size  = size;
-    decoder->discarded  = 0;
+    anim_slots_join(decoder);
+    decoder->borrowed  = 1;
+    decoder->file      = data;
+    decoder->file_size = size;
+    decoder->discarded = 0;
 
     status = rescan_headers(decoder);
     if (status == WPD_ERR_TRUNCATED)
@@ -4856,7 +5080,9 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                 return set_error(decoder,
                                  "ANMF chunk without animation header",
                                  WPD_ERROR_INVALID_DATA);
-            ret = decode_anmf(decoder, payload, size);
+            anim_slots_start(decoder);
+            ret = decode_anmf(
+                decoder, payload, size, anim_slot_take(decoder, chunk_pos + 8));
             if (ret < 0)
                 return set_error(decoder, "animation frame decode failed", ret);
             ret = export_packed(decoder, &decoder->canvas, frame);
@@ -4999,6 +5225,7 @@ const char *wpd_decoder_error(const WPDDecoder *decoder) {
 void wpd_decoder_free(WPDDecoder *decoder) {
     if (!decoder)
         return;
+    anim_slots_free(decoder);
     wpd_task_pool_free(decoder->pool);
     if (decoder->filter_progress_ready)
         wpd_progress_destroy(&decoder->filter_progress);
