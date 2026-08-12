@@ -736,10 +736,11 @@ struct WPDDecoder {
     WebPImage  converted;
     WebPImage  output;
     WebPImage  transformed;
-    uint32_t  *rescale_work;
-    size_t     rescale_work_size;
-    uint8_t   *rescale_row;
-    size_t     rescale_row_size;
+    /* One slice per plane, so the planes can be scaled at the same time. */
+    uint32_t *rescale_work[4];
+    size_t    rescale_work_size;
+    uint8_t  *rescale_row[4];
+    size_t    rescale_row_size;
 
     WebPImage canvas;
     int       anmf_flags, pos_x, pos_y;
@@ -2376,19 +2377,24 @@ static int rescale_work(WPDDecoder *s, int dst_width, int src_width,
     const size_t row  = (size_t)src_width * (size_t)channels;
 
     if (s->rescale_work_size < need) {
-        uint32_t *grown = realloc(s->rescale_work, need * sizeof(*grown));
+        for (int i = 0; i < 4; i++) {
+            uint32_t *grown = realloc(s->rescale_work[i],
+                                      need * sizeof(*grown));
 
-        if (!grown)
-            return WPD_ERROR(ENOMEM);
-        s->rescale_work      = grown;
+            if (!grown)
+                return WPD_ERROR(ENOMEM);
+            s->rescale_work[i] = grown;
+        }
         s->rescale_work_size = need;
     }
     if (s->rescale_row_size < row) {
-        uint8_t *grown = realloc(s->rescale_row, row);
+        for (int i = 0; i < 4; i++) {
+            uint8_t *grown = realloc(s->rescale_row[i], row);
 
-        if (!grown)
-            return WPD_ERROR(ENOMEM);
-        s->rescale_row      = grown;
+            if (!grown)
+                return WPD_ERROR(ENOMEM);
+            s->rescale_row[i] = grown;
+        }
         s->rescale_row_size = row;
     }
     return 0;
@@ -2398,12 +2404,12 @@ static int rescale_work(WPDDecoder *s, int dst_width, int src_width,
    feeds in is not the plane it decoded. Building each row into scratch keeps
    the decoded image untouched, which matters because an animation blends the
    next frame onto it and a still can be exported more than once. */
-static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
-                                   int dst_width, int dst_height,
-                                   const uint8_t *src, int src_stride,
-                                   const uint8_t *alpha, int alpha_stride,
-                                   int src_width, int src_height,
-                                   int channels) {
+static void rescale_plane_weighted(uint32_t *work, uint8_t *scratch,
+                                   uint8_t *dst, int dst_stride, int dst_width,
+                                   int dst_height, const uint8_t *src,
+                                   int src_stride, const uint8_t *alpha,
+                                   int alpha_stride, int src_width,
+                                   int src_height, int channels) {
     WPDRescaler r;
     int         y = 0;
 
@@ -2415,22 +2421,69 @@ static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
                       dst_height,
                       dst_stride,
                       channels,
-                      s->rescale_work);
+                      work);
     while (y < src_height) {
-        memcpy(s->rescale_row,
+        memcpy(scratch,
                src + (ptrdiff_t)y * src_stride,
                (size_t)src_width * channels);
         if (alpha)
-            wpd_multiply_row(s->rescale_row,
-                             alpha + (ptrdiff_t)y * alpha_stride,
-                             src_width,
-                             0);
+            wpd_multiply_row(
+                scratch, alpha + (ptrdiff_t)y * alpha_stride, src_width, 0);
         else
-            wpd_premultiply_argb_row(s->rescale_row, src_width, 0);
-        if (wpd_rescaler_import(&r, 1, s->rescale_row, 0))
+            wpd_premultiply_argb_row(scratch, src_width, 0);
+        if (wpd_rescaler_import(&r, 1, scratch, 0))
             y++;
         wpd_rescaler_export(&r);
     }
+}
+
+/* One plane of a scaled image. The rescaler accumulates down the rows and
+   along x, so neither can be cut; planes are the axis that is free. */
+typedef struct ScalePlanes {
+    WPDDecoder      *s;
+    WebPImage       *dst;
+    const WebPImage *src;
+    int              width, height;
+    int              chroma_full, weight_luma, premult, packed, bpp;
+} ScalePlanes;
+
+static int scale_plane_task(void *arg, int p) {
+    const ScalePlanes *c      = arg;
+    const WebPImage   *src    = c->src;
+    WebPImage         *dst    = c->dst;
+    const int          chroma = p == 1 || p == 2;
+    const int          shift  = chroma && !c->chroma_full;
+    const int sw = c->packed ? src->width : CEIL_RSHIFT(src->width, chroma);
+    const int sh = c->packed ? src->height : CEIL_RSHIFT(src->height, chroma);
+    const int dw = CEIL_RSHIFT(c->width, shift);
+    const int dh = CEIL_RSHIFT(c->height, shift);
+
+    if (c->premult || (c->weight_luma && p == 0))
+        rescale_plane_weighted(c->s->rescale_work[p],
+                               c->s->rescale_row[p],
+                               dst->data[p],
+                               dst->linesize[p],
+                               dw,
+                               dh,
+                               src->data[p],
+                               src->linesize[p],
+                               c->premult ? NULL : src->data[3],
+                               c->premult ? 0 : src->linesize[3],
+                               sw,
+                               sh,
+                               c->bpp);
+    else
+        wpd_rescale_plane(dst->data[p],
+                          dst->linesize[p],
+                          dw,
+                          dh,
+                          src->data[p],
+                          src->linesize[p],
+                          sw,
+                          sh,
+                          c->bpp,
+                          c->s->rescale_work[p]);
+    return 0;
 }
 
 /* Scales the way libwebp does: an area rescaler over each plane, with the
@@ -2448,7 +2501,9 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
        directly, so weighting it a second time would skew it. */
     const int premult = packed && src->format == WPD_PIX_FMT_ARGB &&
         !src->premultiplied;
-    int ret;
+    ScalePlanes planes = {0};
+    WpdTaskJob  job;
+    int         nb_planes, ret;
 
     if (packed)
         ret = image_alloc_packed(dst, width, height, bpp, src->format);
@@ -2463,39 +2518,26 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     if (ret < 0)
         return ret;
 
-    for (int p = 0; p < image_nb_components(src); p++) {
-        const int chroma = p == 1 || p == 2;
-        const int shift  = chroma && !chroma_full;
-        const int sw = packed ? src->width : CEIL_RSHIFT(src->width, chroma);
-        const int sh = packed ? src->height : CEIL_RSHIFT(src->height, chroma);
-        const int dw = CEIL_RSHIFT(width, shift);
-        const int dh = CEIL_RSHIFT(height, shift);
+    planes.s           = s;
+    planes.dst         = dst;
+    planes.src         = src;
+    planes.width       = width;
+    planes.height      = height;
+    planes.chroma_full = chroma_full;
+    planes.weight_luma = weight_luma;
+    planes.premult     = premult;
+    planes.packed      = packed;
+    planes.bpp         = bpp;
 
-        if (premult || (weight_luma && p == 0))
-            rescale_plane_weighted(s,
-                                   dst->data[p],
-                                   dst->linesize[p],
-                                   dw,
-                                   dh,
-                                   src->data[p],
-                                   src->linesize[p],
-                                   premult ? NULL : src->data[3],
-                                   premult ? 0 : src->linesize[3],
-                                   sw,
-                                   sh,
-                                   bpp);
-        else
-            wpd_rescale_plane(dst->data[p],
-                              dst->linesize[p],
-                              dw,
-                              dh,
-                              src->data[p],
-                              src->linesize[p],
-                              sw,
-                              sh,
-                              bpp,
-                              s->rescale_work);
-    }
+    nb_planes = image_nb_components(src);
+    /* Each plane carries its own accumulators, so they scale independently;
+       a packed image is a single plane and gets nothing from the pool. */
+    wpd_task_submit(nb_planes > 1 ? decoder_pool(s) : NULL,
+                    &job,
+                    scale_plane_task,
+                    &planes,
+                    nb_planes);
+    wpd_task_wait(nb_planes > 1 ? s->pool : NULL, &job);
 
     if (premult)
         for (int y = 0; y < height; y++)
@@ -4913,8 +4955,10 @@ void wpd_decoder_free(WPDDecoder *decoder) {
         image_ctx_free(&decoder->vp8l_alpha.image[i]);
     }
     for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
-    free(decoder->rescale_work);
-    free(decoder->rescale_row);
+    for (int i = 0; i < 4; i++) {
+        free(decoder->rescale_work[i]);
+        free(decoder->rescale_row[i]);
+    }
     free(decoder->lossless_top);
     free(decoder->alpha_plane);
     free(decoder->file_alloc);
