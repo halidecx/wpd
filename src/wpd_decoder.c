@@ -569,6 +569,29 @@ static int huff_next_table_bits(const int *count, int len, int root_bits) {
     return len - root_bits;
 }
 
+static int huff_table_size(const HuffPlan *p) {
+    int      count[MAX_HUFFMAN_CODE_LENGTH + 1];
+    uint32_t key = 0, low = 0xFFFFFFFFu;
+    int      len, total   = 1 << p->root_bits;
+
+    memcpy(count, p->count, sizeof(count));
+    for (len = 1; len <= p->root_bits; len++)
+        for (; count[len] > 0; count[len]--) key = huff_next_key(key, len);
+
+    for (; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        for (; count[len] > 0; count[len]--) {
+            if ((key & HUFF_TABLE_MASK) != low) {
+                int sub_bits = huff_next_table_bits(count, len, p->root_bits);
+
+                total += 1 << sub_bits;
+                low = key & HUFF_TABLE_MASK;
+            }
+            key = huff_next_key(key, len);
+        }
+    }
+    return total;
+}
+
 static void huff_count(HuffPlan *p, const uint8_t *code_lengths,
                        int code_lengths_size) {
     int symbol;
@@ -585,7 +608,7 @@ static void huff_count(HuffPlan *p, const uint8_t *code_lengths,
 static int huff_analyze(HuffPlan *p, const uint8_t *code_lengths,
                         int code_lengths_size, uint16_t *sorted) {
     int offset[MAX_HUFFMAN_CODE_LENGTH + 2];
-    int len, symbol, left, max_len, first, total, cur, cur_bits;
+    int len, symbol, left, max_len;
 
     left           = 1;
     max_len        = 0;
@@ -601,7 +624,7 @@ static int huff_analyze(HuffPlan *p, const uint8_t *code_lengths,
         p->num_symbols += p->count[len];
         offset[len + 1] = offset[len] + p->count[len];
     }
-    if (!p->num_symbols)
+    if (!p->num_symbols || p->num_symbols > code_lengths_size)
         return 0;
     if (left && p->num_symbols > 1)
         return 0;
@@ -615,12 +638,26 @@ static int huff_analyze(HuffPlan *p, const uint8_t *code_lengths,
             continue;
         }
         for (len = 0; len < 8; len++, symbol++)
-            if (code_lengths[symbol])
+            if (code_lengths[symbol]) {
+                if (offset[code_lengths[symbol]] >= p->num_symbols)
+                    return 0;
                 sorted[offset[code_lengths[symbol]]++] = symbol;
+            }
     }
     for (; symbol < code_lengths_size; symbol++)
-        if (code_lengths[symbol])
+        if (code_lengths[symbol]) {
+            if (offset[code_lengths[symbol]] >= p->num_symbols)
+                return 0;
             sorted[offset[code_lengths[symbol]]++] = symbol;
+        }
+
+    /* Every offset has to have advanced to where the next length started, or
+       the histogram described a different list from the one just sorted. */
+    for (len = 1, symbol = 0; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        symbol += p->count[len];
+        if (offset[len] != symbol)
+            return 0;
+    }
 
     if (p->num_symbols == 1) {
         p->root_bits  = 0;
@@ -628,43 +665,8 @@ static int huff_analyze(HuffPlan *p, const uint8_t *code_lengths,
         return 1;
     }
 
-    p->root_bits = WPD_MIN(HUFF_TABLE_BITS, max_len);
-    total        = 1 << p->root_bits;
-
-    /* Secondary tables are one per distinct root prefix. Canonical codes of a
-       given length are consecutive, so their prefixes form a run that can only
-       overlap the next length's run at its last entry. */
-    first    = 0;
-    cur      = -1;
-    cur_bits = 0;
-    for (len = 1; len <= max_len; len++) {
-        int shift, lo, hi;
-
-        if (len > 1)
-            first = (first + p->count[len - 1]) << 1;
-        if (len <= HUFF_TABLE_BITS || !p->count[len])
-            continue;
-
-        shift = len - HUFF_TABLE_BITS;
-        lo    = first >> shift;
-        hi    = (first + p->count[len] - 1) >> shift;
-        if (cur != lo) {
-            if (cur >= 0)
-                total += 1 << cur_bits;
-            cur = lo;
-        }
-        cur_bits = shift;
-        if (hi > lo) {
-            total += 1 << cur_bits;
-            total += (hi - lo - 1) << shift;
-            cur      = hi;
-            cur_bits = shift;
-        }
-    }
-    if (cur >= 0)
-        total += 1 << cur_bits;
-
-    p->total_size = total;
+    p->root_bits  = WPD_MIN(HUFF_TABLE_BITS, max_len);
+    p->total_size = huff_table_size(p);
     return 1;
 }
 
@@ -1015,6 +1017,8 @@ static int read_huffman_code_normal(WPDDecoder *s, HuffPlan *plan,
                       code_length_code_lengths,
                       NUM_CODE_LENGTH_CODES,
                       sorted))
+        return WPD_ERROR_INVALID_DATA;
+    if (code_len_plan.total_size > (int)WPD_ARRAY_SIZE(code_len_table))
         return WPD_ERROR_INVALID_DATA;
     if (!huff_fill(&code_len_plan, code_len_table, sorted))
         return WPD_ERROR_INVALID_DATA;

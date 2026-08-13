@@ -13,6 +13,7 @@
 #define WPD_MIN(a, b) ((a) > (b) ? (b) : (a))
 #define WPD_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define WPD_ABS(a) ((a) >= 0 ? (a) : -(a))
+#define WPD_ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
 #define WPD_ERROR(e) (-(e))
 #define WPD_ERROR_INVALID_DATA (-1094995529)
