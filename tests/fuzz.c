@@ -1,5 +1,7 @@
 #include "wpd.h"
 
+#include "testutil.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,28 +29,6 @@ static uint32_t rnd(void) {
     seed ^= seed >> 17;
     seed ^= seed << 5;
     return seed;
-}
-
-static uint8_t *read_file(const char *path, size_t *size) {
-    FILE    *file = fopen(path, "rb");
-    uint8_t *data;
-    long     length;
-
-    if (!file)
-        return NULL;
-    if (fseek(file, 0, SEEK_END) || (length = ftell(file)) < 0) {
-        fclose(file);
-        return NULL;
-    }
-    rewind(file);
-    data = malloc((size_t)length);
-    if (data && fread(data, 1, (size_t)length, file) != (size_t)length) {
-        free(data);
-        data = NULL;
-    }
-    fclose(file);
-    *size = (size_t)length;
-    return data;
 }
 
 static void free_planes(uint8_t *planes[4]) {
