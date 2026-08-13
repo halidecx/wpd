@@ -750,6 +750,10 @@ int main(int argc, char **argv) {
         "palette2bpp_rgb.webp",
         "palette4bpp_rgb.webp",
         "transforms_before_palette.webp",
+        "huffman_simple_duplicate.webp",
+        "huffman_simple_single.webp",
+        "huffman_simple_forms.webp",
+        "huffman_long_codes.webp",
     };
 
     if (argc < 2) {

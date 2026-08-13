@@ -135,6 +135,18 @@ data and pushes the result through every entry point, whole-file and streamed,
 borrowed and copied, under AddressSanitizer and UndefinedBehaviorSanitizer. It
 looks for crashes rather than pixels.
 
+The `huffman_*` stills cover what neither reaches: bitstreams the format permits
+but no encoder produces, so no ordinary corpus file carries them and random
+mutation will not stumble into them either. A simple Huffman code naming the
+same symbol twice is the case they were written for — it has to collapse to a
+single-symbol code consuming no bits, and counting it as two silently
+desynchronises everything after it, without reading out of range or crashing.
+`wpd-test-data/scripts/mk_huffman_codes.py` writes them out bit by bit, along
+with the code shapes either side of that one and codes long enough to need
+secondary tables. Their expected pixels come from the specification rather than
+from a decode, and `huffman_simple_duplicate` and `huffman_simple_single` differ
+in bytes while having to decode identically.
+
 `./scripts/sanitize.sh` runs the ordinary suite under the same two sanitizers,
 once with the assembly enabled and once without. Both are needed: ASan sees
 compiler-generated code only, so an overrun inside a hand-written kernel shows
