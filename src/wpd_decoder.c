@@ -22,6 +22,7 @@
 #define ANMF_FLAG_NO_BLEND (1 << 1)
 
 #define NUM_CODE_LENGTH_CODES 19
+#define MAX_CODE_LENGTH_CODE_LENGTH 7
 #define HUFFMAN_CODES_PER_META_CODE 5
 #define NUM_LITERAL_CODES 256
 #define NUM_LENGTH_CODES 24
@@ -487,32 +488,72 @@ static int image_alloc_yuva(WebPImage *img, int w, int h) {
 
 #define HUFF_TABLE_BITS 8
 #define HUFF_TABLE_MASK ((1 << HUFF_TABLE_BITS) - 1)
+#define HUFF_ARENA_CHUNK 4096
 
-typedef struct HuffCode {
-    uint8_t  bits;
-    uint16_t value;
-} HuffCode;
-
+/* A table entry packs the bits to consume in its low eight bits and either the
+   symbol or a secondary-table offset above them. The root table is sized to the
+   longest code it holds, capped at HUFF_TABLE_BITS, so only codes longer than
+   that reach a secondary table and only then is the cap in force. */
 typedef struct HuffReader {
-    HuffCode *table;
+    const uint32_t *table;
+    uint32_t        mask;
 } HuffReader;
 
-/* An 8-bit root table sends longer canonical codes to secondary tables. */
-static void huff_reader_free(HuffReader *r) { wpd_freep(&r->table); }
+typedef struct HuffBlock {
+    struct HuffBlock *next;
+    size_t            used;
+    size_t            size;
+    uint32_t          data[];
+} HuffBlock;
 
-static wpd_always_inline uint32_t huff_next_key(uint32_t key, int len) {
-    uint32_t step = 1u << (len - 1);
+typedef struct HuffPlan {
+    int count[MAX_HUFFMAN_CODE_LENGTH + 1];
+    int num_symbols;
+    int root_bits;
+    int total_size;
+} HuffPlan;
 
-    while (key & step) step >>= 1;
-    return step ? (key & (step - 1)) + step : key;
+static wpd_always_inline uint32_t huff_entry(int bits, int value) {
+    return (uint32_t)bits | (uint32_t)value << 8;
 }
 
-static wpd_always_inline void huff_replicate(HuffCode *table, int step, int end,
-                                             HuffCode code) {
-    do {
-        end -= step;
-        table[end] = code;
-    } while (end > 0);
+static void huff_arena_free(HuffBlock **head) {
+    HuffBlock *block = *head;
+
+    while (block) {
+        HuffBlock *next = block->next;
+        wpd_free(block);
+        block = next;
+    }
+    *head = NULL;
+}
+
+static uint32_t *huff_arena_alloc(HuffBlock **head, size_t n) {
+    HuffBlock *block = *head;
+    uint32_t  *table;
+
+    if (!block || block->size - block->used < n) {
+        size_t size = n > HUFF_ARENA_CHUNK ? n : HUFF_ARENA_CHUNK;
+        block       = malloc(sizeof(*block) + size * sizeof(*block->data));
+        if (!block)
+            return NULL;
+        block->next = *head;
+        block->used = 0;
+        block->size = size;
+        *head       = block;
+    }
+    table = block->data + block->used;
+    block->used += n;
+    return table;
+}
+
+static wpd_always_inline uint32_t huff_next_key(uint32_t key, int len) {
+    uint32_t inv = ~key & ((1u << len) - 1);
+
+    if (!inv)
+        return key;
+    inv = 1u << (31 - __builtin_clz(inv));
+    return (key & (inv - 1)) + inv;
 }
 
 static int huff_next_table_bits(const int *count, int len, int root_bits) {
@@ -528,154 +569,210 @@ static int huff_next_table_bits(const int *count, int len, int root_bits) {
     return len - root_bits;
 }
 
-static int huff_build_table(HuffCode *root_table, int root_bits,
-                            const uint8_t *code_lengths, int code_lengths_size,
-                            uint16_t *sorted) {
-    /* The first call sizes the tables; the second call fills them. */
-    HuffCode *table                              = root_table;
-    int       total_size                         = 1 << root_bits;
-    int       count[MAX_HUFFMAN_CODE_LENGTH + 1] = {0};
-    int       offset[MAX_HUFFMAN_CODE_LENGTH + 1];
-    int       len, symbol, step;
+static int huff_table_size(const HuffPlan *p) {
+    int      count[MAX_HUFFMAN_CODE_LENGTH + 1];
+    uint32_t key = 0, low = 0xFFFFFFFFu;
+    int      len, total   = 1 << p->root_bits;
 
-    for (symbol = 0; symbol < code_lengths_size; symbol++) {
-        if (code_lengths[symbol] > MAX_HUFFMAN_CODE_LENGTH)
-            return 0;
-        count[code_lengths[symbol]]++;
-    }
-    if (count[0] == code_lengths_size)
-        return 0;
+    memcpy(count, p->count, sizeof(count));
+    for (len = 1; len <= p->root_bits; len++)
+        for (; count[len] > 0; count[len]--) key = huff_next_key(key, len);
 
-    offset[1] = 0;
-    for (len = 1; len < MAX_HUFFMAN_CODE_LENGTH; len++) {
-        if (count[len] > (1 << len))
-            return 0;
-        offset[len + 1] = offset[len] + count[len];
-    }
+    for (; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        for (; count[len] > 0; count[len]--) {
+            if ((key & HUFF_TABLE_MASK) != low) {
+                int sub_bits = huff_next_table_bits(count, len, p->root_bits);
 
-    for (symbol = 0; symbol < code_lengths_size; symbol++) {
-        const int len_sym = code_lengths[symbol];
-        if (len_sym > 0) {
-            if (sorted) {
-                if (offset[len_sym] >= code_lengths_size)
-                    return 0;
-                sorted[offset[len_sym]++] = symbol;
-            } else {
-                offset[len_sym]++;
+                total += 1 << sub_bits;
+                low = key & HUFF_TABLE_MASK;
             }
+            key = huff_next_key(key, len);
         }
     }
-
-    if (offset[MAX_HUFFMAN_CODE_LENGTH] == 1) {
-        if (sorted) {
-            HuffCode code;
-            code.bits  = 0;
-            code.value = sorted[0];
-            huff_replicate(table, 1, total_size, code);
-        }
-        return total_size;
-    }
-
-    {
-        uint32_t low        = 0xFFFFFFFFu;
-        uint32_t mask       = total_size - 1;
-        uint32_t key        = 0;
-        int      num_nodes  = 1;
-        int      num_open   = 1;
-        int      table_bits = root_bits;
-        int      table_size = 1 << table_bits;
-
-        symbol = 0;
-        for (len = 1, step = 2; len <= root_bits; len++, step <<= 1) {
-            num_open <<= 1;
-            num_nodes += num_open;
-            num_open -= count[len];
-            if (num_open < 0)
-                return 0;
-            if (!root_table)
-                continue;
-            for (; count[len] > 0; count[len]--) {
-                HuffCode code;
-                code.bits  = len;
-                code.value = sorted[symbol++];
-                huff_replicate(&table[key], step, table_size, code);
-                key = huff_next_key(key, len);
-            }
-        }
-
-        for (len = root_bits + 1, step = 2; len <= MAX_HUFFMAN_CODE_LENGTH;
-             len++, step <<= 1) {
-            num_open <<= 1;
-            num_nodes += num_open;
-            num_open -= count[len];
-            if (num_open < 0)
-                return 0;
-            for (; count[len] > 0; count[len]--) {
-                HuffCode code;
-                if ((key & mask) != low) {
-                    if (root_table)
-                        table += table_size;
-                    table_bits = huff_next_table_bits(count, len, root_bits);
-                    table_size = 1 << table_bits;
-                    total_size += table_size;
-                    low = key & mask;
-                    if (root_table) {
-                        root_table[low].bits  = table_bits + root_bits;
-                        root_table[low].value = (table - root_table) - low;
-                    }
-                }
-                if (root_table) {
-                    code.bits  = len - root_bits;
-                    code.value = sorted[symbol++];
-                    huff_replicate(
-                        &table[key >> root_bits], step, table_size, code);
-                }
-                key = huff_next_key(key, len);
-            }
-        }
-
-        if (num_nodes != 2 * offset[MAX_HUFFMAN_CODE_LENGTH] - 1)
-            return 0;
-    }
-
-    return total_size;
+    return total;
 }
 
-static int huff_reader_build(HuffReader *r, const uint8_t *code_lengths,
-                             int alphabet_size, uint16_t *sorted) {
-    int total_size;
+static void huff_count(HuffPlan *p, const uint8_t *code_lengths,
+                       int code_lengths_size) {
+    int symbol;
 
-    huff_reader_free(r);
+    memset(p->count, 0, sizeof(p->count));
+    for (symbol = 0; symbol < code_lengths_size; symbol++)
+        p->count[code_lengths[symbol]]++;
+}
 
-    total_size = huff_build_table(
-        NULL, HUFF_TABLE_BITS, code_lengths, alphabet_size, NULL);
-    if (total_size == 0)
+/* Sizes the tables and sorts the symbols by code length, given the length
+   histogram the reader accumulated as it went. Codes are rejected here, before
+   anything is written, so a malformed length list never produces a partially
+   filled table. */
+static int huff_analyze(HuffPlan *p, const uint8_t *code_lengths,
+                        int code_lengths_size, uint16_t *sorted) {
+    int offset[MAX_HUFFMAN_CODE_LENGTH + 2];
+    int len, symbol, left, max_len;
+
+    left           = 1;
+    max_len        = 0;
+    p->num_symbols = 0;
+    offset[1]      = 0;
+    for (len = 1; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        left <<= 1;
+        left -= p->count[len];
+        if (left < 0)
+            return 0;
+        if (p->count[len])
+            max_len = len;
+        p->num_symbols += p->count[len];
+        offset[len + 1] = offset[len] + p->count[len];
+    }
+    if (!p->num_symbols || p->num_symbols > code_lengths_size)
+        return 0;
+    if (left && p->num_symbols > 1)
+        return 0;
+
+    /* Sparse length lists are the common case, so step over whole zero runs
+       instead of testing every symbol. */
+    symbol = 0;
+    while (symbol + 8 <= code_lengths_size) {
+        if (!wpd_r64(code_lengths + symbol)) {
+            symbol += 8;
+            continue;
+        }
+        for (len = 0; len < 8; len++, symbol++)
+            if (code_lengths[symbol]) {
+                if (offset[code_lengths[symbol]] >= p->num_symbols)
+                    return 0;
+                sorted[offset[code_lengths[symbol]]++] = symbol;
+            }
+    }
+    for (; symbol < code_lengths_size; symbol++)
+        if (code_lengths[symbol]) {
+            if (offset[code_lengths[symbol]] >= p->num_symbols)
+                return 0;
+            sorted[offset[code_lengths[symbol]]++] = symbol;
+        }
+
+    /* Every offset has to have advanced to where the next length started, or
+       the histogram described a different list from the one just sorted. */
+    for (len = 1, symbol = 0; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        symbol += p->count[len];
+        if (offset[len] != symbol)
+            return 0;
+    }
+
+    if (p->num_symbols == 1) {
+        p->root_bits  = 0;
+        p->total_size = 1;
+        return 1;
+    }
+
+    p->root_bits  = WPD_MIN(HUFF_TABLE_BITS, max_len);
+    p->total_size = huff_table_size(p);
+    return 1;
+}
+
+/* Because the index is the bit-reversed code, a code of length len owns every
+   slot congruent to its key modulo 2^len. So the slots for all codes shorter
+   than len are already correct in the first half of the table and only need
+   copying into the second, leaving one store per symbol. */
+static wpd_always_inline void huff_double_to(uint32_t *table, int *filled,
+                                             int size) {
+    int n = *filled;
+
+    while (n < size) {
+        memcpy(table + n, table, (size_t)n * sizeof(*table));
+        n <<= 1;
+    }
+    *filled = n;
+}
+
+static int huff_fill(const HuffPlan *p, uint32_t *table,
+                     const uint16_t *sorted) {
+    int       count[MAX_HUFFMAN_CODE_LENGTH + 1];
+    uint32_t  key       = 0;
+    uint32_t  low       = 0xFFFFFFFFu;
+    uint32_t *sub       = table;
+    int       root_bits = p->root_bits;
+    int       len, symbol = 0, filled = 1, sub_size = 1 << root_bits;
+    int       total = 1 << root_bits;
+
+    if (p->num_symbols == 1) {
+        table[0] = huff_entry(0, sorted[0]);
+        return 1;
+    }
+
+    memcpy(count, p->count, sizeof(count));
+    table[0] = 0;
+    for (len = 1; len <= root_bits; len++) {
+        huff_double_to(table, &filled, 1 << len);
+        for (; count[len] > 0; count[len]--) {
+            table[key] = huff_entry(len, sorted[symbol++]);
+            key        = huff_next_key(key, len);
+        }
+    }
+
+    for (len = root_bits + 1; len <= MAX_HUFFMAN_CODE_LENGTH; len++) {
+        for (; count[len] > 0; count[len]--) {
+            if ((key & HUFF_TABLE_MASK) != low) {
+                int sub_bits;
+
+                sub += sub_size;
+                sub_bits = huff_next_table_bits(count, len, root_bits);
+                sub_size = 1 << sub_bits;
+                total += sub_size;
+                if (total > p->total_size)
+                    return 0;
+                low        = key & HUFF_TABLE_MASK;
+                table[low] = huff_entry(sub_bits + root_bits,
+                                        (int)(sub - table) - (int)low);
+                filled     = 1;
+                sub[0]     = 0;
+            }
+            huff_double_to(sub, &filled, 1 << (len - root_bits));
+            sub[key >> root_bits] = huff_entry(len - root_bits,
+                                               sorted[symbol++]);
+            key                   = huff_next_key(key, len);
+        }
+    }
+
+    return total == p->total_size;
+}
+
+static int huff_reader_build(HuffReader *r, HuffBlock **arena, HuffPlan *plan,
+                             const uint8_t *code_lengths, int alphabet_size,
+                             uint16_t *sorted) {
+    uint32_t *table;
+
+    if (!huff_analyze(plan, code_lengths, alphabet_size, sorted))
         return WPD_ERROR_INVALID_DATA;
 
-    r->table = malloc((size_t)total_size * sizeof(*r->table));
-    if (!r->table)
+    table = huff_arena_alloc(arena, (size_t)plan->total_size);
+    if (!table)
         return WPD_ERROR(ENOMEM);
 
-    huff_build_table(
-        r->table, HUFF_TABLE_BITS, code_lengths, alphabet_size, sorted);
+    if (!huff_fill(plan, table, sorted))
+        return WPD_ERROR_INVALID_DATA;
+
+    r->table = table;
+    r->mask  = (1u << plan->root_bits) - 1;
     return 0;
 }
 
-static wpd_always_inline int huff_read_symbol(const HuffCode *table,
-                                              LEBitReader    *br) {
-    uint32_t val = br_prefetch(br);
-    int      nbits;
+static wpd_always_inline int huff_read_symbol(const HuffReader *r,
+                                              LEBitReader      *br) {
+    uint32_t val   = br_prefetch(br);
+    uint32_t index = val & r->mask;
+    uint32_t entry = r->table[index];
+    uint32_t bits  = entry & 0xFF;
 
-    table += val & HUFF_TABLE_MASK;
-    nbits = table->bits - HUFF_TABLE_BITS;
-    if (nbits > 0) {
+    if (bits > HUFF_TABLE_BITS) {
         br_set_bit_pos(br, br->bit_pos + HUFF_TABLE_BITS);
-        val = br_prefetch(br);
-        table += table->value;
-        table += val & ((1u << nbits) - 1);
+        val   = br_prefetch(br);
+        entry = r->table[index + (entry >> 8) +
+                         (val & ((1u << (bits - HUFF_TABLE_BITS)) - 1))];
+        bits  = entry & 0xFF;
     }
-    br_set_bit_pos(br, br->bit_pos + table->bits);
-    return table->value;
+    br_set_bit_pos(br, br->bit_pos + (int)bits);
+    return (int)(entry >> 8);
 }
 
 typedef struct HTreeGroup {
@@ -692,6 +789,7 @@ typedef struct ImageContext {
     uint32_t      *color_cache;
     int            nb_huffman_groups;
     HTreeGroup    *huffman_groups;
+    HuffBlock     *huffman_arena;
     int            size_reduction;
     int            is_alpha_primary;
 } ImageContext;
@@ -856,39 +954,44 @@ static void image_ctx_free(ImageContext *img) {
     wpd_free(img->color_cache);
     if (img->role != IMAGE_ROLE_ARGB)
         image_free(&img->storage);
-    if (img->huffman_groups) {
-        for (int i = 0; i < img->nb_huffman_groups; i++)
-            for (int j = 0; j < HUFFMAN_CODES_PER_META_CODE; j++)
-                huff_reader_free(&img->huffman_groups[i].trees[j]);
-        wpd_free(img->huffman_groups);
-    }
+    huff_arena_free(&img->huffman_arena);
+    wpd_free(img->huffman_groups);
     memset(img, 0, sizeof(*img));
 }
 
-static void read_huffman_code_simple(WPDDecoder *s, uint8_t *code_lengths,
-                                     int alphabet_size) {
+static void read_huffman_code_simple(WPDDecoder *s, HuffPlan *plan,
+                                     uint8_t *code_lengths, int alphabet_size) {
     int nb_symbols = br_bit(&s->gb) + 1;
     int symbol;
 
+    /* The two symbols may repeat, and the histogram has to stay an exact
+       count of the non-zero lengths for the counting sort to line up. */
     symbol = br_bit(&s->gb) ? br_bits(&s->gb, 8) : br_bit(&s->gb);
-    if (symbol < alphabet_size)
+    if (symbol < alphabet_size && !code_lengths[symbol]) {
         code_lengths[symbol] = 1;
+        plan->count[1]++;
+    }
 
     if (nb_symbols == 2) {
         symbol = br_bits(&s->gb, 8);
-        if (symbol < alphabet_size)
+        if (symbol < alphabet_size && !code_lengths[symbol]) {
             code_lengths[symbol] = 1;
+            plan->count[1]++;
+        }
     }
 }
 
-static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
-                                    int alphabet_size) {
-    /* Code lengths are 3 bits wide, so this table never needs a second level. */
-    HuffCode code_len_table[1 << HUFF_TABLE_BITS];
-    uint16_t sorted[NUM_CODE_LENGTH_CODES];
-    uint8_t  code_length_code_lengths[NUM_CODE_LENGTH_CODES] = {0};
-    int      symbol, max_symbol, prev_code_len, ret;
-    int      num_codes = 4 + br_bits(&s->gb, 4);
+static int read_huffman_code_normal(WPDDecoder *s, HuffPlan *plan,
+                                    uint8_t *code_lengths, int alphabet_size) {
+    /* Code lengths are 3 bits wide, so this table never needs a second level
+       and is at most 128 entries wide. */
+    uint32_t   code_len_table[1 << MAX_CODE_LENGTH_CODE_LENGTH];
+    HuffReader code_len_reader;
+    HuffPlan   code_len_plan;
+    uint16_t   sorted[NUM_CODE_LENGTH_CODES];
+    uint8_t    code_length_code_lengths[NUM_CODE_LENGTH_CODES] = {0};
+    int        symbol, max_symbol, prev_code_len, ret;
+    int        num_codes = 4 + br_bits(&s->gb, 4);
 
     for (int i = 0; i < num_codes; i++)
         code_length_code_lengths[code_length_code_order[i]] = br_bits(&s->gb,
@@ -909,17 +1012,18 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
         max_symbol = alphabet_size;
     }
 
-    if (huff_build_table(NULL,
-                         HUFF_TABLE_BITS,
-                         code_length_code_lengths,
-                         NUM_CODE_LENGTH_CODES,
-                         NULL) != 1 << HUFF_TABLE_BITS)
+    huff_count(&code_len_plan, code_length_code_lengths, NUM_CODE_LENGTH_CODES);
+    if (!huff_analyze(&code_len_plan,
+                      code_length_code_lengths,
+                      NUM_CODE_LENGTH_CODES,
+                      sorted))
         return WPD_ERROR_INVALID_DATA;
-    huff_build_table(code_len_table,
-                     HUFF_TABLE_BITS,
-                     code_length_code_lengths,
-                     NUM_CODE_LENGTH_CODES,
-                     sorted);
+    if (code_len_plan.total_size > (int)WPD_ARRAY_SIZE(code_len_table))
+        return WPD_ERROR_INVALID_DATA;
+    if (!huff_fill(&code_len_plan, code_len_table, sorted))
+        return WPD_ERROR_INVALID_DATA;
+    code_len_reader.table = code_len_table;
+    code_len_reader.mask  = (1u << code_len_plan.root_bits) - 1;
 
     prev_code_len = 8;
     symbol        = 0;
@@ -931,11 +1035,13 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
         if (br_is_eos(&s->gb))
             break;
         br_fill(&s->gb);
-        code_len = huff_read_symbol(code_len_table, &s->gb);
+        code_len = huff_read_symbol(&code_len_reader, &s->gb);
         if (code_len < 16) {
             code_lengths[symbol++] = code_len;
-            if (code_len)
+            if (code_len) {
                 prev_code_len = code_len;
+                plan->count[code_len]++;
+            }
         } else {
             int repeat = 0, length = 0;
             switch (code_len) {
@@ -957,7 +1063,12 @@ static int read_huffman_code_normal(WPDDecoder *s, uint8_t *code_lengths,
                 ret = WPD_ERROR_INVALID_DATA;
                 goto finish;
             }
-            while (repeat-- > 0) code_lengths[symbol++] = length;
+            /* The buffer arrives zeroed, so a run of zeros is just a skip. */
+            if (length) {
+                plan->count[length] += repeat;
+                memset(code_lengths + symbol, length, repeat);
+            }
+            symbol += repeat;
         }
     }
 
@@ -1178,31 +1289,38 @@ static wpd_always_inline int read_entropy_image_header(WPDDecoder    *s,
     for (i = 0; i < img->nb_huffman_groups; i++) {
         hg = &img->huffman_groups[i];
         for (j = 0; j < HUFFMAN_CODES_PER_META_CODE; j++) {
-            int alphabet_size = alphabet_sizes[j];
-            if (!j && img->color_cache_bits > 0)
-                alphabet_size += 1 << img->color_cache_bits;
+            HuffPlan  plan;
+            const int alphabet_size = alphabet_sizes[j] +
+                (!j && img->color_cache_bits > 0 ? 1 << img->color_cache_bits
+                                                 : 0);
 
+            ret = 0;
             memset(code_lengths, 0, alphabet_size);
+            memset(plan.count, 0, sizeof(plan.count));
             if (br_bit(&s->gb))
-                read_huffman_code_simple(s, code_lengths, alphabet_size);
+                read_huffman_code_simple(s, &plan, code_lengths, alphabet_size);
             else
-                ret = read_huffman_code_normal(s, code_lengths, alphabet_size);
+                ret = read_huffman_code_normal(
+                    s, &plan, code_lengths, alphabet_size);
             if (ret >= 0)
-                ret = huff_reader_build(
-                    &hg->trees[j], code_lengths, alphabet_size, sorted);
+                ret = huff_reader_build(&hg->trees[j],
+                                        &img->huffman_arena,
+                                        &plan,
+                                        code_lengths,
+                                        alphabet_size,
+                                        sorted);
             if (ret < 0) {
                 free(sorted);
                 return ret;
             }
         }
 
-        hg->trivial_literal = hg->trees[HUFF_IDX_RED].table[0].bits == 0 &&
-            hg->trees[HUFF_IDX_BLUE].table[0].bits == 0 &&
-            hg->trees[HUFF_IDX_ALPHA].table[0].bits == 0;
+        hg->trivial_literal = !hg->trees[HUFF_IDX_RED].mask &&
+            !hg->trees[HUFF_IDX_BLUE].mask && !hg->trees[HUFF_IDX_ALPHA].mask;
         if (hg->trivial_literal) {
-            hg->literal[0] = hg->trees[HUFF_IDX_ALPHA].table[0].value;
-            hg->literal[1] = hg->trees[HUFF_IDX_RED].table[0].value;
-            hg->literal[3] = hg->trees[HUFF_IDX_BLUE].table[0].value;
+            hg->literal[0] = hg->trees[HUFF_IDX_ALPHA].table[0] >> 8;
+            hg->literal[1] = hg->trees[HUFF_IDX_RED].table[0] >> 8;
+            hg->literal[3] = hg->trees[HUFF_IDX_BLUE].table[0] >> 8;
         }
     }
     free(sorted);
@@ -1265,7 +1383,7 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
             if ((x & huff_mask) == 0)
                 hg = get_huffman_group(s, img, x, y);
             br_fill(&s->gb);
-            v = huff_read_symbol(hg->trees[HUFF_IDX_GREEN].table, &s->gb);
+            v = huff_read_symbol(&hg->trees[HUFF_IDX_GREEN], &s->gb);
             if (v < NUM_LITERAL_CODES) {
                 if (hg->trivial_literal) {
                     if (resumable && near && br_is_eos(&s->gb))
@@ -1273,14 +1391,11 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
                     copy32(p, hg->literal);
                     p[2] = v;
                 } else {
-                    int r = huff_read_symbol(hg->trees[HUFF_IDX_RED].table,
-                                             &s->gb);
+                    int r = huff_read_symbol(&hg->trees[HUFF_IDX_RED], &s->gb);
                     int b, a;
                     br_fill(&s->gb);
-                    b = huff_read_symbol(hg->trees[HUFF_IDX_BLUE].table,
-                                         &s->gb);
-                    a = huff_read_symbol(hg->trees[HUFF_IDX_ALPHA].table,
-                                         &s->gb);
+                    b = huff_read_symbol(&hg->trees[HUFF_IDX_BLUE], &s->gb);
+                    a = huff_read_symbol(&hg->trees[HUFF_IDX_ALPHA], &s->gb);
                     if (resumable && near && br_is_eos(&s->gb))
                         goto suspend;
                     p[0] = a;
@@ -1306,7 +1421,7 @@ static wpd_always_inline int decode_entropy_pixels(WPDDecoder    *s,
                     int offset     = (2 + (prefix_code & 1)) << extra_bits;
                     length         = offset + br_bits(&s->gb, extra_bits) + 1;
                 }
-                prefix_code = huff_read_symbol(hg->trees[HUFF_IDX_DIST].table,
+                prefix_code = huff_read_symbol(&hg->trees[HUFF_IDX_DIST],
                                                &s->gb);
                 br_fill(&s->gb);
                 if (prefix_code > 39) {

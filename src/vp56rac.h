@@ -171,9 +171,9 @@ static wpd_always_inline int vp56_rac_get_prob(VP56RangeCoder *c,
 
 static wpd_always_inline int vp56_rac_get_prob_branchy(VP56RangeCoder *c,
                                                        int             prob) {
-    unsigned long code_word = vp56_rac_renorm(c);
-    unsigned      low       = 1 + (((c->high - 1) * prob) >> 8);
-    unsigned      low_shift = low << 16;
+    unsigned code_word = vp56_rac_renorm(c);
+    unsigned low       = 1 + (((c->high - 1) * prob) >> 8);
+    unsigned low_shift = low << 16;
 
     if (code_word >= low_shift) {
         c->high -= low;

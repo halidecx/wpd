@@ -16,6 +16,11 @@ endif
 # The dispose_*, overlap_*, and other single-purpose animations cover the
 # compositing matrix and are verified bit-exact against libwebp by
 # scripts/animcheck.sh.
+#
+# The huffman_* stills are hand-written by wpd-test-data/scripts/mk_huffman_codes.py
+# for code shapes no encoder emits; their hashes come from the pixels the
+# specification says they decode to, not from a decode. huffman_simple_duplicate
+# and huffman_simple_single differ in bytes and must share a hash.
 testdata = [
   ['a_lossy',             'Argb',     'da3731b078d166fdc013b5224fdf0a08'],
   ['a_lossy',             'bgr',      '3b6907ba6cdb7ddb49ea94d3e04a3723'],
@@ -41,6 +46,10 @@ testdata = [
   ['dispose_none_noblend', 'argb',    'b7d6d6d54172a4b01c1cca6d6f864691'],
   ['durations',           'argb',     '1d9390b1f3bfde14a23f97a6146830c5'],
   ['edge_frames',         'argb',     'd7dd013e4500b3e8280bb90d33f38b62'],
+  ['huffman_long_codes',  'argb',     '7d06b583e8e6f0d6cdb13f7727919a48'],
+  ['huffman_simple_duplicate', 'argb', 'b99bb4f17cfde05793a3688013456027'],
+  ['huffman_simple_forms', 'argb',    'dc53075dd99b2220b29c257f8b487b2f'],
+  ['huffman_simple_single', 'argb',   'b99bb4f17cfde05793a3688013456027'],
   ['keyframe_midstream',  'argb',     '43e119faef85a8fc4303ec01e7d30327'],
   ['kitchen_sink',        'argb',     '42ba8f19e026465ce359f10cbf150ce6'],
   ['lossless',            'argb',     'be49864598ae0fef693581929493ba50'],
