@@ -20,7 +20,6 @@ const C_SOURCES: &[&str] = &[
     "src/vp8l.c",
     "src/vp8.c",
     "src/vp56rac.c",
-    "src/vp8pred.c",
     "src/yuvdsp.c",
     "src/rescaler.c",
     "src/wpd_compat.c",
