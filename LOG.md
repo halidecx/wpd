@@ -362,40 +362,33 @@ so the tool now strips the suffix.
 One apparent failure was a real difference between the two _builds_ rather than
 the two binaries: `build` had `trim_dsp=false` and the baseline `if-release`, so
 only the baseline warned that `--cpumask` could not go below the compile-time
-target. Worth recording because it also means any benchmark taken across that
-pair before this point was comparing two different configurations.
+target.
 
-Option parsing reproduces `getopt_long` with `opterr = 0` — clustered short
-options, `--name value` and `--name=value`, `--` to stop, operands and options
-interleaved. Unambiguous long-option abbreviation is the one thing left out;
-nothing in the tree uses it.
+**And then fixing that broke the baseline.** Reconfiguring the baseline's build
+directory and recompiling it staged a binary built with `enable_asm=false`,
+because that directory had been set up as the no-asm C reference. Nothing
+noticed: assembly and fallback produce identical output, so `md5check.sh`,
+`clicheck.sh` and the whole testdata matrix stayed green. Only the benchmarks
+changed, and they changed by 1.9x, which is exactly the kind of number that
+should have been disbelieved on sight rather than explained.
 
-`wpd-capi`'s lib name moved from `wpd` to `wpd_capi` so the archive can also
-ship as an rlib without colliding with the core crate's own `libwpd.rlib`.
-`tools/cargo_build.sh` stages it back to `libwpd.a`, so nothing downstream
-notices.
-
-The y4m writer is the one place the tool reaches past the public header, as the
-C tool did with `#include "yuvdsp.h"`. It now uses the real `WPDYUVDSP` type
-from `wpd-capi` instead of redeclaring it.
+The preserved baseline binary is the reference for every measurement in this
+file. Before trusting a number against it, check that it still has assembly in
+it — `nm build-baseline/wpd | grep ff_vp8_idct_add_sse2` — and never rebuild it
+from a directory whose options have not been read.
 
 ### Phase 2 — `vp8.c` and `vp56rac` in Rust
 
 1720 lines of lossy frame decoder plus 350 of range coder leave the tree. What
 replaces them is `crates/wpd/src/vp8/`, which contains no `unsafe`.
 
-**Making the state opaque first paid for itself twice over.**
-`struct
-WPDDecoder` embedded `VP8Context` by value, and only two lines in the
-tree named it. Replacing it with a pointer was a prerequisite for the port —
-otherwise Rust would have had to mirror `WPDDecoder`'s layout as well — but it
-also turned out to be the single largest speed-up of the project so far: **1.9x
-on lossy, 1.18x on lossless**, against a decoder whose lossless path that commit
-does not touch at all. `VP8Context` is several kilobytes of probability tables
-and coefficient blocks, and it sat in the middle of the struct holding `ldsp`,
-`ydsp` and the VP8L cursor fields that the pixel loops reload constantly. Taking
-it out compacted everything the hot loops read into far fewer cache lines. The
-same shape as the aliasing-hoist win recorded below, at a different scale.
+**Making the state opaque came first.** `struct WPDDecoder` embedded
+`VP8Context` by value, and only two lines in the tree named it. Replacing it
+with a pointer was a prerequisite for the port — otherwise Rust would have had
+to mirror `WPDDecoder`'s layout as well. It is not a speed-up: measured against
+`8248221`, the commit before it, lossy and lossless are both unchanged. An
+earlier draft of this entry claimed 1.9x for it, which was the clobbered
+baseline described above, not the change.
 
 **Two things are expressed differently from the C.**
 
@@ -471,17 +464,33 @@ Do not measure on a hybrid CPU without `taskset`. An unpinned three-way
 comparison put one binary on an efficiency core and reported a 19% difference
 between two builds whose code for that input is byte-identical.
 
-**Results**, pinned, 15 runs, `--repeat 60`, against `3a5e80d` (same tree, VP8
-still in C) and against the C baseline `d241ef8`:
+**Results**, pinned to one core, 15 runs, `--repeat 60`, against the preserved C
+baseline `d241ef8` and against `8248221`, the last commit before this phase:
 
-| file           | vs pre-port | vs C baseline |
-| -------------- | ----------- | ------------- |
-| lossy          | 1.01x       | 1.92x         |
-| a_lossy        | 1.00x       | 1.83x         |
-| simplelf-lossy | 1.01x       | 1.41x         |
-| anim_yuv       | 1.01x       | 1.28x         |
-| anim_yuva      | 1.01x       | 1.15x         |
-| lossless       | 1.00x       | 1.18x         |
+| file           | vs C baseline | vs pre-phase-2 |
+| -------------- | ------------- | -------------- |
+| lossy          | 1.00x         | 1.01x          |
+| a_lossy        | 0.98x         | 0.99x          |
+| odd_lossy      | 1.04x         | 1.00x          |
+| simplelf-lossy | 1.00x         | 1.01x          |
+| anim_yuv       | 1.04x         | 1.01x          |
+| anim_yuva      | 1.01x         | 1.02x          |
+| lossless       | 0.99x         | 1.00x          |
+
+Parity, which is the goal. Nothing here is a speed-up and nothing is a
+regression beyond the ±4% this host resolves.
+
+The safe fallbacks are the part that does cost something. With `--cpumask none`
+on both binaries, so each runs its own scalar code:
+
+| file    | C scalar | Rust scalar |            |
+| ------- | -------- | ----------- | ---------- |
+| lossy   | 412.8 ms | 463.8 ms    | 12% slower |
+| a_lossy | 102.4 ms | 117.3 ms    | 15% slower |
+
+That is the cost of the bounds checks the assembly path does not pay, and it is
+the trade the unsafe-budget decision accepted: a consumer who wants the
+provably-safe build gives up about an eighth of the lossy decode rate.
 
 Gates: `checkasm` 151/151, `meson test` 186/186, `clicheck.sh` 794/794,
 `testdata.sh` across five configurations, `animcheck.sh`, `rac32.sh` 186/186
