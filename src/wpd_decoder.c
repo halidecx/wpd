@@ -5,7 +5,6 @@
 #include "container.h"
 #include "convert.h"
 #include "export.h"
-#include "huffman.h"
 #include "image.h"
 #include "lossy.h"
 #include "rescaler.h"

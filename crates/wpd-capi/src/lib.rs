@@ -16,3 +16,4 @@ pub mod cpu;
 pub mod dsp;
 pub mod rescale;
 pub mod vp8;
+pub mod vp8l;

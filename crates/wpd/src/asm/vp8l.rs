@@ -1,0 +1,196 @@
+//! The lossless DSP assembly.
+//!
+//! Laid out as [`super::vp8`]: the symbols are declared once and exported raw
+//! for the C ABI table, and the core crate gets safe wrappers.
+//!
+//! # Regions
+//!
+//! A predictor writes `n` pixels at `out` and reads `n` at `up`, plus, for the
+//! ones whose fallback wrapper asks for them, `out[-1]` and `up[-1]`. The three
+//! that use the top-right neighbour read one past the end of the row above,
+//! which is the first pixel of the row being written when the picture is
+//! contiguous, and a slot the caller has filled in when it is not. Either way
+//! the read lands inside the picture, so the check is the same for all of them:
+//! `up + n` must be a valid index.
+
+use crate::cpu::CpuFlags;
+use crate::dsp::vp8l::Vp8lDsp;
+use std::ffi::c_int;
+
+pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
+pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
+
+pub use super::vp8::Raw;
+
+macro_rules! raw_pred_add {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        extern "C" {
+            #[link_name = $sym]
+            fn $inner(_: *const u32, _: *const u32, _: c_int, _: *mut u32);
+        }
+
+        pub struct $marker;
+
+        impl Raw for $marker {
+            type Sig = PredAddRaw;
+            const F: PredAddRaw = $inner;
+        }
+    };
+}
+
+macro_rules! raw_map_color {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        extern "C" {
+            #[link_name = $sym]
+            fn $inner(_: *mut u8, _: *const u8, _: *const u32, _: c_int);
+        }
+
+        pub struct $marker;
+
+        impl Raw for $marker {
+            type Sig = MapColorRaw;
+            const F: MapColorRaw = $inner;
+        }
+    };
+}
+
+/// `UP` is false for the two predictors that run on the first row of a picture,
+/// where there is no row above and the caller passes no offset for one.
+fn pred_add<T: Raw<Sig = PredAddRaw>, const UP: bool>(
+    plane: &mut [u32],
+    out: usize,
+    up: usize,
+    n: usize,
+) {
+    assert!(plane.len() >= out + n, "picture too small");
+    if UP {
+        assert!(up < out && plane.len() > up + n, "picture too small");
+    }
+    unsafe {
+        let base = plane.as_mut_ptr();
+
+        (T::F)(
+            base.add(out).cast_const(),
+            if UP { base.add(up).cast_const() } else { base },
+            n as c_int,
+            base.add(out),
+        )
+    }
+}
+
+fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
+    assert!(palette.len() >= 256, "short palette");
+    unsafe {
+        let p = row.as_mut_ptr().cast::<u8>();
+
+        (T::F)(p, p.cast_const(), palette.as_ptr(), row.len() as c_int)
+    }
+}
+
+/// The fourteen predictors of one instruction set, in table order.
+macro_rules! pred_table {
+    ($set:ident) => {
+        [
+            pred_add::<$set::Pred0, false>,
+            pred_add::<$set::Pred1, false>,
+            pred_add::<$set::Pred2, true>,
+            pred_add::<$set::Pred3, true>,
+            pred_add::<$set::Pred4, true>,
+            pred_add::<$set::Pred5, true>,
+            pred_add::<$set::Pred6, true>,
+            pred_add::<$set::Pred7, true>,
+            pred_add::<$set::Pred8, true>,
+            pred_add::<$set::Pred9, true>,
+            pred_add::<$set::Pred10, true>,
+            pred_add::<$set::Pred11, true>,
+            pred_add::<$set::Pred12, true>,
+            pred_add::<$set::Pred13, true>,
+        ]
+    };
+}
+
+macro_rules! preds {
+    ($($marker:ident, $inner:ident, $sym:literal;)*) => {
+        $(raw_pred_add!($marker, $inner, $sym);)*
+    };
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod arch {
+    use super::*;
+
+    pub mod avx2 {
+        use super::*;
+
+        preds! {
+            Pred0, pred0, "ff_pred_add_0_avx2";
+            Pred1, pred1, "ff_pred_add_1_avx2";
+            Pred2, pred2, "ff_pred_add_2_avx2";
+            Pred3, pred3, "ff_pred_add_3_avx2";
+            Pred4, pred4, "ff_pred_add_4_avx2";
+            Pred5, pred5, "ff_pred_add_5_avx2";
+            Pred6, pred6, "ff_pred_add_6_avx2";
+            Pred7, pred7, "ff_pred_add_7_avx2";
+            Pred8, pred8, "ff_pred_add_8_avx2";
+            Pred9, pred9, "ff_pred_add_9_avx2";
+            Pred10, pred10, "ff_pred_add_10_avx2";
+            Pred11, pred11, "ff_pred_add_11_avx2";
+            Pred12, pred12, "ff_pred_add_12_avx2";
+            Pred13, pred13, "ff_pred_add_13_avx2";
+        }
+
+        raw_map_color!(MapColor, map_color, "ff_map_color32_avx2");
+    }
+
+    pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
+        if flags.contains(CpuFlags::AVX2) {
+            dsp.pred_add = pred_table!(avx2);
+            dsp.map_color32 = map_color32::<avx2::MapColor>;
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod arch {
+    use super::*;
+
+    pub mod neon {
+        use super::*;
+
+        preds! {
+            Pred0, pred0, "ff_pred_add_0_neon";
+            Pred1, pred1, "ff_pred_add_1_neon";
+            Pred2, pred2, "ff_pred_add_2_neon";
+            Pred3, pred3, "ff_pred_add_3_neon";
+            Pred4, pred4, "ff_pred_add_4_neon";
+            Pred5, pred5, "ff_pred_add_5_neon";
+            Pred6, pred6, "ff_pred_add_6_neon";
+            Pred7, pred7, "ff_pred_add_7_neon";
+            Pred8, pred8, "ff_pred_add_8_neon";
+            Pred9, pred9, "ff_pred_add_9_neon";
+            Pred10, pred10, "ff_pred_add_10_neon";
+            Pred11, pred11, "ff_pred_add_11_neon";
+            Pred12, pred12, "ff_pred_add_12_neon";
+            Pred13, pred13, "ff_pred_add_13_neon";
+        }
+
+        raw_map_color!(MapColor, map_color, "ff_map_color32_neon");
+    }
+
+    pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
+        if !flags.contains(CpuFlags::NEON) {
+            return;
+        }
+        dsp.pred_add = pred_table!(neon);
+        dsp.map_color32 = map_color32::<neon::MapColor>;
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+mod arch {
+    use super::*;
+
+    pub fn init(_dsp: &mut Vp8lDsp, _flags: CpuFlags) {}
+}
+
+pub use arch::*;

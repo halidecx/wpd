@@ -14,9 +14,9 @@ use wpd::vp8::{Decoder, Error, Status};
 
 pub const VP8_NEED_MORE: c_int = 1;
 
-const WPD_ERROR_INVALID_DATA: c_int = -1094995529;
-const WPD_ERROR_TOO_LARGE: c_int = -558319938;
-const WPD_ENOMEM: c_int = -12;
+pub(crate) const WPD_ERROR_INVALID_DATA: c_int = -1094995529;
+pub(crate) const WPD_ERROR_TOO_LARGE: c_int = -558319938;
+pub(crate) const WPD_ENOMEM: c_int = -12;
 
 #[repr(C)]
 pub struct WpdFrame {
@@ -43,7 +43,7 @@ extern "C" {
     fn wpd_log(context: *mut c_void, level: c_int, format: *const c_char, ...);
 }
 
-fn forward_log(level: Level, message: &str) {
+pub(crate) fn forward_log(level: Level, message: &str) {
     let Ok(message) = CString::new(message) else {
         return;
     };
@@ -55,7 +55,7 @@ fn forward_log(level: Level, message: &str) {
     unsafe { wpd_log(ptr::null_mut(), level, c"%s".as_ptr(), message.as_ptr()) };
 }
 
-fn status(e: Error) -> c_int {
+pub(crate) fn status(e: Error) -> c_int {
     match e {
         Error::InvalidData => WPD_ERROR_INVALID_DATA,
         Error::NoMemory => WPD_ENOMEM,

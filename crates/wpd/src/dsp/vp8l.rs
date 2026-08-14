@@ -30,7 +30,7 @@ const fn avg4(a: u32, b: u32, c: u32, d: u32) -> u32 {
 }
 
 /// Adds the four channels independently, discarding carries between bytes.
-const fn add_pixels(a: u32, b: u32) -> u32 {
+pub const fn add_pixels(a: u32, b: u32) -> u32 {
     let ag = (a & 0xFF00_FF00).wrapping_add(b & 0xFF00_FF00);
     let rb = (a & 0x00FF_00FF).wrapping_add(b & 0x00FF_00FF);
     (ag & 0xFF00_FF00) | (rb & 0x00FF_00FF)
@@ -271,6 +271,114 @@ pub fn blend_row_argb_premult(dst: &mut [u8], src: &[u8]) {
         for i in 0..4 {
             d[i] = (u32::from(s[i]) + ((u32::from(d[i]) * scale) >> 8)) as u8;
         }
+    }
+}
+
+/// Replaces each pixel by `palette[green]`, in place, on a `u32` picture.
+pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
+    let palette = &palette[..256];
+
+    for p in row.iter_mut() {
+        *p = palette[usize::from(p.to_ne_bytes()[2])];
+    }
+}
+
+/// One predictor over a whole picture, addressed by offset.
+///
+/// The destination row and the row above it are two windows on the same
+/// allocation, and when the picture is contiguous — which it is, because the
+/// entropy decode indexes it linearly — they touch: the top-right neighbour of
+/// the last pixel in a row *is* the first pixel of that row. Handing the kernel
+/// two slices would either deny that or have to lie about it, so the table
+/// takes the picture whole and says where in it to work.
+pub type PredAddFn = fn(plane: &mut [u32], out: usize, up: usize, n: usize);
+
+/// The runtime-selected lossless kernels the decoder calls.
+pub struct Vp8lDsp {
+    pub pred_add: [PredAddFn; 14],
+    pub map_color32: fn(&mut [u32], &[u32]),
+}
+
+fn plane_pred_0(plane: &mut [u32], out: usize, _up: usize, n: usize) {
+    pred_add_0(&mut plane[out..out + n]);
+}
+
+fn plane_pred_1(plane: &mut [u32], out: usize, _up: usize, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let (head, tail) = plane.split_at_mut(out);
+
+    pred_add_1(&mut tail[..n], head[out - 1]);
+}
+
+/// Adapts a kernel to the table's shape. The two flags say which out-of-row
+/// neighbours the predictor needs, because reading one it does not — `upper[-1]`
+/// on the first row of a batch, say — would step outside the picture.
+macro_rules! plane_pred {
+    ($name:ident, $kernel:ident, $l:literal, $tl:literal) => {
+        fn $name(plane: &mut [u32], out: usize, up: usize, n: usize) {
+            if n == 0 {
+                return;
+            }
+            let (head, tail) = plane.split_at_mut(out);
+            let left = if $l { head[out - 1] } else { 0 };
+            let top_left = if $tl { head[up - 1] } else { 0 };
+
+            $kernel(&mut tail[..n], &head[up..], left, top_left);
+        }
+    };
+}
+
+plane_pred!(plane_pred_2, pred_add_2, false, false);
+plane_pred!(plane_pred_3, pred_add_3, false, false);
+plane_pred!(plane_pred_4, pred_add_4, false, true);
+plane_pred!(plane_pred_5, pred_add_5, true, false);
+plane_pred!(plane_pred_6, pred_add_6, true, true);
+plane_pred!(plane_pred_7, pred_add_7, true, false);
+plane_pred!(plane_pred_8, pred_add_8, false, true);
+plane_pred!(plane_pred_9, pred_add_9, false, false);
+plane_pred!(plane_pred_10, pred_add_10, true, true);
+plane_pred!(plane_pred_11, pred_add_11, true, true);
+plane_pred!(plane_pred_12, pred_add_12, true, true);
+plane_pred!(plane_pred_13, pred_add_13, true, true);
+
+impl Vp8lDsp {
+    pub const fn scalar() -> Self {
+        Self {
+            pred_add: [
+                plane_pred_0,
+                plane_pred_1,
+                plane_pred_2,
+                plane_pred_3,
+                plane_pred_4,
+                plane_pred_5,
+                plane_pred_6,
+                plane_pred_7,
+                plane_pred_8,
+                plane_pred_9,
+                plane_pred_10,
+                plane_pred_11,
+                plane_pred_12,
+                plane_pred_13,
+            ],
+            map_color32: map_color32_pixels,
+        }
+    }
+
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = Self::scalar();
+
+        #[cfg(feature = "asm")]
+        crate::asm::vp8l::init(&mut table, crate::cpu::flags());
+        table
+    }
+}
+
+impl Default for Vp8lDsp {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

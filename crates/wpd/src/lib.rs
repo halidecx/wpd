@@ -21,6 +21,8 @@ pub mod asm;
 
 pub mod cpu;
 pub mod dsp;
+pub mod error;
 pub mod log;
 pub mod rescale;
 pub mod vp8;
+pub mod vp8l;

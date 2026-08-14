@@ -14,10 +14,8 @@ const C_SOURCES: &[&str] = &[
     "src/container.c",
     "src/convert.c",
     "src/export.c",
-    "src/huffman.c",
     "src/image.c",
     "src/lossy.c",
-    "src/vp8l.c",
     "src/wpd_compat.c",
 ];
 

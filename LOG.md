@@ -60,6 +60,12 @@ conditions have a single source of truth.
 Techniques for keeping the core free of `unsafe` without paying for it. Grown as
 the port proceeds.
 
+- **Pick the element type from what the code actually touches.** The lossless
+  decoder never looks at less than a whole pixel, so its pictures are
+  `Vec<u32>`, not byte planes plus a `linesize`. That deletes the `4 * x`
+  arithmetic and every bounds check that came with it, and it costs nothing at
+  the C ABI: a `u32` in native byte order is the same memory the assembly
+  already reads.
 - **Flat buffers addressed by offset, never per-row slices.** A plane is one
   allocation (`Vec<u8>`) plus stride, width, height and the existing 64-byte
   trailing padding. Because rows are contiguous, the deliberate out-of-row
@@ -81,8 +87,26 @@ the port proceeds.
 - **`vec![0u8; n]`** for the `wpd_mallocz` equivalent: it routes to
   `alloc_zeroed`, i.e. calloc, which earlier benchmarking already found beats
   `aligned_alloc` + `memset` here.
+- **Grow, do not grow-then-clear.** `try_reserve` + `resize` + `fill` memsets a
+  buffer twice. Clearing it first so `resize` covers the whole thing halves
+  that; there is no safe way to get `calloc`'s free zeroing back with a fallible
+  allocation, so the one remaining memset is the standing price.
+- **Clear between frames without dropping.** An animation reruns the whole
+  per-image setup per frame. Transcribing `..._free()` as
+  `*self = Default::default()` hands every buffer back so the next frame can ask
+  for the same sizes again; clearing the vectors and keeping the capacity is
+  what the C's arena reuse amounted to.
+- **`const N: usize` where the C had an always-inline literal.** A copy whose
+  length is a value goes to `memcpy`; the same copy under a const parameter is
+  an inline fixed-width move. Dispatch it with the same `match` the C wrote as a
+  `switch`.
+- **Index a lookup table by a whole byte.** `[[u32; N]; 256]` indexed by a `u8`
+  is provably in bounds; the same table flattened to `[u32; 256 * N]` and
+  indexed by `i * N` is not, and costs a check per lookup.
 - **Intrinsic replacements.** `__builtin_clz` → `leading_zeros()`,
-  `__builtin_bswap64` → `swap_bytes()`.
+  `__builtin_bswap64` → `swap_bytes()`. Prefer `31 - x.leading_zeros()` to
+  `x.ilog2()`, which carries a panic path for zero that the caller has usually
+  already ruled out but LLVM may not see.
 - **Check the disassembly, not the theory.** Hot functions are checked for
   surviving `core::panicking` references; a bounds check that LLVM did not
   remove shows up there.
@@ -94,12 +118,12 @@ Each gets a measurement at the phase that ports it.
 
 | # | Risk                                                         | Status  |
 | - | ------------------------------------------------------------ | ------- |
-| 1 | VP8L entropy pixel loop — bounds checks on `base[4 * pos..]` | not yet |
-| 2 | `copy_block32` overlapping LZ77 copy                         | not yet |
-| 3 | `huff_read_symbol` table indexing                            | not yet |
+| 1 | VP8L entropy pixel loop — bounds checks on `base[4 * pos..]` | clear   |
+| 2 | `copy_block32` overlapping LZ77 copy                         | clear   |
+| 3 | `huff_read_symbol` table indexing                            | clear   |
 | 4 | VP56 range coder refill near the buffer end                  | clear   |
 | 5 | yuvdsp row glue under `--no-default-features`                | not yet |
-| 6 | `Vec` zeroing vs `calloc` on large canvases                  | not yet |
+| 6 | `Vec` zeroing vs `calloc` on large canvases                  | costs   |
 | 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
 | 8 | DSP wrapper call per kernel invocation, Tier A vs raw symbol | clear   |
 
@@ -497,6 +521,146 @@ Gates: `checkasm` 151/151, `meson test` 186/186, `clicheck.sh` 794/794,
 (which is what exercises the 32-bit range coder — its own module, not a
 compile-time variant of the 64-bit one), `md5check.sh`, `sanitize.sh` 186 and
 185, `fuzz.sh` 300 trials per file.
+
+### Phase 3 — VP8L, the whole lossless decoder
+
+`src/vp8l.c`, `src/huffman.c`, `src/bitreader.h` and `src/huffman.h` are gone.
+`crates/wpd/src/vp8l/` replaces them: the bit reader, the prefix codes, the
+pixel loop and the four transforms. `crates/wpd-capi/src/vp8l.rs` implements
+`src/vp8l.h` unchanged, so the container, the animation compositor and the lossy
+decoder's alpha path go on calling the same sixteen functions.
+
+**A picture is a `Vec<u32>`, not a byte plane.** The C addressed every image
+through `data[0]` and a `linesize`, and every pixel access was `4 * x` bytes off
+a row pointer. Nothing in the lossless decoder ever looks at less than a whole
+pixel: the entropy loop walks the picture linearly, the predictors already took
+`uint32_t *`, and the transforms read and write whole `[A, R, G, B]` groups. So
+the picture became one `u32` per pixel, in native byte order over the same
+memory the assembly and the C ABI still see. That is what closed risk 1 — there
+is no `base[4 * pos..]` left to bounds-check, only `pixels[pos]` against a
+length the loop condition already tests.
+
+**Risks closed.**
+
+- **1, the pixel loop.** Closed by the `u32` picture. The loop is 28.2% of
+  `durations` against the C's 27.0%, normalised — parity.
+- **2, `copy_block32`.** Three cases, all disjoint slices, no overlap to reason
+  about: `dist >= length` is one `copy_from_slice` after a `split_at_mut`;
+  `dist == 1` is a `fill`; anything else advances in `dist`-sized steps, each
+  reading only what earlier steps finished writing. Under 2% of any profile.
+- **3, `huff_read_symbol`.** The root table is resliced to exactly `mask + 1`
+  entries when the reader is resolved, so `prefetch() & (len - 1)` is in bounds
+  by construction. The five trees of a meta-block are resolved once, when the
+  block changes, rather than per symbol.
+- **6, `Vec` zeroing vs `calloc`.** Measured, and it does cost. See below.
+
+**What the profile charged for, and what fixed it.** Every one of these was
+found by `perf`, and the first three were worth 1.4x, 1.45x and 2x on the
+functions they touched.
+
+`expand_palette_rows` — the packed-palette expansion — was 2.9x slower than the
+C on `palette4bpp_rgb`. The C specialises the group size through a `switch` over
+an `always_inline` helper, so its copy is a fixed 8, 16 or 32 bytes; the Rust
+passed the group size as a value and every group went through `memcpy`. A
+`const PPB` parameter with the same three-way dispatch, an expansion table built
+per group rather than per index and indexed by a whole byte so the lookup needs
+no check, and the table sized `[[u32; PPB]; 256]` rather than a
+zeroed-then-partly-filled `[u32; 256 * 8]`.
+
+`huff_analyze`'s zero-run skip tested eight bytes with `.iter().all()` where the
+C read a `u64` and compared it to zero. `u64::from_ne_bytes(s.try_into()?) == 0`
+is the playbook entry, and it took `analyze` from 45% slower to parity.
+
+`read_huffman_code_normal` builds a table for the code-length code that the C
+kept in a 128-entry stack array. The Rust allocated a `Vec` for it — one malloc
+per prefix code, five per meta-block. A `[u32; 1 << 7]` local, as in the C.
+
+Per-frame allocation churn. An animation runs `image_ctx_free` between frames,
+and transcribing that as `*self = Default::default()` handed every buffer back
+to the allocator so the next frame could ask for the same sizes again. Clearing
+the vectors without dropping them, plus reusing the sorted-symbol and
+code-length scratch across prefix codes, and pre-reserving the arena the C grew
+in 4096-entry chunks.
+
+**Risk 6, measured.** `wpd_mallocz` is `calloc`, and for a picture-sized
+allocation that is nearly free: the pages arrive zeroed. `try_reserve` then
+`resize` then `fill` — which is what a first draft writes — memsets the buffer
+twice, and on `palette4bpp_rgb`, where the tool builds a fresh decoder per
+repeat, that was 17.8% of the decode. Dropping the buffer before growing it, so
+`resize` zeroes it exactly once, halved that. The remaining single memset is the
+standing cost of not calling `alloc_zeroed`, which is `unsafe`; it only shows up
+on a decoder that is used once, because a reused one takes the `fill` path the C
+takes too.
+
+**Results**, pinned to one core, 15 runs, `--repeat 400`, against the preserved
+C baseline `d241ef8`:
+
+| file                      | vs C baseline |
+| ------------------------- | ------------- |
+| huffman_simple_forms      | 1.53x faster  |
+| huffman_long_codes        | 1.32x faster  |
+| palette_rgb               | 1.06x faster  |
+| lossless                  | 1.01x faster  |
+| palette2bpp_rgb           | 1.01x faster  |
+| anim_rgb                  | 1.02x slower  |
+| predict_topright          | 1.03x slower  |
+| a_lossy                   | 1.05x slower  |
+| transforms_before_palette | 1.05x slower  |
+| overlap_exact             | 1.08x slower  |
+| kitchen_sink              | 1.08x slower  |
+| durations                 | 1.10x slower  |
+| palette4bpp_rgb           | 1.11x slower  |
+
+The main lossless benchmark is at parity and the two files that are all prefix
+codes are much faster. What is left is 5-10% on files made of many small frames,
+and it is spread thin: the prefix-code build path is still about a third more
+expensive than the C's, and `color_rows` — the cross-colour transform — is about
+15% more. LLVM vectorises `color_rows` on 32-bit lanes with a lot of `pshufd`
+and `punpckldq` where the C's byte pointers let GCC stay on 16-bit lanes. Saying
+the product of two `i8`s fits an `i16`, and sign-extending the three multipliers
+once per tile instead of once per pixel, did not move it. This is the one place
+where the flat-`u32` picture costs something rather than paying, and it is on
+the list for the Phase 8 tuning pass.
+
+**The fallbacks, this time, are not the expensive part.** Both sides built with
+`-Denable_asm=false`, per the two-no-asm-builds note below:
+
+| file         | Rust scalar vs C scalar |
+| ------------ | ----------------------- |
+| lossless     | 1.01x faster            |
+| palette_rgb  | 1.02x slower            |
+| kitchen_sink | 1.07x slower            |
+
+Against the eighth the lossy fallbacks gave up. The lossless decoder is mostly
+slice walks and table lookups, which is what safe Rust is good at; the lossy one
+is block arithmetic on small fixed-size arrays, which is where the checks land.
+
+**A resumable batch needs one scratch row, not a staging picture.** The C keeps
+`c->top`, a single row, because the predictor for the first row of a batch needs
+the row above it _as the predictor left it_ — the transforms that run after the
+predictor overwrite it. The Tier A predictor signature is `(plane, out, up, n)`:
+one allocation, two offsets, because the top-right neighbour of a row's last
+pixel is the first pixel of that same row. A separate `top` buffer cannot be
+expressed in it.
+
+The answer is not a staging picture — a batch is not bounded, so that could
+double the memory. It is a two-row scratch: the saved row goes in the first
+half, the batch's first row is copied into the second so the two are adjacent,
+that one row is predicted there and copied back, and every row after it already
+has the row it needs immediately above it in the picture. Two row copies per
+batch, and only on the progressive path, which is the one a caller opts into by
+asking for rows early.
+
+**Caller memory stayed out of the core.** `vp8l_set_alpha_dst` hands the decoder
+a pointer into a picture the lossy path owns, and the C kept it in `VP8LContext`
+across the decode. Here it is an argument to `decode_frame`, so the core never
+holds a borrow it did not receive; the shim keeps the `(pointer, stride)` pair
+and rebuilds the slice per call, exactly as it does for the chunk.
+
+Gates: `checkasm` 151/151, `meson test` 186/186, `clicheck.sh` 794/794,
+`testdata.sh` 183/183, `animcheck.sh` (42 files x 8 formats, 27 animations),
+`rac32.sh` 186/186, `md5check.sh` against the C baseline, `sanitize.sh` 186 and
+185, `fuzz.sh` 300 trials per file, `cargo test -p wpd` 43/43.
 
 ## Measuring the fallbacks needs two no-asm builds
 
