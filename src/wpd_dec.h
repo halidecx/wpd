@@ -163,4 +163,7 @@ int vp8l_still_step(WPDDecoder *s, const uint8_t *payload, unsigned avail,
 int vp8l_still_peek(WPDDecoder *s);
 int apply_color_indexing_transform_alpha(WPDDecoder *s);
 
+void   frame_clear(WPDFrame *frame);
+size_t frame_extent(const WPDFrame *frame);
+
 #endif
