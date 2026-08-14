@@ -5,4 +5,5 @@
 //! replaces them at runtime where the CPU allows, and checkasm compares the
 //! two.
 
+pub mod vp8;
 pub mod vp8l;

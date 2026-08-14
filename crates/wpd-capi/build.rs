@@ -19,7 +19,6 @@ const C_SOURCES: &[&str] = &[
     "src/lossy.c",
     "src/vp8l.c",
     "src/vp8.c",
-    "src/vp8dsp.c",
     "src/vp56rac.c",
     "src/vp8pred.c",
     "src/yuvdsp.c",
