@@ -123,8 +123,7 @@ static int vp8_lossy_init(WPDDecoder *s) {
 
     if (s->vp8_initialized)
         return 0;
-    s->codec.priv_data = &s->vp8;
-    ret                = vp8_decode_init(&s->codec);
+    ret = vp8_decode_init(&s->codec);
     if (ret < 0)
         return ret;
     s->vp8_initialized = 1;
@@ -173,7 +172,7 @@ static void update_filter_bypass(WPDDecoder *s) {
 /* Returns 1 when the frame is complete, 0 when more of the chunk is needed. */
 int vp8_lossy_step(WPDDecoder *s, WebPImage *out, const uint8_t *data_start,
                    unsigned int avail, unsigned int data_size) {
-    WpdFrame decoded;
+    WpdFrame current, decoded;
     int      ret;
 
     if ((ret = vp8_lossy_init(s)) < 0)
@@ -189,7 +188,8 @@ int vp8_lossy_step(WPDDecoder *s, WebPImage *out, const uint8_t *data_start,
             return 0;
 
         update_canvas_size(s, s->codec.width, s->codec.height);
-        vp8_lossy_export_planes(s, out, &s->vp8.frame);
+        vp8_current_frame(&s->codec, &current);
+        vp8_lossy_export_planes(s, out, &current);
         if (s->has_alpha && (ret = vp8_lossy_alpha_plane(s, out)) < 0)
             return ret;
         s->still_lossy = !s->animation;

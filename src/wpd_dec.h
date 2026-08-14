@@ -22,7 +22,6 @@ enum AlphaFilter {
 
 struct WPDDecoder {
     WpdCodecContext   codec;
-    VP8Context        vp8;
     int               vp8_initialized;
     WPDLosslessDSP    ldsp;
     WPDYUVDSP         ydsp;
