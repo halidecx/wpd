@@ -18,9 +18,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define ANMF_FLAG_DISPOSE (1 << 0)
-#define ANMF_FLAG_NO_BLEND (1 << 1)
-
 #define SCALEBITS 10
 #define ONE_HALF (1 << (SCALEBITS - 1))
 #define FIX(x) ((int)((x) * (1 << SCALEBITS) + 0.5))
@@ -141,7 +138,10 @@ WPDDecoder *wpd_decoder_create(void) {
         return NULL;
     wpd_init_cpu();
     decoder->vp8l = vp8l_alloc();
-    if (!decoder->vp8l) {
+    decoder->scan = scan_alloc();
+    if (!decoder->vp8l || !decoder->scan) {
+        vp8l_free(&decoder->vp8l);
+        scan_free(&decoder->scan);
         free(decoder);
         return NULL;
     }
@@ -314,8 +314,8 @@ static void decoder_reset(WPDDecoder *decoder) {
     decoder->file_size = 0;
     decoder->discarded = 0;
     decoder->file      = decoder->file_alloc;
-    scan_free(&decoder->scan);
-    memset(&decoder->scan, 0, sizeof(decoder->scan));
+    scan_reset(decoder->scan);
+    memset(&decoder->scanned, 0, sizeof(decoder->scanned));
     decoder->pos = decoder->end = 0;
     decoder->opened             = 0;
     decoder->streaming          = 0;
@@ -383,7 +383,7 @@ static WPDStatus file_reserve(WPDDecoder *decoder, size_t size) {
 /* Takes a copy of each metadata chunk the scanner has reached, since the
    buffer it sits in is dropped as the stream moves past it. */
 static WPDStatus capture_metadata(WPDDecoder *decoder) {
-    const HeaderScan *hs = &decoder->scan;
+    const ScanInfo *hs = &decoder->scanned;
 
     for (int i = 0; i < WPD_METADATA_NB; i++) {
         const size_t offset = hs->meta_offset[i];
@@ -404,16 +404,19 @@ static WPDStatus capture_metadata(WPDDecoder *decoder) {
 }
 
 static WPDStatus rescan_headers(WPDDecoder *decoder) {
-    const HeaderScan *hs = &decoder->scan;
-    WPDStatus         status, meta;
+    const ScanInfo *hs = &decoder->scanned;
+    WPDStatus       status, meta;
 
-    decoder->scan.collect_frames = 1;
-    status                       = scan_headers(&decoder->scan,
-                                                decoder->file,
-                                                decoder->discarded,
-                                                decoder->file_size,
-                                                decoder->streaming);
-    meta                         = capture_metadata(decoder);
+    status = scan_headers(decoder->scan,
+                          decoder->file,
+                          decoder->discarded,
+                          decoder->file_size,
+                          decoder->streaming,
+                          1);
+    /* Read back whatever the walk reached, error or not: a stream whose
+       headers are merely incomplete keeps decoding from what has arrived. */
+    scan_info(decoder->scan, &decoder->scanned);
+    meta = capture_metadata(decoder);
 
     if (status != WPD_OK)
         return status;
@@ -440,7 +443,7 @@ static WPDStatus rescan_headers(WPDDecoder *decoder) {
 /* No more input is coming, so a chunk list that stops short of what it
    promised, or that never carried an image, cannot be completed. */
 static WPDStatus check_final_headers(WPDDecoder *decoder, const char *message) {
-    const HeaderScan *hs = &decoder->scan;
+    const ScanInfo *hs = &decoder->scanned;
 
     if (hs->truncated)
         return set_error(decoder, message, WPD_ERR_TRUNCATED);
@@ -629,7 +632,7 @@ WPDStatus wpd_decoder_get_info(const WPDDecoder *decoder, WPDImageInfo *info) {
     info->loop_count      = decoder->anim_loop_count;
     info->background_argb = decoder->anim_background_argb;
     info->coding          = decoder->info_coding;
-    info->metadata        = decoder->scan.metadata;
+    info->metadata        = decoder->scanned.metadata;
     return WPD_OK;
 }
 
@@ -646,7 +649,7 @@ WPDStatus wpd_decoder_rewind(WPDDecoder *decoder) {
                          WPD_ERR_UNSUPPORTED);
 
     anim_state_reset(decoder);
-    decoder->pos      = decoder->scan.raw_kind ? 0 : 12;
+    decoder->pos      = decoder->scanned.raw_kind ? 0 : 12;
     decoder->status   = WPD_OK;
     decoder->error[0] = 0;
     return WPD_OK;
@@ -664,8 +667,9 @@ static int frame_info_valid(const WPDFrameInfo *info) {
 
 WPDStatus wpd_decoder_frame_info(const WPDDecoder *decoder, int index,
                                  WPDFrameInfo *info) {
-    const HeaderScan *hs;
-    const size_t      struct_size = info ? info->struct_size : 0;
+    const ScanInfo *hs;
+    FrameEntry      entry;
+    const size_t    struct_size = info ? info->struct_size : 0;
 
     if (!decoder)
         return WPD_ERR_INVALID_ARG;
@@ -677,7 +681,7 @@ WPDStatus wpd_decoder_frame_info(const WPDDecoder *decoder, int index,
         return set_error(
             (WPDDecoder *)decoder, "headers incomplete", WPD_ERR_TRUNCATED);
 
-    hs = &decoder->scan;
+    hs = &decoder->scanned;
     memset((uint8_t *)info + sizeof(info->struct_size),
            0,
            WPD_FRAME_INFO_V1 - sizeof(info->struct_size));
@@ -698,19 +702,19 @@ WPDStatus wpd_decoder_frame_info(const WPDDecoder *decoder, int index,
         return WPD_OK;
     }
 
-    if (index < 0 || index >= hs->nb_frames + hs->partial_frame)
+    if (!scan_frame(decoder->scan, index, &entry))
         return set_error(
             (WPDDecoder *)decoder, "no such frame", WPD_ERR_INVALID_ARG);
 
-    info->pos_x     = hs->frames[index].pos_x;
-    info->pos_y     = hs->frames[index].pos_y;
-    info->width     = hs->frames[index].width;
-    info->height    = hs->frames[index].height;
-    info->duration  = hs->frames[index].duration;
-    info->dispose   = hs->frames[index].dispose;
-    info->blend     = hs->frames[index].blend;
-    info->has_alpha = hs->frames[index].has_alpha;
-    info->complete  = hs->frames[index].complete;
+    info->pos_x     = entry.pos_x;
+    info->pos_y     = entry.pos_y;
+    info->width     = entry.width;
+    info->height    = entry.height;
+    info->duration  = entry.duration;
+    info->dispose   = entry.dispose;
+    info->blend     = entry.blend;
+    info->has_alpha = entry.has_alpha;
+    info->complete  = entry.complete;
     return WPD_OK;
 }
 
@@ -803,9 +807,9 @@ static int emit_still_lossy(WPDDecoder *decoder, WPDFrame *frame) {
 }
 
 static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
-    const HeaderScan *hs   = &decoder->scan;
-    const uint8_t    *data = file_at(decoder, hs->raw_image_offset);
-    int               ret;
+    const ScanInfo *hs   = &decoder->scanned;
+    const uint8_t  *data = file_at(decoder, hs->raw_image_offset);
+    int             ret;
 
     if (!decoder->eos)
         return 0;
@@ -874,7 +878,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             return 0; /* the headers have not arrived yet */
         return set_error(decoder, "no image data found", WPD_ERR_TRUNCATED);
     }
-    if (decoder->scan.raw_kind)
+    if (decoder->scanned.raw_kind)
         return decoder->still_done ? 0 : decode_raw(decoder, frame);
 
     while (decoder->pos + 8 <= decoder->end) {

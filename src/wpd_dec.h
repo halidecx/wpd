@@ -34,7 +34,9 @@ struct WPDDecoder {
     size_t         file_size;
     size_t         discarded;
     size_t         pos, end;
-    HeaderScan     scan;
+    HeaderScan    *scan;
+    /* What the last scan found, refreshed on every rescan. */
+    ScanInfo       scanned;
     int            animation;
     int            still_done;
     int            vp8_active;

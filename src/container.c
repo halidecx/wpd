@@ -1,27 +1,91 @@
 
 #include "container.h"
 
+#define VP8X_FLAG_XMP 0x04
+#define VP8X_FLAG_EXIF 0x08
+#define VP8X_FLAG_ICCP 0x20
+#define VP8X_FLAG_ANIMATION 0x02
+#define VP8X_FLAG_ALPHA 0x10
+
+/* Far above any animation a player would sit through, and low enough that the
+   table cannot be made to eat memory by a file that is all ANMF headers. A
+   file past it still decodes; the table simply stops growing. */
+#define WPD_MAX_FRAMES (1 << 20)
+
+struct HeaderScan {
+    size_t    pos;
+    uint64_t  riff_end;
+    size_t    end;
+    int       width, height;
+    int       has_alpha;
+    int       image_has_alpha;
+    int       animation;
+    int       images;
+    int       vp8x;
+    int       frame_count;
+    int       loop_count;
+    uint32_t  background_argb;
+    WPDCoding coding;
+    int       truncated;
+    int       metadata;
+    size_t    meta_offset[WPD_METADATA_NB];
+    uint32_t  meta_size[WPD_METADATA_NB];
+    int       raw_kind;
+    size_t    raw_image_offset;
+    size_t    raw_image_size;
+    size_t    raw_alpha_offset;
+    size_t    raw_alpha_size;
+    /* The frame table, built only when 'collect_frames' asks for it, so that
+       wpd_get_info() keeps its promise not to allocate. 'nb_frames' counts the
+       frames whose payload is all here; a frame whose ANMF header has arrived
+       but whose payload has not occupies the slot past them and is rebuilt on
+       every rescan until it completes. */
+    int collect_frames;
+    int partial_frame;
+    int frames_capped;
+    int nb_frames;
+    int frames_capacity;
+    /* How far the alpha scan has walked into the sub-chunk list starting at
+       'anmf_scan_at', so an ANMF arriving in pieces is not re-walked from its
+       first sub-chunk on every delivery. The offset is never zero, so a scan
+       that has moved on to another ANMF invalidates this by itself. */
+    size_t      anmf_scan_at;
+    size_t      anmf_scan_pos;
+    int         anmf_scan_done;
+    int         anmf_scan_alpha;
+    FrameEntry *frames;
+};
+
 /* The order of the WPDMetadata bits, so a bit indexes these tables. */
-const uint32_t meta_tag[WPD_METADATA_NB] = {
+static const uint32_t meta_tag[WPD_METADATA_NB] = {
     MKTAG('I', 'C', 'C', 'P'),
     MKTAG('E', 'X', 'I', 'F'),
     MKTAG('X', 'M', 'P', ' '),
 };
 
-const uint8_t meta_vp8x_flag[WPD_METADATA_NB] = {
+static const uint8_t meta_vp8x_flag[WPD_METADATA_NB] = {
     VP8X_FLAG_ICCP,
     VP8X_FLAG_EXIF,
     VP8X_FLAG_XMP,
 };
 
-void scan_free(HeaderScan *hs) {
-    wpd_free(hs->frames);
-    hs->frames          = NULL;
-    hs->frames_capacity = 0;
-    hs->nb_frames       = 0;
-    hs->partial_frame   = 0;
-    hs->frames_capped   = 0;
-    hs->collect_frames  = 0;
+HeaderScan *scan_alloc(void) { return wpd_mallocz(sizeof(HeaderScan)); }
+
+void scan_free(HeaderScan **hs) {
+    if (*hs) {
+        wpd_free((*hs)->frames);
+        wpd_free(*hs);
+        *hs = NULL;
+    }
+}
+
+void scan_reset(HeaderScan *hs) {
+    FrameEntry *const frames   = hs->frames;
+    const int         capacity = hs->frames_capacity;
+
+    memset(hs, 0, sizeof(*hs));
+    hs->frames          = frames;
+    hs->frames_capacity = capacity;
 }
 
 int info_valid(const WPDImageInfo *info) {
@@ -252,11 +316,12 @@ static WPDStatus scan_raw_headers(HeaderScan *hs, const uint8_t *data,
    the stream offset the buffer now starts at, once earlier bytes have been
    dropped. */
 WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
-                       size_t size, int partial) {
+                       size_t size, int partial, int collect_frames) {
     int partial_still = 0;
 
-    hs->truncated     = 0;
-    hs->partial_frame = 0;
+    hs->collect_frames = collect_frames;
+    hs->truncated      = 0;
+    hs->partial_frame  = 0;
 
     if (!hs->pos) {
         if (size < 12 && size >= 4 &&
@@ -383,16 +448,36 @@ WPDStatus scan_headers(HeaderScan *hs, const uint8_t *data, size_t base,
     return WPD_OK;
 }
 
-void info_from_scan(WPDImageInfo *info, const HeaderScan *hs) {
-    info->width           = hs->width;
-    info->height          = hs->height;
-    info->has_alpha       = hs->has_alpha;
-    info->is_animation    = hs->animation;
-    info->frame_count     = hs->frame_count;
-    info->loop_count      = hs->loop_count;
-    info->background_argb = hs->background_argb;
-    info->coding          = hs->coding;
-    info->metadata        = hs->metadata;
+void scan_info(const HeaderScan *hs, ScanInfo *out) {
+    out->end             = hs->end;
+    out->width           = hs->width;
+    out->height          = hs->height;
+    out->has_alpha       = hs->has_alpha;
+    out->image_has_alpha = hs->image_has_alpha;
+    out->animation       = hs->animation;
+    out->images          = hs->images;
+    out->frame_count     = hs->frame_count;
+    out->loop_count      = hs->loop_count;
+    out->background_argb = hs->background_argb;
+    out->coding          = hs->coding;
+    out->truncated       = hs->truncated;
+    out->metadata        = hs->metadata;
+    for (int i = 0; i < WPD_METADATA_NB; i++) {
+        out->meta_offset[i] = hs->meta_offset[i];
+        out->meta_size[i]   = hs->meta_size[i];
+    }
+    out->raw_kind         = hs->raw_kind;
+    out->raw_image_offset = hs->raw_image_offset;
+    out->raw_image_size   = hs->raw_image_size;
+    out->raw_alpha_offset = hs->raw_alpha_offset;
+    out->raw_alpha_size   = hs->raw_alpha_size;
+}
+
+int scan_frame(const HeaderScan *hs, int index, FrameEntry *out) {
+    if (index < 0 || index >= hs->nb_frames + hs->partial_frame)
+        return 0;
+    *out = hs->frames[index];
+    return 1;
 }
 
 WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
@@ -405,9 +490,18 @@ WPDStatus wpd_get_info(const uint8_t *data, size_t size, WPDImageInfo *info) {
     info_clear(info);
     /* collect_frames stays clear, so this allocates nothing, as documented. */
     memset(&hs, 0, sizeof(hs));
-    status = scan_headers(&hs, data, 0, size, 1);
-    if (status == WPD_OK)
-        info_from_scan(info, &hs);
-    scan_free(&hs);
+    status = scan_headers(&hs, data, 0, size, 1, 0);
+    if (status == WPD_OK) {
+        info->width           = hs.width;
+        info->height          = hs.height;
+        info->has_alpha       = hs.has_alpha;
+        info->is_animation    = hs.animation;
+        info->frame_count     = hs.frame_count;
+        info->loop_count      = hs.loop_count;
+        info->background_argb = hs.background_argb;
+        info->coding          = hs.coding;
+        info->metadata        = hs.metadata;
+    }
+    wpd_free(hs.frames);
     return status;
 }
