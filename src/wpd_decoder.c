@@ -73,6 +73,47 @@ size_t frame_extent(const WPDFrame *frame) {
         : WPD_FIELD_END(WPDFrame, private_data);
 }
 
+/* The decoder's answers to the questions the export asks, gathered at the call
+   rather than reached for: the export owns no decoder state, so nothing it
+   sees can drift from what the frame was decoded as. */
+static ExportSettings export_settings(const WPDDecoder *s) {
+    ExportSettings set = {
+        .out_format  = s->out_format,
+        .premultiply = s->premultiply,
+        .animation   = s->animation,
+        .anim_mode   = s->anim_mode,
+        .ext_active  = s->ext_active,
+        .duration    = s->frame_duration,
+        .pos_x       = s->pos_x,
+        .pos_y       = s->pos_y,
+        .anmf_flags  = s->anmf_flags,
+        /* An animation latches each sub-frame's alpha as it decodes it; a
+           still has only the one image, whose two decoders report it
+           separately. */
+        .has_alpha = s->animation ? s->frame_has_alpha
+                                  : s->has_alpha || s->lossless_has_alpha,
+        .timestamp = s->frame_timestamp - s->frame_duration,
+    };
+
+    return set;
+}
+
+static ExportTargets export_targets(WPDDecoder *s) {
+    ExportTargets t = {
+        .dsp              = &s->ydsp,
+        .options          = &s->options,
+        .rescale          = &s->rescale,
+        .transformed      = &s->transformed,
+        .output           = &s->output,
+        .converted        = &s->converted,
+        .ext              = s->ext,
+        .converted_rows   = &s->converted_rows,
+        .converted_format = &s->converted_format,
+    };
+
+    return t;
+}
+
 void frame_clear(WPDFrame *frame) {
     const size_t struct_size = frame->struct_size;
 
@@ -778,29 +819,37 @@ static int lossless_peek(WPDDecoder *decoder) {
 }
 
 static int emit_still_lossless(WPDDecoder *decoder, WPDFrame *frame) {
-    int ret;
+    const ExportSettings set = export_settings(decoder);
+    const ExportTargets  t   = export_targets(decoder);
+    int                  ret;
 
     decoder->still_done = 1;
     if (options_transform(&decoder->options))
-        ret = export_packed(decoder, decoder->lossless_frame, frame);
+        ret = export_packed(&set, &t, decoder->lossless_frame, frame);
     else
-        ret = export_still_lossless(
-            decoder, frame, decoder->lossless_frame->height);
+        ret = export_still_lossless(&set,
+                                    &t,
+                                    decoder->lossless_frame,
+                                    frame,
+                                    decoder->lossless_frame->height);
     if (ret < 0)
         return set_error(decoder, "cannot output frame", ret);
     return 1;
 }
 
 static int emit_still_lossy(WPDDecoder *decoder, WPDFrame *frame) {
-    int ret;
+    const ExportSettings set = export_settings(decoder);
+    const ExportTargets  t   = export_targets(decoder);
+    int                  ret;
 
     decoder->still_done = 1;
     if (options_transform(&decoder->options))
-        ret = export_packed(decoder, &decoder->subframe, frame);
+        ret = export_packed(&set, &t, &decoder->subframe, frame);
     else if (format_is_packed(decoder->out_format))
-        ret = export_still_packed(decoder, frame, decoder->subframe.height);
+        ret = export_still_packed(
+            &set, &t, &decoder->subframe, frame, decoder->subframe.height);
     else
-        ret = export_packed(decoder, &decoder->subframe, frame);
+        ret = export_packed(&set, &t, &decoder->subframe, frame);
     if (ret < 0)
         return set_error(decoder, "cannot output frame", ret);
     return 1;
@@ -834,7 +883,12 @@ static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
         decoder->still_lossless = 1;
         decoder->lossless_frame = &decoder->argb;
         decoder->converted_rows = decoder->argb.height;
-        ret                     = export_packed(decoder, &decoder->argb, frame);
+        {
+            const ExportSettings set = export_settings(decoder);
+            const ExportTargets  t   = export_targets(decoder);
+
+            ret = export_packed(&set, &t, &decoder->argb, frame);
+        }
     } else {
         if (hs->raw_kind == 3) {
             const uint8_t *alpha = file_at(decoder, hs->raw_alpha_offset);
@@ -859,7 +913,12 @@ static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
         if (ret < 0)
             return set_error(decoder, "VP8 decode failed", ret);
         decoder->still_done = 1;
-        ret                 = export_packed(decoder, &decoder->subframe, frame);
+        {
+            const ExportSettings set = export_settings(decoder);
+            const ExportTargets  t   = export_targets(decoder);
+
+            ret = export_packed(&set, &t, &decoder->subframe, frame);
+        }
     }
     if (ret < 0)
         return set_error(decoder, "cannot output frame", ret);
@@ -994,7 +1053,12 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
             decoder->still_done = 1;
-            ret                 = export_packed(decoder, &decoder->argb, frame);
+            {
+                const ExportSettings set = export_settings(decoder);
+                const ExportTargets  t   = export_targets(decoder);
+
+                ret = export_packed(&set, &t, &decoder->argb, frame);
+            }
             if (ret < 0)
                 return set_error(decoder, "cannot output frame", ret);
             decoder->still_lossless = 1;
@@ -1010,11 +1074,17 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
             ret = decode_anmf(decoder, payload, size);
             if (ret < 0)
                 return set_error(decoder, "animation frame decode failed", ret);
-            ret = export_packed(decoder,
-                                decoder->anim_mode == WPD_ANIM_SUBFRAME
-                                    ? decoder->subframe_out
-                                    : &decoder->canvas,
-                                frame);
+            {
+                const ExportSettings set = export_settings(decoder);
+                const ExportTargets  t   = export_targets(decoder);
+
+                ret = export_packed(&set,
+                                    &t,
+                                    decoder->anim_mode == WPD_ANIM_SUBFRAME
+                                        ? decoder->subframe_out
+                                        : &decoder->canvas,
+                                    frame);
+            }
             if (ret < 0)
                 return set_error(decoder, "cannot output frame", ret);
             return 1;
@@ -1036,6 +1106,9 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
     if (!decoder->opened)
         return set_error(decoder, "no file opened", WPD_ERR_INVALID_ARG);
 
+    const ExportSettings set = export_settings(decoder);
+    const ExportTargets  t   = export_targets(decoder);
+
     frame_clear(frame);
     if (rows_valid)
         *rows_valid = 0;
@@ -1052,13 +1125,13 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
                 : decoder->lossless_frame->height;
             if (rows < decoder->lossless_frame->height)
                 return WPD_OK;
-            ret = export_packed(decoder, decoder->lossless_frame, frame);
+            ret = export_packed(&set, &t, decoder->lossless_frame, frame);
         } else if (decoder->still_lossy) {
             rows = decoder->vp8_active ? vp8_rows_finalized(&decoder->codec)
                                        : decoder->subframe.height;
             if (rows < decoder->subframe.height)
                 return WPD_OK;
-            ret = export_packed(decoder, &decoder->subframe, frame);
+            ret = export_packed(&set, &t, &decoder->subframe, frame);
         } else {
             return WPD_OK;
         }
@@ -1075,7 +1148,9 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
         }
-        ret = export_still_lossless(decoder,
+        ret = export_still_lossless(&set,
+                                    &t,
+                                    decoder->lossless_frame,
                                     frame,
                                     vp8l_still_active(decoder->vp8l)
                                         ? vp8l_still_rows_out(decoder->vp8l)
@@ -1117,11 +1192,11 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
         }
         if (decoder->ext_active) {
             ret = export_external_planar_rows(
-                decoder, plane, format, frame, first, rows);
+                &set, &t, plane, format, frame, first, rows);
             if (ret < 0)
                 return set_error(decoder, "cannot output frame", ret);
         } else {
-            export_frame(decoder, plane, format, frame);
+            export_frame(&set, plane, format, frame);
         }
         decoder->converted_rows   = rows;
         decoder->converted_format = format;
@@ -1135,7 +1210,7 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
     if (rows && rows < decoder->subframe.height)
         rows--;
 
-    ret = export_still_packed(decoder, frame, rows);
+    ret = export_still_packed(&set, &t, &decoder->subframe, frame, rows);
     if (ret < 0)
         return set_error(decoder, "cannot output frame", ret);
     if (rows_valid)

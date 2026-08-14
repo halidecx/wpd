@@ -1,7 +1,7 @@
 
 #include "export.h"
 
-void export_frame(const WPDDecoder *s, const WebPImage *img,
+void export_frame(const ExportSettings *set, const WebPImage *img,
                   WPDPixelFormat format, WPDFrame *frame) {
     int planes = format == WPD_PIX_FMT_YUVA420P ? 4
         : format == WPD_PIX_FMT_YUV420P         ? 3
@@ -15,42 +15,40 @@ void export_frame(const WPDDecoder *s, const WebPImage *img,
     frame->width     = img->width;
     frame->height    = img->height;
     frame->format    = format;
-    frame->duration  = s->frame_duration;
-    frame->timestamp = s->frame_timestamp - s->frame_duration;
+    frame->duration  = set->duration;
+    frame->timestamp = set->timestamp;
     if (frame_extent(frame) < WPD_FIELD_END(WPDFrame, has_alpha))
         return;
-    frame->pos_x   = s->pos_x;
-    frame->pos_y   = s->pos_y;
-    frame->dispose = s->anmf_flags & ANMF_FLAG_DISPOSE ? WPD_DISPOSE_BACKGROUND
-                                                       : WPD_DISPOSE_NONE;
-    frame->blend   = s->anmf_flags & ANMF_FLAG_NO_BLEND ? WPD_BLEND_NONE
-                                                        : WPD_BLEND_ALPHA;
-    /* An animation latches each sub-frame's alpha as it decodes it; a still
-       has only the one image, whose two decoders report it separately. */
-    frame->has_alpha = s->animation ? s->frame_has_alpha
-                                    : s->has_alpha || s->lossless_has_alpha;
+    frame->pos_x     = set->pos_x;
+    frame->pos_y     = set->pos_y;
+    frame->dispose   = set->anmf_flags & ANMF_FLAG_DISPOSE
+        ? WPD_DISPOSE_BACKGROUND
+        : WPD_DISPOSE_NONE;
+    frame->blend     = set->anmf_flags & ANMF_FLAG_NO_BLEND ? WPD_BLEND_NONE
+                                                            : WPD_BLEND_ALPHA;
+    frame->has_alpha = set->has_alpha;
 }
 
 static size_t stride_magnitude(ptrdiff_t stride) {
     return stride < 0 ? (size_t)(-(stride + 1)) + 1 : (size_t)stride;
 }
 
-static int export_external_rows(WPDDecoder *s, const WebPImage *img,
+static int export_external_rows(const ExportSettings *set,
+                                const ExportTargets *t, const WebPImage *img,
                                 WPDPixelFormat format, WPDFrame *frame,
                                 int row_start, int row_end) {
     const size_t  row     = (size_t)img->width * format_bpp(format);
-    const size_t  advance = stride_magnitude(s->ext[0].stride);
-    pack_row_func pack    = img->format == format
-        ? NULL
-        : format_packer(&s->ydsp, format);
-    uint8_t      *dst     = s->ext[0].data;
+    const size_t  advance = stride_magnitude(t->ext[0].stride);
+    pack_row_func pack    = img->format == format ? NULL
+                                                  : format_packer(t->dsp, format);
+    uint8_t      *dst     = t->ext[0].data;
 
     if (!pack && format_bpp(img->format) != format_bpp(format))
         return WPD_ERR_UNSUPPORTED;
-    if (advance < row || (size_t)img->height > s->ext[0].size / advance)
+    if (advance < row || (size_t)img->height > t->ext[0].size / advance)
         return WPD_ERR_BUFFER_TOO_SMALL;
 
-    dst += (ptrdiff_t)row_start * s->ext[0].stride;
+    dst += (ptrdiff_t)row_start * t->ext[0].stride;
     for (int y = row_start; y < row_end; y++) {
         const uint8_t *src = img->data[0] + (ptrdiff_t)y * img->linesize[0];
 
@@ -59,20 +57,21 @@ static int export_external_rows(WPDDecoder *s, const WebPImage *img,
         } else {
             memcpy(dst, src, row);
         }
-        dst += s->ext[0].stride;
+        dst += t->ext[0].stride;
     }
 
-    export_frame(s, img, format, frame);
+    export_frame(set, img, format, frame);
     for (int p = 1; p < 4; p++) {
         frame->data[p]   = NULL;
         frame->stride[p] = 0;
     }
-    frame->data[0]   = s->ext[0].data;
-    frame->stride[0] = s->ext[0].stride;
+    frame->data[0]   = t->ext[0].data;
+    frame->stride[0] = t->ext[0].stride;
     return 0;
 }
 
-int export_external_planar_rows(WPDDecoder *s, const WebPImage *img,
+int export_external_planar_rows(const ExportSettings *set,
+                                const ExportTargets *t, const WebPImage *img,
                                 WPDPixelFormat format, WPDFrame *frame,
                                 int row_start, int row_end) {
     const int planes = format == WPD_PIX_FMT_YUVA420P ? 4 : 3;
@@ -81,10 +80,10 @@ int export_external_planar_rows(WPDDecoder *s, const WebPImage *img,
         const int    shift = p == 1 || p == 2;
         const int    w     = CEIL_RSHIFT(img->width, shift);
         const int    h     = CEIL_RSHIFT(img->height, shift);
-        const size_t step  = stride_magnitude(s->ext[p].stride);
+        const size_t step  = stride_magnitude(t->ext[p].stride);
 
-        if (!s->ext[p].data || !s->ext[p].stride || step < (size_t)w ||
-            (size_t)h > s->ext[p].size / step)
+        if (!t->ext[p].data || !t->ext[p].stride || step < (size_t)w ||
+            (size_t)h > t->ext[p].size / step)
             return WPD_ERR_BUFFER_TOO_SMALL;
     }
 
@@ -93,48 +92,47 @@ int export_external_planar_rows(WPDDecoder *s, const WebPImage *img,
         const int w     = CEIL_RSHIFT(img->width, shift);
         const int y0    = row_start >> shift;
         const int h     = CEIL_RSHIFT(row_end, shift);
-        uint8_t  *dst   = s->ext[p].data + (ptrdiff_t)y0 * s->ext[p].stride;
+        uint8_t  *dst   = t->ext[p].data + (ptrdiff_t)y0 * t->ext[p].stride;
 
         for (int y = y0; y < h; y++) {
             memcpy(
                 dst, img->data[p] + (ptrdiff_t)y * img->linesize[p], (size_t)w);
-            dst += s->ext[p].stride;
+            dst += t->ext[p].stride;
         }
     }
 
-    export_frame(s, img, format, frame);
+    export_frame(set, img, format, frame);
     for (int p = 0; p < 4; p++) {
-        frame->data[p]   = p < planes ? s->ext[p].data : NULL;
-        frame->stride[p] = p < planes ? s->ext[p].stride : 0;
+        frame->data[p]   = p < planes ? t->ext[p].data : NULL;
+        frame->stride[p] = p < planes ? t->ext[p].stride : 0;
     }
     return 0;
 }
 
-static int export_external_planar(WPDDecoder *s, const WebPImage *img,
+static int export_external_planar(const ExportSettings *set,
+                                  const ExportTargets *t, const WebPImage *img,
                                   WPDPixelFormat format, WPDFrame *frame) {
-    return export_external_planar_rows(s, img, format, frame, 0, img->height);
+    return export_external_planar_rows(
+        set, t, img, format, frame, 0, img->height);
 }
 
-static int export_external(WPDDecoder *s, const WebPImage *img,
-                           WPDPixelFormat format, WPDFrame *frame) {
-    return export_external_rows(s, img, format, frame, 0, img->height);
+static int export_external(const ExportSettings *set, const ExportTargets *t,
+                           const WebPImage *img, WPDPixelFormat format,
+                           WPDFrame *frame) {
+    return export_external_rows(set, t, img, format, frame, 0, img->height);
 }
 
-int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
-    const WPDPixelFormat format = s->out_format;
+int export_packed(const ExportSettings *set, const ExportTargets *t,
+                  WebPImage *img, WPDFrame *frame) {
+    const WPDPixelFormat format = set->out_format;
     WebPImage            view;
     WebPImage           *processed;
     WebPImage           *planar;
     pack_row_func        pack;
     int                  ret;
 
-    ret = transform_image(&s->options,
-                          &s->rescale,
-                          &s->transformed,
-                          img,
-                          &view,
-                          &processed,
-                          format);
+    ret = transform_image(
+        t->options, t->rescale, t->transformed, img, &view, &processed, format);
     if (ret < 0)
         return ret;
     img = processed;
@@ -146,117 +144,114 @@ int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
             planar = img;
         } else {
             ret = ensure_yuva(
-                &s->ydsp, &s->output, img, format == WPD_PIX_FMT_YUVA420P);
+                t->dsp, t->output, img, format == WPD_PIX_FMT_YUVA420P);
             if (ret < 0)
                 return ret;
-            planar = &s->output;
+            planar = t->output;
         }
-        if (s->options.flip) {
+        if (t->options->flip) {
             view = *planar;
             flip_image(&view);
             planar = &view;
         }
-        if (s->ext_active)
-            return export_external_planar(s, planar, format, frame);
-        export_frame(s, planar, format, frame);
+        if (set->ext_active)
+            return export_external_planar(set, t, planar, format, frame);
+        export_frame(set, planar, format, frame);
         return 0;
     }
     if (!format_is_packed(format)) {
-        if (s->options.flip) {
+        if (t->options->flip) {
             view = *img;
             flip_image(&view);
             img = &view;
         }
-        if (!s->ext_active) {
-            export_frame(s, img, img->format, frame);
+        if (!set->ext_active) {
+            export_frame(set, img, img->format, frame);
             return 0;
         }
         if (!format_is_packed(img->format))
-            return export_external_planar(s, img, img->format, frame);
-        return export_external(s, img, img->format, frame);
+            return export_external_planar(set, t, img, img->format, frame);
+        return export_external(set, t, img, img->format, frame);
     }
     if (!format_is_packed(img->format) || format_bpp(format) == 2) {
         ret = convert_to_packed(
-            &s->ydsp,
-            &s->output,
+            t->dsp,
+            t->output,
             img,
             format,
-            s->options.no_fancy_upsampling,
-            premultiply_after_pack(s->animation, s->anim_mode));
+            t->options->no_fancy_upsampling,
+            premultiply_after_pack(set->animation, set->anim_mode));
         if (ret < 0)
             return ret;
-        img = &s->output;
+        img = t->output;
     } else if (img->format != format) {
-        pack = format_packer(&s->ydsp, format);
+        pack = format_packer(t->dsp, format);
         if (!pack) {
             if (format != WPD_PIX_FMT_ARGB_PRE ||
                 img->format != WPD_PIX_FMT_ARGB)
                 return WPD_ERR_UNSUPPORTED;
-            if (s->animation) {
+            if (set->animation) {
                 view        = *img;
                 view.format = format;
                 img         = &view;
             } else {
                 ret = image_alloc_packed(
-                    &s->output, img->width, img->height, 4, format);
+                    t->output, img->width, img->height, 4, format);
                 if (ret < 0)
                     return ret;
                 for (int y = 0; y < img->height; y++)
-                    memcpy(s->output.data[0] +
-                               (ptrdiff_t)y * s->output.linesize[0],
+                    memcpy(t->output->data[0] +
+                               (ptrdiff_t)y * t->output->linesize[0],
                            img->data[0] + (ptrdiff_t)y * img->linesize[0],
                            (size_t)img->width * 4);
-                img = &s->output;
+                img = t->output;
             }
         } else {
-            ret = image_alloc_packed(&s->output,
-                                     img->width,
-                                     img->height,
-                                     format_bpp(format),
-                                     format);
+            ret = image_alloc_packed(
+                t->output, img->width, img->height, format_bpp(format), format);
             if (ret < 0)
                 return ret;
             for (int y = 0; y < img->height; y++)
-                pack(s->output.data[0] + (ptrdiff_t)y * s->output.linesize[0],
+                pack(t->output->data[0] + (ptrdiff_t)y * t->output->linesize[0],
                      img->data[0] + (ptrdiff_t)y * img->linesize[0],
                      img->width);
-            img = &s->output;
+            img = t->output;
         }
     }
-    if (s->premultiply && !s->animation && format_bpp(format) != 2)
+    if (set->premultiply && !set->animation && format_bpp(format) != 2)
         for (int y = 0; y < img->height; y++)
-            s->ydsp.premultiply_row(
+            t->dsp->premultiply_row(
                 img->data[0] + (ptrdiff_t)y * img->linesize[0],
                 format_layout(img->format) == WPD_LAYOUT_ARGB,
                 img->width);
-    if (s->options.flip) {
+    if (t->options->flip) {
         view = *img;
         flip_image(&view);
         img = &view;
     }
-    if (s->ext_active)
-        return export_external(s, img, format, frame);
-    export_frame(s, img, format, frame);
+    if (set->ext_active)
+        return export_external(set, t, img, format, frame);
+    export_frame(set, img, format, frame);
     return 0;
 }
 
 /* Converts and hands out rows [0, upto) of the still lossy frame, converting
    each row exactly once however many times it is asked for. */
-int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
-    const WPDPixelFormat format = s->out_format;
-    const WebPImage     *src    = &s->subframe;
-    WebPImage           *dst    = &s->converted;
-    const int first = s->converted_format == format ? s->converted_rows : 0;
+int export_still_packed(const ExportSettings *set, const ExportTargets *t,
+                        const WebPImage *src, WPDFrame *frame, int upto) {
+    const WPDPixelFormat format = set->out_format;
+    WebPImage           *dst    = t->converted;
+    const int first = *t->converted_format == format ? *t->converted_rows : 0;
     int       converted_from = first;
     int       ret;
 
-    if (upto < s->converted_rows)
-        upto = s->converted_rows;
+    if (upto < *t->converted_rows)
+        upto = *t->converted_rows;
 
     /* The two-byte formats are packed from ARGB, so the intermediate has to be
        carried between calls too, rather than rebuilt for the whole frame. */
     if (format_bpp(format) == 2) {
-        WebPImage *argb = &s->output;
+        WebPImage *argb = t->output;
 
         if (!first) {
             ret = image_alloc_argb(argb, src->width, src->height);
@@ -267,12 +262,12 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 return ret;
         }
         if (upto > first) {
-            const pack_row_func pack = format_packer(&s->ydsp, format);
+            const pack_row_func pack = format_packer(t->dsp, format);
             const premultiply_4444_row_func premultiply =
-                format_premultiplier_4444(&s->ydsp, format);
+                format_premultiplier_4444(t->dsp, format);
 
-            if (s->options.no_fancy_upsampling)
-                wpd_yuv420_to_packed_simple(&s->ydsp,
+            if (t->options->no_fancy_upsampling)
+                wpd_yuv420_to_packed_simple(t->dsp,
                                             WPD_LAYOUT_ARGB,
                                             argb->data[0],
                                             argb->linesize[0],
@@ -287,7 +282,7 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                                             first,
                                             upto);
             else
-                converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
+                converted_from = wpd_yuv420_to_packed_rows(t->dsp,
                                                            WPD_LAYOUT_ARGB,
                                                            argb->data[0],
                                                            argb->linesize[0],
@@ -308,20 +303,20 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 pack(row,
                      argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
                      src->width);
-                if (s->premultiply)
+                if (set->premultiply)
                     premultiply(row, src->width);
             }
         }
-        if (s->ext_active) {
+        if (set->ext_active) {
             ret = export_external_rows(
-                s, dst, format, frame, converted_from, upto);
+                set, t, dst, format, frame, converted_from, upto);
             if (ret < 0)
                 return ret;
         } else {
-            export_frame(s, dst, format, frame);
+            export_frame(set, dst, format, frame);
         }
-        s->converted_rows   = upto;
-        s->converted_format = format;
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
 
@@ -332,8 +327,8 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
             return ret;
     }
 
-    if (s->options.no_fancy_upsampling) {
-        wpd_yuv420_to_packed_simple(&s->ydsp,
+    if (t->options->no_fancy_upsampling) {
+        wpd_yuv420_to_packed_simple(t->dsp,
                                     format_layout(format),
                                     dst->data[0],
                                     dst->linesize[0],
@@ -348,7 +343,7 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                                     first,
                                     upto);
     } else if (upto > first) {
-        converted_from = wpd_yuv420_to_packed_rows(&s->ydsp,
+        converted_from = wpd_yuv420_to_packed_rows(t->dsp,
                                                    format_layout(format),
                                                    dst->data[0],
                                                    dst->linesize[0],
@@ -364,131 +359,133 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                                                    first,
                                                    upto);
     }
-    if (s->premultiply)
+    if (set->premultiply)
         for (int y = converted_from; y < upto; y++)
-            s->ydsp.premultiply_row(dst->data[0] + (size_t)y * dst->linesize[0],
+            t->dsp->premultiply_row(dst->data[0] + (size_t)y * dst->linesize[0],
                                     format_layout(format) == WPD_LAYOUT_ARGB,
                                     dst->width);
 
-    if (s->ext_active) {
-        ret = export_external_rows(s, dst, format, frame, converted_from, upto);
+    if (set->ext_active) {
+        ret = export_external_rows(
+            set, t, dst, format, frame, converted_from, upto);
         if (ret < 0)
             return ret;
-        s->converted_rows   = upto;
-        s->converted_format = format;
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
-    s->converted_rows   = upto;
-    s->converted_format = format;
-    export_frame(s, dst, format, frame);
+    *t->converted_rows   = upto;
+    *t->converted_format = format;
+    export_frame(set, dst, format, frame);
     return 0;
 }
 
 /* Hands out rows [0, upto) of the still lossless frame, premultiplying and
    packing each row exactly once however many times it is asked for. */
-int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
-    const WPDPixelFormat format = s->out_format;
-    WebPImage           *img    = s->lossless_frame;
-    const int first = s->converted_format == format ? s->converted_rows : 0;
+int export_still_lossless(const ExportSettings *set, const ExportTargets *t,
+                          WebPImage *img, WPDFrame *frame, int upto) {
+    const WPDPixelFormat format = set->out_format;
+    const int first = *t->converted_format == format ? *t->converted_rows : 0;
     const premultiply_4444_row_func premultiply = format_premultiplier_4444(
-        &s->ydsp, format);
+        t->dsp, format);
     pack_row_func pack;
     int           ret;
 
-    if (upto < s->converted_rows)
-        upto = s->converted_rows;
+    if (upto < *t->converted_rows)
+        upto = *t->converted_rows;
 
     if (format == WPD_PIX_FMT_YUV420P || format == WPD_PIX_FMT_YUVA420P) {
-        ret = ensure_yuva_rows(&s->ydsp,
-                               &s->output,
+        ret = ensure_yuva_rows(t->dsp,
+                               t->output,
                                img,
                                format == WPD_PIX_FMT_YUVA420P,
                                first,
                                upto);
         if (ret < 0)
             return ret;
-        if (s->ext_active)
+        if (set->ext_active)
             ret = export_external_planar_rows(
-                s, &s->output, format, frame, first, upto);
+                set, t, t->output, format, frame, first, upto);
         else {
-            export_frame(s, &s->output, format, frame);
+            export_frame(set, t->output, format, frame);
             ret = 0;
         }
         if (ret < 0)
             return ret;
-        s->converted_rows   = upto;
-        s->converted_format = format;
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
 
     if (!format_is_packed(format)) {
-        if (!s->ext_active) {
-            export_frame(s, img, img->format, frame);
-            s->converted_rows   = upto;
-            s->converted_format = format;
+        if (!set->ext_active) {
+            export_frame(set, img, img->format, frame);
+            *t->converted_rows   = upto;
+            *t->converted_format = format;
             return 0;
         }
-        ret = export_external_rows(s, img, img->format, frame, first, upto);
+        ret = export_external_rows(
+            set, t, img, img->format, frame, first, upto);
         if (ret < 0)
             return ret;
-        s->converted_rows   = upto;
-        s->converted_format = format;
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
 
-    if (s->ext_active) {
-        ret = export_external_rows(s, img, format, frame, first, upto);
+    if (set->ext_active) {
+        ret = export_external_rows(set, t, img, format, frame, first, upto);
         if (ret < 0)
             return ret;
-        if (s->premultiply)
+        if (set->premultiply)
             for (int y = first; y < upto; y++) {
-                uint8_t *row = s->ext[0].data + (ptrdiff_t)y * s->ext[0].stride;
+                uint8_t *row = t->ext[0].data + (ptrdiff_t)y * t->ext[0].stride;
 
                 if (format_bpp(format) == 2)
                     premultiply(row, img->width);
                 else
-                    s->ydsp.premultiply_row(
+                    t->dsp->premultiply_row(
                         row,
                         format_layout(format) == WPD_LAYOUT_ARGB,
                         img->width);
             }
-        s->converted_rows   = upto;
-        s->converted_format = format;
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
 
-    pack = format_packer(&s->ydsp, format);
-    if (!s->premultiply && (!pack || img->format == format)) {
-        export_frame(s, img, format, frame);
-        s->converted_rows   = upto;
-        s->converted_format = format;
+    pack = format_packer(t->dsp, format);
+    if (!set->premultiply && (!pack || img->format == format)) {
+        export_frame(set, img, format, frame);
+        *t->converted_rows   = upto;
+        *t->converted_format = format;
         return 0;
     }
 
     if (!first) {
         ret = image_alloc_packed(
-            &s->output, img->width, img->height, format_bpp(format), format);
+            t->output, img->width, img->height, format_bpp(format), format);
         if (ret < 0)
             return ret;
     }
     for (int y = first; y < upto; y++) {
-        uint8_t *dst = s->output.data[0] + (size_t)y * s->output.linesize[0];
+        uint8_t *dst = t->output->data[0] + (size_t)y * t->output->linesize[0];
         const uint8_t *src = img->data[0] + (size_t)y * img->linesize[0];
 
         if (pack)
             pack(dst, src, img->width);
         else
             memcpy(dst, src, (size_t)img->width * 4);
-        if (s->premultiply) {
+        if (set->premultiply) {
             if (format_bpp(format) == 2)
                 premultiply(dst, img->width);
             else
-                s->ydsp.premultiply_row(
+                t->dsp->premultiply_row(
                     dst, format_layout(format) == WPD_LAYOUT_ARGB, img->width);
         }
     }
-    export_frame(s, &s->output, format, frame);
-    s->converted_rows   = upto;
-    s->converted_format = format;
+    export_frame(set, t->output, format, frame);
+    *t->converted_rows   = upto;
+    *t->converted_format = format;
     return 0;
 }
