@@ -715,7 +715,8 @@ pub unsafe extern "C" fn copy_yuva_region(
 
 /// # Safety
 ///
-/// Every pointer must be live.
+/// Every pointer must be live, and `dst` must not alias `src`: the source is
+/// borrowed across the allocation that fills the destination.
 #[no_mangle]
 pub unsafe extern "C" fn convert_to_packed(
     dsp: *const WPDYUVDSP,
@@ -925,7 +926,7 @@ pub unsafe extern "C" fn convert_to_argb(
 
 /// # Safety
 ///
-/// As [`convert_to_packed`].
+/// As [`convert_to_packed`], including that `dst` does not alias `src`.
 #[no_mangle]
 pub unsafe extern "C" fn ensure_yuva_rows(
     dsp: *const WPDYUVDSP,

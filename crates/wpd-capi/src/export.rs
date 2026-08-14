@@ -346,9 +346,12 @@ pub unsafe extern "C" fn export_packed(
     let (set, t) = unsafe { (&*set, &*t) };
     let format = set.out_format;
     let mut view: WebPImage = unsafe { mem::zeroed() };
-    /* The flip gets an image of its own. The C reused the crop view for it,
-    which meant assigning it from a pointer that was sometimes itself: a
-    harmless self-assignment in C, and an alias Rust has no reason to expect. */
+    /* Each of these is written once and only from one of the others, so no
+    assignment can have its own destination as its source. The C reused a
+    single view for all three, which meant assigning it from a pointer that was
+    sometimes itself: a harmless self-assignment there, and an alias Rust has
+    no reason to expect. */
+    let mut relabelled: WebPImage;
     let mut flipped: WebPImage;
     let mut processed: *mut WebPImage = ptr::null_mut();
 
@@ -446,9 +449,9 @@ pub unsafe extern "C" fn export_packed(
                 animation canvas arrives. A still has to be copied, because
                 the caller may hold the picture past the next decode. */
                 if set.animation != 0 {
-                    flipped = *img;
-                    flipped.format = format;
-                    img = &flipped;
+                    relabelled = *img;
+                    relabelled.format = format;
+                    img = &relabelled;
                 } else {
                     let ret = unsafe {
                         image_alloc_packed(t.output, img.width, img.height, 4, format)

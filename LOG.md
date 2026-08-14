@@ -830,6 +830,19 @@ This is the sharper edge of the same rule the ports keep meeting: a raw pointer
 in C is a re-read, and a `&T` in Rust is a promise. Translating one to the other
 is only safe where nothing writes through the pointer in between.
 
+**The transformed animation paths had no oracle, which is how the alias survived
+one round of fixing.** `tests/parity.c` returns early on any animated file, so
+cropping, scaling and flipping are only ever checked against libwebp for stills.
+The first attempt at the fix below moved the relabelled image onto the same
+variable as the flip and reintroduced the aliasing exactly, and every gate
+stayed green. `test_flip_reverses_rows` in `tests/api.c` closes that: a flip is
+the last pass over finished rows, so a flipped decode must be the row-reversal
+of an unflipped one, which is a property no second decoder has to agree with and
+which holds for an animation as much as a still. It runs on `anim_yuva.webp` in
+`ARGB_PRE` — the one packed output that is relabelled rather than converted, and
+so the only way to reach that branch twice — and it was checked against a
+deliberately broken `flip_image` before being kept.
+
 **The C reused one view for cropping and flipping; the port does not.**
 `export_packed` kept a single stack `WebPImage view` that `transform_image` may
 point `img` at, and then flipped by assigning `view = *img` — sometimes with
