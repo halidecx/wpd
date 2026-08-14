@@ -199,6 +199,42 @@ pub fn crop_origin(
     Ok((left, top))
 }
 
+/// How far one row advances in a caller's buffer, whichever direction it runs.
+///
+/// A negative stride is negated in `usize` rather than `isize`, so the most
+/// negative stride has a magnitude too.
+pub fn stride_magnitude(stride: isize) -> usize {
+    if stride < 0 {
+        (-(stride + 1)) as usize + 1
+    } else {
+        stride as usize
+    }
+}
+
+/// Whether a caller's plane has room for `height` rows of `row` bytes at
+/// `stride`.
+///
+/// The division the C did here had no guard on a zero stride: a zero-width
+/// image reached it with both operands zero, which passed the first test and
+/// divided by zero in the second. A plane that advances by nothing holds one
+/// row at most, and that is what this says.
+pub fn external_plane_fits(
+    size: usize,
+    stride: isize,
+    row: usize,
+    height: i32,
+) -> bool {
+    let advance = stride_magnitude(stride);
+
+    if advance < row {
+        return false;
+    }
+    match advance {
+        0 => height <= 1,
+        _ => (height as usize) <= size / advance,
+    }
+}
+
 /// How a source alpha combines with a destination one, worked out once so a
 /// pair of channels sharing an alpha shares the reciprocal too: the divide
 /// dominates the blend, and chroma runs it for U and V together.
@@ -490,6 +526,23 @@ mod tests {
         );
         assert_eq!(dst_u, [10, 200]);
         assert_eq!(dst_v, [20, 100]);
+    }
+
+    #[test]
+    fn a_plane_that_advances_by_nothing_holds_one_row() {
+        assert!(external_plane_fits(0, 0, 0, 1));
+        assert!(!external_plane_fits(0, 0, 0, 2));
+        assert!(external_plane_fits(40, 10, 10, 4));
+        assert!(!external_plane_fits(40, 10, 10, 5));
+        assert!(!external_plane_fits(4000, 4, 10, 1));
+    }
+
+    #[test]
+    fn a_negative_stride_advances_as_far_as_a_positive_one() {
+        assert_eq!(stride_magnitude(-10), 10);
+        assert_eq!(stride_magnitude(10), 10);
+        assert_eq!(stride_magnitude(0), 0);
+        assert!(external_plane_fits(40, -10, 10, 4));
     }
 
     /// The bottom edge of an odd-height region spans one row, and the average

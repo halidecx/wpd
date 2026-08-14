@@ -740,23 +740,34 @@ Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183,
 `md5check.sh` against the C baseline, `sanitize.sh` 186 and 185, `fuzz.sh` 300
 trials per file, `cargo test -p wpd` 51/51.
 
-### Phase 5 — plane allocation and the image ops (`710e37d` and the port that follows it)
+### Phase 5 — plane allocation, the image ops and the export
 
-`src/image.c` and `src/convert.c` are gone. The decision-making — which format
-packs how, what a crop resolves to, what a scale rounds to, and the YUVA blend
-arithmetic — is `crates/wpd/src/image.rs`, safe and unit-tested; the plane
-walking is `crates/wpd-capi/src/{image,convert}.rs`. Five C files are left:
-`wpd_decoder.c`, `anim.c`, `export.c`, `lossy.c` and `wpd_compat.c`.
+`src/image.c`, `src/convert.c` and `src/export.c` are gone. The decision-making
+— which format packs how, what a crop resolves to, what a scale rounds to, and
+the YUVA blend arithmetic — is `crates/wpd/src/image.rs`, safe and unit-tested;
+the plane walking is `crates/wpd-capi/src/{image,convert,export}.rs`. Four C
+files are left: `wpd_decoder.c`, `anim.c`, `lossy.c` and `wpd_compat.c`.
 
-**`export.c` stays with Phase 7, and the reason is structural.** It was grouped
-with the image ops in the plan, but it is not one: `export_packed` and the two
-`export_still_*` functions read and write about twenty `WPDDecoder` fields,
-including four scratch `WebPImage` slots, the external-buffer table and the
+**`export.c` came last, and needed a shape the earlier phases did not.** It was
+the one module whose state is genuinely the decoder's: `export_packed` and the
+two `export_still_*` functions read and write about twenty `WPDDecoder` fields,
+including four scratch `WebPImage` slots, the caller's output planes, and the
 `converted_rows`/`converted_format` pair that makes a partial export resumable.
-That is the decoder's output state machine, not a pixel operation. Porting it
-now would mean mirroring a twenty-field context struct across the ABI — the
-exact shape the port has already been bitten by once — and Phase 7 would delete
-the scaffold when `WPDDecoder` itself becomes Rust. It moves there intact.
+Neither of the two moves that worked before applies — there is no struct to make
+opaque, and twenty parameters is not an interface.
+
+They divide in two, though, and the division is the point: what the export needs
+to _know_ about the frame is all scalars, and what it reads through or carries
+between calls is all pointers. `ExportSettings` and `ExportTargets` are those
+halves. Splitting them that way is not tidiness — a struct of only scalars and a
+struct of only pointers both have no interior padding, so a field added on one
+side of the ABI and not the other changes the size, and a
+`const _: () = assert!(size_of::<..>() == ..)` on each catches it at compile
+time. The layouts were checked field for field against the C as well.
+
+Two questions moved to the caller because they are about the decode rather than
+the output: which of the decoder's three alpha flags applies to this frame, and
+what its timestamp is measured from.
 
 **`WebPImage` stays a C struct, deliberately.** Everything else so far became
 opaque before it was ported. This one cannot: `crop_image` and `flip_image`
@@ -805,6 +816,35 @@ Worth keeping: a per-sample helper is the natural way to write a blend and the
 wrong way to compile one, whenever a divide or a table lookup is shared across
 the channels of a pixel. The row kernel is the unit, not the sample.
 
+**A reference taken before the allocation is a reference to the old image.**
+`export_still_packed` bound `&*t->converted` at the top, the way the C bound a
+pointer, and then called through to code that grows that image. The C reloaded
+the struct on every access; Rust is entitled not to, because a shared reference
+promises the value will not change underneath it. The result was a segfault in
+`pack_rgb565` writing through the stride the image had before it was allocated.
+Every borrow of a `WebPImage` in the ported modules is now taken after the last
+call that can reallocate it, and the two helpers that allocate return only the
+row they started at.
+
+This is the sharper edge of the same rule the ports keep meeting: a raw pointer
+in C is a re-read, and a `&T` in Rust is a promise. Translating one to the other
+is only safe where nothing writes through the pointer in between.
+
+**The C reused one view for cropping and flipping; the port does not.**
+`export_packed` kept a single stack `WebPImage view` that `transform_image` may
+point `img` at, and then flipped by assigning `view = *img` — sometimes with
+`img == &view`. In C that is a legal self-assignment. In Rust it is a write to
+the referent of a live shared reference, which is exactly the aliasing the
+optimiser is allowed to assume away. The flip now gets an image of its own; the
+cost is one stack struct and the question stops arising.
+
+**A zero stride divided by zero.** `export_external_rows` guarded its capacity
+check with `advance < row` and then divided the caller's buffer size by
+`advance`. A zero-width image reaches it with both zero, which passes the first
+test and divides by zero in the second. `external_plane_fits` in `wpd::image`
+makes the guard explicit — a plane that advances by nothing holds one row — and
+covers it with a test.
+
 **One file left 4% slower, and the time is not in this phase's code.**
 `palette2bpp_rgb` measures 1.04x slower than Phase 4, reproducibly, while its
 two siblings `palette_rgb` and `palette4bpp_rgb` are unchanged. Under a call
@@ -817,11 +857,14 @@ fresh mapping from the kernel. It is a heap-layout coincidence at one size, not
 a cost in the ported code, and it belongs to the Phase 8 perf pass rather than
 to a workaround here. Everything else is within 2% of Phase 4.
 
+The export port itself is perf-neutral: measured against the tree just before
+it, every file is within 2% and `palette4bpp_rgb` is 3% faster.
+
 Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
 five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
 `rac32.sh` 186/186, `md5check.sh` bit-exact against the C baseline `d241ef8`,
 `sanitize.sh` 186 and 185 with no ASan or UBSan report, `fuzz.sh` 300 trials per
-file, `cargo test -p wpd` 61/61.
+file, `cargo test -p wpd` 63/63.
 
 ## Measuring the fallbacks needs two no-asm builds
 

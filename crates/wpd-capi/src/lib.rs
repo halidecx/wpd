@@ -16,6 +16,7 @@ pub mod container;
 pub mod convert;
 pub mod cpu;
 pub mod dsp;
+pub mod export;
 pub mod image;
 pub mod rescale;
 pub mod vp8;
