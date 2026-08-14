@@ -128,3 +128,49 @@ single build directory — comparing binaries linked in different build dirs has
 previously produced a spurious ~5% swing. End-to-end `cmpbench.sh` comparisons
 use the preserved statically-linked baseline binary, which does not have that
 problem.
+
+### Phase 0b — `wpd_decoder.c` split into modules
+
+Pure code motion in C, so that the port can proceed a module at a time rather
+than swapping a 5332-line translation unit in one commit. Separable translation
+units are load-bearing for the mixed-language build: with the file monolithic
+there is no way to port "just the Huffman part".
+
+| Module          | Lines | Contents                                                     |
+| --------------- | ----- | ------------------------------------------------------------ |
+| `wpd_decoder.c` | 1248  | public API, streaming input buffer                           |
+| `vp8l.c`        | 1059  | lossless entropy decode, the four transforms, still driver   |
+| `convert.c`     | 612   | format helpers, crop/scale/flip, conversion, region blending |
+| `export.c`      | 477   | frame export, caller-owned output buffers                    |
+| `container.c`   | 413   | RIFF scan, frame table, `wpd_get_info`                       |
+| `anim.c`        | 365   | compositor, canvas, `decode_anmf`                            |
+| `huffman.c`     | 367   | prefix-code table build, code-length list readers            |
+| `lossy.c`       | 236   | lossy still/alpha driver                                     |
+| `image.c`       | 102   | `WebPImage` allocation                                       |
+
+Headers: `wpd_internal.h` (shared helpers), `bitreader.h` (header-only),
+`huffman.h`, `image.h`, `container.h`, `vp8l.h`, `wpd_dec.h` (the decoder
+struct), plus a header per module for the symbols that cross a boundary.
+
+Two things stayed inline rather than moving into a `.c`: the whole bit reader,
+because `br_bits()` sits in the lossless pixel loop and its refill machinery has
+to be visible at the call site, and `huff_read_symbol()` for the same reason.
+`read_huffman_code_simple`/`_normal` took a `WPDDecoder` only to reach `s->gb`,
+so they now take the `LEBitReader` directly and moved with the rest of the
+Huffman code.
+
+Verification against the preserved baseline: 187/187 meson tests, checkasm
+151/151, `md5check.sh` bit-identical, `animcheck.sh` clean over 42 files × 8
+packed formats and 27 animations, `rac32.sh` 187/187, no new compiler warnings.
+
+Timings, same methodology as Phase 0a:
+
+| File                  | Baseline | After split | Delta |
+| --------------------- | -------- | ----------- | ----- |
+| `lossless.webp`       | 160.6 ms | 160.4 ms    | -0.1% |
+| `lossy.webp`          | 169.5 ms | 170.0 ms    | +0.3% |
+| `anim_yuva.webp`      | 341.5 ms | 342.9 ms    | +0.4% |
+| `simplelf-lossy.webp` | 159.5 ms | 160.2 ms    | +0.4% |
+
+All within run-to-run noise: the extra translation units cost nothing, so no
+interim LTO is needed to keep the port's own measurements honest.
