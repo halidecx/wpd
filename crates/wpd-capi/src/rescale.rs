@@ -105,11 +105,9 @@ pub unsafe extern "C" fn wpd_rescaler_init(
         0
     } else {
         let den = u64::from(x_add as u32) * u64::from(y_add as u32);
-        let ratio = if den != 0 {
-            (u64::from(dst_height as u32) << 32) / den
-        } else {
-            0
-        };
+        let ratio = (u64::from(dst_height as u32) << 32)
+            .checked_div(den)
+            .unwrap_or(0);
 
         if ratio > u64::from(u32::MAX) {
             0

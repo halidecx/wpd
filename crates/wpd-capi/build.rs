@@ -20,7 +20,6 @@ const C_SOURCES: &[&str] = &[
     "src/vp8l.c",
     "src/vp8.c",
     "src/vp56rac.c",
-    "src/yuvdsp.c",
     "src/wpd_compat.c",
 ];
 
@@ -56,6 +55,7 @@ fn dep(name: &str) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-check-cfg=cfg(wpd_asm_dotprod, wpd_asm_i8mm)");
 
     let root = repo_root();
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -119,6 +119,9 @@ fn main() {
                         &format!("HAVE_{upper}"),
                         dep(&format!("HAVE_{upper}")).as_deref(),
                     );
+                    if dep(&format!("HAVE_{upper}")).as_deref() == Some("1") {
+                        println!("cargo:rustc-cfg=wpd_asm_{name}");
+                    }
                 }
             }
             "arm" => {

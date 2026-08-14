@@ -80,8 +80,8 @@ pub fn pred4x4_horizontal(buf: &mut [u8], o: usize, stride: usize) {
         ((l[2] + 3 * l[3] + 2) >> 2) as u8,
     ];
 
-    for y in 0..4 {
-        row::<4>(buf, o, stride, y).fill(p[y]);
+    for (y, &v) in p.iter().enumerate() {
+        row::<4>(buf, o, stride, y).fill(v);
     }
 }
 
@@ -135,10 +135,7 @@ pub fn pred4x4_down_left(buf: &mut [u8], o: usize, stride: usize, tr: &[u8; 4]) 
     p[6] = ((t[6] + 3 * t[7] + 2) >> 2) as u8;
 
     for y in 0..4 {
-        let r = row::<4>(buf, o, stride, y);
-        for x in 0..4 {
-            r[x] = p[x + y];
-        }
+        row::<4>(buf, o, stride, y).copy_from_slice(&p[y..y + 4]);
     }
 }
 
@@ -174,8 +171,8 @@ pub fn pred4x4_vertical_right(buf: &mut [u8], o: usize, stride: usize) {
         ],
     ];
 
-    for y in 0..4 {
-        row::<4>(buf, o, stride, y).copy_from_slice(&p[y]);
+    for (y, pred) in p.iter().enumerate() {
+        row::<4>(buf, o, stride, y).copy_from_slice(pred);
     }
 }
 
@@ -213,8 +210,8 @@ pub fn pred4x4_vertical_left(buf: &mut [u8], o: usize, stride: usize, tr: &[u8; 
         ],
     ];
 
-    for y in 0..4 {
-        row::<4>(buf, o, stride, y).copy_from_slice(&p[y]);
+    for (y, pred) in p.iter().enumerate() {
+        row::<4>(buf, o, stride, y).copy_from_slice(pred);
     }
 }
 
@@ -239,8 +236,8 @@ pub fn pred4x4_horizontal_up(buf: &mut [u8], o: usize, stride: usize) {
         [l3, l3, l3, l3],
     ];
 
-    for y in 0..4 {
-        row::<4>(buf, o, stride, y).copy_from_slice(&p[y]);
+    for (y, pred) in p.iter().enumerate() {
+        row::<4>(buf, o, stride, y).copy_from_slice(pred);
     }
 }
 
@@ -276,8 +273,8 @@ pub fn pred4x4_horizontal_down(buf: &mut [u8], o: usize, stride: usize) {
         ],
     ];
 
-    for y in 0..4 {
-        row::<4>(buf, o, stride, y).copy_from_slice(&p[y]);
+    for (y, pred) in p.iter().enumerate() {
+        row::<4>(buf, o, stride, y).copy_from_slice(pred);
     }
 }
 
