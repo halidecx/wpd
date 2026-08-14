@@ -174,3 +174,54 @@ Timings, same methodology as Phase 0a:
 
 All within run-to-run noise: the extra translation units cost nothing, so no
 interim LTO is needed to keep the port's own measurements honest.
+
+### Phase 0c — cargo drives the library, meson keeps the harnesses
+
+The topology is established before any code moves, so its shape is proven while
+every line is still C.
+
+- `crates/wpd` — core rlib. Its build script assembles the x86 nasm and the
+  aarch64/arm `.S` files, reproducing meson's flags and its `.arch_extension`
+  dotprod/i8mm and armv6/armv6t2 probes. The assembly lives here rather than in
+  `wpd-capi` so that a pure-Rust consumer of the rlib still links.
+- `crates/wpd-capi` — the staticlib C consumers link. Its build script compiles
+  whatever C the port has not reached, listed in `C_SOURCES`; entries drop out
+  as modules move, and when the list empties the script and its `cc`
+  build-dependency go away. Probe results cross from `wpd` via the `links` key,
+  so the C and the assembly agree about the target's extensions.
+- `meson.build` compiles nothing for the library any more. It runs cargo and
+  links `tools/wpd.c`, the api/parity/fuzz/rowbounds tests, checkasm and the
+  testdata matrix against the result.
+
+Three things needed care, each of which would have been a silent regression:
+
+1. **checkasm needs `trim_dsp` off.** `trim_dsp` lets the compiler drop every
+   fallback the build target cannot reach — which is exactly what checkasm
+   compares the assembly against. Linking checkasm against the ordinary release
+   library took it from 151 tests to 97 without failing anything. It now gets
+   its own cargo configuration, in its own target dir so the two do not
+   invalidate each other's incremental state.
+2. **A Rust `cdylib` exports only Rust symbols**, which is nothing while the
+   entry points are still C — the shared library came out with zero exports. It
+   is now linked from the archive with a version script generated from
+   `include/wpd.h`, so it exports exactly the 28 `WPD_API` symbols the old build
+   did (verified identical) and keeps working unchanged once the entry points
+   become `#[no_mangle]` Rust.
+3. **Sanitizer flags have to reach the C**, which cargo now compiles. Meson's
+   `b_sanitize` is handed across through `CFLAGS`, which the `cc` crate honours;
+   confirmed by 209 `__asan_report`/`__ubsan_handle` references in the resulting
+   archive. `buildtype=debugoptimized` maps to a new `debugopt` cargo profile
+   rather than to `debug`, so sanitizer and fuzz runs stay optimised instead of
+   dropping to `-O0`.
+
+One trap worth remembering: `.gitignore` had `build*`, which silently ignored
+both `build.rs` files. A clean-clone build is now part of the check.
+
+Verification: 187/187 meson tests, checkasm 151/151, `md5check.sh` bit-identical
+against the preserved baseline, `animcheck.sh` clean, `rac32.sh` 187/187,
+sanitizers clean for both asm and no-asm builds, no-asm build 186/186, and a
+fresh `git clone` configures, builds and passes checkasm. Decode timings 0.0% to
++0.7% against baseline, i.e. noise.
+
+`scripts/stylecheck.sh` now also runs `cargo fmt --all`; `rustfmt.toml` sets the
+width to 88.
