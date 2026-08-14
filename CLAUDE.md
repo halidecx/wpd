@@ -44,6 +44,7 @@ Test scripts:
 ./scripts/bench.sh      # performance, wpd vs libwebpdec
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
+./scripts/clicheck.sh   # correctness, everything else the tool prints
 ./scripts/testdata.sh   # asm vs c E2E correctness
 ./scripts/fuzz.sh       # robustness, damaged input under sanitizers
 ./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp

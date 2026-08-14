@@ -258,58 +258,52 @@ fn parse_args(argv: &[String]) -> Parsed {
                 }
             };
 
+            // An option whose value is simply absent is what getopt reported as
+            // an unknown option, not as a bad value, so it says so first.
+            macro_rules! value {
+                () => {
+                    match value() {
+                        Some(v) => v,
+                        None => return Parsed::Bad(MISSING),
+                    }
+                };
+            }
+
             match name {
                 "help" => return Parsed::Help,
-                "repeat" => match value().as_deref().and_then(parse_repeat) {
+                "repeat" => match parse_repeat(&value!()) {
                     Some(v) => o.repeat = v,
-                    None => {
-                        return Parsed::Bad("invalid repeat value; expected 1..INT_MAX")
-                    }
+                    None => return Parsed::Bad(BAD_REPEAT),
                 },
-                "fmt" => match value().as_deref().and_then(parse_format) {
+                "fmt" => match parse_format(&value!()) {
                     Some((name, format)) => {
                         o.pixel_format = name;
                         o.out_format = format;
                     }
-                    None => return Parsed::Bad("invalid output pixel format"),
+                    None => return Parsed::Bad(BAD_FORMAT),
                 },
-                "muxer" => match value() {
-                    Some(v)
-                        if matches!(
-                            v.as_str(),
-                            "raw" | "md5" | "ppm" | "pam" | "y4m"
-                        ) =>
+                "muxer" => match value!() {
+                    v if matches!(
+                        v.as_str(),
+                        "raw" | "md5" | "ppm" | "pam" | "y4m"
+                    ) =>
                     {
                         o.muxer = Some(v)
                     }
-                    _ => {
-                        return Parsed::Bad(
-                            "invalid output muxer; expected raw, md5, ppm, \
-                             pam or y4m",
-                        )
-                    }
+                    _ => return Parsed::Bad(BAD_MUXER),
                 },
-                "verify" => match value() {
-                    Some(v) => o.verify = Some(v),
-                    None => return Parsed::Bad(MISSING),
-                },
+                "verify" => o.verify = Some(value!()),
                 "info" => o.info = true,
                 "subframe" => o.subframe = true,
-                "loops" => match value().as_deref().and_then(parse_repeat) {
+                "loops" => match parse_repeat(&value!()) {
                     Some(v) => o.loops = v,
-                    None => {
-                        return Parsed::Bad("invalid loop count; expected 1..INT_MAX")
-                    }
+                    None => return Parsed::Bad(BAD_LOOPS),
                 },
-                "stream" => match value().as_deref().and_then(parse_repeat) {
+                "stream" => match parse_repeat(&value!()) {
                     Some(v) => o.stream = v as usize,
-                    None => {
-                        return Parsed::Bad(
-                            "invalid stream chunk size; expected 1..INT_MAX",
-                        )
-                    }
+                    None => return Parsed::Bad(BAD_STREAM),
                 },
-                "cpumask" => match value().as_deref().and_then(parse_cpumask) {
+                "cpumask" => match parse_cpumask(&value!()) {
                     Some(mask) => {
                         warn_baseline_cpumask(mask);
                         unsafe { wpd_set_cpu_flags_mask(mask) };
@@ -343,20 +337,27 @@ fn parse_args(argv: &[String]) -> Parsed {
                 }
             };
 
+            macro_rules! value {
+                () => {
+                    match value(&mut i) {
+                        Some(v) => v,
+                        None => return Parsed::Bad(MISSING),
+                    }
+                };
+            }
+
             match opt {
                 'h' => return Parsed::Help,
-                'r' => match value(&mut i).as_deref().and_then(parse_repeat) {
+                'r' => match parse_repeat(&value!()) {
                     Some(v) => o.repeat = v,
-                    None => {
-                        return Parsed::Bad("invalid repeat value; expected 1..INT_MAX")
-                    }
+                    None => return Parsed::Bad(BAD_REPEAT),
                 },
-                'f' => match value(&mut i).as_deref().and_then(parse_format) {
+                'f' => match parse_format(&value!()) {
                     Some((name, format)) => {
                         o.pixel_format = name;
                         o.out_format = format;
                     }
-                    None => return Parsed::Bad("invalid output pixel format"),
+                    None => return Parsed::Bad(BAD_FORMAT),
                 },
                 _ => return Parsed::Bad(MISSING),
             }
@@ -367,6 +368,22 @@ fn parse_args(argv: &[String]) -> Parsed {
 
 const MISSING: &str = "unknown option or missing option value";
 const BAD_CPUMASK: &str = "invalid cpu mask";
+const BAD_REPEAT: &str = "invalid repeat value; expected 1..INT_MAX";
+const BAD_LOOPS: &str = "invalid loop count; expected 1..INT_MAX";
+const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
+const BAD_FORMAT: &str = "invalid output pixel format";
+const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
+
+/// Renders an I/O error the way `strerror` did for the C tool: the message on
+/// its own, without the `(os error N)` tail Rust appends.
+fn errmsg(e: &std::io::Error) -> String {
+    let text = e.to_string();
+
+    match text.find(" (os error ") {
+        Some(cut) => text[..cut].to_owned(),
+        None => text,
+    }
+}
 
 struct DecodeContext<'a> {
     sink: Option<&'a mut Output>,
@@ -644,7 +661,7 @@ fn run(
     let data = match read_file(input_name) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{input_name}: {e}");
+            eprintln!("{input_name}: {}", errmsg(&e));
             return ExitCode::FAILURE;
         }
     };
@@ -660,7 +677,7 @@ fn run(
         match Output::open(muxer, output_name) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("{}: {e}", output_name.unwrap_or(""));
+                eprintln!("{}: {}", output_name.unwrap_or(""), errmsg(&e));
                 return ExitCode::FAILURE;
             }
         }
@@ -783,7 +800,7 @@ fn run(
     match output.close() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "write: {e}");
+            let _ = writeln!(std::io::stderr(), "write: {}", errmsg(&e));
             ExitCode::FAILURE
         }
     }

@@ -344,6 +344,26 @@ compiled, linked and ran, and only showed up as `--info` printing
 400,400`. A hand-written binding to a C ABI needs a differential test
 against something that already agrees with the header.
 
+It is now a script rather than a session's worth of ad-hoc comparisons:
+`scripts/clicheck.sh OLD NEW` runs 794 invocations through both binaries and
+diffs the exit status, stdout, stderr and the bytes of any file written. The
+banner names the revision and usage echoes `argv[0]`, so both are folded to a
+fixed string before comparing; nothing else is normalised.
+
+Running it caught two more differences that no pixel comparison could see.
+`getopt_long` reports a long option whose value is missing as an unknown option,
+not as a bad value, so `--fmt` at the end of the argument list has to say
+`unknown option or missing option value` — the port was reporting
+`invalid output pixel format`. And Rust's `io::Error` renders as
+`No such file or directory (os error 2)` where `strerror` gave just the message,
+so the tool now strips the suffix.
+
+One apparent failure was a real difference between the two _builds_ rather than
+the two binaries: `build` had `trim_dsp=false` and the baseline `if-release`, so
+only the baseline warned that `--cpumask` could not go below the compile-time
+target. Worth recording because it also means any benchmark taken across that
+pair before this point was comparing two different configurations.
+
 Option parsing reproduces `getopt_long` with `opterr = 0` — clustered short
 options, `--name value` and `--name=value`, `--` to stop, operands and options
 interleaved. Unambiguous long-option abbreviation is the one thing left out;
