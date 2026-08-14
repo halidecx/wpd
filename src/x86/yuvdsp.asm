@@ -108,14 +108,16 @@ pd_65535: times 8 dd 65535
 pd_1:     times 8 dd 1
 ps_1_19:  times 8 dd 524288.0
 ; U = (-9719 R - 19081 G + 28800 B) and V = (28800 R - 24116 G - 4684 B), each
-; rounded by half an output step plus the 128 offset before a shift of 18. R
-; and G ride in one word pair; B keeps a lane of its own, its second word being
-; the zero the sums never carry into.
-pw_u_rg:   times 8 dw -9719, -19081
-pw_u_b:    times 8 dw 28800, 0
-pw_v_rg:   times 8 dw 28800, -24116
-pw_v_b:    times 8 dw -4684, 0
-pd_uv_rnd: times 8 dd 33685504
+; rounded by half an output step plus the 128 offset. R and G ride in one word
+; pair; B keeps a lane of its own, its second word being the zero the sums
+; never carry into. The 4:2:0 path feeds sums of a 2x2 block and folds the
+; average into a shift of 18; the 4:4:4 path feeds one pixel and shifts by 16.
+pw_u_rg:      times 8 dw -9719, -19081
+pw_u_b:       times 8 dw 28800, 0
+pw_v_rg:      times 8 dw 28800, -24116
+pw_v_b:       times 8 dw -4684, 0
+pd_uv_rnd:    times 8 dd 33685504
+pd_uv444_rnd: times 8 dd 8421376
 
 cextern_naked wpd_gamma_to_linear_tab
 cextern_naked wpd_linear_to_gamma_tab
@@ -769,13 +771,13 @@ cglobal argb_to_y, 3, 4, 6, y, argb, n
     pmaddwd   m2, [pw_u_rg]
     pmaddwd   m3, [pw_u_b]
     paddd     m2, m3
-    paddd     m2, [pd_uv_rnd]
-    psrad     m2, 18
+    paddd     m2, [pd_uv444_rnd]
+    psrad     m2, 16
     pmaddwd   m4, [pw_v_rg]
     pmaddwd   m5, [pw_v_b]
     paddd     m4, m5
-    paddd     m4, [pd_uv_rnd]
-    psrad     m4, 18
+    paddd     m4, [pd_uv444_rnd]
+    psrad     m4, 16
     packssdw  m1, m1
     packuswb  m1, m1
     packssdw  m2, m2

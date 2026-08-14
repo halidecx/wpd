@@ -435,8 +435,8 @@ static void argb_to_yuv444_c(uint8_t *y, uint8_t *u, uint8_t *v,
         const int b = argb[4 * i + 3];
 
         y[i] = (uint8_t)rgb_to_y(r, g, b);
-        u[i] = (uint8_t)rgb_to_u(r, g, b);
-        v[i] = (uint8_t)rgb_to_v(r, g, b);
+        u[i] = (uint8_t)rgb_to_u(4 * r, 4 * g, 4 * b);
+        v[i] = (uint8_t)rgb_to_v(4 * r, 4 * g, 4 * b);
     }
 }
 
