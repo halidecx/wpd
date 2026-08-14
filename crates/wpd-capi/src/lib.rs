@@ -10,4 +10,7 @@
 //! compiled by this crate's build script. They move up into safe Rust module
 //! by module; see `LOG.md`.
 
+#![deny(unsafe_op_in_unsafe_fn)]
+
 mod cpu;
+mod dsp;
