@@ -1,0 +1,28 @@
+[package]
+name = "wpd-capi"
+description = "C ABI for the wpd WebP decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# The artifact C consumers link, so it keeps the historical libwpd name.
+name = "wpd"
+# The shared library is linked from this archive by tools/cargo_build.sh, so
+# that its export list comes from include/wpd.h rather than from whichever
+# entry points have been ported to Rust so far.
+crate-type = ["staticlib"]
+
+[dependencies]
+wpd = { path = "../wpd", default-features = false }
+
+[features]
+default = ["asm"]
+asm = ["wpd/asm"]
+trim_dsp = ["wpd/trim_dsp"]
+force_rac32 = ["wpd/force_rac32"]
+
+[build-dependencies]
+cc = "1"

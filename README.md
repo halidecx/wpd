@@ -11,6 +11,14 @@ meson setup build
 meson compile -C build
 ```
 
+Meson drives the build and owns the tools and test harnesses; the library
+itself is built by cargo, which also assembles the hand-written assembly. A
+Rust toolchain and `nasm` (on x86) are therefore build requirements. The
+decoder is being ported from C to Rust module by module — see [LOG.md](LOG.md)
+for the current state — and both languages are compiled into the one
+`libwpd.a` that everything links against, so the build and the public C ABI do
+not change as the port proceeds.
+
 The decoder executable is written to `build/wpd`. It reads a WebP file and
 writes decoded frames:
 

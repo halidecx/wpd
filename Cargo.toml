@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/wpd", "crates/wpd-capi"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "BSD-2-Clause"
+repository = "https://github.com/halidecx/wpd"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+
+[profile.release.package."*"]
+opt-level = 3
+
+# What meson's `debugoptimized` maps to: optimised, but with the debug info and
+# the checks that make a sanitizer or a fuzzer run useful.
+[profile.debugopt]
+inherits = "release"
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+codegen-units = 16

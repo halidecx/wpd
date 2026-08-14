@@ -63,27 +63,6 @@ if not cc.has_function('getopt_long', prefix: '#include <getopt.h>')
 endif
 
 inc_dirs = [include_directories('.', 'include', 'src')]
-lib_sources = files(
-  'src/wpd_decoder.c',
-  'src/huffman.c',
-  'src/container.c',
-  'src/vp8l.c',
-  'src/lossy.c',
-  'src/convert.c',
-  'src/anim.c',
-  'src/export.c',
-  'src/image.c',
-  'src/vp8.c',
-  'src/vp8dsp.c',
-  'src/vp56rac.c',
-  'src/vp8pred.c',
-  'src/vp8l_dsp.c',
-  'src/yuvdsp.c',
-  'src/rescaler.c',
-  'src/wpd_compat.c',
-  'src/cpu.c',
-)
-lib_objects = []
 lib_c_args = ['-Wno-unused-parameter', '-DWPD_BUILDING']
 
 lib_c_args += '-DWPD_HAVE_GETAUXVAL=@0@'.format(
@@ -112,72 +91,11 @@ trim_c_args = trim_dsp ? ['-DWPD_TRIM_DSP_FUNCTIONS=1'] : []
 
 if asm_enabled
   if cpu_family.startswith('x86')
+    # cargo's build script is what actually invokes nasm; finding it here just
+    # turns a missing assembler into a configure error rather than a link one.
     nasm = find_program('nasm')
-    is_x86_64 = cpu_family == 'x86_64'
-    if host_machine.system() == 'windows'
-      nasm_format = 'win'
-    elif host_machine.system() == 'darwin'
-      nasm_format = 'macho'
-    else
-      nasm_format = 'elf'
-    endif
-    nasm_format += is_x86_64 ? '64' : '32'
-
-    nasm_prefix_args = []
-    if host_machine.system() in ['darwin', 'ios', 'tvos', 'os/2'] or (
-       host_machine.system() == 'windows' and not is_x86_64)
-      nasm_prefix_args = ['-DPREFIX=1']
-    endif
-
-    nasm_gen = generator(
-      nasm,
-      output: '@BASENAME@.obj',
-      depfile: '@BASENAME@.obj.ndep',
-      arguments: [
-        '-w-label-orphan',
-        '-w-implicit-abs-deprecated',
-        '-f', nasm_format,
-        '-DPIC=1',
-        '-DHAVE_ALIGNED_STACK=1',
-        '-DHAVE_X86_SSE2AVX=0',
-        '-DARCH_X86_64=@0@'.format(is_x86_64 ? 1 : 0),
-        '-DARCH_X86_32=@0@'.format(is_x86_64 ? 0 : 1),
-        nasm_prefix_args,
-        '-I', source_root / 'src' + '/',
-        '-MQ', '@OUTPUT@',
-        '-MD', '@DEPFILE@',
-        '@EXTRA_ARGS@',
-        '@INPUT@',
-        '-o', '@OUTPUT@',
-      ],
-    )
-
-    lib_objects += nasm_gen.process(
-      files(
-        'src/x86/vp8l.asm',
-        'src/x86/vp8dsp.asm',
-        'src/x86/vp8_intrapred.asm',
-      ),
-      extra_args: ['-DHAVE_AVX2_EXTERNAL=1'],
-    )
-    lib_objects += nasm_gen.process(files(
-      'src/x86/vp8dsp_loopfilter.asm',
-      'src/x86/yuvdsp.asm',
-    ))
-    lib_sources += files(
-      'src/x86/cpu.c',
-      'src/x86/wpd_simd_constants.c',
-    )
   elif cpu_family == 'aarch64'
     inc_dirs += [include_directories('src/aarch64')]
-    lib_sources += files(
-      'src/arm/cpu.c',
-      'src/aarch64/vp8l_neon.S',
-      'src/aarch64/vp8dsp_neon.S',
-      'src/aarch64/vp8pred_neon.S',
-      'src/aarch64/yuvdsp_neon.S',
-    )
-
     # dotprod and i8mm, probed the way dav1d does: an assembler may accept the
     # instructions without being able to toggle the extension on and off with
     # .arch_extension, and an assembler that takes the directive still has to
@@ -202,7 +120,6 @@ if asm_enabled
         upper, cc.compiles(code, name: upper) ? 1 : 0)
     endforeach
 
-    lib_sources += files('src/aarch64/yuvdsp_dotprod.S')
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 
@@ -222,15 +139,7 @@ if asm_enabled
       'void f(void) { __asm__(".syntax unified\\nsbfx r0, r0, #0, #1"); }',
       name: 'ARMv6T2 assembler support')
 
-    lib_sources += files(
-      'src/arm/cpu.c',
-      'src/arm/vp8dsp_neon.S',
-      'src/arm/vp8pred_neon.S',
-    )
     if armv6
-      lib_sources += files(
-        'src/arm/vp8dsp_armv6.S',
-      )
       cpu_baseline_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
     endif
     if armv6t2
@@ -247,49 +156,80 @@ lib_c_args += cpu_baseline_c_args
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
 
-libwpd = library(
-  'wpd',
-  lib_sources,
-  lib_objects,
-  include_directories: inc_dirs,
-  c_args: lib_c_args + trim_c_args,
-  version: meson.project_version(),
-  soversion: meson.project_version().split('.')[0],
-  gnu_symbol_visibility: 'hidden',
+# The library, the assembly, and whatever C has not been ported yet are built
+# by cargo; Meson keeps the C test harnesses, the tools and the testdata suite.
+# Cargo tracks its own inputs far better than a file list here could, so the
+# target is always stale and cargo decides whether there is work to do.
+cargo = find_program('cargo')
+cargo_features = []
+if asm_enabled
+  cargo_features += 'asm'
+endif
+if trim_dsp
+  cargo_features += 'trim_dsp'
+endif
+if get_option('force_rac32')
+  cargo_features += 'force_rac32'
+endif
+
+cargo_profile = {
+  'release': 'release',
+  'debugoptimized': 'debugopt',
+  'minsize': 'release',
+  'debug': 'debug',
+  'plain': 'release',
+}.get(get_option('buildtype'), 'release')
+
+# The C the port has not reached yet is compiled by cargo's build script, so
+# meson's sanitizer selection has to be handed across; the cc crate reads
+# CFLAGS. Rust's own sanitizer support needs nightly and is wired up in
+# scripts/sanitize.sh once there is Rust code to instrument.
+cargo_env = environment()
+if get_option('b_sanitize') != 'none'
+  cargo_env.append('CFLAGS', '-fsanitize=' + get_option('b_sanitize'),
+                   '-fno-omit-frame-pointer', separator: ' ')
+endif
+soversion = meson.project_version()
+
+libwpd_artifacts = custom_target(
+  'libwpd',
+  output: ['libwpd.a', 'libwpd.so.' + soversion],
+  command: [
+    files('tools/cargo_build.sh'),
+    source_root,
+    meson.current_build_dir(),
+    'wpd',
+    cargo_profile,
+    soversion,
+    cargo_features,
+  ],
+  env: cargo_env,
+  build_always_stale: true,
+  build_by_default: true,
   install: true,
+  install_dir: [get_option('libdir'), get_option('libdir')],
 )
+libwpd = libwpd_artifacts[0]
 
 install_headers('include/wpd.h')
 
 import('pkgconfig').generate(
-  libwpd,
   name: 'wpd',
   filebase: 'wpd',
   description: 'A fast WebP decoder',
+  version: meson.project_version(),
+  libraries: ['-L${libdir}', '-lwpd'],
 )
 
-# The bundled tools reach past the public API (cpu flag overrides), which the
-# shared library hides, so link them against the static objects instead.
-if get_option('default_library') == 'both'
-  libwpd_internal = libwpd.get_static_lib()
-elif get_option('default_library') == 'static'
-  libwpd_internal = libwpd
-else
-  libwpd_internal = static_library(
-    'wpd_internal',
-    lib_sources,
-    lib_objects,
-    include_directories: inc_dirs,
-    c_args: lib_c_args + trim_c_args,
-    build_by_default: false,
-    install: false,
-  )
-endif
-
 wpd_dep = declare_dependency(
-  link_with: libwpd_internal,
+  link_with: libwpd,
   include_directories: inc_dirs,
   compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
+  dependencies: [
+    cc.find_library('m', required: false),
+    dependency('threads', required: false),
+    cc.find_library('dl', required: false),
+  ],
 )
 
 wpd = executable(
@@ -443,12 +383,31 @@ checkasm_dep = dependency(
 )
 
 if asm_enabled and checkasm_dep.found()
-  libwpd_checkasm = static_library(
-    'wpd_checkasm',
-    lib_sources,
-    lib_objects,
-    include_directories: inc_dirs,
-    c_args: lib_c_args + ['-DWPD_CHECKASM=1'],
+  # trim_dsp lets the compiler drop every fallback the build target cannot
+  # reach, which is exactly what checkasm compares the assembly against. So it
+  # gets its own copy of the library with trim_dsp off; otherwise the lower
+  # CPU tiers vanish and their tests silently stop running.
+  checkasm_features = []
+  foreach f : cargo_features
+    if f != 'trim_dsp'
+      checkasm_features += f
+    endif
+  endforeach
+
+  libwpd_checkasm = custom_target(
+    'libwpd_checkasm',
+    output: 'libwpd_checkasm.a',
+    command: [
+      files('tools/cargo_build.sh'),
+      source_root,
+      meson.current_build_dir(),
+      'wpd_checkasm',
+      cargo_profile,
+      soversion,
+      checkasm_features,
+    ],
+    env: cargo_env,
+    build_always_stale: true,
     build_by_default: false,
     install: false,
   )
@@ -456,8 +415,15 @@ if asm_enabled and checkasm_dep.found()
   wpd_checkasm_dep = declare_dependency(
     link_with: libwpd_checkasm,
     include_directories: inc_dirs,
+    dependencies: [
+      cc.find_library('m', required: false),
+      dependency('threads', required: false),
+      cc.find_library('dl', required: false),
+    ],
   )
 
+  # checkasm reaches past the public API to poke the DSP tables and override
+  # the CPU flags, so it links the static archive rather than the shared one.
   checkasm = executable(
     'checkasm',
     files(
@@ -469,7 +435,7 @@ if asm_enabled and checkasm_dep.found()
     ),
     dependencies: [wpd_checkasm_dep, checkasm_dep],
     include_directories: include_directories('tests/checkasm'),
-    c_args: lib_c_args + ['-DWPD_CHECKASM=1'],
+    c_args: lib_c_args,
     build_by_default: true,
     install: false,
   )

@@ -1,0 +1,27 @@
+[package]
+name = "wpd"
+description = "A fast WebP decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Lets wpd-capi read the assembler probe results via DEP_WPDASM_*.
+links = "wpdasm"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["asm"]
+# Hand-written assembly, dispatched at runtime. Turning this off makes the
+# crate compile under #![forbid(unsafe_code)].
+asm = []
+# Drop DSP fallbacks the build target can never reach (dav1d's trim_dsp).
+trim_dsp = []
+# Use the 32-bit range coder even where the 64-bit one fits.
+force_rac32 = []
+
+[build-dependencies]
+cc = "1"
+nasm-rs = { version = "0.3", features = ["parallel"] }

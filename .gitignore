@@ -28,7 +28,10 @@ wpd-test-data/
 
 .DS_Store
 
-build*
+# meson build directories, but not Cargo build scripts
+/build*/
+/build*
+!**/build.rs
 
 *.y4m
 *.yuv
