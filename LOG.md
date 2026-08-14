@@ -97,6 +97,7 @@ Each gets a measurement at the phase that ports it.
 | 2 | `copy_block32` overlapping LZ77 copy                         | not yet |
 | 3 | `huff_read_symbol` table indexing                            | not yet |
 | 4 | VP56 range coder refill near the buffer end                  | not yet |
+| 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
 | 5 | yuvdsp row glue under `--no-default-features`                | not yet |
 | 6 | `Vec` zeroing vs `calloc` on large canvases                  | not yet |
 
@@ -225,3 +226,87 @@ fresh `git clone` configures, builds and passes checkasm. Decode timings 0.0% to
 
 `scripts/stylecheck.sh` now also runs `cargo fmt --all`; `rustfmt.toml` sets the
 width to 88.
+
+### Phase 1 — leaf modules
+
+**`cpu` — done.** `src/cpu.c`, `src/x86/cpu.c` and `src/arm/cpu.c` are replaced
+by `crates/wpd/src/cpu.rs`, which contains no `unsafe`.
+
+Detection goes through `std`'s `is_x86_feature_detected!` and
+`is_aarch64_feature_detected!`. They are safe, and they already do correctly the
+parts the C had to spell out: the OSXSAVE and XCR0 checks before believing AVX2,
+`getauxval` on Linux, `sysctl` on Apple. On 32-bit arm, where `std` has no
+stable detection, `/proc/self/auxv` is parsed instead — the same table
+`getauxval` reads, but as a file, so no libc call is needed and the module stays
+safe.
+
+The two atomics the C exported are now private to the Rust module; `src/cpu.h`
+calls `wpd_get_cpu_flags_raw()` rather than loading them. The `trim_dsp` union
+deliberately stays on the C side of that boundary: it has to remain a
+compile-time constant at the DSP init call sites or trimming stops trimming.
+
+checkasm's test count is the real check for this module — a detection bug shows
+up as CPU tiers silently not being tested, not as a failure. It stayed at 151.
+`--cpumask 0` still decodes identically to the default, so the mask reaches
+dispatch. Timings -1.0% / +0.9%, noise.
+
+## Ordering correction: `vp56rac` moves with `vp8.c`, not before it
+
+The plan had `vp56rac` early in Phase 1 with the other leaves. That is wrong.
+`src/vp56rac.h` is almost entirely `wpd_always_inline` and its callers are the
+token-decoding loops in `vp8.c`. Porting the coder while `vp8.c` is still C
+would turn every `vp56_rac_get_prob` into a cross-language call in the hottest
+loop of lossy decoding.
+
+The distinction that matters is **how the caller reaches the module**:
+
+- Reached through a function pointer (`vp8dsp`, `vp8pred`, `vp8l_dsp`) or by an
+  ordinary per-row call (`yuvdsp` glue, `rescaler`) — safe to port on its own,
+  because the call was never inlined anyway.
+- Reached by inlining (`vp56rac`, and the bit reader and `huff_read_symbol`
+  headers) — must move in the same commit as its caller.
+
+So Phase 1 is `cpu` → `vp8l_dsp` → `vp8dsp` → `vp8pred` → `yuvdsp` → `rescaler`,
+and `vp56rac` joins Phase 2 with `vp8.c`. Likewise `bitreader.h` and
+`huffman.h`'s inline half move with `vp8l.c` in Phase 3.
+
+## Aliasing at the DSP boundary
+
+Working out the Tier A signatures means reading each call site, because the C
+prototypes permit aliasing the callers do not use — and, in one case, aliasing
+the callers _do_ use that a naive `(&[u32], &mut [u32])` pair would make
+unsound.
+
+`pred_add(in, upper, num_pixels, out)` is the interesting one:
+
+- `in` and `out` are **always the same pointer** at every call site in
+  `predictor_transform_rows`. So the signature cannot be `(&[u32], &mut [u32])`;
+  the input has to be read out of the output slice.
+- `upper` and `out` **overlap by one element** whenever the rows are physically
+  adjacent: the predictors read `upper[num_pixels]` as the top-right neighbour,
+  and when `upper + width == row` that element _is_ `row[0]`. This is the
+  deliberate trick the `upper[width] = row[0]` write in the caller exists to
+  support. A `&[u32]` upper alongside a `&mut [u32]` row would be UB.
+- `upper` is `NULL` for the first row (predictors 0 and 1 do not read it).
+
+The signature that survives all three is the flat-buffer form from the playbook
+— one mutable slice plus offsets:
+
+```rust
+type PredAdd = fn(buf: &mut [u32], out: usize, upper: usize, n: usize);
+```
+
+Everything the C did with pointer arithmetic becomes in-bounds indexing, the
+one-element overlap stops being an aliasing question, and the first row passes
+`upper == out` because those predictors ignore it.
+
+The other four are simpler, confirmed against their call sites: `extract_green`
+writes an alpha plane from a separate ARGB image (disjoint); `blend_row_argb`
+and `blend_row_argb_premult` blend a frame into the canvas, which are always
+different `WebPImage` allocations (disjoint); `map_color32` has exactly one
+caller and it passes `dst == src`, so its safe form takes a single `&mut [u8]`.
+
+General rule for the rest of the port: **derive each Tier A signature from the
+call sites, not from the C prototype.** The prototypes are uniformly more
+permissive than the code, and the gap is where both unsoundness and unnecessary
+copies hide.
