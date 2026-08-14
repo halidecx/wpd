@@ -3,11 +3,17 @@
 
 #include "wpd_codec.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #define MKTAG(a, b, c, d)                                       \
     ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | \
      (uint32_t)(d) << 24)
+
+/* End offset of a struct field, for the struct_size versioning the public
+   structs use. */
+#define WPD_FIELD_END(type, field) \
+    (offsetof(type, field) + sizeof(((type *)0)->field))
 
 #define CEIL_RSHIFT(v, s) (-((-(v)) >> (s)))
 

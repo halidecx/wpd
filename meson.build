@@ -66,6 +66,8 @@ inc_dirs = [include_directories('.', 'include', 'src')]
 lib_sources = files(
   'src/wpd_decoder.c',
   'src/huffman.c',
+  'src/container.c',
+  'src/image.c',
   'src/vp8.c',
   'src/vp8dsp.c',
   'src/vp56rac.c',
