@@ -36,12 +36,13 @@ porting wpd from C to Rust. Newest entries go at the bottom of each section.
 The design that reconciles "safe core" with "honest checkasm".
 
 **Tier A — safe table** (`crates/wpd/src/dsp/`). Fields are safe Rust `fn`
-pointers over slices, e.g. `pred_add: [fn(&[u32], &[u32], &mut [u32]); 14]`.
-Fallbacks are ordinary safe functions. Assembly entries are safe `fn` items
-whose body is a single `unsafe` block in `wpd::asm`, guarded by length
-assertions covering the reads the assembly makes past the nominal row
-(`upper[-1]`, `upper[num_pixels]`). The decoder only ever sees Tier A, so it
-contains no `unsafe` at all.
+pointers over slices — though not always a slice per C pointer: see "Aliasing at
+the DSP boundary" below for why `pred_add` takes one buffer plus offsets rather
+than separate input and output slices. Fallbacks are ordinary safe functions.
+Assembly entries are safe `fn` items whose body is a single `unsafe` block in
+`wpd::asm`, guarded by length assertions covering the reads the assembly makes
+past the nominal row (`upper[-1]`, `upper[num_pixels]`). The decoder only ever
+sees Tier A, so it contains no `unsafe` at all.
 
 **Tier B — C ABI table** (`crates/wpd-capi`, `#[cfg(feature = "checkasm")]`).
 `#[repr(C)]`, field-for-field identical to `src/vp8l_dsp.h`, `src/vp8dsp.h` and
@@ -97,9 +98,9 @@ Each gets a measurement at the phase that ports it.
 | 2 | `copy_block32` overlapping LZ77 copy                         | not yet |
 | 3 | `huff_read_symbol` table indexing                            | not yet |
 | 4 | VP56 range coder refill near the buffer end                  | not yet |
-| 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
 | 5 | yuvdsp row glue under `--no-default-features`                | not yet |
 | 6 | `Vec` zeroing vs `calloc` on large canvases                  | not yet |
+| 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
 
 ## Milestones
 
