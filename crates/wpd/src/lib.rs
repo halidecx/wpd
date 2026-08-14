@@ -23,6 +23,7 @@ pub mod container;
 pub mod cpu;
 pub mod dsp;
 pub mod error;
+pub mod image;
 pub mod log;
 pub mod rescale;
 pub mod vp8;

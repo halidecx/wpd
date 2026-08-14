@@ -11,9 +11,7 @@ use std::{env, fs};
 const C_SOURCES: &[&str] = &[
     "src/wpd_decoder.c",
     "src/anim.c",
-    "src/convert.c",
     "src/export.c",
-    "src/image.c",
     "src/lossy.c",
     "src/wpd_compat.c",
 ];

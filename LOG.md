@@ -107,12 +107,20 @@ the port proceeds.
   `__builtin_bswap64` → `swap_bytes()`. Prefer `31 - x.leading_zeros()` to
   `x.ilog2()`, which carries a panic path for zero that the caller has usually
   already ruled out but LLVM may not see.
-- **In a parser, read with saturating helpers rather than proven bounds.** A
-  bounds check that fires on damaged input is a panic, and a panic on damaged
-  input is a denial of service the C did not have. Header and chunk walks are
-  O(chunks), so byte accessors that return zero past the end and a `window()`
-  that clips cost nothing measurable and leave no residual argument to get
-  wrong. Keep proven-bound indexing for the pixel loops, where it pays.
+- **A row is the unit of a pixel kernel, not a sample.** When a divide, a
+  reciprocal or a table lookup is shared across the channels of a pixel, a
+  per-sample helper repeats it per channel. Compute it once per pixel and apply
+  it, and keep loop bounds that are known at the call site — a 2x2 block, a
+  channel count — as const generics, so they unroll the way the C they replace
+  did. See Phase 5's chroma blend.
+
+**In a parser, read with saturating helpers rather than proven bounds.** A
+bounds check that fires on damaged input is a panic, and a panic on damaged
+input is a denial of service the C did not have. Header and chunk walks are
+O(chunks), so byte accessors that return zero past the end and a `window()` that
+clips cost nothing measurable and leave no residual argument to get wrong. Keep
+proven-bound indexing for the pixel loops, where it pays.
+
 - **Check the disassembly, not the theory.** Hot functions are checked for
   surviving `core::panicking` references; a bounds check that LLVM did not
   remove shows up there.
@@ -731,6 +739,89 @@ Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183,
 `animcheck.sh` (42 files x 8 formats, 27 animations), `rac32.sh` 186/186,
 `md5check.sh` against the C baseline, `sanitize.sh` 186 and 185, `fuzz.sh` 300
 trials per file, `cargo test -p wpd` 51/51.
+
+### Phase 5 — plane allocation and the image ops (`710e37d` and the port that follows it)
+
+`src/image.c` and `src/convert.c` are gone. The decision-making — which format
+packs how, what a crop resolves to, what a scale rounds to, and the YUVA blend
+arithmetic — is `crates/wpd/src/image.rs`, safe and unit-tested; the plane
+walking is `crates/wpd-capi/src/{image,convert}.rs`. Five C files are left:
+`wpd_decoder.c`, `anim.c`, `export.c`, `lossy.c` and `wpd_compat.c`.
+
+**`export.c` stays with Phase 7, and the reason is structural.** It was grouped
+with the image ops in the plan, but it is not one: `export_packed` and the two
+`export_still_*` functions read and write about twenty `WPDDecoder` fields,
+including four scratch `WebPImage` slots, the external-buffer table and the
+`converted_rows`/`converted_format` pair that makes a partial export resumable.
+That is the decoder's output state machine, not a pixel operation. Porting it
+now would mean mirroring a twenty-field context struct across the ABI — the
+exact shape the port has already been bitten by once — and Phase 7 would delete
+the scaffold when `WPDDecoder` itself becomes Rust. It moves there intact.
+
+**`WebPImage` stays a C struct, deliberately.** Everything else so far became
+opaque before it was ported. This one cannot: `crop_image` and `flip_image`
+build _views_ by adding to `data[p]` and negating `linesize[p]`, and the rest of
+the decoder passes those views around beside owned images in the same type. No
+owning Rust type expresses that. What moved instead is the ownership — every
+byte an image holds is now allocated and released on the Rust side, so the
+`(alloc, alloc_size)` pair is the single description of each block, and the size
+arithmetic a damaged header drives is checked rather than argued.
+
+The one C-side change the split needed: `scale_image` used to free a plane by
+hand, so `image_drop_plane` had to exist for the allocator to stay the only
+owner.
+
+**The refactor commit is the same rhythm, aimed at a different problem.**
+`convert.c` did not embed decoder state, it _reached into_ it: `s->options`, the
+two DSP tables, the rescaler scratch, `s->pos_x`/`pos_y`. Commit `710e37d` gives
+every function what it uses and nothing more, which is what let the port land
+without any of `WPDDecoder` crossing the boundary. The DSP tables stay as
+parameters because they are chosen per CPU at init, so there is no constant to
+select from. `scaled_size` moved out of `lossy.c`, where a pure function of the
+options happened to live next to its only caller.
+
+**A cleared plane cleared its stride, and 146 tests failed.**
+`image_alloc_plane` in the C only freed the block; the Rust `drop_plane` also
+zeroed `data` and `linesize`, because that is what the rest of its callers want.
+The allocators set `linesize` _before_ calling it, as the C safely did, so every
+freshly grown image came back with a stride of zero. The symptom was unhelpful —
+packed output came out looking gamma-shifted, which sent the first hour after a
+colour bug — and the cause was visible in one `fprintf` of `img->linesize[0]`.
+Setting the geometry after the allocation, never before, is the invariant; it is
+now stated where `alloc_plane` is defined.
+
+**The chroma blend was 1.10x slower until it stopped dividing twice.** The C
+computed one reciprocal per 2x2 block and applied it to U and V. The first port
+expressed the blend as a per-sample function, so it divided once per channel,
+and integer division is the whole kernel. Splitting it into a `Mix` — worked out
+once from the two alphas, then applied — got most of it back. The rest was the
+2x2 alpha average walking two dynamically bounded loops per sample where clang
+had unrolled them: both counts are known at the call, so they became const
+generics, and the odd-width half block became a tail rather than a branch inside
+the loop. `anim_yuv` went from 1.10x slower than Phase 4 to 1.02x faster, and
+`blend_yuva_region` from 12.3% of that decode back to under 8%.
+
+Worth keeping: a per-sample helper is the natural way to write a blend and the
+wrong way to compile one, whenever a divide or a table lookup is shared across
+the channels of a pixel. The row kernel is the unit, not the sample.
+
+**One file left 4% slower, and the time is not in this phase's code.**
+`palette2bpp_rgb` measures 1.04x slower than Phase 4, reproducibly, while its
+two siblings `palette_rgb` and `palette4bpp_rgb` are unchanged. Under a call
+graph the extra time is inside `wpd::vp8l::Picture::alloc` — Phase 3 code this
+phase did not touch — zeroing a block that used to come back already zero. The
+calloc count and byte total are identical between the two builds, so what
+changed is which allocation lands where: the image planes now come from the Rust
+allocator instead of `wpd_mallocz`, and the lossless picture no longer draws a
+fresh mapping from the kernel. It is a heap-layout coincidence at one size, not
+a cost in the ported code, and it belongs to the Phase 8 perf pass rather than
+to a workaround here. Everything else is within 2% of Phase 4.
+
+Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
+five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
+`rac32.sh` 186/186, `md5check.sh` bit-exact against the C baseline `d241ef8`,
+`sanitize.sh` 186 and 185 with no ASan or UBSan report, `fuzz.sh` 300 trials per
+file, `cargo test -p wpd` 61/61.
 
 ## Measuring the fallbacks needs two no-asm builds
 
