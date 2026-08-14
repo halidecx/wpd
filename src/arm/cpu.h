@@ -8,6 +8,4 @@ enum WpdArmCpuFlags {
     WPD_ARM_CPU_FLAG_I8MM    = 1 << 3,
 };
 
-unsigned wpd_get_cpu_flags_arm(void);
-
 #endif

@@ -3,8 +3,6 @@
 
 #include "wpd_compat.h"
 
-#include <stdatomic.h>
-
 #ifndef WPD_HAVE_ASM
 #define WPD_HAVE_ASM 0
 #endif
@@ -37,12 +35,10 @@
 #include "src/x86/cpu.h"
 #endif
 
-extern atomic_uint wpd_cpu_flags;
-extern atomic_uint wpd_cpu_flags_mask;
-
-void          wpd_init_cpu(void);
-void          wpd_set_cpu_flags_mask(unsigned mask);
-unsigned long wpd_getauxval(unsigned long type);
+/* Implemented in Rust; see crates/wpd/src/cpu.rs. */
+void     wpd_init_cpu(void);
+void     wpd_set_cpu_flags_mask(unsigned mask);
+unsigned wpd_get_cpu_flags_raw(void);
 
 /* Feature set the compiler was told to target. Detection starts from these,
  * so a build with e.g. -march=native can constant-fold the dispatch away. */
@@ -87,9 +83,7 @@ static wpd_always_inline unsigned wpd_get_default_cpu_flags(void) {
 }
 
 static wpd_always_inline unsigned wpd_get_cpu_flags(void) {
-    unsigned flags = atomic_load_explicit(&wpd_cpu_flags,
-                                          memory_order_acquire) &
-        atomic_load_explicit(&wpd_cpu_flags_mask, memory_order_relaxed);
+    unsigned flags = wpd_get_cpu_flags_raw();
 
 #if WPD_TRIM_DSP_FUNCTIONS
     /* Since this function is inlined into the DSP init functions, which are in

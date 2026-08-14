@@ -18,3 +18,5 @@
 #[cfg(feature = "asm")]
 #[allow(unsafe_code)]
 pub mod asm;
+
+pub mod cpu;

@@ -9,6 +9,4 @@ enum WpdX86CpuFlags {
     WPD_X86_CPU_FLAG_AVX2  = 1 << 4,
 };
 
-unsigned wpd_get_cpu_flags_x86(void);
-
 #endif

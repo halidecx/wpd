@@ -10,6 +10,4 @@
 //! compiled by this crate's build script. They move up into safe Rust module
 //! by module; see `LOG.md`.
 
-// Keeps the core crate in the dependency graph while the C still provides the
-// entry points, so its assembly objects reach the final link.
-use wpd as _;
+mod cpu;

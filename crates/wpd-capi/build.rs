@@ -26,7 +26,6 @@ const C_SOURCES: &[&str] = &[
     "src/yuvdsp.c",
     "src/rescaler.c",
     "src/wpd_compat.c",
-    "src/cpu.c",
 ];
 
 fn repo_root() -> PathBuf {
@@ -110,12 +109,10 @@ fn main() {
     if asm {
         match arch.as_str() {
             "x86_64" | "x86" => {
-                build.file(root.join("src/x86/cpu.c"));
                 build.file(root.join("src/x86/wpd_simd_constants.c"));
             }
             "aarch64" => {
                 build.include(root.join("src/aarch64"));
-                build.file(root.join("src/arm/cpu.c"));
                 for name in ["dotprod", "i8mm"] {
                     let upper = name.to_uppercase();
                     build.define(
@@ -130,7 +127,6 @@ fn main() {
             }
             "arm" => {
                 build.include(root.join("src/arm"));
-                build.file(root.join("src/arm/cpu.c"));
                 for (var, define) in [
                     ("ARMV6", "WPD_ARM_ARMV6_ASM"),
                     ("ARMV6T2", "WPD_ARM_ARMV6T2_ASM"),
