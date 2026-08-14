@@ -48,6 +48,9 @@ typedef void (*premultiply_4444_row_func)(uint8_t *rgba4444, int num_pixels);
 /* Luma for one ARGB row. */
 typedef void (*argb_to_y_func)(uint8_t *y, const uint8_t *argb, int num_pixels);
 
+typedef void (*argb_to_yuv444_func)(uint8_t *y, uint8_t *u, uint8_t *v,
+                                    const uint8_t *argb, int num_pixels);
+
 /* Chroma for one pair of ARGB rows, averaged 2x2 in linear light. 'argb' is
    the top row and 'argb_stride' reaches the bottom one; a stride of 0 repeats
    the row, which is how the last row of an odd-height image is handled. When
@@ -80,6 +83,7 @@ typedef struct WPDYUVDSP {
     premultiply_4444_row_func premultiply_row_4444;
     premultiply_4444_row_func premultiply_row_4444_swap;
     argb_to_y_func            argb_to_y;
+    argb_to_yuv444_func       argb_to_yuv444;
     argb_to_uv_func           argb_to_uv;
 } WPDYUVDSP;
 
@@ -132,5 +136,10 @@ void wpd_argb_to_yuva(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
                       ptrdiff_t a_stride, const uint8_t *argb,
                       ptrdiff_t argb_stride, int width, int row_start,
                       int row_end);
+
+void wpd_argb_to_yuv444(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
+                        uint8_t *u, uint8_t *v, ptrdiff_t uv_stride,
+                        const uint8_t *argb, ptrdiff_t argb_stride, int width,
+                        int height);
 
 #endif

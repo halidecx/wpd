@@ -169,6 +169,32 @@ if asm_enabled
       'src/aarch64/vp8pred_neon.S',
       'src/aarch64/yuvdsp_neon.S',
     )
+
+    # dotprod and i8mm, probed the way dav1d does: an assembler may accept the
+    # instructions without being able to toggle the extension on and off with
+    # .arch_extension, and an assembler that takes the directive still has to
+    # be asked whether the instructions themselves assemble.
+    aarch64_extensions = {
+      'dotprod': 'sdot v0.4s, v0.16b, v0.16b',
+      'i8mm': 'usdot v0.4s, v0.16b, v0.16b',
+    }
+    foreach name, instr : aarch64_extensions
+      upper = name.to_upper()
+      archext = cc.compiles(
+        '__asm__ (".arch_extension @0@\\n");'.format(name),
+        name: '.arch_extension ' + name)
+      code = '__asm__ ('
+      if archext
+        code += '".arch_extension @0@\\n"'.format(name)
+      endif
+      code += '"@0@\\n");'.format(instr)
+      lib_c_args += '-DHAVE_AS_ARCHEXT_@0@_DIRECTIVE=@1@'.format(
+        upper, archext ? 1 : 0)
+      lib_c_args += '-DHAVE_@0@=@1@'.format(
+        upper, cc.compiles(code, name: upper) ? 1 : 0)
+    endforeach
+
+    lib_sources += files('src/aarch64/yuvdsp_dotprod.S')
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 

@@ -188,6 +188,39 @@ static void check_argb_to_y(WPDYUVDSP *dsp) {
     }
 }
 
+static void check_argb_to_yuv444(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, argb, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, y0, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, y1, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, u0, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, u1, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, v0, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, v1, [MAX_PIXELS + GUARD_PIXELS]);
+    declare_func(void, uint8_t *, uint8_t *, uint8_t *, const uint8_t *, int);
+
+    if (check_func(dsp->argb_to_yuv444, "argb_to_yuv444")) {
+        for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
+             i++) {
+            const int n = row_lengths[i];
+
+            for (int x = 0; x < 4 * MAX_PIXELS; x++) argb[x] = (uint8_t)rnd();
+            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++) {
+                y0[x] = y1[x] = (uint8_t)rnd();
+                u0[x] = u1[x] = (uint8_t)rnd();
+                v0[x] = v1[x] = (uint8_t)rnd();
+            }
+
+            call_ref(y0, u0, v0, argb, n);
+            call_new(y1, u1, v1, argb, n);
+            if (memcmp(y0, y1, (size_t)n + GUARD_PIXELS) ||
+                memcmp(u0, u1, (size_t)n + GUARD_PIXELS) ||
+                memcmp(v0, v1, (size_t)n + GUARD_PIXELS))
+                fail();
+        }
+        bench_new(y1, u1, v1, argb, MAX_PIXELS);
+    }
+}
+
 static void check_argb_to_uv(WPDYUVDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, argb, [8 * MAX_PIXELS]);
     LOCAL_ALIGNED_16(uint8_t, u0, [UV_PIXELS]);
@@ -507,6 +540,8 @@ void checkasm_check_yuvdsp(void) {
     report("premultiply_row");
     check_argb_to_y(&dsp);
     report("argb_to_y");
+    check_argb_to_yuv444(&dsp);
+    report("argb_to_yuv444");
     check_argb_to_uv(&dsp);
     report("argb_to_uv");
     check_yuv420_to_packed(&dsp, WPD_LAYOUT_ARGB, "argb");

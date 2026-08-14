@@ -25,6 +25,8 @@
 typedef void (*row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
 typedef void (*inplace_func)(uint8_t *row, int num_pixels);
 typedef void (*alpha_first_func)(uint8_t *row, int alpha_first, int num_pixels);
+typedef void (*yuv444_func)(uint8_t *y, uint8_t *u, uint8_t *v,
+                            const uint8_t *argb, int num_pixels);
 
 enum { KIND_ROW, KIND_INPLACE, KIND_ALPHA_FIRST };
 
@@ -108,6 +110,45 @@ static int probe(const RowTest *t, int n) {
     return failed;
 }
 
+static int probe_yuv444(yuv444_func func, int n) {
+    uint8_t *y_map = NULL, *u_map = NULL, *v_map = NULL, *src_map = NULL;
+    size_t   y_size = 0, u_size = 0, v_size = 0, src_size = 0;
+    uint8_t *y, *u, *v, *src;
+    int      failed = 0;
+
+    y   = guarded(&y_map, &y_size, (size_t)n);
+    u   = guarded(&u_map, &u_size, (size_t)n);
+    v   = guarded(&v_map, &v_size, (size_t)n);
+    src = guarded(&src_map, &src_size, (size_t)n * 4);
+    if (!y || !u || !v || !src) {
+        fprintf(stderr, "mmap failed\n");
+        failed = 1;
+        goto done;
+    }
+
+    trapped = 0;
+    signal(SIGSEGV, on_fault);
+    signal(SIGBUS, on_fault);
+    if (sigsetjmp(escape, 1) == 0)
+        func(y, u, v, src, n);
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGBUS, SIG_DFL);
+    if (trapped) {
+        printf("FAIL argb_to_yuv444: n=%d ran past the end of a row\n", n);
+        failed = 1;
+    }
+done:
+    if (y_map)
+        munmap(y_map, y_size);
+    if (u_map)
+        munmap(u_map, u_size);
+    if (v_map)
+        munmap(v_map, v_size);
+    if (src_map)
+        munmap(src_map, src_size);
+    return failed;
+}
+
 #define ROW(fn, dst, src) {#fn, KIND_ROW, dst, src, 0, dsp->fn}
 #define INPLACE(fn, dst) {#fn, KIND_INPLACE, dst, 0, 0, dsp->fn}
 #define PREMUL(pos, first)   \
@@ -140,6 +181,8 @@ static int check(const WPDYUVDSP *dsp) {
 
     for (size_t i = 0; i < sizeof(tests) / sizeof(*tests); i++)
         for (int n = 1; n <= 96; n++) failed |= probe(&tests[i], n);
+    for (int n = 1; n <= 96; n++)
+        failed |= probe_yuv444(dsp->argb_to_yuv444, n);
     return failed;
 }
 
@@ -156,6 +199,8 @@ int main(void) {
         0,
         WPD_ARM_CPU_FLAG_ARMV6,
         WPD_ARM_CPU_FLAG_NEON,
+        WPD_ARM_CPU_FLAG_DOTPROD,
+        WPD_ARM_CPU_FLAG_I8MM,
 #else
         0,
 #endif

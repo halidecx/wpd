@@ -89,6 +89,10 @@ shuf_y_rg: db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
            db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
 shuf_y_gb: db 2, -1, 3, -1, 6, -1, 7, -1, 10, -1, 11, -1, 14, -1, 15, -1
            db 2, -1, 3, -1, 6, -1, 7, -1, 10, -1, 11, -1, 14, -1, 15, -1
+shuf_uv_b: db 3, -1, -1, -1, 7, -1, -1, -1
+           db 11, -1, -1, -1, 15, -1, -1, -1
+           db 3, -1, -1, -1, 7, -1, -1, -1
+           db 11, -1, -1, -1, 15, -1, -1, -1
 pw_y_rg:  times 8 dw 16839, 16675
 pw_y_gb:  times 8 dw 16384, 6420
 pd_y_rnd: times 8 dd 1081344
@@ -104,14 +108,16 @@ pd_65535: times 8 dd 65535
 pd_1:     times 8 dd 1
 ps_1_19:  times 8 dd 524288.0
 ; U = (-9719 R - 19081 G + 28800 B) and V = (28800 R - 24116 G - 4684 B), each
-; rounded by half an output step plus the 128 offset before a shift of 18. R
-; and G ride in one word pair; B keeps a lane of its own, its second word being
-; the zero the sums never carry into.
-pw_u_rg:   times 8 dw -9719, -19081
-pw_u_b:    times 8 dw 28800, 0
-pw_v_rg:   times 8 dw 28800, -24116
-pw_v_b:    times 8 dw -4684, 0
-pd_uv_rnd: times 8 dd 33685504
+; rounded by half an output step plus the 128 offset. R and G ride in one word
+; pair; B keeps a lane of its own, its second word being the zero the sums
+; never carry into. The 4:2:0 path feeds sums of a 2x2 block and folds the
+; average into a shift of 18; the 4:4:4 path feeds one pixel and shifts by 16.
+pw_u_rg:      times 8 dw -9719, -19081
+pw_u_b:       times 8 dw 28800, 0
+pw_v_rg:      times 8 dw 28800, -24116
+pw_v_b:       times 8 dw -4684, 0
+pd_uv_rnd:    times 8 dd 33685504
+pd_uv444_rnd: times 8 dd 8421376
 
 cextern_naked wpd_gamma_to_linear_tab
 cextern_naked wpd_linear_to_gamma_tab
@@ -746,6 +752,92 @@ cglobal argb_to_y, 3, 4, 6, y, argb, n
     RET
 %endmacro
 
+%macro ARGB_TO_YUV444_GROUP 0
+    mova      m1, m0
+    mova      m2, m0
+    pshufb    m1, [shuf_y_rg]
+    pshufb    m2, [shuf_y_gb]
+    pmaddwd   m1, [pw_y_rg]
+    pmaddwd   m2, [pw_y_gb]
+    paddd     m1, m2
+    paddd     m1, [pd_y_rnd]
+    psrad     m1, 16
+    mova      m2, m0
+    mova      m3, m0
+    pshufb    m2, [shuf_y_rg]
+    pshufb    m3, [shuf_uv_b]
+    mova      m4, m2
+    mova      m5, m3
+    pmaddwd   m2, [pw_u_rg]
+    pmaddwd   m3, [pw_u_b]
+    paddd     m2, m3
+    paddd     m2, [pd_uv444_rnd]
+    psrad     m2, 16
+    pmaddwd   m4, [pw_v_rg]
+    pmaddwd   m5, [pw_v_b]
+    paddd     m4, m5
+    paddd     m4, [pd_uv444_rnd]
+    psrad     m4, 16
+    packssdw  m1, m1
+    packuswb  m1, m1
+    packssdw  m2, m2
+    packuswb  m2, m2
+    packssdw  m4, m4
+    packuswb  m4, m4
+%if mmsize == 32
+    vextracti128 xm0, m1, 1
+    punpckldq xm1, xm0
+    vextracti128 xm0, m2, 1
+    punpckldq xm2, xm0
+    vextracti128 xm0, m4, 1
+    punpckldq xm4, xm0
+%endif
+%endmacro
+
+%macro ARGB_TO_YUV444 0
+cglobal argb_to_yuv444, 5, 6, 6, y, u, v, argb, n, tmp
+    sub       nd, mmsize / 4
+    jl        .tail
+.loop:
+    movu      m0, [argbq]
+    ARGB_TO_YUV444_GROUP
+%if mmsize == 32
+    movq      [yq], xm1
+    movq      [uq], xm2
+    movq      [vq], xm4
+%else
+    movd      [yq], xm1
+    movd      [uq], xm2
+    movd      [vq], xm4
+%endif
+    add       argbq, mmsize
+    add       yq, mmsize / 4
+    add       uq, mmsize / 4
+    add       vq, mmsize / 4
+    sub       nd, mmsize / 4
+    jge       .loop
+.tail:
+    add       nd, mmsize / 4
+    jz        .end
+.tail_loop:
+    movd      xm0, [argbq]
+    ARGB_TO_YUV444_GROUP
+    movd      tmpd, xm1
+    mov       [yq], tmpb
+    movd      tmpd, xm2
+    mov       [uq], tmpb
+    movd      tmpd, xm4
+    mov       [vq], tmpb
+    add       argbq, 4
+    inc       yq
+    inc       uq
+    inc       vq
+    dec       nd
+    jg        .tail_loop
+.end:
+    RET
+%endmacro
+
 ; Every channel is a nibble expanded to eight bits by a multiply by 17, and
 ; the alpha multiplier is the same expansion doubled up, so the truncating
 ; divide by 255 the C does with a 32-bit product is exactly pmulhuw here.
@@ -894,6 +986,9 @@ PREMULTIPLY_ROW
 PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
+%if ARCH_X86_64
+ARGB_TO_YUV444
+%endif
 INIT_YMM avx2
 PACK32 rgba
 PACK32 bgra
@@ -907,6 +1002,9 @@ PREMULTIPLY_ROW
 PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
+%if ARCH_X86_64
+ARGB_TO_YUV444
+%endif
 
 ; Rewrites one byte of every pixel, reading back the other three and storing
 ; them again unchanged. 'dst' is the start of the pixel, never the alpha byte

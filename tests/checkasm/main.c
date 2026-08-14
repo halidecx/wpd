@@ -12,6 +12,8 @@ static const CheckasmCpuInfo cpu_flags[] = {
     {"NEON", "neon", WPD_ARM_CPU_FLAG_NEON},
 #elif WPD_ARCH_AARCH64
     {"NEON", "neon", WPD_ARM_CPU_FLAG_NEON},
+    {"DOTPROD", "dotprod", WPD_ARM_CPU_FLAG_DOTPROD},
+    {"I8MM", "i8mm", WPD_ARM_CPU_FLAG_I8MM},
 #endif
     {0}};
 
