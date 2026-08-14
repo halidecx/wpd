@@ -44,6 +44,8 @@ void ff_premultiply_row_neon(uint8_t *rgba, int alpha_first, int num_pixels);
 void ff_premultiply_row_4444_neon(uint8_t *rgba4444, int num_pixels);
 void ff_premultiply_row_4444_swap_neon(uint8_t *bgra4444, int num_pixels);
 void ff_argb_to_y_neon(uint8_t *y, const uint8_t *argb, int num_pixels);
+void ff_argb_to_yuv444_neon(uint8_t *y, uint8_t *u, uint8_t *v,
+                            const uint8_t *argb, int num_pixels);
 void ff_argb_to_uv_neon(uint8_t *u, uint8_t *v, const uint8_t *argb,
                         ptrdiff_t argb_stride, int num_pixels,
                         int weight_alpha);
@@ -70,6 +72,7 @@ static wpd_always_inline void wpd_yuv_dsp_init_aarch64(WPDYUVDSP *dsp) {
     dsp->premultiply_row_4444            = ff_premultiply_row_4444_neon;
     dsp->premultiply_row_4444_swap       = ff_premultiply_row_4444_swap_neon;
     dsp->argb_to_y                       = ff_argb_to_y_neon;
+    dsp->argb_to_yuv444                  = ff_argb_to_yuv444_neon;
     dsp->argb_to_uv                      = ff_argb_to_uv_neon;
 }
 

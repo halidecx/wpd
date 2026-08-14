@@ -506,6 +506,97 @@ function ff_argb_to_y_neon, export=1
 9:      ret
 endfunc
 
+const yuv444_coeffs, align=4
+        .short          -9719, -19081, 28800, 28800, -24116, -4684, 0, 0
+endconst
+
+.macro  argb_to_uv444_widen hi
+    .if \hi
+        ushll2          v16.8h,  v1.16b, #0
+        ushll2          v17.8h,  v2.16b, #0
+        ushll2          v18.8h,  v3.16b, #0
+    .else
+        ushll           v16.8h,  v1.8b,  #0
+        ushll           v17.8h,  v2.8b,  #0
+        ushll           v18.8h,  v3.8b,  #0
+    .endif
+.endm
+
+.macro  argb_to_uv444_calc dst, cr, cg, cb
+        smull           v4.4s,   v16.4h, v8.h[\cr]
+        smlal           v4.4s,   v17.4h, v8.h[\cg]
+        smlal           v4.4s,   v18.4h, v8.h[\cb]
+        smull2          v5.4s,   v16.8h, v8.h[\cr]
+        smlal2          v5.4s,   v17.8h, v8.h[\cg]
+        smlal2          v5.4s,   v18.8h, v8.h[\cb]
+        add             v4.4s,   v4.4s,  v28.4s
+        add             v5.4s,   v5.4s,  v28.4s
+        sqshrn          v\dst\().4h, v4.4s, #16
+        sqshrn2         v\dst\().8h, v5.4s, #16
+        sqxtun          v\dst\().8b, v\dst\().8h
+.endm
+
+.macro  argb_to_uv444_group hi
+        argb_to_uv444_widen \hi
+        argb_to_uv444_calc 6, 0, 1, 2
+        argb_to_uv444_calc 7, 3, 4, 5
+.endm
+
+// Scaling the inputs by four and shifting by YUV_FIX + 2, as clip_uv does, is
+// the same as leaving them alone and shifting by YUV_FIX, so the rounding and
+// the 128 offset collapse into one constant of 32768 + (128 << 16). The sum
+// stays within [16, 240] for any input, so neither narrowing saturates.
+function ff_argb_to_yuv444_neon, export=1
+        str             d8,  [sp, #-16]!
+        movi            v20.16b, #65
+        movi            v21.16b, #129
+        movi            v22.16b, #25
+        movi            v23.16b, #199
+        movi            v24.16b, #35
+        movi            v25.16b, #20
+        mov             w5,  #4224
+        dup             v26.8h,  w5
+        movrel          x5,  yuv444_coeffs
+        ld1             {v8.8h}, [x5]
+        mov             w5,  #0x8000
+        movk            w5,  #0x80, lsl #16
+        dup             v28.4s,  w5
+        cmp             w4,  #16
+        b.lt            2f
+1:      ld4             {v0.16b-v3.16b}, [x3], #64
+        sub             w4,  w4,  #16
+        argb_to_y_group 16b, 1
+        st1             {v4.16b}, [x0], #16
+        argb_to_uv444_group 0
+        st1             {v6.8b}, [x1], #8
+        st1             {v7.8b}, [x2], #8
+        argb_to_uv444_group 1
+        st1             {v6.8b}, [x1], #8
+        st1             {v7.8b}, [x2], #8
+        cmp             w4,  #16
+        b.ge            1b
+2:      cmp             w4,  #8
+        b.lt            3f
+        ld4             {v0.8b-v3.8b}, [x3], #32
+        sub             w4,  w4,  #8
+        argb_to_y_group 8b, 0
+        st1             {v4.8b}, [x0], #8
+        argb_to_uv444_group 0
+        st1             {v6.8b}, [x1], #8
+        st1             {v7.8b}, [x2], #8
+3:      cbz             w4,  9f
+4:      ld4             {v0.b, v1.b, v2.b, v3.b}[0], [x3], #4
+        subs            w4,  w4,  #1
+        argb_to_y_group 8b, 0
+        st1             {v4.b}[0], [x0], #1
+        argb_to_uv444_group 0
+        st1             {v6.b}[0], [x1], #1
+        st1             {v7.b}[0], [x2], #1
+        b.gt            4b
+9:      ldr             d8,  [sp], #16
+        ret
+endfunc
+
 .macro  premultiply_ch ch, alpha
         umull           v4.8h,   v\ch\().8b, v\alpha\().8b
         ushr            v5.8h,   v4.8h,   #8
