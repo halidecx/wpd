@@ -6,6 +6,44 @@ void image_free(WebPImage *img) {
     memset(img, 0, sizeof(*img));
 }
 
+void image_drop_plane(WebPImage *img, int p) {
+    wpd_free(img->alloc[p]);
+    img->alloc[p]      = NULL;
+    img->alloc_size[p] = 0;
+    img->data[p]       = NULL;
+    img->linesize[p]   = 0;
+}
+
+void image_scratch_free(RescaleScratch *scratch) {
+    wpd_free(scratch->work);
+    wpd_free(scratch->row);
+    memset(scratch, 0, sizeof(*scratch));
+}
+
+int image_scratch_grow(RescaleScratch *scratch, int dst_width, int src_width,
+                       int channels) {
+    const size_t need = 2 * (size_t)dst_width * (size_t)channels;
+    const size_t row  = (size_t)src_width * (size_t)channels;
+
+    if (scratch->work_size < need) {
+        uint32_t *grown = realloc(scratch->work, need * sizeof(*grown));
+
+        if (!grown)
+            return WPD_ERROR(ENOMEM);
+        scratch->work      = grown;
+        scratch->work_size = need;
+    }
+    if (scratch->row_size < row) {
+        uint8_t *grown = realloc(scratch->row, row);
+
+        if (!grown)
+            return WPD_ERROR(ENOMEM);
+        scratch->row      = grown;
+        scratch->row_size = row;
+    }
+    return 0;
+}
+
 static uint8_t *image_alloc_plane(WebPImage *img, int p, size_t size) {
     if (img->alloc[p] && img->alloc_size[p] >= size) {
         memset(img->alloc[p], 0, size);

@@ -11,14 +11,15 @@ static void composite_region(WPDDecoder *s, const WebPImage *frame, SubRect r,
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
         if (blend)
-            blend_argb_region(s, canvas, frame, r);
+            blend_argb_region(
+                &s->ldsp, s->premultiply, canvas, frame, r, s->pos_x, s->pos_y);
         else
-            copy_argb_region(s, canvas, frame, r);
+            copy_argb_region(canvas, frame, r, s->pos_x, s->pos_y);
     } else {
         if (blend)
-            blend_yuva_region(s, canvas, frame, r);
+            blend_yuva_region(canvas, frame, r, s->pos_x, s->pos_y);
         else
-            copy_yuva_region(s, canvas, frame, r);
+            copy_yuva_region(canvas, frame, r, s->pos_x, s->pos_y);
     }
 }
 
@@ -172,7 +173,10 @@ static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
             s->canvas.format == WPD_PIX_FMT_YUVA420P) {
             WebPImage yuva_canvas = s->canvas;
             memset(&s->canvas, 0, sizeof(s->canvas));
-            ret = convert_to_argb(s, &s->canvas, &yuva_canvas);
+            ret = convert_to_argb(&s->ydsp,
+                                  &s->canvas,
+                                  &yuva_canvas,
+                                  s->options.no_fancy_upsampling);
             image_free(&yuva_canvas);
             if (ret < 0)
                 return ret;
@@ -322,7 +326,8 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         target = WPD_PIX_FMT_ARGB;
 
     if (target == WPD_PIX_FMT_ARGB && sub->format != WPD_PIX_FMT_ARGB) {
-        ret = convert_to_argb(s, &s->converted, sub);
+        ret = convert_to_argb(
+            &s->ydsp, &s->converted, sub, s->options.no_fancy_upsampling);
         if (ret < 0)
             return ret;
         sub = &s->converted;
@@ -335,7 +340,8 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
        feeds no canvas, so a two-byte output premultiplies after the pack
        instead, in the four-bit domain a still uses. */
     if (s->premultiply &&
-        !(premultiply_after_pack(s) && format_bpp(s->out_format) == 2))
+        !(premultiply_after_pack(s->animation, s->anim_mode) &&
+          format_bpp(s->out_format) == 2))
         for (int y = 0; y < sub->height; y++)
             s->ydsp.premultiply_row(
                 sub->data[0] + (size_t)y * sub->linesize[0], 1, sub->width);

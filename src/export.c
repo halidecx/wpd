@@ -40,8 +40,9 @@ static int export_external_rows(WPDDecoder *s, const WebPImage *img,
                                 int row_start, int row_end) {
     const size_t  row     = (size_t)img->width * format_bpp(format);
     const size_t  advance = stride_magnitude(s->ext[0].stride);
-    pack_row_func pack    = img->format == format ? NULL
-                                                  : format_packer(s, format);
+    pack_row_func pack    = img->format == format
+        ? NULL
+        : format_packer(&s->ydsp, format);
     uint8_t      *dst     = s->ext[0].data;
 
     if (!pack && format_bpp(img->format) != format_bpp(format))
@@ -127,7 +128,13 @@ int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
     pack_row_func        pack;
     int                  ret;
 
-    ret = transform_image(s, img, &view, &processed, format);
+    ret = transform_image(&s->options,
+                          &s->rescale,
+                          &s->transformed,
+                          img,
+                          &view,
+                          &processed,
+                          format);
     if (ret < 0)
         return ret;
     img = processed;
@@ -139,7 +146,7 @@ int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
             planar = img;
         } else {
             ret = ensure_yuva(
-                s, &s->output, img, format == WPD_PIX_FMT_YUVA420P);
+                &s->ydsp, &s->output, img, format == WPD_PIX_FMT_YUVA420P);
             if (ret < 0)
                 return ret;
             planar = &s->output;
@@ -169,12 +176,18 @@ int export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame) {
         return export_external(s, img, img->format, frame);
     }
     if (!format_is_packed(img->format) || format_bpp(format) == 2) {
-        ret = convert_to_packed(s, &s->output, img, format);
+        ret = convert_to_packed(
+            &s->ydsp,
+            &s->output,
+            img,
+            format,
+            s->options.no_fancy_upsampling,
+            premultiply_after_pack(s->animation, s->anim_mode));
         if (ret < 0)
             return ret;
         img = &s->output;
     } else if (img->format != format) {
-        pack = format_packer(s, format);
+        pack = format_packer(&s->ydsp, format);
         if (!pack) {
             if (format != WPD_PIX_FMT_ARGB_PRE ||
                 img->format != WPD_PIX_FMT_ARGB)
@@ -254,9 +267,9 @@ int export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto) {
                 return ret;
         }
         if (upto > first) {
-            const pack_row_func             pack = format_packer(s, format);
+            const pack_row_func pack = format_packer(&s->ydsp, format);
             const premultiply_4444_row_func premultiply =
-                format_premultiplier_4444(s, format);
+                format_premultiplier_4444(&s->ydsp, format);
 
             if (s->options.no_fancy_upsampling)
                 wpd_yuv420_to_packed_simple(&s->ydsp,
@@ -378,7 +391,7 @@ int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
     WebPImage           *img    = s->lossless_frame;
     const int first = s->converted_format == format ? s->converted_rows : 0;
     const premultiply_4444_row_func premultiply = format_premultiplier_4444(
-        s, format);
+        &s->ydsp, format);
     pack_row_func pack;
     int           ret;
 
@@ -386,8 +399,12 @@ int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
         upto = s->converted_rows;
 
     if (format == WPD_PIX_FMT_YUV420P || format == WPD_PIX_FMT_YUVA420P) {
-        ret = ensure_yuva_rows(
-            s, &s->output, img, format == WPD_PIX_FMT_YUVA420P, first, upto);
+        ret = ensure_yuva_rows(&s->ydsp,
+                               &s->output,
+                               img,
+                               format == WPD_PIX_FMT_YUVA420P,
+                               first,
+                               upto);
         if (ret < 0)
             return ret;
         if (s->ext_active)
@@ -440,7 +457,7 @@ int export_still_lossless(WPDDecoder *s, WPDFrame *frame, int upto) {
         return 0;
     }
 
-    pack = format_packer(s, format);
+    pack = format_packer(&s->ydsp, format);
     if (!s->premultiply && (!pack || img->format == format)) {
         export_frame(s, img, format, frame);
         s->converted_rows   = upto;

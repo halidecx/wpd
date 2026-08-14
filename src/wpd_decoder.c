@@ -193,7 +193,7 @@ WPDStatus wpd_decoder_set_animation_mode(WPDDecoder      *decoder,
     if (mode != WPD_ANIM_COMPOSITED && mode != WPD_ANIM_SUBFRAME)
         return set_error(
             decoder, "invalid animation mode", WPD_ERR_INVALID_ARG);
-    if (mode == WPD_ANIM_SUBFRAME && options_transform(decoder))
+    if (mode == WPD_ANIM_SUBFRAME && options_transform(&decoder->options))
         return set_error(decoder,
                          "sub-frame mode cannot be combined with cropping, "
                          "scaling or flipping",
@@ -781,7 +781,7 @@ static int emit_still_lossless(WPDDecoder *decoder, WPDFrame *frame) {
     int ret;
 
     decoder->still_done = 1;
-    if (options_transform(decoder))
+    if (options_transform(&decoder->options))
         ret = export_packed(decoder, decoder->lossless_frame, frame);
     else
         ret = export_still_lossless(
@@ -795,7 +795,7 @@ static int emit_still_lossy(WPDDecoder *decoder, WPDFrame *frame) {
     int ret;
 
     decoder->still_done = 1;
-    if (options_transform(decoder))
+    if (options_transform(&decoder->options))
         ret = export_packed(decoder, &decoder->subframe, frame);
     else if (format_is_packed(decoder->out_format))
         ret = export_still_packed(decoder, frame, decoder->subframe.height);
@@ -1040,7 +1040,7 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
     if (rows_valid)
         *rows_valid = 0;
 
-    if (options_transform(decoder)) {
+    if (options_transform(&decoder->options)) {
         if (decoder->still_lossless) {
             if (vp8l_still_active(decoder->vp8l)) {
                 ret = lossless_peek(decoder);
@@ -1105,7 +1105,7 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
         if (rows < first)
             rows = first;
         if (have != WPD_PIX_FMT_YUVA420P && format != have) {
-            ret = ensure_yuva_rows(decoder,
+            ret = ensure_yuva_rows(&decoder->ydsp,
                                    &decoder->output,
                                    &decoder->subframe,
                                    format == WPD_PIX_FMT_YUVA420P,
@@ -1164,8 +1164,7 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     image_free(&decoder->transformed);
     for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
     scan_free(&decoder->scan);
-    free(decoder->rescale_work);
-    free(decoder->rescale_row);
+    image_scratch_free(&decoder->rescale);
     free(decoder->alpha_plane);
     free(decoder->file_alloc);
     free(decoder);

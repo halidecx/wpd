@@ -133,23 +133,6 @@ static int vp8_lossy_init(WPDDecoder *s) {
 }
 
 /* libwebp rounds an inferred dimension up, not to nearest. */
-int scaled_size(const WPDDecoder *s, int src_width, int src_height, int *width,
-                int *height) {
-    int w = s->options.scaled_width;
-    int h = s->options.scaled_height;
-
-    if (!w)
-        w = (int)(((int64_t)src_width * h + src_height - 1) / src_height);
-    if (!h)
-        h = (int)(((int64_t)src_height * w + src_width - 1) / src_width);
-    if (w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
-        (uint64_t)w * h >= 1ULL << 32)
-        return WPD_ERR_TOO_LARGE;
-    *width  = w;
-    *height = h;
-    return 0;
-}
-
 /* libwebp drops the in-loop filter once a scaled decode shrinks the frame past
    three quarters in both directions, on the grounds that nothing survives the
    downscale, so a scaled lossy frame only matches it if the filter goes too.
@@ -161,7 +144,7 @@ static void update_filter_bypass(WPDDecoder *s) {
     if (!s->options.use_scaling || !s->canvas_width || !s->canvas_height)
         return;
     if (scaled_size(
-            s,
+            &s->options,
             s->options.use_cropping ? s->options.crop_width : s->canvas_width,
             s->options.use_cropping ? s->options.crop_height : s->canvas_height,
             &width,

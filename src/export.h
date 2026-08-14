@@ -2,6 +2,7 @@
 #define WPD_EXPORT_H
 
 #include "convert.h"
+#include "wpd_dec.h"
 
 int  export_packed(WPDDecoder *s, WebPImage *img, WPDFrame *frame);
 int  export_still_packed(WPDDecoder *s, WPDFrame *frame, int upto);

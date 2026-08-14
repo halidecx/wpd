@@ -62,17 +62,14 @@ struct WPDDecoder {
     int          lossless_has_alpha;
 
     /* Views of pictures the lossless decoder owns; never freed from here. */
-    WebPImage  argb;
-    WebPImage  alpha_argb;
-    WebPImage *lossless_frame;
-    WebPImage  subframe;
-    WebPImage  converted;
-    WebPImage  output;
-    WebPImage  transformed;
-    uint32_t  *rescale_work;
-    size_t     rescale_work_size;
-    uint8_t   *rescale_row;
-    size_t     rescale_row_size;
+    WebPImage      argb;
+    WebPImage      alpha_argb;
+    WebPImage     *lossless_frame;
+    WebPImage      subframe;
+    WebPImage      converted;
+    WebPImage      output;
+    WebPImage      transformed;
+    RescaleScratch rescale;
 
     WebPImage canvas;
     /* The sub-frame WPD_ANIM_SUBFRAME hands out, borrowed from whichever of

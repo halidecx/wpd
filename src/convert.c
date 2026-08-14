@@ -1,6 +1,5 @@
 
 #include "convert.h"
-#include "lossy.h"
 
 int image_nb_components(const WebPImage *img) {
     switch (img->format) {
@@ -38,33 +37,32 @@ int format_valid(WPDPixelFormat format) {
     return format >= WPD_PIX_FMT_YUV420P && format <= WPD_PIX_FMT_BGRA4444_PRE;
 }
 
-pack_row_func format_packer(const WPDDecoder *s, WPDPixelFormat format) {
+pack_row_func format_packer(const WPDYUVDSP *dsp, WPDPixelFormat format) {
     switch (format) {
     case WPD_PIX_FMT_RGBA:
-    case WPD_PIX_FMT_RGBA_PRE: return s->ydsp.pack_rgba;
+    case WPD_PIX_FMT_RGBA_PRE: return dsp->pack_rgba;
     case WPD_PIX_FMT_BGRA:
-    case WPD_PIX_FMT_BGRA_PRE: return s->ydsp.pack_bgra;
-    case WPD_PIX_FMT_RGB: return s->ydsp.pack_rgb;
-    case WPD_PIX_FMT_BGR: return s->ydsp.pack_bgr;
-    case WPD_PIX_FMT_RGB565: return s->ydsp.pack_rgb565;
+    case WPD_PIX_FMT_BGRA_PRE: return dsp->pack_bgra;
+    case WPD_PIX_FMT_RGB: return dsp->pack_rgb;
+    case WPD_PIX_FMT_BGR: return dsp->pack_bgr;
+    case WPD_PIX_FMT_RGB565: return dsp->pack_rgb565;
     case WPD_PIX_FMT_RGBA4444:
-    case WPD_PIX_FMT_RGBA4444_PRE: return s->ydsp.pack_rgba4444;
-    case WPD_PIX_FMT_BGR565: return s->ydsp.pack_bgr565;
+    case WPD_PIX_FMT_RGBA4444_PRE: return dsp->pack_rgba4444;
+    case WPD_PIX_FMT_BGR565: return dsp->pack_bgr565;
     case WPD_PIX_FMT_BGRA4444:
-    case WPD_PIX_FMT_BGRA4444_PRE: return s->ydsp.pack_bgra4444;
+    case WPD_PIX_FMT_BGRA4444_PRE: return dsp->pack_bgra4444;
     default: return NULL;
     }
 }
 
-premultiply_4444_row_func format_premultiplier_4444(const WPDDecoder *s,
-                                                    WPDPixelFormat    format) {
-    return format == WPD_PIX_FMT_BGRA4444_PRE
-        ? s->ydsp.premultiply_row_4444_swap
-        : s->ydsp.premultiply_row_4444;
+premultiply_4444_row_func format_premultiplier_4444(const WPDYUVDSP *dsp,
+                                                    WPDPixelFormat   format) {
+    return format == WPD_PIX_FMT_BGRA4444_PRE ? dsp->premultiply_row_4444_swap
+                                              : dsp->premultiply_row_4444;
 }
 
-int premultiply_after_pack(const WPDDecoder *s) {
-    return !s->animation || s->anim_mode == WPD_ANIM_SUBFRAME;
+int premultiply_after_pack(int animation, WPDAnimationMode anim_mode) {
+    return !animation || anim_mode == WPD_ANIM_SUBFRAME;
 }
 
 /* The byte layouts the upsampler can emit without a second pass. */
@@ -80,22 +78,39 @@ int format_layout(WPDPixelFormat format) {
     }
 }
 
-int options_transform(const WPDDecoder *s) {
-    return s->options.use_cropping || s->options.use_scaling || s->options.flip;
+int options_transform(const WPDDecoderOptions *options) {
+    return options->use_cropping || options->use_scaling || options->flip;
 }
 
-static int crop_image(const WPDDecoder *s, const WebPImage *src,
+int scaled_size(const WPDDecoderOptions *options, int src_width, int src_height,
+                int *width, int *height) {
+    int w = options->scaled_width;
+    int h = options->scaled_height;
+
+    if (!w)
+        w = (int)(((int64_t)src_width * h + src_height - 1) / src_height);
+    if (!h)
+        h = (int)(((int64_t)src_height * w + src_width - 1) / src_width);
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384 ||
+        (uint64_t)w * h >= 1ULL << 32)
+        return WPD_ERR_TOO_LARGE;
+    *width  = w;
+    *height = h;
+    return 0;
+}
+
+static int crop_image(const WPDDecoderOptions *options, const WebPImage *src,
                       WebPImage *view) {
     const int align = format_is_packed(src->format) ? 0 : 1;
-    int       left  = s->options.crop_left & ~align;
-    int       top   = s->options.crop_top & ~align;
+    int       left  = options->crop_left & ~align;
+    int       top   = options->crop_top & ~align;
 
     *view = *src;
-    if (!s->options.use_cropping)
+    if (!options->use_cropping)
         return 0;
     if (left > src->width || top > src->height ||
-        s->options.crop_width > src->width - left ||
-        s->options.crop_height > src->height - top)
+        options->crop_width > src->width - left ||
+        options->crop_height > src->height - top)
         return WPD_ERR_INVALID_ARG;
     for (int p = 0; p < image_nb_components(src); p++) {
         const int shift = p == 1 || p == 2;
@@ -105,32 +120,8 @@ static int crop_image(const WPDDecoder *s, const WebPImage *src,
         view->data[p] += (ptrdiff_t)(top >> shift) * src->linesize[p] +
             (ptrdiff_t)(left >> shift) * bpp;
     }
-    view->width  = s->options.crop_width;
-    view->height = s->options.crop_height;
-    return 0;
-}
-
-static int rescale_work(WPDDecoder *s, int dst_width, int src_width,
-                        int channels) {
-    const size_t need = 2 * (size_t)dst_width * (size_t)channels;
-    const size_t row  = (size_t)src_width * (size_t)channels;
-
-    if (s->rescale_work_size < need) {
-        uint32_t *grown = realloc(s->rescale_work, need * sizeof(*grown));
-
-        if (!grown)
-            return WPD_ERROR(ENOMEM);
-        s->rescale_work      = grown;
-        s->rescale_work_size = need;
-    }
-    if (s->rescale_row_size < row) {
-        uint8_t *grown = realloc(s->rescale_row, row);
-
-        if (!grown)
-            return WPD_ERROR(ENOMEM);
-        s->rescale_row      = grown;
-        s->rescale_row_size = row;
-    }
+    view->width  = options->crop_width;
+    view->height = options->crop_height;
     return 0;
 }
 
@@ -138,12 +129,12 @@ static int rescale_work(WPDDecoder *s, int dst_width, int src_width,
    feeds in is not the plane it decoded. Building each row into scratch keeps
    the decoded image untouched, which matters because an animation blends the
    next frame onto it and a still can be exported more than once. */
-static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
-                                   int dst_width, int dst_height,
-                                   const uint8_t *src, int src_stride,
-                                   const uint8_t *alpha, int alpha_stride,
-                                   int src_width, int src_height,
-                                   int channels) {
+static void rescale_plane_weighted(RescaleScratch *scratch, uint8_t *dst,
+                                   int dst_stride, int dst_width,
+                                   int dst_height, const uint8_t *src,
+                                   int src_stride, const uint8_t *alpha,
+                                   int alpha_stride, int src_width,
+                                   int src_height, int channels) {
     WPDRescaler r;
     int         y = 0;
 
@@ -155,19 +146,19 @@ static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
                       dst_height,
                       dst_stride,
                       channels,
-                      s->rescale_work);
+                      scratch->work);
     while (y < src_height) {
-        memcpy(s->rescale_row,
+        memcpy(scratch->row,
                src + (ptrdiff_t)y * src_stride,
                (size_t)src_width * channels);
         if (alpha)
-            wpd_multiply_row(s->rescale_row,
+            wpd_multiply_row(scratch->row,
                              alpha + (ptrdiff_t)y * alpha_stride,
                              src_width,
                              0);
         else
-            wpd_premultiply_argb_row(s->rescale_row, src_width, 0);
-        if (wpd_rescaler_import(&r, 1, s->rescale_row, 0))
+            wpd_premultiply_argb_row(scratch->row, src_width, 0);
+        if (wpd_rescaler_import(&r, 1, scratch->row, 0))
             y++;
         wpd_rescaler_export(&r);
     }
@@ -178,9 +169,9 @@ static void rescale_plane_weighted(WPDDecoder *s, uint8_t *dst, int dst_stride,
    bleed. 'chroma_full' brings U and V up to the output size instead of half
    it, which is what libwebp feeds its point converter when a scaled lossy
    frame is going to a packed format. */
-static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                       int width, int height, int chroma_full,
-                       int weight_luma) {
+static int scale_image(RescaleScratch *scratch, WebPImage *dst,
+                       const WebPImage *src, int width, int height,
+                       int chroma_full, int weight_luma) {
     const int packed = format_is_packed(src->format);
     const int bpp    = packed ? format_bpp(src->format) : 1;
     /* An already premultiplied source resamples correctly on its own: the
@@ -199,7 +190,7 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     if (ret < 0)
         return ret;
     dst->format = src->format;
-    ret         = rescale_work(s, width, src->width, bpp);
+    ret         = image_scratch_grow(scratch, width, src->width, bpp);
     if (ret < 0)
         return ret;
 
@@ -212,7 +203,7 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
         const int dh = CEIL_RSHIFT(height, shift);
 
         if (premult || (weight_luma && p == 0))
-            rescale_plane_weighted(s,
+            rescale_plane_weighted(scratch,
                                    dst->data[p],
                                    dst->linesize[p],
                                    dw,
@@ -234,7 +225,7 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
                               sw,
                               sh,
                               bpp,
-                              s->rescale_work);
+                              scratch->work);
     }
 
     if (premult)
@@ -248,12 +239,8 @@ static int scale_image(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
                              width,
                              1);
     if (!packed && image_nb_components(src) < 4) {
-        wpd_free(dst->alloc[3]);
-        dst->alloc[3]      = NULL;
-        dst->alloc_size[3] = 0;
-        dst->data[3]       = NULL;
-        dst->linesize[3]   = 0;
-        dst->format        = WPD_PIX_FMT_YUV420P;
+        image_drop_plane(dst, 3);
+        dst->format = WPD_PIX_FMT_YUV420P;
     }
     dst->chroma_full   = !packed && chroma_full;
     dst->premultiplied = src->premultiplied;
@@ -270,15 +257,16 @@ void flip_image(WebPImage *view) {
     }
 }
 
-int transform_image(WPDDecoder *s, const WebPImage *src, WebPImage *view,
+int transform_image(const WPDDecoderOptions *options, RescaleScratch *scratch,
+                    WebPImage *scaled, const WebPImage *src, WebPImage *view,
                     WebPImage **result, WPDPixelFormat format) {
     int width, height, ret;
 
-    ret = crop_image(s, src, view);
+    ret = crop_image(options, src, view);
     if (ret < 0)
         return ret;
     *result = view;
-    if (s->options.use_scaling) {
+    if (options->use_scaling) {
         const int planar = !format_is_packed(src->format);
         /* Going to a packed format, libwebp brings U and V all the way up to
            the output size and point-converts; staying planar, it keeps them
@@ -287,50 +275,49 @@ int transform_image(WPDDecoder *s, const WebPImage *src, WebPImage *view,
         const int weight_luma = planar && !format_is_packed(format) &&
             format != WPD_PIX_FMT_YUV420P && image_nb_components(src) == 4;
 
-        ret = scaled_size(s, view->width, view->height, &width, &height);
+        ret = scaled_size(options, view->width, view->height, &width, &height);
         if (ret < 0)
             return ret;
         ret = scale_image(
-            s, &s->transformed, view, width, height, chroma_full, weight_luma);
+            scratch, scaled, view, width, height, chroma_full, weight_luma);
         if (ret < 0)
             return ret;
-        *result = &s->transformed;
+        *result = scaled;
     }
     return 0;
 }
 
-void blend_argb_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                       SubRect r) {
+void blend_argb_region(const WPDLosslessDSP *dsp, int premultiply,
+                       WebPImage *dst, const WebPImage *src, SubRect r,
+                       int dst_x, int dst_y) {
     for (int y = 0; y < r.h; y++) {
         const uint8_t *src_argb = src->data[0] +
             (ptrdiff_t)(r.y + y) * src->linesize[0] + r.x * 4;
         uint8_t *dst_argb = dst->data[0] +
-            (ptrdiff_t)(s->pos_y + r.y + y) * dst->linesize[0] +
-            (s->pos_x + r.x) * 4;
+            (ptrdiff_t)(dst_y + r.y + y) * dst->linesize[0] + (dst_x + r.x) * 4;
 
-        if (s->premultiply)
-            s->ldsp.blend_row_argb_premult(dst_argb, src_argb, r.w);
+        if (premultiply)
+            dsp->blend_row_argb_premult(dst_argb, src_argb, r.w);
         else
-            s->ldsp.blend_row_argb(dst_argb, src_argb, r.w);
+            dsp->blend_row_argb(dst_argb, src_argb, r.w);
     }
 }
 
-void copy_argb_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                      SubRect r) {
+void copy_argb_region(WebPImage *dst, const WebPImage *src, SubRect r,
+                      int dst_x, int dst_y) {
     for (int y = 0; y < r.h; y++) {
         const uint8_t *src_argb = src->data[0] +
             (ptrdiff_t)(r.y + y) * src->linesize[0] + r.x * 4;
         uint8_t *dst_argb = dst->data[0] +
-            (ptrdiff_t)(s->pos_y + r.y + y) * dst->linesize[0] +
-            (s->pos_x + r.x) * 4;
+            (ptrdiff_t)(dst_y + r.y + y) * dst->linesize[0] + (dst_x + r.x) * 4;
 
         memcpy(dst_argb, src_argb, (size_t)r.w * 4);
     }
 }
 
-void blend_yuva_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                       SubRect r) {
-    int base_x = s->pos_x + r.x, base_y = s->pos_y + r.y;
+void blend_yuva_region(WebPImage *dst, const WebPImage *src, SubRect r,
+                       int dst_x, int dst_y) {
+    int base_x = dst_x + r.x, base_y = dst_y + r.y;
 
     for (int y = 0; y < CEIL_RSHIFT(r.h, 1); y++) {
         int            tile_h = WPD_MIN(r.h - y * 2, 2);
@@ -419,10 +406,10 @@ void blend_yuva_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     }
 }
 
-void copy_yuva_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                      SubRect r) {
+void copy_yuva_region(WebPImage *dst, const WebPImage *src, SubRect r,
+                      int dst_x, int dst_y) {
     int nb_components = image_nb_components(src);
-    int base_x = s->pos_x + r.x, base_y = s->pos_y + r.y;
+    int base_x = dst_x + r.x, base_y = dst_y + r.y;
 
     for (int comp = 0; comp < nb_components; comp++) {
         int            shift = (comp == 1 || comp == 2) ? 1 : 0;
@@ -449,8 +436,9 @@ void copy_yuva_region(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     }
 }
 
-int convert_to_packed(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
-                      WPDPixelFormat format) {
+int convert_to_packed(const WPDYUVDSP *dsp, WebPImage *dst,
+                      const WebPImage *src, WPDPixelFormat format,
+                      int no_fancy_upsampling, int premultiply_packed) {
     const int layout = format_layout(format);
     int       ret;
 
@@ -459,22 +447,27 @@ int convert_to_packed(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
         const WebPImage *argb = src;
 
         if (src->format != WPD_PIX_FMT_ARGB) {
-            ret = convert_to_packed(s, &temp, src, WPD_PIX_FMT_ARGB);
+            ret = convert_to_packed(dsp,
+                                    &temp,
+                                    src,
+                                    WPD_PIX_FMT_ARGB,
+                                    no_fancy_upsampling,
+                                    premultiply_packed);
             if (ret < 0)
                 return ret;
             argb = &temp;
         }
         ret = image_alloc_packed(dst, argb->width, argb->height, 2, format);
         if (ret >= 0) {
-            const pack_row_func pack = format_packer(s, format);
+            const pack_row_func pack = format_packer(dsp, format);
 
             for (int y = 0; y < argb->height; y++)
                 pack(dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
                      argb->data[0] + (ptrdiff_t)y * argb->linesize[0],
                      argb->width);
-            if (format_is_premultiplied(format) && premultiply_after_pack(s)) {
+            if (format_is_premultiplied(format) && premultiply_packed) {
                 const premultiply_4444_row_func premultiply =
-                    format_premultiplier_4444(s, format);
+                    format_premultiplier_4444(dsp, format);
 
                 for (int y = 0; y < argb->height; y++)
                     premultiply(dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
@@ -504,15 +497,15 @@ int convert_to_packed(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
         if (image_nb_components(src) == 4 && layout != WPD_LAYOUT_RGB &&
             layout != WPD_LAYOUT_BGR)
             for (int y = 0; y < src->height; y++)
-                (layout == WPD_LAYOUT_ARGB ? s->ydsp.dispatch_alpha_first
-                                           : s->ydsp.dispatch_alpha_last)(
+                (layout == WPD_LAYOUT_ARGB ? dsp->dispatch_alpha_first
+                                           : dsp->dispatch_alpha_last)(
                     dst->data[0] + (ptrdiff_t)y * dst->linesize[0],
                     src->data[3] + (ptrdiff_t)y * src->linesize[3],
                     src->width);
         return 0;
     }
-    if (s->options.no_fancy_upsampling)
-        wpd_yuv420_to_packed_simple(&s->ydsp,
+    if (no_fancy_upsampling)
+        wpd_yuv420_to_packed_simple(dsp,
                                     layout,
                                     dst->data[0],
                                     dst->linesize[0],
@@ -527,7 +520,7 @@ int convert_to_packed(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
                                     0,
                                     src->height);
     else
-        wpd_yuv420_to_packed(&s->ydsp,
+        wpd_yuv420_to_packed(dsp,
                              layout,
                              dst->data[0],
                              dst->linesize[0],
@@ -543,11 +536,13 @@ int convert_to_packed(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     return 0;
 }
 
-int convert_to_argb(WPDDecoder *s, WebPImage *dst, const WebPImage *src) {
-    return convert_to_packed(s, dst, src, WPD_PIX_FMT_ARGB);
+int convert_to_argb(const WPDYUVDSP *dsp, WebPImage *dst, const WebPImage *src,
+                    int no_fancy_upsampling) {
+    return convert_to_packed(
+        dsp, dst, src, WPD_PIX_FMT_ARGB, no_fancy_upsampling, 0);
 }
 
-static int convert_argb_to_yuva(WPDDecoder *s, WebPImage *dst,
+static int convert_argb_to_yuva(const WPDYUVDSP *dsp, WebPImage *dst,
                                 const WebPImage *src, int want_alpha,
                                 int row_start, int row_end) {
     int ret;
@@ -555,7 +550,7 @@ static int convert_argb_to_yuva(WPDDecoder *s, WebPImage *dst,
     if (!row_start &&
         (ret = image_alloc_yuva(dst, src->width, src->height)) < 0)
         return ret;
-    wpd_argb_to_yuva(&s->ydsp,
+    wpd_argb_to_yuva(dsp,
                      dst->data[0],
                      dst->linesize[0],
                      dst->data[1],
@@ -576,13 +571,13 @@ static int convert_argb_to_yuva(WPDDecoder *s, WebPImage *dst,
     return 0;
 }
 
-int ensure_yuva_rows(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
+int ensure_yuva_rows(const WPDYUVDSP *dsp, WebPImage *dst, const WebPImage *src,
                      int want_alpha, int row_start, int row_end) {
     int ret;
 
     if (src->format == WPD_PIX_FMT_ARGB)
         return convert_argb_to_yuva(
-            s, dst, src, want_alpha, row_start, row_end);
+            dsp, dst, src, want_alpha, row_start, row_end);
     if (!row_start &&
         (ret = image_alloc_yuva(dst, src->width, src->height)) < 0)
         return ret;
@@ -605,7 +600,7 @@ int ensure_yuva_rows(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
     return 0;
 }
 
-int ensure_yuva(WPDDecoder *s, WebPImage *dst, const WebPImage *src,
+int ensure_yuva(const WPDYUVDSP *dsp, WebPImage *dst, const WebPImage *src,
                 int want_alpha) {
-    return ensure_yuva_rows(s, dst, src, want_alpha, 0, src->height);
+    return ensure_yuva_rows(dsp, dst, src, want_alpha, 0, src->height);
 }
