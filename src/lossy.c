@@ -54,24 +54,26 @@ static int vp8_lossy_decode_alpha(WPDDecoder *s, WebPImage *p,
             left -= n;
         }
     } else if (s->alpha_compression == ALPHA_COMPRESSION_VP8L) {
-        s->alpha_dst        = p->data[3];
-        s->alpha_dst_stride = p->linesize[3];
-        s->alpha_dst_used   = 0;
+        int direct;
 
-        ret = vp8_lossless_decode_frame(
-            s, &s->alpha_argb, data_start, data_size, 1);
-        s->alpha_dst = NULL;
-        if (ret < 0) {
-            image_free(&s->alpha_argb);
+        lossless_canvas_in(s);
+        vp8l_set_alpha_dst(s->vp8l, p->data[3], p->linesize[3]);
+        ret    = vp8l_decode_frame(s->vp8l,
+                                   VP8L_TARGET_ALPHA,
+                                   &s->alpha_argb,
+                                   data_start,
+                                   data_size,
+                                   1);
+        direct = vp8l_alpha_dst_used(s->vp8l);
+        vp8l_set_alpha_dst(s->vp8l, NULL, 0);
+        if (ret < 0)
             return ret;
-        }
 
-        if (!s->alpha_dst_used)
+        if (!direct)
             for (y = 0; y < s->height; y++)
                 s->ldsp.extract_green(p->data[3] + p->linesize[3] * y,
                                       GET_PIXEL(&s->alpha_argb, 0, y),
                                       s->width);
-        image_free(&s->alpha_argb);
     }
 
     if (s->alpha_filter)

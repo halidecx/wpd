@@ -141,6 +141,11 @@ WPDDecoder *wpd_decoder_create(void) {
     if (!decoder)
         return NULL;
     wpd_init_cpu();
+    decoder->vp8l = vp8l_alloc();
+    if (!decoder->vp8l) {
+        free(decoder);
+        return NULL;
+    }
     wpd_vp8l_dsp_init(&decoder->ldsp);
     wpd_yuv_dsp_init(&decoder->ydsp);
     decoder->out_format          = WPD_PIX_FMT_NONE;
@@ -266,7 +271,7 @@ WPDStatus wpd_decoder_set_output_buffer(WPDDecoder            *decoder,
    new file and rewinding the current one have to put back. The buffers the
    frames are decoded into are kept: they are sized on use and reused. */
 static void anim_state_reset(WPDDecoder *decoder) {
-    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
+    vp8l_reset(decoder->vp8l);
     image_free(&decoder->canvas);
     decoder->still_done       = 0;
     decoder->vp8_active       = 0;
@@ -274,10 +279,7 @@ static void anim_state_reset(WPDDecoder *decoder) {
     decoder->alpha_pending    = 0;
     decoder->converted_rows   = 0;
     decoder->converted_format = WPD_PIX_FMT_NONE;
-    decoder->vp8l_active      = 0;
     decoder->still_lossless   = 0;
-    decoder->vp8l_next_try    = 0;
-    decoder->vp8l_peeked      = 0;
     decoder->lossless_frame   = NULL;
     decoder->subframe_out     = NULL;
     decoder->frame_index      = 0;
@@ -303,12 +305,13 @@ static void decoder_reset(WPDDecoder *decoder) {
         decoder->meta_size[i] = 0;
     }
     anim_state_reset(decoder);
-    image_free(&decoder->argb);
-    image_free(&decoder->lossless_out);
+    vp8l_release(decoder->vp8l);
     image_free(&decoder->converted);
     image_free(&decoder->output);
     image_free(&decoder->transformed);
     memset(&decoder->subframe, 0, sizeof(decoder->subframe));
+    memset(&decoder->argb, 0, sizeof(decoder->argb));
+    memset(&decoder->alpha_argb, 0, sizeof(decoder->alpha_argb));
     decoder->file_size = 0;
     decoder->discarded = 0;
     decoder->file      = decoder->file_alloc;
@@ -744,6 +747,33 @@ static int still_lossless_pending(const WPDDecoder *decoder,
         !decoder->still_done;
 }
 
+/* The resumable lossless path, plus the copies the container keeps of what it
+   left behind: which picture is being filled in, and whether there is one. */
+static int lossless_step(WPDDecoder *decoder, const uint8_t *payload,
+                         unsigned avail, unsigned size, int complete) {
+    int ret;
+
+    lossless_canvas_in(decoder);
+    ret = vp8l_still_step(decoder->vp8l, payload, avail, size, complete);
+    lossless_canvas_out(decoder);
+    if (ret >= 0 && (vp8l_still_active(decoder->vp8l) || ret == 1)) {
+        decoder->still_lossless = 1;
+        vp8l_still_frame(decoder->vp8l, &decoder->argb);
+        decoder->lossless_frame = &decoder->argb;
+    }
+    return ret;
+}
+
+static int lossless_peek(WPDDecoder *decoder) {
+    int ret = vp8l_still_peek(decoder->vp8l);
+
+    if (ret >= 0) {
+        vp8l_still_frame(decoder->vp8l, &decoder->argb);
+        decoder->lossless_frame = &decoder->argb;
+    }
+    return ret;
+}
+
 static int emit_still_lossless(WPDDecoder *decoder, WPDFrame *frame) {
     int ret;
 
@@ -787,8 +817,14 @@ static int decode_raw(WPDDecoder *decoder, WPDFrame *frame) {
 
     decoder->width = decoder->height = 0;
     if (hs->raw_kind == 1) {
-        ret = vp8_lossless_decode_frame(
-            decoder, &decoder->argb, data, (unsigned)hs->raw_image_size, 0);
+        lossless_canvas_in(decoder);
+        ret = vp8l_decode_frame(decoder->vp8l,
+                                VP8L_TARGET_ARGB,
+                                &decoder->argb,
+                                data,
+                                (unsigned)hs->raw_image_size,
+                                0);
+        lossless_canvas_out(decoder);
         if (ret < 0)
             return set_error(decoder, "VP8L decode failed", ret);
         decoder->still_done     = 1;
@@ -870,7 +906,7 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                     if (ret)
                         return emit_still_lossy(decoder, frame);
                 } else if (still_lossless_pending(decoder, chunk_type)) {
-                    ret = vp8l_still_step(
+                    ret = lossless_step(
                         decoder,
                         payload,
                         (unsigned)(decoder->end - (decoder->pos + 8)),
@@ -935,8 +971,8 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
         case MKTAG('V', 'P', '8', 'L'):
             if (decoder->animation || decoder->still_done)
                 break;
-            if (decoder->vp8l_active) {
-                ret = vp8l_still_step(decoder, payload, size, size, 1);
+            if (vp8l_still_active(decoder->vp8l)) {
+                ret = lossless_step(decoder, payload, size, size, 1);
                 if (ret == 0)
                     ret = WPD_ERROR_INVALID_DATA;
                 if (ret < 0)
@@ -944,8 +980,14 @@ int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame) {
                 return emit_still_lossless(decoder, frame);
             }
             decoder->width = decoder->height = 0;
-            ret                              = vp8_lossless_decode_frame(
-                decoder, &decoder->argb, payload, size, 0);
+            lossless_canvas_in(decoder);
+            ret = vp8l_decode_frame(decoder->vp8l,
+                                    VP8L_TARGET_ARGB,
+                                    &decoder->argb,
+                                    payload,
+                                    size,
+                                    0);
+            lossless_canvas_out(decoder);
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
             decoder->still_done = 1;
@@ -997,13 +1039,14 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
 
     if (options_transform(decoder)) {
         if (decoder->still_lossless) {
-            if (decoder->vp8l_active) {
-                ret = vp8l_still_peek(decoder);
+            if (vp8l_still_active(decoder->vp8l)) {
+                ret = lossless_peek(decoder);
                 if (ret < 0)
                     return set_error(decoder, "VP8L decode failed", ret);
             }
-            rows = decoder->vp8l_active ? decoder->vp8l_rows_out
-                                        : decoder->lossless_frame->height;
+            rows = vp8l_still_active(decoder->vp8l)
+                ? vp8l_still_rows_out(decoder->vp8l)
+                : decoder->lossless_frame->height;
             if (rows < decoder->lossless_frame->height)
                 return WPD_OK;
             ret = export_packed(decoder, decoder->lossless_frame, frame);
@@ -1024,15 +1067,15 @@ WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder, WPDFrame *frame,
     }
 
     if (decoder->still_lossless) {
-        if (decoder->vp8l_active) {
-            ret = vp8l_still_peek(decoder);
+        if (vp8l_still_active(decoder->vp8l)) {
+            ret = lossless_peek(decoder);
             if (ret < 0)
                 return set_error(decoder, "VP8L decode failed", ret);
         }
         ret = export_still_lossless(decoder,
                                     frame,
-                                    decoder->vp8l_active
-                                        ? decoder->vp8l_rows_out
+                                    vp8l_still_active(decoder->vp8l)
+                                        ? vp8l_still_rows_out(decoder->vp8l)
                                         : decoder->lossless_frame->height);
         if (ret < 0)
             return set_error(decoder, "cannot output frame", ret);
@@ -1111,19 +1154,15 @@ void wpd_decoder_free(WPDDecoder *decoder) {
         return;
     if (decoder->vp8_initialized)
         vp8_decode_free(&decoder->codec);
+    vp8l_free(&decoder->vp8l);
     image_free(&decoder->canvas);
-    image_free(&decoder->argb);
     image_free(&decoder->converted);
     image_free(&decoder->output);
     image_free(&decoder->transformed);
-    image_free(&decoder->alpha_argb);
-    image_free(&decoder->lossless_out);
-    for (int i = 0; i < IMAGE_ROLE_NB; i++) image_ctx_free(&decoder->image[i]);
     for (int i = 0; i < WPD_METADATA_NB; i++) free(decoder->meta[i]);
     scan_free(&decoder->scan);
     free(decoder->rescale_work);
     free(decoder->rescale_row);
-    free(decoder->lossless_top);
     free(decoder->alpha_plane);
     free(decoder->file_alloc);
     free(decoder);

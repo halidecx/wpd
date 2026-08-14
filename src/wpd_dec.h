@@ -42,12 +42,7 @@ struct WPDDecoder {
     int            alpha_pending;
     int            converted_rows;
     WPDPixelFormat converted_format;
-    int            vp8l_active;
     int            still_lossless;
-    size_t         vp8l_next_try;
-    size_t         vp8l_pos, vp8l_cached;
-    int            vp8l_x, vp8l_y, vp8l_hg;
-    int            vp8l_rows_done, vp8l_rows_out, vp8l_peeked;
     int            frame_index;
     int            canvas_width, canvas_height;
 
@@ -60,24 +55,14 @@ struct WPDDecoder {
     uint8_t *alpha_plane;
     size_t   alpha_plane_size;
 
-    LEBitReader        gb;
-    uint8_t           *alpha_dst;
-    int                alpha_dst_stride;
-    int                alpha_dst_used;
-    int                width, height;
-    int                lossless_has_alpha;
-    int                nb_transforms;
-    enum TransformType transforms[4];
-    int                reduced_width;
-    int                nb_huffman_groups;
-    ImageContext       image[IMAGE_ROLE_NB];
+    VP8LContext *vp8l;
+    int          width, height;
+    int          lossless_has_alpha;
 
+    /* Views of pictures the lossless decoder owns; never freed from here. */
     WebPImage  argb;
-    WebPImage  lossless_out;
-    WebPImage *lossless_frame;
-    uint8_t   *lossless_top;
-    size_t     lossless_top_size;
     WebPImage  alpha_argb;
+    WebPImage *lossless_frame;
     WebPImage  subframe;
     WebPImage  converted;
     WebPImage  output;
@@ -145,22 +130,18 @@ static inline void update_canvas_size(WPDDecoder *s, int w, int h) {
     s->height = h;
 }
 
-void image_ctx_free(ImageContext *img);
+/* The canvas is negotiated between the container and the lossless module: the
+   container knows what the file declared, the module knows what the frame
+   header said, and either may be the first to learn it. */
+static inline void lossless_canvas_in(WPDDecoder *s) {
+    vp8l_set_canvas(s->vp8l, s->width, s->height);
+}
 
-/* VP8L. The still-image entry points drive a resumable decode: _peek reads
-   just the frame header, _alloc sizes the output, and _step consumes as much
-   of the payload as has arrived. */
-wpd_noclone int vp8l_apply_transforms(WPDDecoder *s);
-wpd_noclone int vp8l_resume_argb_pixels(WPDDecoder *s);
-int vp8_lossless_decode_frame(WPDDecoder *s, WebPImage *out,
-                              const uint8_t *data_start, unsigned data_size,
-                              int is_alpha_chunk);
-int vp8l_transform_rows(WPDDecoder *s, int y0, int y1);
-int vp8l_still_alloc(WPDDecoder *s);
-int vp8l_still_step(WPDDecoder *s, const uint8_t *payload, unsigned avail,
-                    unsigned size, int complete);
-int vp8l_still_peek(WPDDecoder *s);
-int apply_color_indexing_transform_alpha(WPDDecoder *s);
+static inline void lossless_canvas_out(WPDDecoder *s) {
+    s->width              = vp8l_width(s->vp8l);
+    s->height             = vp8l_height(s->vp8l);
+    s->lossless_has_alpha = vp8l_has_alpha(s->vp8l);
+}
 
 void   frame_clear(WPDFrame *frame);
 size_t frame_extent(const WPDFrame *frame);

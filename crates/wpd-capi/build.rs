@@ -100,6 +100,16 @@ fn main() {
         println!("cargo:rerun-if-changed={}", root.join(f).display());
     }
 
+    /* A header change reaches every translation unit that includes it, and a
+    stale object from before a struct grew is a mismatch no test can see. */
+    for entry in fs::read_dir(root.join("src")).unwrap() {
+        let path = entry.unwrap().path();
+
+        if path.extension().is_some_and(|e| e == "h") {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+
     if asm {
         match arch.as_str() {
             "x86_64" | "x86" => {

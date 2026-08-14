@@ -271,7 +271,10 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         case MKTAG('V', 'P', '8', 'L'):
             if (sub)
                 break;
-            ret = vp8_lossless_decode_frame(s, &s->argb, p, payload_size, 0);
+            lossless_canvas_in(s);
+            ret = vp8l_decode_frame(
+                s->vp8l, VP8L_TARGET_ARGB, &s->argb, p, payload_size, 0);
+            lossless_canvas_out(s);
             if (ret < 0)
                 return ret;
             sub                = &s->argb;

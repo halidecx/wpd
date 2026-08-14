@@ -1,78 +1,64 @@
 #ifndef WPD_VP8L_H
 #define WPD_VP8L_H
 
-#include "huffman.h"
 #include "image.h"
 
-#define HUFFMAN_CODES_PER_META_CODE 5
-#define NUM_LITERAL_CODES 256
-#define NUM_LENGTH_CODES 24
-#define NUM_DISTANCE_CODES 40
-#define NUM_SHORT_DISTANCES 120
+#define VP8L_NEED_MORE 1
 
-enum TransformType {
-    PREDICTOR_TRANSFORM      = 0,
-    COLOR_TRANSFORM          = 1,
-    SUBTRACT_GREEN           = 2,
-    COLOR_INDEXING_TRANSFORM = 3,
+/* The lossless decoder. Everything it tracks — the bit reader, the transform
+   list, the prefix codes and the images it decodes into — lives behind this
+   pointer; the container only ever sees finished pictures. */
+typedef struct VP8LContext VP8LContext;
+
+/* Which of the module's output images a decode fills in. Both are kept across
+   calls and resized on use, so a lossy animation with alpha alternates between
+   them without reallocating either. */
+enum VP8LTarget {
+    VP8L_TARGET_ARGB,
+    VP8L_TARGET_ALPHA,
 };
 
-enum PredictionMode {
-    PRED_MODE_BLACK,
-    PRED_MODE_L,
-    PRED_MODE_T,
-    PRED_MODE_TR,
-    PRED_MODE_TL,
-    PRED_MODE_AVG_T_AVG_L_TR,
-    PRED_MODE_AVG_L_TL,
-    PRED_MODE_AVG_L_T,
-    PRED_MODE_AVG_TL_T,
-    PRED_MODE_AVG_T_TR,
-    PRED_MODE_AVG_AVG_L_TL_AVG_T_TR,
-    PRED_MODE_SELECT,
-    PRED_MODE_ADD_SUBTRACT_FULL,
-    PRED_MODE_ADD_SUBTRACT_HALF,
-};
+VP8LContext *vp8l_alloc(void);
+void         vp8l_free(VP8LContext **ctx);
 
-enum HuffmanIndex {
-    HUFF_IDX_GREEN = 0,
-    HUFF_IDX_RED   = 1,
-    HUFF_IDX_BLUE  = 2,
-    HUFF_IDX_ALPHA = 3,
-    HUFF_IDX_DIST  = 4
-};
+/* Drops everything derived from a file, keeping the decode buffers, which are
+   sized on use and reused. vp8l_release() gives those back too, for when the
+   file is closed and nothing is looking at the pictures any more. */
+void vp8l_reset(VP8LContext *ctx);
+void vp8l_release(VP8LContext *ctx);
 
-enum ImageRole {
-    IMAGE_ROLE_ARGB,
-    IMAGE_ROLE_ENTROPY,
-    IMAGE_ROLE_PREDICTOR,
-    IMAGE_ROLE_COLOR_TRANSFORM,
-    IMAGE_ROLE_COLOR_INDEXING,
-    IMAGE_ROLE_NB,
-};
+/* The canvas the container has already committed to, and what the module made
+   of it: a lossless frame header carries its own dimensions, an alpha chunk
+   does not, and the two have to agree. */
+void vp8l_set_canvas(VP8LContext *ctx, int width, int height);
+int  vp8l_width(const VP8LContext *ctx);
+int  vp8l_height(const VP8LContext *ctx);
+int  vp8l_has_alpha(const VP8LContext *ctx);
 
-typedef struct HTreeGroup {
-    HuffReader trees[HUFFMAN_CODES_PER_META_CODE];
-    int        trivial_literal;
-    uint8_t    literal[4];
-} HTreeGroup;
+/* Where an ALPH chunk's alpha goes when the module can write it straight out,
+   and whether it did. When it did not, the caller extracts green itself. */
+void vp8l_set_alpha_dst(VP8LContext *ctx, uint8_t *dst, int stride);
+int  vp8l_alpha_dst_used(const VP8LContext *ctx);
 
-typedef struct ImageContext {
-    enum ImageRole role;
-    WebPImage     *frame;
-    WebPImage      storage;
-    int            color_cache_bits;
-    uint32_t      *color_cache;
-    int            nb_huffman_groups;
-    HTreeGroup    *huffman_groups;
-    HuffBlock     *huffman_arena;
-    int            size_reduction;
-    int            is_alpha_primary;
-} ImageContext;
+/* Decodes a whole frame in one call. 'out' is filled in with a view of memory
+   the context owns, valid until the next decode into the same target, and must
+   not be freed. */
+int vp8l_decode_frame(VP8LContext *ctx, enum VP8LTarget target, WebPImage *out,
+                      const uint8_t *data, unsigned size, int is_alpha_chunk);
 
-extern const uint16_t alphabet_sizes[HUFFMAN_CODES_PER_META_CODE];
-extern const int8_t   lz77_distance_offsets[NUM_SHORT_DISTANCES][2];
+/* The resumable still-image path. _step consumes as much of the payload as has
+   arrived, returning 1 once the whole image is out and 0 while more is needed;
+   _peek switches it over to handing rows out as they finish, which needs
+   somewhere to put them because backward references keep reading the
+   untransformed pixels for as long as the image is being decoded. */
+int vp8l_still_step(VP8LContext *ctx, const uint8_t *payload, unsigned avail,
+                    unsigned size, int complete);
+int vp8l_still_peek(VP8LContext *ctx);
+int vp8l_still_active(const VP8LContext *ctx);
+int vp8l_still_rows_out(const VP8LContext *ctx);
 
-void image_ctx_free(ImageContext *img);
+/* A view of the image the still path is filling in, on the same terms as the
+   one vp8l_decode_frame() hands back. */
+void vp8l_still_frame(const VP8LContext *ctx, WebPImage *out);
 
 #endif
