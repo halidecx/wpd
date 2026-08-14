@@ -181,6 +181,9 @@ cargo_env = environment()
 if get_option('b_sanitize') != 'none'
   cargo_env.append('CFLAGS', '-fsanitize=' + get_option('b_sanitize'),
                    '-fno-omit-frame-pointer', separator: ' ')
+  # The tool is linked by rustc, so the sanitizer runtime has to reach the
+  # link line there too; cargo_tool.sh turns this into RUSTFLAGS.
+  cargo_env.set('WPD_SANITIZE', get_option('b_sanitize'))
 endif
 soversion = meson.project_version()
 

@@ -4,6 +4,12 @@
 COMMON=(-Db_sanitize=address,undefined -Db_lundef=false
         --buildtype=debugoptimized -Dtestdata_tests=true)
 
+# The tool is linked by rustc, which appends the sanitizer runtime rather than
+# putting it first, so ASan's link-order check fires before anything runs. The
+# runtime is still fully in charge of the allocator here; only its position in
+# the initial library list differs from what a cc-driven link would give.
+export ASAN_OPTIONS=halt_on_error=1:abort_on_error=1:print_summary=1:verify_asan_link_order=0
+
 configure() {
     local build="$1"
     shift
