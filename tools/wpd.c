@@ -58,15 +58,27 @@ static const CpuMask cpu_masks[] = {
 };
 
 typedef enum OutputType {
-    OUTPUT_RAW,
+    OUTPUT_FILE,
     OUTPUT_MD5,
     OUTPUT_NULL,
 } OutputType;
 
+typedef enum OutputMuxer {
+    MUXER_RAW,
+    MUXER_PPM,
+    MUXER_PAM,
+    MUXER_Y4M,
+} OutputMuxer;
+
 typedef struct OutputContext {
-    OutputType    type;
-    FILE         *file;
-    WPDMD5Context md5;
+    OutputType     type;
+    OutputMuxer    muxer;
+    FILE          *file;
+    WPDMD5Context  md5;
+    int            frames;
+    int            width;
+    int            height;
+    WPDPixelFormat format;
 } OutputContext;
 
 static const char short_options[] = "hr:f:";
@@ -113,7 +125,8 @@ static void usage(const char *app, const char *reason) {
             "    letter marks the channels alpha is multiplied into, and\n"
             "    the bgr 16-bit ones swap the two bytes of every pixel\n"
             " --muxer str\n"
-            "    output muxer (raw, md5); default raw\n"
+            "    output muxer (raw, md5, ppm, pam, y4m); default is selected\n"
+            "    from a .ppm, .pam or .y4m output extension, or raw\n"
             " --verify md5\n"
             "    verify decoded md5; implies --muxer md5 and no output\n"
             " --cpumask str\n"
@@ -242,33 +255,100 @@ static int parse_md5(const char *value, uint8_t digest[16]) {
     return 0;
 }
 
+static const char *filename_extension(const char *filename) {
+    const char *slash     = strrchr(filename, '/');
+    const char *backslash = strrchr(filename, '\\');
+    const char *dot       = strrchr(filename, '.');
+
+    if (backslash && (!slash || backslash > slash))
+        slash = backslash;
+
+    return dot && (!slash || dot > slash) ? dot + 1 : NULL;
+}
+
 static int output_open(OutputContext *output, const char *muxer,
                        const char *filename) {
-    if (!muxer)
-        muxer = "raw";
+    const char *extension;
+
+    memset(output, 0, sizeof(*output));
+    if (!muxer) {
+        extension = filename_extension(filename);
+        muxer     = extension &&
+                (!strcmp(extension, "ppm") || !strcmp(extension, "pam") ||
+                 !strcmp(extension, "y4m"))
+            ? extension
+            : "raw";
+    }
 
     output->file = NULL;
     if (!strcmp(muxer, "md5")) {
-        output->type = OUTPUT_MD5;
+        output->type  = OUTPUT_MD5;
+        output->muxer = MUXER_RAW;
         wpd_md5_init(&output->md5);
         if (!filename)
             return 0;
-    } else if (!strcmp(filename, "/dev/null")) {
-        output->type = OUTPUT_NULL;
-        return 0;
     } else {
-        output->type = OUTPUT_RAW;
+        output->type  = !strcmp(filename, "/dev/null") ? OUTPUT_NULL
+                                                       : OUTPUT_FILE;
+        output->muxer = !strcmp(muxer, "ppm") ? MUXER_PPM
+            : !strcmp(muxer, "pam")           ? MUXER_PAM
+            : !strcmp(muxer, "y4m")           ? MUXER_Y4M
+                                              : MUXER_RAW;
+        if (output->type == OUTPUT_NULL)
+            return 0;
     }
 
     output->file = !strcmp(filename, "-") ? stdout : fopen(filename, "wb");
     return output->file ? 0 : -1;
 }
 
+static int output_select_format(const OutputContext *output,
+                                const WPDImageInfo  *info,
+                                const char         **pixel_format,
+                                WPDPixelFormat      *format) {
+    const char    *required_name;
+    WPDPixelFormat required;
+
+    switch (output->muxer) {
+    case MUXER_PPM:
+        required_name = "rgb";
+        required      = WPD_PIX_FMT_RGB;
+        break;
+    case MUXER_PAM:
+        required_name = "rgba";
+        required      = WPD_PIX_FMT_RGBA;
+        break;
+    case MUXER_Y4M:
+        if (*format == WPD_PIX_FMT_YUV420P || *format == WPD_PIX_FMT_YUVA420P)
+            return 0;
+        if (*format != WPD_PIX_FMT_NONE) {
+            fprintf(stderr, "y4m requires yuv420p or yuva420p output\n");
+            return -1;
+        }
+        required_name = info->has_alpha ? "yuva420p" : "yuv420p";
+        required = info->has_alpha ? WPD_PIX_FMT_YUVA420P : WPD_PIX_FMT_YUV420P;
+        break;
+    default: return 0;
+    }
+
+    if (*format != WPD_PIX_FMT_NONE && *format != required) {
+        fprintf(stderr,
+                "%s requires %s output\n",
+                output->muxer == MUXER_PPM ? "ppm" : "pam",
+                required_name);
+        return -1;
+    } else {
+        *pixel_format = required_name;
+        *format       = required;
+    }
+    return 0;
+}
+
 static int output_write(OutputContext *output, const uint8_t *data,
                         size_t size) {
     if (output->type == OUTPUT_MD5) {
         wpd_md5_update(&output->md5, data, size);
-    } else if (output->type == OUTPUT_RAW &&
+    } else if (output->type == OUTPUT_FILE &&
                fwrite(data, 1, size, output->file) != size) {
         return -1;
     }
@@ -321,6 +401,28 @@ static int write_plane(OutputContext *output, const uint8_t *data,
     return 0;
 }
 
+static int write_header(OutputContext *output, const char *header) {
+    return output_write(output, (const uint8_t *)header, strlen(header));
+}
+
+static int write_chroma_444(OutputContext *output, const uint8_t *data,
+                            ptrdiff_t stride, int width, int height) {
+    uint8_t *row = malloc((size_t)width);
+
+    if (!row)
+        return -1;
+    for (int y = 0; y < height; y++) {
+        const uint8_t *src = data + (y / 2) * stride;
+        for (int x = 0; x < width; x++) row[x] = src[x / 2];
+        if (output_write(output, row, (size_t)width) < 0) {
+            free(row);
+            return -1;
+        }
+    }
+    free(row);
+    return 0;
+}
+
 static const char *format_name(WPDPixelFormat format) {
     for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
         if (pixel_formats[i].format == format)
@@ -330,10 +432,115 @@ static const char *format_name(WPDPixelFormat format) {
 
 static int write_frame(OutputContext *output, const WPDFrame *frame,
                        const char *pixel_format) {
-    int planes;
+    int  planes;
+    char header[128];
+    int  header_size;
 
     if (!pixel_format)
         pixel_format = format_name(frame->format);
+
+    if (output->muxer == MUXER_PPM || output->muxer == MUXER_PAM) {
+        const WPDPixelFormat required = output->muxer == MUXER_PPM
+            ? WPD_PIX_FMT_RGB
+            : WPD_PIX_FMT_RGBA;
+
+        if (frame->format != required) {
+            fprintf(stderr,
+                    "%s requires %s output\n",
+                    output->muxer == MUXER_PPM ? "ppm" : "pam",
+                    output->muxer == MUXER_PPM ? "rgb" : "rgba");
+            return -1;
+        }
+        header_size = output->muxer == MUXER_PPM
+            ? snprintf(header,
+                       sizeof(header),
+                       "P6\n%d %d\n255\n",
+                       frame->width,
+                       frame->height)
+            : snprintf(header,
+                       sizeof(header),
+                       "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\n"
+                       "TUPLTYPE RGB_ALPHA\nENDHDR\n",
+                       frame->width,
+                       frame->height);
+        if (header_size < 0 || (size_t)header_size >= sizeof(header) ||
+            write_header(output, header) < 0)
+            return -1;
+        return write_plane(output,
+                           frame->data[0],
+                           frame->stride[0],
+                           frame->width * (output->muxer == MUXER_PPM ? 3 : 4),
+                           frame->height);
+    }
+
+    if (output->muxer == MUXER_Y4M) {
+        if (frame->format != WPD_PIX_FMT_YUV420P &&
+            frame->format != WPD_PIX_FMT_YUVA420P) {
+            fprintf(stderr, "y4m requires yuv420p or yuva420p output\n");
+            return -1;
+        }
+        if (!output->frames) {
+            output->width  = frame->width;
+            output->height = frame->height;
+            output->format = frame->format;
+            header_size    = snprintf(
+                header,
+                sizeof(header),
+                "YUV4MPEG2 W%d H%d F0:0 Ip A0:0 C%s\n",
+                frame->width,
+                frame->height,
+                frame->format == WPD_PIX_FMT_YUVA420P ? "444alpha" : "420jpeg");
+            if (header_size < 0 || (size_t)header_size >= sizeof(header) ||
+                write_header(output, header) < 0)
+                return -1;
+        } else if (frame->width != output->width ||
+                   frame->height != output->height ||
+                   frame->format != output->format) {
+            fprintf(stderr, "y4m frames must have one size and format\n");
+            return -1;
+        }
+        output->frames++;
+        if (write_header(output, "FRAME\n") < 0 ||
+            write_plane(output,
+                        frame->data[0],
+                        frame->stride[0],
+                        frame->width,
+                        frame->height) < 0)
+            return -1;
+        if (frame->format == WPD_PIX_FMT_YUVA420P) {
+            if (write_chroma_444(output,
+                                 frame->data[1],
+                                 frame->stride[1],
+                                 frame->width,
+                                 frame->height) < 0 ||
+                write_chroma_444(output,
+                                 frame->data[2],
+                                 frame->stride[2],
+                                 frame->width,
+                                 frame->height) < 0 ||
+                write_plane(output,
+                            frame->data[3],
+                            frame->stride[3],
+                            frame->width,
+                            frame->height) < 0)
+                return -1;
+        } else {
+            const int chroma_width  = (frame->width + 1) / 2;
+            const int chroma_height = (frame->height + 1) / 2;
+            if (write_plane(output,
+                            frame->data[1],
+                            frame->stride[1],
+                            chroma_width,
+                            chroma_height) < 0 ||
+                write_plane(output,
+                            frame->data[2],
+                            frame->stride[2],
+                            chroma_width,
+                            chroma_height) < 0)
+                return -1;
+        }
+        return 0;
+    }
 
     if (frame->format >= WPD_PIX_FMT_ARGB) {
         const int bpp = frame->format == WPD_PIX_FMT_RGB ||
@@ -607,8 +814,12 @@ int main(int argc, char **argv) {
             }
             break;
         case ARG_MUXER:
-            if (strcmp(optarg, "raw") && strcmp(optarg, "md5")) {
-                usage(argv[0], "invalid output muxer; expected raw or md5");
+            if (strcmp(optarg, "raw") && strcmp(optarg, "md5") &&
+                strcmp(optarg, "ppm") && strcmp(optarg, "pam") &&
+                strcmp(optarg, "y4m")) {
+                usage(argv[0],
+                      "invalid output muxer; expected raw, md5, ppm, pam or "
+                      "y4m");
                 return 2;
             }
             muxer = optarg;
@@ -683,6 +894,18 @@ int main(int argc, char **argv) {
     data = read_file(input_name, input, &size);
     if (!data)
         goto done;
+
+    if (output_opened && output.muxer != MUXER_RAW) {
+        WPDImageInfo image = WPD_IMAGE_INFO_INIT;
+
+        if (wpd_get_info(data, size, &image) < 0) {
+            fprintf(stderr, "%s: cannot read image header\n", input_name);
+            goto done;
+        }
+        if (output_select_format(&output, &image, &pixel_format, &out_format) <
+            0)
+            goto done;
+    }
 
     for (int iter = 0; iter < repeat; iter++) {
         DecodeContext ctx = {0};

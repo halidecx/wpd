@@ -12,7 +12,7 @@ meson compile -C build
 ```
 
 The decoder executable is written to `build/wpd`. It reads a WebP file and
-writes raw frames:
+writes decoded frames:
 
 ```sh
 build/wpd [options] input.webp output.raw
