@@ -338,3 +338,241 @@ mod tests {
         assert_eq!(block, [0i16; 16]);
     }
 }
+
+/// The lossy DSP table the decoder calls through.
+///
+/// Unlike the kernels above, the entries take the whole plane plus the offset
+/// of the position they act on. A macroblock edge filter reads rows above the
+/// one it is given and writes to the byte before its first column, so handing
+/// it a slice that starts at the edge would make those ordinary reads negative
+/// indices; addressing one flat allocation by offset keeps them in bounds
+/// without a single `unsafe`, and the assembly wrappers get the pointer they
+/// want from the same two numbers.
+///
+/// The chroma entries take an offset per plane rather than one shared offset.
+/// The two planes are separate allocations, so the padding each needs to put
+/// its rows on a 64-byte boundary differs, and their origins differ with it.
+pub type WhtFn = fn(&mut [[i16; 16]; 16], &mut [i16; 16]);
+pub type IdctFn = fn(&mut [u8], usize, usize, &mut [i16; 16]);
+pub type Idct4Fn = fn(&mut [u8], usize, usize, &mut [[i16; 16]; 4]);
+pub type LfFn = fn(&mut [u8], usize, usize, i32, i32, i32);
+pub type LfUvFn = fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32);
+pub type LfMbFn = fn(&mut [u8], usize, usize, i32, i32, i32, i32);
+pub type LfUvMbFn = fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32, i32);
+pub type LfSimpleFn = fn(&mut [u8], usize, usize, i32);
+pub type LfSimpleMbFn = fn(&mut [u8], usize, usize, i32, i32);
+
+pub struct Vp8Dsp {
+    pub luma_dc_wht: WhtFn,
+    pub luma_dc_wht_dc: WhtFn,
+    pub idct_add: IdctFn,
+    pub idct_dc_add: IdctFn,
+    pub idct_dc_add4y: Idct4Fn,
+    pub idct_dc_add4uv: Idct4Fn,
+
+    pub v_loop_filter16y: LfFn,
+    pub h_loop_filter16y: LfFn,
+    pub v_loop_filter8uv: LfUvFn,
+    pub h_loop_filter8uv: LfUvFn,
+
+    pub v_loop_filter16y_inner: LfFn,
+    pub h_loop_filter16y_inner: LfFn,
+    pub v_loop_filter8uv_inner: LfUvFn,
+    pub h_loop_filter8uv_inner: LfUvFn,
+
+    pub h_loop_filter16y_mb: LfMbFn,
+    pub h_loop_filter8uv_mb: LfUvMbFn,
+    pub v_loop_filter16y_mb: LfMbFn,
+    pub v_loop_filter8uv_mb: LfUvMbFn,
+
+    pub v_loop_filter_simple: LfSimpleFn,
+    pub h_loop_filter_simple: LfSimpleFn,
+    pub h_loop_filter_simple_mb: LfSimpleMbFn,
+    pub v_loop_filter_simple_mb: LfSimpleMbFn,
+}
+
+fn wht_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+    luma_dc_wht(block, dc);
+}
+
+fn wht_dc_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+    luma_dc_wht_dc(block, dc);
+}
+
+fn idct_add_c(p: &mut [u8], o: usize, s: usize, block: &mut [i16; 16]) {
+    idct_add(&mut p[o..], s, block);
+}
+
+fn idct_dc_add_c(p: &mut [u8], o: usize, s: usize, block: &mut [i16; 16]) {
+    idct_dc_add(&mut p[o..], s, block);
+}
+
+fn idct_dc_add4y_c(p: &mut [u8], o: usize, s: usize, block: &mut [[i16; 16]; 4]) {
+    for (i, b) in block.iter_mut().enumerate() {
+        idct_dc_add(&mut p[o + 4 * i..], s, b);
+    }
+}
+
+fn idct_dc_add4uv_c(p: &mut [u8], o: usize, s: usize, block: &mut [[i16; 16]; 4]) {
+    for (i, b) in block.iter_mut().enumerate() {
+        idct_dc_add(&mut p[o + 4 * s * (i / 2) + 4 * (i % 2)..], s, b);
+    }
+}
+
+macro_rules! lf_c {
+    ($name:ident, $size:literal, $vert:literal, $inner:literal, $back:expr) => {
+        fn $name(p: &mut [u8], o: usize, s: usize, e: i32, i: i32, hev: i32) {
+            let back = $back(s);
+
+            loop_filter::<$size, $vert, $inner>(&mut p[o - back..], s, e, i, hev);
+        }
+    };
+}
+
+macro_rules! lf_uv_c {
+    ($name:ident, $single:ident) => {
+        #[allow(clippy::too_many_arguments)]
+        fn $name(
+            u: &mut [u8],
+            ou: usize,
+            v: &mut [u8],
+            ov: usize,
+            s: usize,
+            e: i32,
+            i: i32,
+            hev: i32,
+        ) {
+            $single(u, ou, s, e, i, hev);
+            $single(v, ov, s, e, i, hev);
+        }
+    };
+}
+
+lf_c!(v16_c, 16, true, false, |s| 4 * s);
+lf_c!(h16_c, 16, false, false, |_| 4);
+lf_c!(v16_inner_c, 16, true, true, |s| 4 * s);
+lf_c!(h16_inner_c, 16, false, true, |_| 4);
+lf_c!(v8_c, 8, true, false, |s| 4 * s);
+lf_c!(h8_c, 8, false, false, |_| 4);
+lf_c!(v8_inner_c, 8, true, true, |s| 4 * s);
+lf_c!(h8_inner_c, 8, false, true, |_| 4);
+
+lf_uv_c!(v8uv_c, v8_c);
+lf_uv_c!(h8uv_c, h8_c);
+lf_uv_c!(v8uv_inner_c, v8_inner_c);
+lf_uv_c!(h8uv_inner_c, h8_inner_c);
+
+fn v_simple_c(p: &mut [u8], o: usize, s: usize, flim: i32) {
+    loop_filter_simple::<true>(&mut p[o - 2 * s..], s, flim);
+}
+
+fn h_simple_c(p: &mut [u8], o: usize, s: usize, flim: i32) {
+    loop_filter_simple::<false>(&mut p[o - 2..], s, flim);
+}
+
+/// The four filters a macroblock edge needs: the edge itself, then the three
+/// subblock edges inside it. `$step` is how far apart they sit.
+macro_rules! mb_c {
+    ($name:ident, $edge:ident, $inner:ident, $step:expr) => {
+        fn $name(p: &mut [u8], o: usize, s: usize, e: i32, be: i32, i: i32, hev: i32) {
+            let step = $step(s);
+
+            $edge(p, o, s, e, i, hev);
+            $inner(p, o + step, s, be, i, hev);
+            $inner(p, o + 2 * step, s, be, i, hev);
+            $inner(p, o + 3 * step, s, be, i, hev);
+        }
+    };
+}
+
+macro_rules! uv_mb_c {
+    ($name:ident, $edge:ident, $inner:ident, $step:expr) => {
+        #[allow(clippy::too_many_arguments)]
+        fn $name(
+            u: &mut [u8],
+            ou: usize,
+            v: &mut [u8],
+            ov: usize,
+            s: usize,
+            e: i32,
+            be: i32,
+            i: i32,
+            hev: i32,
+        ) {
+            let step = $step(s);
+
+            $edge(u, ou, v, ov, s, e, i, hev);
+            $inner(u, ou + step, v, ov + step, s, be, i, hev);
+        }
+    };
+}
+
+mb_c!(h16_mb_c, h16_c, h16_inner_c, |_| 4);
+mb_c!(v16_mb_c, v16_c, v16_inner_c, |s: usize| 4 * s);
+uv_mb_c!(h8uv_mb_c, h8uv_c, h8uv_inner_c, |_| 4);
+uv_mb_c!(v8uv_mb_c, v8uv_c, v8uv_inner_c, |s: usize| 4 * s);
+
+fn h_simple_mb_c(p: &mut [u8], o: usize, s: usize, e: i32, be: i32) {
+    h_simple_c(p, o, s, e);
+    h_simple_c(p, o + 4, s, be);
+    h_simple_c(p, o + 8, s, be);
+    h_simple_c(p, o + 12, s, be);
+}
+
+fn v_simple_mb_c(p: &mut [u8], o: usize, s: usize, e: i32, be: i32) {
+    v_simple_c(p, o, s, e);
+    v_simple_c(p, o + 4 * s, s, be);
+    v_simple_c(p, o + 8 * s, s, be);
+    v_simple_c(p, o + 12 * s, s, be);
+}
+
+impl Vp8Dsp {
+    /// The scalar table, before any assembly is substituted in.
+    pub const fn scalar() -> Self {
+        Self {
+            luma_dc_wht: wht_c,
+            luma_dc_wht_dc: wht_dc_c,
+            idct_add: idct_add_c,
+            idct_dc_add: idct_dc_add_c,
+            idct_dc_add4y: idct_dc_add4y_c,
+            idct_dc_add4uv: idct_dc_add4uv_c,
+
+            v_loop_filter16y: v16_c,
+            h_loop_filter16y: h16_c,
+            v_loop_filter8uv: v8uv_c,
+            h_loop_filter8uv: h8uv_c,
+
+            v_loop_filter16y_inner: v16_inner_c,
+            h_loop_filter16y_inner: h16_inner_c,
+            v_loop_filter8uv_inner: v8uv_inner_c,
+            h_loop_filter8uv_inner: h8uv_inner_c,
+
+            h_loop_filter16y_mb: h16_mb_c,
+            h_loop_filter8uv_mb: h8uv_mb_c,
+            v_loop_filter16y_mb: v16_mb_c,
+            v_loop_filter8uv_mb: v8uv_mb_c,
+
+            v_loop_filter_simple: v_simple_c,
+            h_loop_filter_simple: h_simple_c,
+            h_loop_filter_simple_mb: h_simple_mb_c,
+            v_loop_filter_simple_mb: v_simple_mb_c,
+        }
+    }
+
+    /// The best table the running CPU allows.
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = Self::scalar();
+
+        #[cfg(feature = "asm")]
+        crate::asm::vp8::init(&mut table, crate::cpu::flags());
+
+        table
+    }
+}
+
+impl Default for Vp8Dsp {
+    fn default() -> Self {
+        Self::new()
+    }
+}

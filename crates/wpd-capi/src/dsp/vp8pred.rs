@@ -92,104 +92,59 @@ pred_entry!(dc128_16_c, k::pred_dc128::<16>, 16, 0, 0);
 #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
 mod asm {
     use super::*;
+    use wpd::asm::vp8pred::{avx2, sse, sse2, ssse3, Raw};
     use wpd::cpu::CpuFlags;
-
-    extern "C" {
-        fn ff_pred4x4_dc_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_horizontal_vp8_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vertical_left_vp8_8_ssse3(
-            src: *mut u8,
-            tr: *const u8,
-            stride: isize,
-        );
-        fn ff_pred4x4_down_left_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_down_right_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_horizontal_down_8_sse2(
-            src: *mut u8,
-            tr: *const u8,
-            stride: isize,
-        );
-        fn ff_pred4x4_horizontal_up_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_tm_vp8_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_tm_vp8_8_ssse3(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vertical_right_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vertical_vp8_8_sse2(src: *mut u8, tr: *const u8, stride: isize);
-
-        fn ff_pred8x8_dc_vp8_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred8x8_top_dc_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred8x8_top_dc_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred8x8_left_dc_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred8x8_left_dc_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred8x8_horizontal_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred8x8_horizontal_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred8x8_tm_vp8_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred8x8_tm_vp8_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred8x8_vertical_8_sse2(src: *mut u8, stride: isize);
-
-        fn ff_pred16x16_vertical_8_sse(src: *mut u8, stride: isize);
-        fn ff_pred16x16_horizontal_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred16x16_horizontal_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred16x16_dc_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred16x16_dc_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred16x16_top_dc_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred16x16_top_dc_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred16x16_left_dc_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred16x16_left_dc_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred16x16_tm_vp8_8_sse2(src: *mut u8, stride: isize);
-        fn ff_pred16x16_tm_vp8_8_ssse3(src: *mut u8, stride: isize);
-        fn ff_pred16x16_tm_vp8_8_avx2(src: *mut u8, stride: isize);
-    }
 
     pub fn init(p: &mut VP8PredContext) {
         let flags = wpd::cpu::flags();
 
         if flags.contains(CpuFlags::SSE) {
-            p.pred16x16[VERT] = ff_pred16x16_vertical_8_sse;
+            p.pred16x16[VERT] = sse::Vert16::F;
         }
 
         if flags.contains(CpuFlags::SSE2) {
-            p.pred4x4[DIAG_DOWN_LEFT] = ff_pred4x4_down_left_8_sse2;
-            p.pred4x4[DIAG_DOWN_RIGHT] = ff_pred4x4_down_right_8_sse2;
-            p.pred4x4[VERT_RIGHT] = ff_pred4x4_vertical_right_8_sse2;
-            p.pred4x4[HOR_DOWN] = ff_pred4x4_horizontal_down_8_sse2;
-            p.pred4x4[HOR_UP] = ff_pred4x4_horizontal_up_8_sse2;
-            p.pred4x4[DC4] = ff_pred4x4_dc_8_sse2;
-            p.pred4x4[TM4] = ff_pred4x4_tm_vp8_8_sse2;
-            p.pred4x4[VERT4] = ff_pred4x4_vertical_vp8_8_sse2;
-            p.pred4x4[HOR4] = ff_pred4x4_horizontal_vp8_8_sse2;
+            p.pred4x4[DIAG_DOWN_LEFT] = sse2::DownLeft4::F;
+            p.pred4x4[DIAG_DOWN_RIGHT] = sse2::DownRight4::F;
+            p.pred4x4[VERT_RIGHT] = sse2::VertRight4::F;
+            p.pred4x4[HOR_DOWN] = sse2::HorDown4::F;
+            p.pred4x4[HOR_UP] = sse2::HorUp4::F;
+            p.pred4x4[DC4] = sse2::Dc4::F;
+            p.pred4x4[TM4] = sse2::Tm4::F;
+            p.pred4x4[VERT4] = sse2::Vert4::F;
+            p.pred4x4[HOR4] = sse2::Hor4::F;
 
-            p.pred8x8[DC] = ff_pred8x8_dc_vp8_8_sse2;
-            p.pred8x8[HOR] = ff_pred8x8_horizontal_8_sse2;
-            p.pred8x8[VERT] = ff_pred8x8_vertical_8_sse2;
-            p.pred8x8[PLANE] = ff_pred8x8_tm_vp8_8_sse2;
-            p.pred8x8[TOP_DC] = ff_pred8x8_top_dc_8_sse2;
-            p.pred8x8[LEFT_DC] = ff_pred8x8_left_dc_8_sse2;
+            p.pred8x8[DC] = sse2::Dc8::F;
+            p.pred8x8[HOR] = sse2::Hor8::F;
+            p.pred8x8[VERT] = sse2::Vert8::F;
+            p.pred8x8[PLANE] = sse2::Tm8::F;
+            p.pred8x8[TOP_DC] = sse2::TopDc8::F;
+            p.pred8x8[LEFT_DC] = sse2::LeftDc8::F;
 
-            p.pred16x16[HOR] = ff_pred16x16_horizontal_8_sse2;
-            p.pred16x16[DC] = ff_pred16x16_dc_8_sse2;
-            p.pred16x16[PLANE] = ff_pred16x16_tm_vp8_8_sse2;
-            p.pred16x16[TOP_DC] = ff_pred16x16_top_dc_8_sse2;
-            p.pred16x16[LEFT_DC] = ff_pred16x16_left_dc_8_sse2;
+            p.pred16x16[HOR] = sse2::Hor16::F;
+            p.pred16x16[DC] = sse2::Dc16::F;
+            p.pred16x16[PLANE] = sse2::Tm16::F;
+            p.pred16x16[TOP_DC] = sse2::TopDc16::F;
+            p.pred16x16[LEFT_DC] = sse2::LeftDc16::F;
         }
 
         if flags.contains(CpuFlags::SSSE3) {
-            p.pred4x4[TM4] = ff_pred4x4_tm_vp8_8_ssse3;
-            p.pred4x4[VERT_LEFT] = ff_pred4x4_vertical_left_vp8_8_ssse3;
+            p.pred4x4[TM4] = ssse3::Tm4::F;
+            p.pred4x4[VERT_LEFT] = ssse3::VertLeft4::F;
 
-            p.pred8x8[HOR] = ff_pred8x8_horizontal_8_ssse3;
-            p.pred8x8[PLANE] = ff_pred8x8_tm_vp8_8_ssse3;
-            p.pred8x8[TOP_DC] = ff_pred8x8_top_dc_8_ssse3;
-            p.pred8x8[LEFT_DC] = ff_pred8x8_left_dc_8_ssse3;
+            p.pred8x8[HOR] = ssse3::Hor8::F;
+            p.pred8x8[PLANE] = ssse3::Tm8::F;
+            p.pred8x8[TOP_DC] = ssse3::TopDc8::F;
+            p.pred8x8[LEFT_DC] = ssse3::LeftDc8::F;
 
-            p.pred16x16[PLANE] = ff_pred16x16_tm_vp8_8_ssse3;
-            p.pred16x16[HOR] = ff_pred16x16_horizontal_8_ssse3;
-            p.pred16x16[DC] = ff_pred16x16_dc_8_ssse3;
-            p.pred16x16[TOP_DC] = ff_pred16x16_top_dc_8_ssse3;
-            p.pred16x16[LEFT_DC] = ff_pred16x16_left_dc_8_ssse3;
+            p.pred16x16[PLANE] = ssse3::Tm16::F;
+            p.pred16x16[HOR] = ssse3::Hor16::F;
+            p.pred16x16[DC] = ssse3::Dc16::F;
+            p.pred16x16[TOP_DC] = ssse3::TopDc16::F;
+            p.pred16x16[LEFT_DC] = ssse3::LeftDc16::F;
         }
 
         if flags.contains(CpuFlags::AVX2) {
-            p.pred16x16[PLANE] = ff_pred16x16_tm_vp8_8_avx2;
+            p.pred16x16[PLANE] = avx2::Tm16::F;
         }
     }
 }
@@ -197,90 +152,57 @@ mod asm {
 #[cfg(all(feature = "asm", target_arch = "aarch64"))]
 mod asm {
     use super::*;
+    use wpd::asm::vp8pred::{neon, Raw};
     use wpd::cpu::CpuFlags;
-
-    extern "C" {
-        fn ff_pred4x4_tm_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_dc_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vert_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_hor_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_down_left_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_down_right_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vert_left_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_vert_right_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_hor_up_neon(src: *mut u8, tr: *const u8, stride: isize);
-        fn ff_pred4x4_hor_down_neon(src: *mut u8, tr: *const u8, stride: isize);
-
-        fn ff_pred8x8_vert_neon(src: *mut u8, stride: isize);
-        fn ff_pred8x8_dc_neon(src: *mut u8, stride: isize);
-        fn ff_pred8x8_tm_neon(src: *mut u8, stride: isize);
-
-        fn ff_pred16x16_vert_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_hor_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_dc_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_tm_neon(src: *mut u8, stride: isize);
-    }
 
     pub fn init(p: &mut VP8PredContext) {
         if !wpd::cpu::flags().contains(CpuFlags::NEON) {
             return;
         }
 
-        p.pred4x4[TM4] = ff_pred4x4_tm_neon;
-        p.pred4x4[DC4] = ff_pred4x4_dc_neon;
-        p.pred4x4[VERT4] = ff_pred4x4_vert_neon;
-        p.pred4x4[HOR4] = ff_pred4x4_hor_neon;
-        p.pred4x4[DIAG_DOWN_LEFT] = ff_pred4x4_down_left_neon;
-        p.pred4x4[DIAG_DOWN_RIGHT] = ff_pred4x4_down_right_neon;
-        p.pred4x4[VERT_LEFT] = ff_pred4x4_vert_left_neon;
-        p.pred4x4[VERT_RIGHT] = ff_pred4x4_vert_right_neon;
-        p.pred4x4[HOR_UP] = ff_pred4x4_hor_up_neon;
-        p.pred4x4[HOR_DOWN] = ff_pred4x4_hor_down_neon;
+        p.pred4x4[TM4] = neon::Tm4::F;
+        p.pred4x4[DC4] = neon::Dc4::F;
+        p.pred4x4[VERT4] = neon::Vert4::F;
+        p.pred4x4[HOR4] = neon::Hor4::F;
+        p.pred4x4[DIAG_DOWN_LEFT] = neon::DownLeft4::F;
+        p.pred4x4[DIAG_DOWN_RIGHT] = neon::DownRight4::F;
+        p.pred4x4[VERT_LEFT] = neon::VertLeft4::F;
+        p.pred4x4[VERT_RIGHT] = neon::VertRight4::F;
+        p.pred4x4[HOR_UP] = neon::HorUp4::F;
+        p.pred4x4[HOR_DOWN] = neon::HorDown4::F;
 
-        p.pred8x8[VERT] = ff_pred8x8_vert_neon;
-        p.pred8x8[DC] = ff_pred8x8_dc_neon;
-        p.pred8x8[PLANE] = ff_pred8x8_tm_neon;
+        p.pred8x8[VERT] = neon::Vert8::F;
+        p.pred8x8[DC] = neon::Dc8::F;
+        p.pred8x8[PLANE] = neon::Tm8::F;
 
-        p.pred16x16[DC] = ff_pred16x16_dc_neon;
-        p.pred16x16[VERT] = ff_pred16x16_vert_neon;
-        p.pred16x16[HOR] = ff_pred16x16_hor_neon;
-        p.pred16x16[PLANE] = ff_pred16x16_tm_neon;
+        p.pred16x16[DC] = neon::Dc16::F;
+        p.pred16x16[VERT] = neon::Vert16::F;
+        p.pred16x16[HOR] = neon::Hor16::F;
+        p.pred16x16[PLANE] = neon::Tm16::F;
     }
 }
 
 #[cfg(all(feature = "asm", target_arch = "arm"))]
 mod asm {
     use super::*;
+    use wpd::asm::vp8pred::{neon, Raw};
     use wpd::cpu::CpuFlags;
-
-    extern "C" {
-        fn ff_pred8x8_vert_neon(src: *mut u8, stride: isize);
-        fn ff_pred8x8_hor_neon(src: *mut u8, stride: isize);
-        fn ff_pred8x8_128_dc_neon(src: *mut u8, stride: isize);
-
-        fn ff_pred16x16_dc_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_vert_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_hor_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_left_dc_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_top_dc_neon(src: *mut u8, stride: isize);
-        fn ff_pred16x16_128_dc_neon(src: *mut u8, stride: isize);
-    }
 
     pub fn init(p: &mut VP8PredContext) {
         if !wpd::cpu::flags().contains(CpuFlags::NEON) {
             return;
         }
 
-        p.pred8x8[VERT] = ff_pred8x8_vert_neon;
-        p.pred8x8[HOR] = ff_pred8x8_hor_neon;
-        p.pred8x8[DC_128] = ff_pred8x8_128_dc_neon;
+        p.pred8x8[VERT] = neon::Vert8::F;
+        p.pred8x8[HOR] = neon::Hor8::F;
+        p.pred8x8[DC_128] = neon::Dc128_8::F;
 
-        p.pred16x16[DC] = ff_pred16x16_dc_neon;
-        p.pred16x16[VERT] = ff_pred16x16_vert_neon;
-        p.pred16x16[HOR] = ff_pred16x16_hor_neon;
-        p.pred16x16[LEFT_DC] = ff_pred16x16_left_dc_neon;
-        p.pred16x16[TOP_DC] = ff_pred16x16_top_dc_neon;
-        p.pred16x16[DC_128] = ff_pred16x16_128_dc_neon;
+        p.pred16x16[DC] = neon::Dc16::F;
+        p.pred16x16[VERT] = neon::Vert16::F;
+        p.pred16x16[HOR] = neon::Hor16::F;
+        p.pred16x16[LEFT_DC] = neon::LeftDc16::F;
+        p.pred16x16[TOP_DC] = neon::TopDc16::F;
+        p.pred16x16[DC_128] = neon::Dc128_16::F;
     }
 }
 

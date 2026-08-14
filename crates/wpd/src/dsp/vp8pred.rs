@@ -408,3 +408,118 @@ mod tests {
         }
     }
 }
+
+/// The intra prediction table the decoder calls through.
+///
+/// As with [`crate::dsp::vp8::Vp8Dsp`], an entry takes the whole plane and the
+/// offset of the block's top-left sample; every predictor reads the row above
+/// and the column to the left of that, which are ordinary indices here.
+///
+/// The four bytes above and to the right of a block are passed separately
+/// because the last macroblock in a row has no such neighbour and the decoder
+/// substitutes a replicated sample, exactly as the C does.
+pub type Pred4x4Fn = fn(&mut [u8], usize, usize, &[u8; 4]);
+pub type PredFn = fn(&mut [u8], usize, usize);
+
+pub const PRED4X4_COUNT: usize = 10;
+pub const PRED8X8_COUNT: usize = 7;
+
+/// `VP8Pred4x4Mode`.
+pub const VERT_PRED: usize = 0;
+pub const HOR_PRED: usize = 1;
+pub const DC_PRED: usize = 2;
+pub const DIAG_DOWN_LEFT_PRED: usize = 3;
+pub const DIAG_DOWN_RIGHT_PRED: usize = 4;
+pub const VERT_RIGHT_PRED: usize = 5;
+pub const HOR_DOWN_PRED: usize = 6;
+pub const VERT_LEFT_PRED: usize = 7;
+pub const HOR_UP_PRED: usize = 8;
+pub const TM_VP8_PRED: usize = 9;
+
+/// `VP8Pred8x8Mode`.
+pub const DC_PRED8X8: usize = 0;
+pub const HOR_PRED8X8: usize = 1;
+pub const VERT_PRED8X8: usize = 2;
+pub const PLANE_PRED8X8: usize = 3;
+pub const LEFT_DC_PRED8X8: usize = 4;
+pub const TOP_DC_PRED8X8: usize = 5;
+pub const DC_128_PRED8X8: usize = 6;
+
+pub struct Vp8Pred {
+    pub pred4x4: [Pred4x4Fn; PRED4X4_COUNT],
+    pub pred8x8: [PredFn; PRED8X8_COUNT],
+    pub pred16x16: [PredFn; PRED8X8_COUNT],
+}
+
+/// Gives a predictor that ignores the above-right samples the same shape as
+/// one that reads them, so the table has a single entry type.
+macro_rules! no_tr {
+    ($name:ident, $k:expr) => {
+        fn $name(p: &mut [u8], o: usize, s: usize, _tr: &[u8; 4]) {
+            $k(p, o, s);
+        }
+    };
+}
+
+no_tr!(horizontal4_c, pred4x4_horizontal);
+no_tr!(dc4_c, pred4x4_dc);
+no_tr!(down_right4_c, pred4x4_down_right);
+no_tr!(vertical_right4_c, pred4x4_vertical_right);
+no_tr!(horizontal_down4_c, pred4x4_horizontal_down);
+no_tr!(horizontal_up4_c, pred4x4_horizontal_up);
+no_tr!(tm4_c, pred_tm::<4>);
+
+impl Vp8Pred {
+    /// The scalar table, before any assembly is substituted in.
+    pub const fn scalar() -> Self {
+        Self {
+            pred4x4: [
+                pred4x4_vertical,
+                horizontal4_c,
+                dc4_c,
+                pred4x4_down_left,
+                down_right4_c,
+                vertical_right4_c,
+                horizontal_down4_c,
+                pred4x4_vertical_left,
+                horizontal_up4_c,
+                tm4_c,
+            ],
+            pred8x8: [
+                pred_dc::<8>,
+                pred_horizontal::<8>,
+                pred_vertical::<8>,
+                pred_tm::<8>,
+                pred_left_dc::<8>,
+                pred_top_dc::<8>,
+                pred_dc128::<8>,
+            ],
+            pred16x16: [
+                pred_dc::<16>,
+                pred_horizontal::<16>,
+                pred_vertical::<16>,
+                pred_tm::<16>,
+                pred_left_dc::<16>,
+                pred_top_dc::<16>,
+                pred_dc128::<16>,
+            ],
+        }
+    }
+
+    /// The best table the running CPU allows.
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = Self::scalar();
+
+        #[cfg(feature = "asm")]
+        crate::asm::vp8pred::init(&mut table, crate::cpu::flags());
+
+        table
+    }
+}
+
+impl Default for Vp8Pred {
+    fn default() -> Self {
+        Self::new()
+    }
+}

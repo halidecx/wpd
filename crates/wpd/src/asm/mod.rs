@@ -7,3 +7,6 @@
 //!
 //! Building without the `asm` feature removes the module entirely, which is
 //! what lets the crate compile under `#![forbid(unsafe_code)]`.
+
+pub mod vp8;
+pub mod vp8pred;
