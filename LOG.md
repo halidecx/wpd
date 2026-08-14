@@ -251,6 +251,137 @@ up as CPU tiers silently not being tested, not as a failure. It stayed at 151.
 `--cpumask 0` still decodes identically to the default, so the mask reaches
 dispatch. Timings -1.0% / +0.9%, noise.
 
+**`vp8l_dsp` — done.** Scalar kernels in `crates/wpd/src/dsp/vp8l.rs`, C ABI
+table in `crates/wpd-capi/src/dsp/vp8l.rs`. First use of the two-tier design:
+assembly entries are the raw symbols, fallbacks are trampolines that rebuild
+slices from the caller's pointers.
+
+**`vp8dsp` — done.** `crates/wpd/src/dsp/vp8.rs` and
+`crates/wpd-capi/src/dsp/vp8.rs`. Each instruction set gets a module of
+identically named functions bound to its own symbols with `#[link_name]`, so the
+`VP8_*_LOOP_FILTER*_MB` compositions are written once instead of once per
+variant as `src/vp8dsp.h` did.
+
+**`vp8pred` — done.** `crates/wpd/src/dsp/vp8pred.rs` and its C ABI shim.
+checkasm caught a transcription error in `HOR_DOWN_PRED` — one of sixteen taps
+averaged the corner with the sample above instead of the one to its left — which
+is exactly the failure mode a hand port has and the reason every DSP entry needs
+a checkasm test.
+
+**`rescaler` — done.** `crates/wpd/src/rescale.rs` and
+`crates/wpd-capi/src/rescale.rs`. No assembly and no checkasm coverage;
+`tests/parity.c` is the gate, since the CLI has no scale option and the testdata
+matrix never reaches this code. The struct keeps its C layout because
+`src/convert.c` still drives it through the inline helpers in `src/rescaler.h`.
+
+**`yuvdsp` — not yet.** See "The yuvdsp seam" below; it is the one Phase 1
+module whose file mixes the DSP table with the row drivers that consume it, so
+it needs a decision the others did not.
+
+| Module     | with asm       | `-Denable_asm=false` |
+| ---------- | -------------- | -------------------- |
+| `vp8l_dsp` | 166.7 vs 166.6 | 200.1 vs 198.9       |
+| `vp8dsp`   | 210.4 vs 211.2 | 441.9 vs 407.1       |
+| `vp8pred`  | 210.9 vs 211.2 | 442.6 vs 406.1       |
+
+Lossless figures are 50 iterations of `lossless.webp`, lossy ones 60 of
+`lossy.webp`. The shipping configuration is neutral throughout. The no-asm build
+is 8.6% slower on lossy content and unchanged on lossless; that cost is the
+bounds checks in the loop filter, and it is the trade the unsafe-budget decision
+explicitly accepted.
+
+## Measuring the fallbacks needs two no-asm builds
+
+The first fallback numbers this port produced were wrong by more than a factor
+of two, and the reason is worth writing down.
+
+`--cpumask none` does **not** disable the assembly in a release build. With
+`trim_dsp` on — its default is `if-release` — `wpd_get_cpu_flags()` unions the
+compile-time baseline back in, and on x86-64 that baseline includes SSE and
+SSE2. A release binary run with `--cpumask none` therefore still dispatches to
+the SSE2 loop filters. That is deliberate: a binary cannot run on a CPU below
+its own target, so trimming the unreachable fallbacks is free.
+
+The consequence for this port is that comparing `--cpumask none` on a preserved
+C binary against `--cpumask none` on the Rust build compares SSE2 assembly with
+Rust scalar code. To measure the fallbacks, build both sides with
+`-Denable_asm=false`:
+
+```sh
+git worktree add /tmp/wpd-base <pre-port-commit>
+meson setup /tmp/wpd-base/b /tmp/wpd-base -Dbuildtype=release -Denable_asm=false
+meson setup build-noasm . -Dbuildtype=release -Denable_asm=false
+```
+
+Same lesson as the recorded checkasm A/B pitfall: the two sides of a comparison
+have to be configured identically, and "identically" includes the options that
+silently change which code runs.
+
+## Monomorphised drivers stop inlining their helpers
+
+The loop filter got slower when its direction, edge size and subblock flag
+became const generic parameters — 470 ms to 561 ms — which is the opposite of
+what const folding the strides should do. The profile showed why:
+`filter_common` and `filter_mbedge` had become their own symbols. The
+monomorphised driver was large enough that LLVM stopped inlining them, and every
+filtered edge cost a call.
+
+`#[inline(always)]` on the predicates and the two filters took it to 444 ms.
+That attribute is not a micro-optimisation here; it is the direct equivalent of
+the `wpd_always_inline` the C spells on the same functions, and the same rule
+should apply to every DSP kernel ported from a `wpd_always_inline` C helper.
+
+## Size the region by what the kernel reads
+
+Every kernel here takes the exact region it touches as one slice, which turns
+the C's negative indices — `p[-4 * stride]`, `src[-stride - 1]` — into ordinary
+ones. The extent of that region has to be derived per entry point, not chosen
+once per file, because the C reads different neighbourhoods per variant:
+
+- The **simple** loop filter touches `p[-2 * s] .. p[+1 * s]`, not the eight
+  samples `LOAD_PIXELS` names. The C reads all eight in the abstract machine and
+  relies on the optimiser to drop the unused loads; at the bottom of a
+  macroblock the four it does not use are past the end of the buffer, so
+  building an eight-sample slice there would be a genuine out-of-bounds read
+  where the C had none in practice.
+- Each **predictor** reads some of the row above, the column to its left and the
+  corner between them. `DC_128_PRED8x8` reads none of them — and it is called
+  precisely where there is no neighbour to read.
+
+The failure mode is safe in both directions: too small a region panics on the
+first access, which the tests catch; too large is inert, since the kernel never
+touches what it does not read. But only an exact extent is a correct
+`from_raw_parts`, so each one is spelled out beside the kernel it wraps.
+
+## The yuvdsp seam
+
+`src/yuvdsp.c` is the one Phase 1 file that is not purely a DSP table. Its 843
+lines are two halves:
+
+- **Table entries** (through line ~507): the five `upsample_block_*`, the alpha
+  dispatchers, the eight packers, three premultipliers, `argb_to_y`,
+  `argb_to_yuv444`, `argb_to_uv`, and the two gamma tables the assembly gathers
+  from directly.
+- **Row drivers** (line ~508 on): `wpd_argb_to_yuva`, `wpd_argb_to_yuv444`, the
+  five `upsample_row_*`, `wpd_yuv420_to_packed_rows` and its three siblings.
+  `src/convert.c` and `src/export.c` call these, not the table.
+
+The drivers cannot simply stay in C: `upsample_row_*` calls
+`upsample_pairs_##name` for the row edges and `yuv_to_##name` for the first and
+last pixel, both of which live in the kernel half. Leaving them behind would
+mean two copies of the same arithmetic.
+
+The seam to cut is therefore **below `upsample_row`, not above it**: port the
+table entries plus `upsample_row` (dispatching on layout rather than being macro
+expanded per layout), and either port the four `wpd_yuv420_to_packed*` drivers
+with them or leave those in C calling a new `wpd_upsample_row(dsp, layout, ...)`
+entry point. The per-row edge work is a handful of pixels, so the lost inlining
+there is not measurable; `upsample_block` is already reached through a function
+pointer.
+
+The two gamma tables should be generated into Rust from the C source rather than
+retyped, and exported `#[no_mangle]` so the assembly keeps gathering from them.
+
 ## Ordering correction: `vp56rac` moves with `vp8.c`, not before it
 
 The plan had `vp56rac` early in Phase 1 with the other leaves. That is wrong.
@@ -267,7 +398,7 @@ The distinction that matters is **how the caller reaches the module**:
 - Reached by inlining (`vp56rac`, and the bit reader and `huff_read_symbol`
   headers) — must move in the same commit as its caller.
 
-So Phase 1 is `cpu` → `vp8l_dsp` → `vp8dsp` → `vp8pred` → `yuvdsp` → `rescaler`,
+So Phase 1 is `cpu` → `vp8l_dsp` → `vp8dsp` → `vp8pred` → `rescaler` → `yuvdsp`,
 and `vp56rac` joins Phase 2 with `vp8.c`. Likewise `bitreader.h` and
 `huffman.h`'s inline half move with `vp8l.c` in Phase 3.
 
@@ -290,16 +421,26 @@ unsound.
   support. A `&[u32]` upper alongside a `&mut [u32]` row would be UB.
 - `upper` is `NULL` for the first row (predictors 0 and 1 do not read it).
 
-The signature that survives all three is the flat-buffer form from the playbook
-— one mutable slice plus offsets:
+The flat-buffer form from the playbook — one mutable slice plus offsets —
+answers all three, and that is what the C ABI trampolines would have needed.
+What the implementation actually settled on is better, and it generalises:
 
 ```rust
-type PredAdd = fn(buf: &mut [u32], out: usize, upper: usize, n: usize);
+pub fn pred_add_5(out: &mut [u32], upper: &[u32], left: u32, top_left: u32);
 ```
 
-Everything the C did with pointer arithmetic becomes in-bounds indexing, the
-one-element overlap stops being an aliasing question, and the first row passes
-`upper == out` because those predictors ignore it.
+Both out-of-row neighbours are passed **by value**. `left` is the running result
+the predictor already carries — the C rereads `out[x - 1]` each iteration only
+to get back what it just wrote — and `top_left` for `x > 0` is the `top` loaded
+on the previous iteration. Carrying them in registers is what the C loop
+effectively does anyway, and once they are out of the slices, `out` and `upper`
+are disjoint even on physically adjacent rows. Fewer loads and no aliasing
+question at the same time.
+
+The same shape recurs: **the neighbours a kernel reads outside its own row
+belong in scalars, not in the slice.** It removed the overlap here, and it is
+why the loop filter's window is loaded once into `[i32; 8]` rather than reread
+per predicate.
 
 The other four are simpler, confirmed against their call sites: `extract_green`
 writes an alpha plane from a separate ARGB image (disjoint); `blend_row_argb`
