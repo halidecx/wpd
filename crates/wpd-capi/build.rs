@@ -10,7 +10,6 @@ use std::{env, fs};
 /// Still in C. Ported modules are removed from this list.
 const C_SOURCES: &[&str] = &[
     "src/wpd_decoder.c",
-    "src/input.c",
     "src/anim.c",
     "src/lossy.c",
     "src/wpd_compat.c",

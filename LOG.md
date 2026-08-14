@@ -919,6 +919,47 @@ five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
 185, `fuzz.sh` 300 trials per file, `cargo test -p wpd` 72/72. Perf is unchanged
 against Phase 5.
 
+### Phase 7a — the streaming input buffer
+
+The six fields that described what had arrived — the pointer, the allocation,
+the size, how much of the front had been dropped, the capacity, and whether the
+memory was the caller's — are now `InputBuffer`, allocated and grown in
+`crates/wpd-capi/src/input.rs` with the arithmetic in `crates/wpd/src/input.rs`.
+
+**This is the piece of Phase 7 that is genuinely its own object.** The rest of
+`wpd_decoder.c` is the public API and cannot move until `WPDDecoder` does, but
+what has arrived is a thing with three ways in and one invariant, and naming
+them made the invariant visible: a whole file copied in, a whole file borrowed
+from the caller, or a stream appended to a chunk at a time. Only the third owns
+a growing allocation and only it ever drops bytes off the front, which is why
+every position the decoder remembers is a stream offset and not a pointer.
+`input_compact` now says a borrowed buffer keeps every byte, rather than relying
+on its one caller happening to be the append path.
+
+**Two properties worth a test rather than an argument.** That growth doubles is
+not decoration: a caller appending a stream byte at a time is the shape a
+network feed has, and a buffer that grew by a constant would make that
+quadratic. The test appends a byte a million times and asserts the buffer grew
+fewer than eight times. The other is that a `keep` behind what has already been
+dropped is declined rather than wrapped — the decoder asks to keep the chunk it
+is working on, and an earlier compaction may already have stopped short of it,
+so the subtraction that looks safe is the one that would underflow.
+
+`MAX_BUFFERED` is stated as what it is: the decoder hands chunk sizes to the
+codecs as `int`, so a stream that grew past `INT_MAX` could not be described to
+them. The C had the same two bounds checks without saying why.
+
+Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
+five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
+`rac32.sh` 186/186, `md5check.sh` bit-exact against the C baseline `d241ef8`,
+`sanitize.sh` 186 and 185, `fuzz.sh` 300 trials per file, `cargo test -p wpd`
+79/79.
+
+Four C files are left, and they move together: `wpd_decoder.c` holds the public
+API, `lossy.c` and `anim.c`'s `decode_anmf` both take a `WPDDecoder *`, and
+`wpd_compat.c` cannot go until they do, because `wpd_log` is variadic and stable
+Rust cannot define a C-variadic function.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor

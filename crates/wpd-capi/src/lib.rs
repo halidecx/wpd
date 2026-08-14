@@ -19,6 +19,7 @@ pub mod cpu;
 pub mod dsp;
 pub mod export;
 pub mod image;
+pub mod input;
 pub mod rescale;
 pub mod vp8;
 pub mod vp8l;

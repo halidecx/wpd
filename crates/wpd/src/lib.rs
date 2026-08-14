@@ -25,6 +25,7 @@ pub mod cpu;
 pub mod dsp;
 pub mod error;
 pub mod image;
+pub mod input;
 pub mod log;
 pub mod rescale;
 pub mod vp8;
