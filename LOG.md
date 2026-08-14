@@ -879,6 +879,46 @@ five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
 `sanitize.sh` 186 and 185 with no ASan or UBSan report, `fuzz.sh` 300 trials per
 file, `cargo test -p wpd` 63/63.
 
+### Phase 6 — the animation compositor
+
+`src/anim.c` is down from 368 lines to 217. What left it is the compositor:
+`crates/wpd/src/anim.rs` decides where a frame lands and how it divides into
+regions, and `crates/wpd-capi/src/anim.rs` walks those regions over the canvas.
+`decode_anmf` stays, and moves with `wpd_decoder.c`.
+
+**The split is the same one the export used, and for the same reason.** What the
+compositor needs to know — where the frame goes, what the frame before it left
+behind — is all scalars, so `Placement` mirrors as a struct whose size is its
+own checksum. What it writes through is a canvas and two DSP tables, so
+`CompositeTargets` is three pointers. `anim_is_key_frame` is its own entry point
+because the decision has to be made before the placement is complete: it is what
+fills in the one field the decoder does not already know.
+
+**The geometry was worth lifting out on its own.** Compositing an animation
+frame is two questions — is this a key frame, and which parts of it blend — and
+neither touches a pixel. `regions()` answers the second by returning up to five
+rectangles: libwebp overwrites the frame rectangle and alpha-blends only where
+the previous canvas can be non-transparent, so when the frame before disposed
+its own rectangle, the overlap is copied and the four strips around it are
+blended. Written as five `composite_region` calls in the C, that is five chances
+to get an off-by-one wrong and no way to test it below a whole decode. Written
+as a function returning rectangles, the test is that the five tile the frame
+exactly: every pixel covered once, none twice. Nine tests cover it, and they run
+in microseconds.
+
+**One thing that looked like a bug and was not.** The planar path rounds the
+overlap's _extent_ down to even samples but leaves its _corner_ alone, so a copy
+region can start inside a 2x2 chroma block and the blitters truncate it. That
+reads like an oversight; it is what libwebp does, and `animcheck.sh` is
+bit-exact against libwebp across 27 animations, so it stays. The port says so
+where it would otherwise look like a transcription slip.
+
+Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
+five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
+`md5check.sh` bit-exact against the C baseline `d241ef8`, `sanitize.sh` 186 and
+185, `fuzz.sh` 300 trials per file, `cargo test -p wpd` 72/72. Perf is unchanged
+against Phase 5.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor

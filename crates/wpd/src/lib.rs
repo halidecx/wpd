@@ -19,6 +19,7 @@
 #[allow(unsafe_code)]
 pub mod asm;
 
+pub mod anim;
 pub mod container;
 pub mod cpu;
 pub mod dsp;
