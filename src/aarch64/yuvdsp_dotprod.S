@@ -1,17 +1,7 @@
-
 #include "asm.S"
 
 #if HAVE_DOTPROD
 
-// A pixel is already grouped the way a dot product wants it: one 32-bit lane
-// of [A R G B] against [0 cR cG cB] is the whole conversion for that channel,
-// so a 128-bit dot product handles four pixels at once. The coefficients do
-// not fit in a byte, but radix 260 splits every one of them exactly into two
-// signed bytes, e.g. 16839 = 260 * 65 - 61 and 33059 = 260 * 127 + 39, which
-// is why the radix is 260 rather than 256: it is the smallest one that keeps
-// the green coefficient's high half inside a signed byte. Each channel is
-// then dot_lo + 260 * dot_hi, and the rounder and the 16 or 128 offset ride
-// along in the low accumulator's initial value.
 const yuv444_dot_coeffs, align=4
         .byte           0, -61, 39, -80         // Y low halves
         .byte           0, 65, 127, 25          // Y high halves
@@ -21,9 +11,6 @@ const yuv444_dot_coeffs, align=4
         .byte           0, 111, -93, -18        // V high halves
 endconst
 
-// One channel of sixteen pixels: v0-v3 hold the pixels, the accumulators land
-// packed in \out. Zeroing the high accumulators and seeding the low ones with
-// the rounder is what makes each dot product a plain accumulate.
 .macro  yuv444_dot16 dot, out, coef, ilo, ihi, round
         mov             v4.16b,  \round\().16b
         mov             v5.16b,  \round\().16b
@@ -53,7 +40,6 @@ endconst
         sqxtun2         \out\().16b, v21.8h
 .endm
 
-// The same for the up-to-four pixels of v0 alone, feeding the byte tails.
 .macro  yuv444_dot4 dot, out, coef, ilo, ihi, round
         mov             v4.16b,  \round\().16b
         movi            v16.4s,  #0
@@ -64,14 +50,54 @@ endconst
         sqxtun          \out\().8b,  v20.8h
 .endm
 
-// sdot needs signed input, so the unsigned bytes are recentred by flipping
-// their high bit. That subtracts 128 from every channel, and the constant it
-// costs, 128 times the sum of the channel's coefficients, folds into the
-// rounder; for U and V those sums are zero, so only Y sees a different one.
 .macro  yuv444_center reg, mask
     .ifnb \mask
         eor             \reg\().16b, \reg\().16b, \mask\().16b
     .endif
+.endm
+
+.macro  argb_to_y_dot name, dot, yround, mask
+function ff_argb_to_y_\name, export=1
+        movrel          x3,  yuv444_dot_coeffs
+        ldr             q22, [x3]
+        mov             w3,  #260
+        dup             v24.4s,  w3
+        mov             w3,  #(\yround&0xffff)
+        movk            w3,  #(\yround>>16), lsl #16
+        dup             v25.4s,  w3
+    .ifnb \mask
+        movi            v27.16b, #0x80
+    .endif
+        cmp             w2,  #16
+        b.lt            2f
+1:      ld1             {v0.16b-v3.16b}, [x1], #64
+        sub             w2,  w2,  #16
+        yuv444_center   v0,  \mask
+        yuv444_center   v1,  \mask
+        yuv444_center   v2,  \mask
+        yuv444_center   v3,  \mask
+        yuv444_dot16    \dot, v28, v22, 0, 1, v25
+        st1             {v28.16b}, [x0], #16
+        cmp             w2,  #16
+        b.ge            1b
+2:      cmp             w2,  #4
+        b.lt            3f
+        ldr             q0,  [x1], #16
+        sub             w2,  w2,  #4
+        yuv444_center   v0,  \mask
+        yuv444_dot4     \dot, v28, v22, 0, 1, v25
+        st1             {v28.s}[0], [x0], #4
+        cmp             w2,  #4
+        b.ge            2b
+3:      cbz             w2,  9f
+4:      ld1             {v0.s}[0], [x1], #4
+        subs            w2,  w2,  #1
+        yuv444_center   v0,  \mask
+        yuv444_dot4     \dot, v28, v22, 0, 1, v25
+        st1             {v28.b}[0], [x0], #1
+        b.gt            4b
+9:      ret
+endfunc
 .endm
 
 .macro  argb_to_yuv444_dot name, dot, yround, mask
@@ -135,11 +161,13 @@ endfunc
 .endm
 
 ENABLE_DOTPROD
+argb_to_y_dot neon_dotprod, sdot, 8290048, v27
 argb_to_yuv444_dot neon_dotprod, sdot, 8290048, v27
 DISABLE_DOTPROD
 
 #if HAVE_I8MM
 ENABLE_I8MM
+argb_to_y_dot neon_i8mm, usdot, 1081344
 argb_to_yuv444_dot neon_i8mm, usdot, 1081344
 DISABLE_I8MM
 #endif

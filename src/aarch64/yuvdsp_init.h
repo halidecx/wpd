@@ -53,9 +53,11 @@ void ff_argb_to_uv_neon(uint8_t *u, uint8_t *v, const uint8_t *argb,
                         int weight_alpha);
 
 #if HAVE_DOTPROD
+void ff_argb_to_y_neon_dotprod(uint8_t *y, const uint8_t *argb, int num_pixels);
 void ff_argb_to_yuv444_neon_dotprod(uint8_t *y, uint8_t *u, uint8_t *v,
                                     const uint8_t *argb, int num_pixels);
 #if HAVE_I8MM
+void ff_argb_to_y_neon_i8mm(uint8_t *y, const uint8_t *argb, int num_pixels);
 void ff_argb_to_yuv444_neon_i8mm(uint8_t *y, uint8_t *u, uint8_t *v,
                                  const uint8_t *argb, int num_pixels);
 #endif
@@ -89,11 +91,15 @@ static wpd_always_inline void wpd_yuv_dsp_init_aarch64(WPDYUVDSP *dsp) {
     dsp->argb_to_uv                      = ff_argb_to_uv_neon;
 
 #if HAVE_DOTPROD
-    if (flags & WPD_ARM_CPU_FLAG_DOTPROD)
+    if (flags & WPD_ARM_CPU_FLAG_DOTPROD) {
+        dsp->argb_to_y      = ff_argb_to_y_neon_dotprod;
         dsp->argb_to_yuv444 = ff_argb_to_yuv444_neon_dotprod;
+    }
 #if HAVE_I8MM
-    if (flags & WPD_ARM_CPU_FLAG_I8MM)
+    if (flags & WPD_ARM_CPU_FLAG_I8MM) {
+        dsp->argb_to_y      = ff_argb_to_y_neon_i8mm;
         dsp->argb_to_yuv444 = ff_argb_to_yuv444_neon_i8mm;
+    }
 #endif
 #endif
 }
