@@ -2,57 +2,63 @@
 #include "anim.h"
 #include "lossy.h"
 
-static void composite_region(WPDDecoder *s, const WebPImage *frame, SubRect r,
-                             int blend) {
-    WebPImage *canvas = &s->canvas;
+static void composite_region(const Placement *pl, const CompositeTargets *ct,
+                             const WebPImage *frame, SubRect r, int blend) {
+    WebPImage *canvas = ct->canvas;
 
     if (r.w <= 0 || r.h <= 0)
         return;
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
         if (blend)
-            blend_argb_region(
-                &s->ldsp, s->premultiply, canvas, frame, r, s->pos_x, s->pos_y);
+            blend_argb_region(ct->ldsp,
+                              pl->premultiply,
+                              canvas,
+                              frame,
+                              r,
+                              pl->pos_x,
+                              pl->pos_y);
         else
-            copy_argb_region(canvas, frame, r, s->pos_x, s->pos_y);
+            copy_argb_region(canvas, frame, r, pl->pos_x, pl->pos_y);
     } else {
         if (blend)
-            blend_yuva_region(canvas, frame, r, s->pos_x, s->pos_y);
+            blend_yuva_region(canvas, frame, r, pl->pos_x, pl->pos_y);
         else
-            copy_yuva_region(canvas, frame, r, s->pos_x, s->pos_y);
+            copy_yuva_region(canvas, frame, r, pl->pos_x, pl->pos_y);
     }
 }
 
 // libwebp overwrites the frame rect and alpha-blends only where the prev
 // canvas can be non-transparent, blending elsewhere would round down
-static void composite_subframe(WPDDecoder *s, const WebPImage *frame) {
+static void composite_subframe(const Placement *pl, const CompositeTargets *ct,
+                               const WebPImage *frame) {
     SubRect full = {0, 0, frame->width, frame->height};
     SubRect keep = {0, 0, 0, 0};
 
     // frames w no alpha plane cannot blend
-    if (!s->key_frame && !(s->anmf_flags & ANMF_FLAG_NO_BLEND) &&
+    if (!pl->key_frame && !(pl->anmf_flags & ANMF_FLAG_NO_BLEND) &&
         frame->format != WPD_PIX_FMT_YUV420P) {
-        if (!(s->prev_anmf_flags & ANMF_FLAG_DISPOSE)) {
-            composite_region(s, frame, full, 1);
+        if (!(pl->prev_anmf_flags & ANMF_FLAG_DISPOSE)) {
+            composite_region(pl, ct, frame, full, 1);
             return;
         }
-        keep.x = WPD_MAX(s->pos_x, s->prev_pos_x) - s->pos_x;
-        keep.y = WPD_MAX(s->pos_y, s->prev_pos_y) - s->pos_y;
-        keep.w = WPD_MIN(s->pos_x + frame->width,
-                         s->prev_pos_x + s->prev_width) -
-            s->pos_x - keep.x;
-        keep.h = WPD_MIN(s->pos_y + frame->height,
-                         s->prev_pos_y + s->prev_height) -
-            s->pos_y - keep.y;
+        keep.x = WPD_MAX(pl->pos_x, pl->prev_pos_x) - pl->pos_x;
+        keep.y = WPD_MAX(pl->pos_y, pl->prev_pos_y) - pl->pos_y;
+        keep.w = WPD_MIN(pl->pos_x + frame->width,
+                         pl->prev_pos_x + pl->prev_width) -
+            pl->pos_x - keep.x;
+        keep.h = WPD_MIN(pl->pos_y + frame->height,
+                         pl->prev_pos_y + pl->prev_height) -
+            pl->pos_y - keep.y;
         if (keep.w <= 0 || keep.h <= 0) {
-            composite_region(s, frame, full, 1);
+            composite_region(pl, ct, frame, full, 1);
             return;
         }
-        if (s->canvas.format != WPD_PIX_FMT_ARGB) {
+        if (ct->canvas->format != WPD_PIX_FMT_ARGB) {
             keep.w &= ~1;
             keep.h &= ~1;
             if (!keep.w || !keep.h) {
-                composite_region(s, frame, full, 1);
+                composite_region(pl, ct, frame, full, 1);
                 return;
             }
         }
@@ -63,27 +69,27 @@ static void composite_subframe(WPDDecoder *s, const WebPImage *frame) {
         SubRect right  = {
             keep.x + keep.w, keep.y, full.w - keep.x - keep.w, keep.h};
 
-        composite_region(s, frame, top, 1);
-        composite_region(s, frame, bottom, 1);
-        composite_region(s, frame, left, 1);
-        composite_region(s, frame, right, 1);
-        composite_region(s, frame, keep, 0);
+        composite_region(pl, ct, frame, top, 1);
+        composite_region(pl, ct, frame, bottom, 1);
+        composite_region(pl, ct, frame, left, 1);
+        composite_region(pl, ct, frame, right, 1);
+        composite_region(pl, ct, frame, keep, 0);
         return;
     }
 
-    composite_region(s, frame, full, 0);
+    composite_region(pl, ct, frame, full, 0);
 }
 
-static void clear_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
-                              int height) {
-    WebPImage *canvas = &s->canvas;
+static void clear_canvas_rect(const Placement *pl, const CompositeTargets *ct,
+                              int pos_x, int pos_y, int width, int height) {
+    WebPImage *canvas = ct->canvas;
 
     if (canvas->format == WPD_PIX_FMT_ARGB) {
         uint8_t *const base     = canvas->data[0];
         const int      linesize = canvas->linesize[0];
         uint32_t       bg;
 
-        memcpy(&bg, s->clear_argb, 4);
+        memcpy(&bg, pl->clear_argb, 4);
         for (int y = 0; y < height; y++) {
             uint32_t *dst = (uint32_t *)(base +
                                          (size_t)(pos_y + y) * linesize) +
@@ -98,96 +104,137 @@ static void clear_canvas_rect(WPDDecoder *s, int pos_x, int pos_y, int width,
                 (ptrdiff_t)(pos_y >> shift) * canvas->linesize[comp] +
                 (pos_x >> shift);
             for (int y = 0; y < CEIL_RSHIFT(height, shift); y++) {
-                memset(dst, s->clear_yuva[comp], CEIL_RSHIFT(width, shift));
+                memset(dst, pl->clear_yuva[comp], CEIL_RSHIFT(width, shift));
                 dst += canvas->linesize[comp];
             }
         }
     }
 }
 
-static int allocate_canvas(WPDDecoder *s, WPDPixelFormat format) {
-    int ret;
-
+static int allocate_canvas(const Placement *pl, const CompositeTargets *ct,
+                           WPDPixelFormat format) {
     if (format == WPD_PIX_FMT_ARGB)
-        ret = image_alloc_argb(&s->canvas, s->canvas_width, s->canvas_height);
-    else
-        ret = image_alloc_yuva(&s->canvas, s->canvas_width, s->canvas_height);
-    return ret;
+        return image_alloc_argb(
+            ct->canvas, pl->canvas_width, pl->canvas_height);
+    return image_alloc_yuva(ct->canvas, pl->canvas_width, pl->canvas_height);
 }
 
-static int is_full_frame(const WPDDecoder *s, int width, int height) {
-    return width == s->canvas_width && height == s->canvas_height;
+static int is_full_frame(const Placement *pl, int width, int height) {
+    return width == pl->canvas_width && height == pl->canvas_height;
 }
 
-static int is_key_frame(const WPDDecoder *s, const WebPImage *frame) {
-    if (s->frame_index == 0)
+int anim_is_key_frame(const Placement *pl, int width, int height) {
+    if (pl->frame_index == 0)
         return 1;
-    if ((!s->frame_has_alpha || (s->anmf_flags & ANMF_FLAG_NO_BLEND)) &&
-        s->pos_x == 0 && s->pos_y == 0 &&
-        is_full_frame(s, frame->width, frame->height))
+    if ((!pl->frame_has_alpha || (pl->anmf_flags & ANMF_FLAG_NO_BLEND)) &&
+        pl->pos_x == 0 && pl->pos_y == 0 && is_full_frame(pl, width, height))
         return 1;
-    return (s->prev_anmf_flags & ANMF_FLAG_DISPOSE) &&
-        (is_full_frame(s, s->prev_width, s->prev_height) || s->prev_key_frame);
+    return (pl->prev_anmf_flags & ANMF_FLAG_DISPOSE) &&
+        (is_full_frame(pl, pl->prev_width, pl->prev_height) ||
+         pl->prev_key_frame);
 }
 
 /* The canvas holds whichever alpha convention the output format asked for when
    its pixels were composited, and the caller may change that format between
    frames. Bring what is already there into the convention the next frame will
    be blended in, so the two are never mixed. */
-static void reconcile_canvas_alpha(WPDDecoder *s) {
-    if (s->canvas.data[0] && s->canvas.format == WPD_PIX_FMT_ARGB &&
-        s->canvas.premultiplied != s->premultiply)
-        for (int y = 0; y < s->canvas.height; y++) {
-            uint8_t *row = s->canvas.data[0] +
-                (ptrdiff_t)y * s->canvas.linesize[0];
+static void reconcile_canvas_alpha(const Placement        *pl,
+                                   const CompositeTargets *ct) {
+    WebPImage *canvas = ct->canvas;
 
-            if (s->premultiply)
-                s->ydsp.premultiply_row(row, 1, s->canvas.width);
+    if (canvas->data[0] && canvas->format == WPD_PIX_FMT_ARGB &&
+        canvas->premultiplied != pl->premultiply)
+        for (int y = 0; y < canvas->height; y++) {
+            uint8_t *row = canvas->data[0] + (ptrdiff_t)y * canvas->linesize[0];
+
+            if (pl->premultiply)
+                ct->ydsp->premultiply_row(row, 1, canvas->width);
             else
-                wpd_premultiply_argb_row(row, s->canvas.width, 1);
+                wpd_premultiply_argb_row(row, canvas->width, 1);
         }
-    s->canvas.premultiplied = s->premultiply;
+    canvas->premultiplied = pl->premultiply;
 }
 
-static int prepare_canvas(WPDDecoder *s, const WebPImage *frame,
-                          WPDPixelFormat format) {
-    int covers_canvas = s->pos_x == 0 && s->pos_y == 0 &&
-        is_full_frame(s, frame->width, frame->height);
+static int prepare_canvas(const Placement *pl, const CompositeTargets *ct,
+                          const WebPImage *frame, WPDPixelFormat format) {
+    WebPImage *canvas        = ct->canvas;
+    int        covers_canvas = pl->pos_x == 0 && pl->pos_y == 0 &&
+        is_full_frame(pl, frame->width, frame->height);
     int ret;
 
-    if (s->key_frame && s->canvas.data[0] && s->canvas.format != format)
-        image_free(&s->canvas);
+    if (pl->key_frame && canvas->data[0] && canvas->format != format)
+        image_free(canvas);
 
-    if (!s->canvas.data[0]) {
-        ret = allocate_canvas(s, format);
+    if (!canvas->data[0]) {
+        ret = allocate_canvas(pl, ct, format);
         if (ret < 0)
             return ret;
-        s->canvas.premultiplied = s->premultiply;
+        canvas->premultiplied = pl->premultiply;
         if (!covers_canvas)
-            clear_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
-    } else if (s->key_frame) {
+            clear_canvas_rect(pl, ct, 0, 0, canvas->width, canvas->height);
+    } else if (pl->key_frame) {
         if (!covers_canvas)
-            clear_canvas_rect(s, 0, 0, s->canvas.width, s->canvas.height);
+            clear_canvas_rect(pl, ct, 0, 0, canvas->width, canvas->height);
     } else {
         if (format == WPD_PIX_FMT_ARGB &&
-            s->canvas.format == WPD_PIX_FMT_YUVA420P) {
-            WebPImage yuva_canvas = s->canvas;
-            memset(&s->canvas, 0, sizeof(s->canvas));
-            ret = convert_to_argb(&s->ydsp,
-                                  &s->canvas,
-                                  &yuva_canvas,
-                                  s->options.no_fancy_upsampling);
+            canvas->format == WPD_PIX_FMT_YUVA420P) {
+            WebPImage yuva_canvas = *canvas;
+            memset(canvas, 0, sizeof(*canvas));
+            ret = convert_to_argb(
+                ct->ydsp, canvas, &yuva_canvas, pl->no_fancy_upsampling);
             image_free(&yuva_canvas);
             if (ret < 0)
                 return ret;
         }
-        if (s->prev_anmf_flags & ANMF_FLAG_DISPOSE)
-            clear_canvas_rect(
-                s, s->prev_pos_x, s->prev_pos_y, s->prev_width, s->prev_height);
+        if (pl->prev_anmf_flags & ANMF_FLAG_DISPOSE)
+            clear_canvas_rect(pl,
+                              ct,
+                              pl->prev_pos_x,
+                              pl->prev_pos_y,
+                              pl->prev_width,
+                              pl->prev_height);
     }
 
-    reconcile_canvas_alpha(s);
+    reconcile_canvas_alpha(pl, ct);
     return 0;
+}
+
+int anim_composite(const Placement *pl, const CompositeTargets *ct,
+                   const WebPImage *sub, WPDPixelFormat target) {
+    int ret = prepare_canvas(pl, ct, sub, target);
+
+    if (ret < 0)
+        return ret;
+    composite_subframe(pl, ct, sub);
+    return 0;
+}
+
+/* The decoder's answers to what the compositor asks, gathered at the call.
+   'key_frame' is the one field it does not know yet: anim_is_key_frame()
+   decides it from the rest. */
+static Placement anim_placement(const WPDDecoder *s) {
+    Placement pl = {
+        .canvas_width        = s->canvas_width,
+        .canvas_height       = s->canvas_height,
+        .pos_x               = s->pos_x,
+        .pos_y               = s->pos_y,
+        .anmf_flags          = s->anmf_flags,
+        .frame_index         = s->frame_index,
+        .frame_has_alpha     = s->frame_has_alpha,
+        .key_frame           = 0,
+        .prev_anmf_flags     = s->prev_anmf_flags,
+        .prev_width          = s->prev_width,
+        .prev_height         = s->prev_height,
+        .prev_pos_x          = s->prev_pos_x,
+        .prev_pos_y          = s->prev_pos_y,
+        .prev_key_frame      = s->prev_key_frame,
+        .premultiply         = s->premultiply,
+        .no_fancy_upsampling = s->options.no_fancy_upsampling,
+    };
+
+    memcpy(pl.clear_argb, s->clear_argb, 4);
+    memcpy(pl.clear_yuva, s->clear_yuva, 4);
+    return pl;
 }
 
 int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
@@ -317,7 +364,10 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
         return WPD_ERROR_INVALID_DATA;
     }
 
-    s->key_frame = is_key_frame(s, sub);
+    Placement pl = anim_placement(s);
+
+    s->key_frame = anim_is_key_frame(&pl, sub->width, sub->height);
+    pl.key_frame = s->key_frame;
 
     WPDPixelFormat target = WPD_PIX_FMT_YUVA420P;
     if (sub->format == WPD_PIX_FMT_ARGB || format_is_packed(s->out_format) ||
@@ -354,11 +404,11 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
        a canvas to stay compatible with and correctly declines when there is
        none. Switching modes mid-animation is refused for that reason. */
     if (s->anim_mode != WPD_ANIM_SUBFRAME) {
-        ret = prepare_canvas(s, sub, target);
+        const CompositeTargets ct = {&s->ldsp, &s->ydsp, &s->canvas};
+
+        ret = anim_composite(&pl, &ct, sub, target);
         if (ret < 0)
             return ret;
-
-        composite_subframe(s, sub);
     }
 
     s->frame_timestamp += s->frame_duration;
