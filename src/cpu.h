@@ -54,6 +54,12 @@ static wpd_always_inline unsigned wpd_get_default_cpu_flags(void) {
     WPD_ARCH_AARCH64
     flags |= WPD_ARM_CPU_FLAG_NEON;
 #endif
+#ifdef __ARM_FEATURE_DOTPROD
+    flags |= WPD_ARM_CPU_FLAG_DOTPROD;
+#endif
+#ifdef __ARM_FEATURE_MATMUL_INT8
+    flags |= WPD_ARM_CPU_FLAG_I8MM;
+#endif
     /* The ARMv6 asm is only assembled when the target baseline supports it,
      * so this is a compile-time property rather than a runtime one. */
 #ifdef WPD_ARM_ARMV6_ASM

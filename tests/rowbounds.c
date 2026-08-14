@@ -199,6 +199,8 @@ int main(void) {
         0,
         WPD_ARM_CPU_FLAG_ARMV6,
         WPD_ARM_CPU_FLAG_NEON,
+        WPD_ARM_CPU_FLAG_DOTPROD,
+        WPD_ARM_CPU_FLAG_I8MM,
 #else
         0,
 #endif
