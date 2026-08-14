@@ -2,6 +2,7 @@
 #include "cpu.h"
 #include "md5.h"
 #include "vcs_version.h"
+#include "yuvdsp.h"
 
 #include <errno.h>
 #include <getopt.h>
@@ -78,7 +79,9 @@ typedef struct OutputContext {
     int            frames;
     int            width;
     int            height;
+    int            has_alpha;
     WPDPixelFormat format;
+    WPDYUVDSP      yuvdsp;
 } OutputContext;
 
 static const char short_options[] = "hr:f:";
@@ -294,6 +297,8 @@ static int output_open(OutputContext *output, const char *muxer,
             : !strcmp(muxer, "pam")           ? MUXER_PAM
             : !strcmp(muxer, "y4m")           ? MUXER_Y4M
                                               : MUXER_RAW;
+        if (output->muxer == MUXER_Y4M)
+            wpd_yuv_dsp_init(&output->yuvdsp);
         if (output->type == OUTPUT_NULL)
             return 0;
     }
@@ -302,10 +307,9 @@ static int output_open(OutputContext *output, const char *muxer,
     return output->file ? 0 : -1;
 }
 
-static int output_select_format(const OutputContext *output,
-                                const WPDImageInfo  *info,
-                                const char         **pixel_format,
-                                WPDPixelFormat      *format) {
+static int output_select_format(OutputContext *output, const WPDImageInfo *info,
+                                const char    **pixel_format,
+                                WPDPixelFormat *format) {
     const char    *required_name;
     WPDPixelFormat required;
 
@@ -319,6 +323,13 @@ static int output_select_format(const OutputContext *output,
         required      = WPD_PIX_FMT_RGBA;
         break;
     case MUXER_Y4M:
+        if (info->coding == WPD_CODING_LOSSLESS &&
+            *format == WPD_PIX_FMT_NONE) {
+            output->has_alpha = info->has_alpha;
+            required_name     = "argb";
+            required          = WPD_PIX_FMT_ARGB;
+            break;
+        }
         if (*format == WPD_PIX_FMT_YUV420P || *format == WPD_PIX_FMT_YUVA420P)
             return 0;
         if (*format != WPD_PIX_FMT_NONE) {
@@ -423,6 +434,55 @@ static int write_chroma_444(OutputContext *output, const uint8_t *data,
     return 0;
 }
 
+static int write_argb_444(OutputContext *output, const WPDFrame *frame) {
+    const size_t pixels = (size_t)frame->width * (size_t)frame->height;
+    uint8_t     *y      = malloc(pixels);
+    uint8_t     *u      = malloc(pixels);
+    uint8_t     *v      = malloc(pixels);
+    int          ret    = -1;
+
+    if (!y || !u || !v)
+        goto done;
+    wpd_argb_to_yuv444(&output->yuvdsp,
+                       y,
+                       frame->width,
+                       u,
+                       v,
+                       frame->width,
+                       frame->data[0],
+                       frame->stride[0],
+                       frame->width,
+                       frame->height);
+    if (output_write(output, y, pixels) < 0 ||
+        output_write(output, u, pixels) < 0 ||
+        output_write(output, v, pixels) < 0)
+        goto done;
+    ret = 0;
+done:
+    free(y);
+    free(u);
+    free(v);
+    return ret;
+}
+
+static int write_argb_alpha(OutputContext *output, const WPDFrame *frame) {
+    uint8_t *row = malloc((size_t)frame->width);
+
+    if (!row)
+        return -1;
+    for (int y = 0; y < frame->height; y++) {
+        const uint8_t *src = frame->data[0] + (ptrdiff_t)y * frame->stride[0];
+
+        for (int x = 0; x < frame->width; x++) row[x] = src[4 * x];
+        if (output_write(output, row, (size_t)frame->width) < 0) {
+            free(row);
+            return -1;
+        }
+    }
+    free(row);
+    return 0;
+}
+
 static const char *format_name(WPDPixelFormat format) {
     for (size_t i = 0; i < sizeof(pixel_formats) / sizeof(*pixel_formats); i++)
         if (pixel_formats[i].format == format)
@@ -475,8 +535,9 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
 
     if (output->muxer == MUXER_Y4M) {
         if (frame->format != WPD_PIX_FMT_YUV420P &&
-            frame->format != WPD_PIX_FMT_YUVA420P) {
-            fprintf(stderr, "y4m requires yuv420p or yuva420p output\n");
+            frame->format != WPD_PIX_FMT_YUVA420P &&
+            frame->format != WPD_PIX_FMT_ARGB) {
+            fprintf(stderr, "y4m requires yuv420p, yuva420p or argb output\n");
             return -1;
         }
         if (!output->frames) {
@@ -489,7 +550,11 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
                 "YUV4MPEG2 W%d H%d F0:0 Ip A0:0 C%s\n",
                 frame->width,
                 frame->height,
-                frame->format == WPD_PIX_FMT_YUVA420P ? "444alpha" : "420jpeg");
+                frame->format == WPD_PIX_FMT_YUVA420P ||
+                        (frame->format == WPD_PIX_FMT_ARGB && output->has_alpha)
+                    ? "444alpha"
+                    : frame->format == WPD_PIX_FMT_ARGB ? "444"
+                                                        : "420jpeg");
             if (header_size < 0 || (size_t)header_size >= sizeof(header) ||
                 write_header(output, header) < 0)
                 return -1;
@@ -500,14 +565,19 @@ static int write_frame(OutputContext *output, const WPDFrame *frame,
             return -1;
         }
         output->frames++;
-        if (write_header(output, "FRAME\n") < 0 ||
-            write_plane(output,
-                        frame->data[0],
-                        frame->stride[0],
-                        frame->width,
-                        frame->height) < 0)
+        if (write_header(output, "FRAME\n") < 0)
             return -1;
-        if (frame->format == WPD_PIX_FMT_YUVA420P) {
+        if (frame->format == WPD_PIX_FMT_ARGB) {
+            if (write_argb_444(output, frame) < 0 ||
+                (output->has_alpha && write_argb_alpha(output, frame) < 0))
+                return -1;
+        } else if (write_plane(output,
+                               frame->data[0],
+                               frame->stride[0],
+                               frame->width,
+                               frame->height) < 0) {
+            return -1;
+        } else if (frame->format == WPD_PIX_FMT_YUVA420P) {
             if (write_chroma_444(output,
                                  frame->data[1],
                                  frame->stride[1],

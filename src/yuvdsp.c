@@ -427,6 +427,19 @@ static void argb_to_y_c(uint8_t *y, const uint8_t *argb, int num_pixels) {
             argb[4 * i + 1], argb[4 * i + 2], argb[4 * i + 3]);
 }
 
+static void argb_to_yuv444_c(uint8_t *y, uint8_t *u, uint8_t *v,
+                             const uint8_t *argb, int num_pixels) {
+    for (int i = 0; i < num_pixels; i++) {
+        const int r = argb[4 * i + 1];
+        const int g = argb[4 * i + 2];
+        const int b = argb[4 * i + 3];
+
+        y[i] = (uint8_t)rgb_to_y(r, g, b);
+        u[i] = (uint8_t)rgb_to_u(r, g, b);
+        v[i] = (uint8_t)rgb_to_v(r, g, b);
+    }
+}
+
 static wpd_always_inline int sum4(const uint8_t *p, ptrdiff_t stride) {
     return linear_to_gamma(gamma_to_linear(p[0]) + gamma_to_linear(p[4]) +
                                gamma_to_linear(p[stride]) +
@@ -532,6 +545,18 @@ void wpd_argb_to_yuva(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
 
         for (int i = 0; i < width; i++) dst[i] = src[4 * i];
     }
+}
+
+void wpd_argb_to_yuv444(const WPDYUVDSP *dsp, uint8_t *y, ptrdiff_t y_stride,
+                        uint8_t *u, uint8_t *v, ptrdiff_t uv_stride,
+                        const uint8_t *argb, ptrdiff_t argb_stride, int width,
+                        int height) {
+    for (int row = 0; row < height; row++)
+        dsp->argb_to_yuv444(y + (ptrdiff_t)row * y_stride,
+                            u + (ptrdiff_t)row * uv_stride,
+                            v + (ptrdiff_t)row * uv_stride,
+                            argb + (ptrdiff_t)row * argb_stride,
+                            width);
 }
 
 static int upsample_first_pair(int row_start) {
@@ -802,6 +827,7 @@ wpd_cold void wpd_yuv_dsp_init(WPDYUVDSP *dsp) {
         .premultiply_row_4444      = premultiply_row_4444_c,
         .premultiply_row_4444_swap = premultiply_row_4444_swap_c,
         .argb_to_y                 = argb_to_y_c,
+        .argb_to_yuv444            = argb_to_yuv444_c,
         .argb_to_uv                = argb_to_uv_c,
     };
 
