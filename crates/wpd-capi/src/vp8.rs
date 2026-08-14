@@ -17,6 +17,8 @@ pub const VP8_NEED_MORE: c_int = 1;
 pub(crate) const WPD_ERROR_INVALID_DATA: c_int = -1094995529;
 pub(crate) const WPD_ERROR_TOO_LARGE: c_int = -558319938;
 pub(crate) const WPD_ENOMEM: c_int = -12;
+const WPD_ERR_NOT_WEBP: c_int = -2;
+const WPD_ERR_TRUNCATED: c_int = -4;
 
 #[repr(C)]
 pub struct WpdFrame {
@@ -60,6 +62,10 @@ pub(crate) fn status(e: Error) -> c_int {
         Error::InvalidData => WPD_ERROR_INVALID_DATA,
         Error::NoMemory => WPD_ENOMEM,
         Error::TooLarge => WPD_ERROR_TOO_LARGE,
+        /* status_from_internal() passes a WPDStatus through unchanged, so the
+        two the container raises need no code of their own. */
+        Error::Truncated => WPD_ERR_TRUNCATED,
+        Error::NotWebp => WPD_ERR_NOT_WEBP,
     }
 }
 

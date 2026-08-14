@@ -107,6 +107,12 @@ the port proceeds.
   `__builtin_bswap64` → `swap_bytes()`. Prefer `31 - x.leading_zeros()` to
   `x.ilog2()`, which carries a panic path for zero that the caller has usually
   already ruled out but LLVM may not see.
+- **In a parser, read with saturating helpers rather than proven bounds.** A
+  bounds check that fires on damaged input is a panic, and a panic on damaged
+  input is a denial of service the C did not have. Header and chunk walks are
+  O(chunks), so byte accessors that return zero past the end and a `window()`
+  that clips cost nothing measurable and leave no residual argument to get
+  wrong. Keep proven-bound indexing for the pixel loops, where it pays.
 - **Check the disassembly, not the theory.** Hot functions are checked for
   surviving `core::panicking` references; a bounds check that LLVM did not
   remove shows up there.
@@ -661,6 +667,70 @@ Gates: `checkasm` 151/151, `meson test` 186/186, `clicheck.sh` 794/794,
 `testdata.sh` 183/183, `animcheck.sh` (42 files x 8 formats, 27 animations),
 `rac32.sh` 186/186, `md5check.sh` against the C baseline, `sanitize.sh` 186 and
 185, `fuzz.sh` 300 trials per file, `cargo test -p wpd` 43/43.
+
+### Phase 4 — the RIFF container (`82ed367` and the port that follows it)
+
+`src/container.c` and `src/container.h` — the chunk-list walk, `wpd_get_info`,
+the metadata offsets and the ANMF frame table — are now
+`crates/wpd/src/container.rs`, behind `crates/wpd-capi/src/container.rs`. Seven
+C files are left: `wpd_decoder.c`, `anim.c`, `convert.c`, `export.c`, `image.c`,
+`lossy.c` and `wpd_compat.c`.
+
+**The refactor came first, as it did for VP8 and VP8L.** `HeaderScan` was a
+struct the decoder embedded by value and read field by field, which a Rust
+implementation cannot offer without mirroring its layout. Commit `82ed367` puts
+it behind a pointer and hands the container back a `ScanInfo`: the part it
+actually reads, separated from where the walk stopped, the frame table and how
+far into an ANMF the alpha walk has gone. That commit is green on its own, so
+the API shape is proven behaviour-preserving before any Rust enters.
+
+`collect_frames` stopped being a field the caller pokes and became an argument.
+It was only ever set to 1 by one function and cleared by teardown; as a
+parameter nothing has to remember to clear it, and the promise that reading a
+file's information allocates nothing is visible at the call site.
+
+**A parser reads with saturating helpers, not proven-in-range indexing.** This
+is the first module whose whole job is to walk attacker-controlled length
+fields, and it is the first place where the usual advice — prove the bound, then
+index — is the wrong trade. The C could argue every read in range by
+construction; a Rust bounds check that fires on damaged input is a panic, and a
+panic on damaged input is a denial of service the C did not have. So every read
+in `container.rs` goes through `byte`/`rl16`/`rl24`/`rl32`, which return zero
+past the end of the window, and every sub-slice goes through `window`, which
+clips. Nothing here is hot — it is O(chunks), once per file plus once per
+streaming append — so the cost is not measurable, and there is no residual
+argument to get wrong.
+
+The two new tests are shaped around that: one walks every prefix of a synthetic
+file, and one corrupts every byte of it to five values in turn and scans the
+result. Neither asserts anything about the output; the assertion is that the
+scan returns.
+
+**Two error variants, not a second error type.** `Error` gained `Truncated` and
+`NotWebp`, which the container needs and no codec raises. `status_from_internal`
+on the C side passes a `WPDStatus` through unchanged, so the shim maps them to
+`WPD_ERR_TRUNCATED` and `WPD_ERR_NOT_WEBP` and nothing else has to know.
+
+**`WPDImageInfo` is written a field at a time.** The struct is versioned by
+`struct_size` and a caller's copy may be a longer revision than this build knows
+about. Assigning the whole struct writes its tail padding too, which in a longer
+revision is a field; the C guarded that with `WPD_FIELD_END`, and the Rust
+guards it by never writing the struct whole.
+
+**No perf change, which is the expected result.** The scan is per file, not per
+pixel. Re-measured against the C baseline `d241ef8`, pinned to one core, 20
+runs, `--repeat 400`, the table is Phase 3's within noise.
+
+One correction to that table: `palette4bpp_rgb` measures 1.20x slower, not the
+1.11x recorded in Phase 3. Building the Phase 3 tree fresh and timing it against
+this one put them within 1% of each other, so the gap was there before this
+phase and the earlier figure was optimistic — a reminder that a single
+measurement session is not a baseline.
+
+Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183,
+`animcheck.sh` (42 files x 8 formats, 27 animations), `rac32.sh` 186/186,
+`md5check.sh` against the C baseline, `sanitize.sh` 186 and 185, `fuzz.sh` 300
+trials per file, `cargo test -p wpd` 51/51.
 
 ## Measuring the fallbacks needs two no-asm builds
 

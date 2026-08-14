@@ -5,6 +5,10 @@ pub enum Error {
     InvalidData,
     NoMemory,
     TooLarge,
+    /// The input stops inside something the decoder was still reading.
+    Truncated,
+    /// The input is not a WebP file at all, rather than a damaged one.
+    NotWebp,
 }
 
 /// What a decode call stopped on: either the work asked for is finished, or
