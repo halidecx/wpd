@@ -274,21 +274,121 @@ a checkasm test.
 matrix never reaches this code. The struct keeps its C layout because
 `src/convert.c` still drives it through the inline helpers in `src/rescaler.h`.
 
-**`yuvdsp` — not yet.** See "The yuvdsp seam" below; it is the one Phase 1
-module whose file mixes the DSP table with the row drivers that consume it, so
-it needs a decision the others did not.
+**`yuvdsp` — done.** `crates/wpd/src/dsp/yuv.rs` and
+`crates/wpd-capi/src/dsp/yuv.rs`. The seam went where "The yuvdsp seam" below
+said it would: the table entries and `upsample_row` became Rust, and the four
+`wpd_yuv420_to_packed*` drivers came with them rather than staying in C.
+
+The packed layout is a const generic rather than a runtime argument, which is
+what the C got from expanding `YUV_TO_OUT` and `UPSAMPLE_PAIRS` once per layout.
+Two details are worth keeping:
+
+- The three-byte layouts have no alpha byte, and rather than branch, their
+  channel table aliases alpha onto red. The `0xff` store lands first and the red
+  store overwrites it, so the result is what `YUV_TO_OUT3` produces and the dead
+  store folds away.
+- `upsample_pairs` takes the index of the first output pixel it touches instead
+  of having the caller bias the pointers. The C block entry point passes
+  `top_y - 1` and `top_dst - bpp`; reproducing that literally would mean
+  building a slice that starts before the row, and checkasm hands that entry
+  point the very first byte of a stack buffer, so it is a real out-of-bounds
+  pointer and not a theoretical one.
+
+The gamma tables keep their C names through
+`#[cfg_attr(feature = "asm",
+export_name = ...)]`, because the assembly gathers
+from them directly. They are plain `pub static`s otherwise: `#[no_mangle]` and
+`#[export_name]` both trip the `unsafe_code` lint, so an unconditional attribute
+would break the `forbid(unsafe_code)` build.
 
 | Module     | with asm       | `-Denable_asm=false` |
 | ---------- | -------------- | -------------------- |
 | `vp8l_dsp` | 166.7 vs 166.6 | 200.1 vs 198.9       |
 | `vp8dsp`   | 210.4 vs 211.2 | 441.9 vs 407.1       |
 | `vp8pred`  | 210.9 vs 211.2 | 442.6 vs 406.1       |
+| `yuvdsp`   | 210.2 vs 212.6 | 270.8 vs 295.2       |
 
 Lossless figures are 50 iterations of `lossless.webp`, lossy ones 60 of
-`lossy.webp`. The shipping configuration is neutral throughout. The no-asm build
-is 8.6% slower on lossy content and unchanged on lossless; that cost is the
-bounds checks in the loop filter, and it is the trade the unsafe-budget decision
-explicitly accepted.
+`lossy.webp`; the `yuvdsp` row is 40 iterations, so its two columns are not
+comparable with the rows above, only with each other. The shipping configuration
+is neutral throughout. The no-asm build is 8.6% slower on lossy content and
+unchanged on lossless; that cost is the bounds checks in the loop filter, and it
+is the trade the unsafe-budget decision explicitly accepted.
+
+The upsampler's own row drivers are Rust in _both_ configurations, since they
+are never assembly. `anim_yuv.webp`, which is mostly upsampling, came out 3%
+faster with assembly enabled and 2% slower without it.
+
+**Phase 1 is complete.** The order it actually ran in was `cpu` → `vp8l_dsp` →
+`vp8dsp` → `vp8pred` → `rescaler` → `yuvdsp`.
+
+### Phase 1 addendum — `tools/` in Rust
+
+`tools/wpd.c`, `tools/md5.c` and the `tools/compat/` getopt shim are replaced by
+`crates/wpd-tool`. The binary links the same archive the library target stages,
+so it still reaches the decoder through the C ABI exactly as an outside consumer
+would; the bindings in `src/sys.rs` are hand-written for that reason rather than
+generated.
+
+The constraint here is that this binary _is_ the test harness —
+`scripts/md5check.sh`, `scripts/testdata.sh` and `scripts/animcheck.sh` all
+drive it — so its behaviour had to stay byte for byte identical. What was
+checked against the C tool: `--help`, `--info` (still and animated, streaming
+and whole-file), the exit codes for each malformed-argument path, and every
+muxer crossed with every pixel format on seven test files.
+
+That last check earned its keep. `WPDFrameInfo` declares `pos_x, pos_y` before
+`width, height`, the opposite of `WPDFrame`; transcribing it in the other order
+compiled, linked and ran, and only showed up as `--info` printing
+`0x0 at
+400,400`. A hand-written binding to a C ABI needs a differential test
+against something that already agrees with the header.
+
+Option parsing reproduces `getopt_long` with `opterr = 0` — clustered short
+options, `--name value` and `--name=value`, `--` to stop, operands and options
+interleaved. Unambiguous long-option abbreviation is the one thing left out;
+nothing in the tree uses it.
+
+`wpd-capi`'s lib name moved from `wpd` to `wpd_capi` so the archive can also
+ship as an rlib without colliding with the core crate's own `libwpd.rlib`.
+`tools/cargo_build.sh` stages it back to `libwpd.a`, so nothing downstream
+notices.
+
+The y4m writer is the one place the tool reaches past the public header, as the
+C tool did with `#include "yuvdsp.h"`. It now uses the real `WPDYUVDSP` type
+from `wpd-capi` instead of redeclaring it.
+
+### Phase 2 — scoped, not started
+
+`src/vp8.c` (1720 lines) plus `src/vp56rac.{c,h}` (350) is the next unit. The
+range coder cannot move on its own: everything hot in it is
+`static wpd_always_inline` in the header, so it is compiled into `vp8.c` and has
+no symbol to replace. Only four cold functions would actually change hands. It
+moves with its caller, as noted under the ordering correction below.
+
+The blocking question was how tightly `VP8Context` is wired into the rest of the
+C, since `struct WPDDecoder` embeds it **by value** alongside `HeaderScan` and
+both DSP tables. Porting it would mean either mirroring the layout of
+`WPDDecoder` in Rust or making the VP8 state opaque first.
+
+Counting the actual references settles it: `VP8Context` is reached through
+`codec.priv_data`, which is already a `void *`, and exactly two lines name it
+directly — `src/lossy.c:126` sets `priv_data = &s->vp8`, and `src/lossy.c:192`
+reads `s->vp8.frame`. Nothing else in the tree touches the struct.
+
+So the first step of Phase 2 is small: give `WPDDecoder` an opaque pointer
+instead of an embedded `VP8Context`, and add an accessor for the frame that
+`lossy.c` wants. After that the port only has to agree with `WpdCodecContext`,
+`WpdFrame`, `WpdPacket` and `VP8ResumeState` from `src/wpd_codec.h`, and
+`VP8Context` itself becomes private to Rust — no `#[repr(C)]` obligation, and
+therefore free to use `Vec` and slices for `top_border`, `top_nnz`,
+`filter_strength` and `intra4x4_pred_mode_top` rather than the four manual
+allocations `free_buffers()` currently juggles.
+
+The gates for it are `scripts/md5check.sh` against the C baseline, the testdata
+matrix (which covers lossy in every packed format), `tests/parity.c`, and
+`scripts/rac32.sh`, which forces the 32-bit range coder so the `WPD_RAC_64`
+fallback path is exercised rather than assumed.
 
 ## Measuring the fallbacks needs two no-asm builds
 
@@ -353,7 +453,7 @@ first access, which the tests catch; too large is inert, since the kernel never
 touches what it does not read. But only an exact extent is a correct
 `from_raw_parts`, so each one is spelled out beside the kernel it wraps.
 
-## The yuvdsp seam
+## The yuvdsp seam (resolved)
 
 `src/yuvdsp.c` is the one Phase 1 file that is not purely a DSP table. Its 843
 lines are two halves:
