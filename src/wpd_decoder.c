@@ -178,11 +178,13 @@ WPDDecoder *wpd_decoder_create(void) {
     if (!decoder)
         return NULL;
     wpd_init_cpu();
-    decoder->vp8l = vp8l_alloc();
-    decoder->scan = scan_alloc();
-    if (!decoder->vp8l || !decoder->scan) {
+    decoder->vp8l  = vp8l_alloc();
+    decoder->scan  = scan_alloc();
+    decoder->input = input_alloc();
+    if (!decoder->vp8l || !decoder->scan || !decoder->input) {
         vp8l_free(&decoder->vp8l);
         scan_free(&decoder->scan);
+        input_free(&decoder->input);
         free(decoder);
         return NULL;
     }
@@ -352,9 +354,7 @@ static void decoder_reset(WPDDecoder *decoder) {
     memset(&decoder->subframe, 0, sizeof(decoder->subframe));
     memset(&decoder->argb, 0, sizeof(decoder->argb));
     memset(&decoder->alpha_argb, 0, sizeof(decoder->alpha_argb));
-    decoder->file_size = 0;
-    decoder->discarded = 0;
-    decoder->file      = decoder->file_alloc;
+    input_reset(decoder->input);
     scan_reset(decoder->scan);
     memset(&decoder->scanned, 0, sizeof(decoder->scanned));
     decoder->pos = decoder->end = 0;
@@ -363,7 +363,6 @@ static void decoder_reset(WPDDecoder *decoder) {
     decoder->eos                = 0;
     decoder->headers_valid      = 0;
     decoder->truncated          = 0;
-    decoder->borrowed           = 0;
     decoder->input_mode         = 0;
     decoder->animation          = 0;
     decoder->canvas_width = decoder->canvas_height = 0;
@@ -383,42 +382,15 @@ static void decoder_reset(WPDDecoder *decoder) {
 /* Drops input the decoder can no longer look at. The chunk at 'pos' is kept
    whole: a VP8 chunk decoded row by row keeps range coders pointing into it
    until the frame is done, and those are rebased on the next step. */
+/* Drops input the decoder can no longer look at. The chunk at 'pos' is kept
+   whole: a VP8 chunk decoded row by row keeps range coders pointing into it
+   until the frame is done, and those are rebased on the next step. */
 static void file_compact(WPDDecoder *decoder) {
     size_t keep = decoder->pos;
 
     if (decoder->alpha_pending && decoder->alpha_data_offset < keep)
         keep = decoder->alpha_data_offset;
-    if (keep < decoder->discarded || keep - decoder->discarded < 1 << 16)
-        return;
-
-    memmove(decoder->file_alloc,
-            file_at(decoder, keep),
-            decoder->file_size - keep + WPD_FILE_PADDING);
-    decoder->file      = decoder->file_alloc;
-    decoder->discarded = keep;
-}
-
-static WPDStatus file_reserve(WPDDecoder *decoder, size_t size) {
-    const size_t buffered = file_buffered(decoder);
-    const size_t needed   = buffered + size + WPD_FILE_PADDING;
-    size_t       capacity;
-    uint8_t     *grown;
-
-    if (size > (size_t)INT_MAX - WPD_FILE_PADDING ||
-        buffered > (size_t)INT_MAX - WPD_FILE_PADDING - size)
-        return WPD_ERR_TOO_LARGE;
-    if (decoder->file_capacity >= needed)
-        return WPD_OK;
-
-    capacity = decoder->file_capacity ? decoder->file_capacity : 1 << 16;
-    while (capacity < needed) capacity *= 2;
-    grown = realloc(decoder->file_alloc, capacity);
-    if (!grown)
-        return WPD_ERR_NO_MEMORY;
-    decoder->file_alloc    = grown;
-    decoder->file          = grown;
-    decoder->file_capacity = capacity;
-    return WPD_OK;
+    input_compact(decoder->input, keep);
 }
 
 /* Takes a copy of each metadata chunk the scanner has reached, since the
@@ -432,8 +404,9 @@ static WPDStatus capture_metadata(WPDDecoder *decoder) {
 
         if (!offset || decoder->meta[i])
             continue;
-        if (offset < decoder->discarded || offset > decoder->file_size ||
-            size > decoder->file_size - offset)
+        if (offset < input_discarded(decoder->input) ||
+            offset > input_size(decoder->input) ||
+            size > input_size(decoder->input) - offset)
             continue;
         decoder->meta[i] = malloc(size);
         if (!decoder->meta[i])
@@ -448,12 +421,13 @@ static WPDStatus rescan_headers(WPDDecoder *decoder) {
     const ScanInfo *hs = &decoder->scanned;
     WPDStatus       status, meta;
 
-    status = scan_headers(decoder->scan,
-                          decoder->file,
-                          decoder->discarded,
-                          decoder->file_size,
-                          decoder->streaming,
-                          1);
+    status = scan_headers(
+        decoder->scan,
+        input_at(decoder->input, input_discarded(decoder->input)),
+        input_discarded(decoder->input),
+        input_size(decoder->input),
+        decoder->streaming,
+        1);
     /* Read back whatever the walk reached, error or not: a stream whose
        headers are merely incomplete keeps decoding from what has arrived. */
     scan_info(decoder->scan, &decoder->scanned);
@@ -504,23 +478,18 @@ WPDStatus wpd_decoder_open(WPDDecoder *decoder, const uint8_t *data,
 
     decoder_reset(decoder);
 
-    status = file_reserve(decoder, size);
+    status = input_own(decoder->input, data, size);
     if (status != WPD_OK)
         return set_error(decoder, "cannot buffer input", status);
-    memcpy(decoder->file_alloc, data, size);
-    memset(decoder->file_alloc + size, 0, WPD_FILE_PADDING);
-    decoder->file      = decoder->file_alloc;
-    decoder->file_size = size;
-    decoder->discarded = 0;
 
     status = rescan_headers(decoder);
     if (status != WPD_OK) {
-        decoder->file_size = 0;
+        input_reset(decoder->input);
         return set_error(decoder, "cannot read headers", status);
     }
     status = check_final_headers(decoder, "file ends inside a chunk");
     if (status != WPD_OK) {
-        decoder->file_size     = 0;
+        input_reset(decoder->input);
         decoder->headers_valid = 0;
         return status;
     }
@@ -539,9 +508,7 @@ WPDStatus wpd_decoder_open_borrowed(WPDDecoder *decoder, const uint8_t *data,
         return set_error(decoder, "invalid input data", WPD_ERR_INVALID_ARG);
 
     decoder_reset(decoder);
-    decoder->file      = data;
-    decoder->file_size = size;
-    decoder->borrowed  = 1;
+    input_borrow(decoder->input, data, size);
 
     status = rescan_headers(decoder);
     if (status != WPD_OK)
@@ -549,9 +516,7 @@ WPDStatus wpd_decoder_open_borrowed(WPDDecoder *decoder, const uint8_t *data,
     else
         status = check_final_headers(decoder, "file ends inside a chunk");
     if (status != WPD_OK) {
-        decoder->file          = decoder->file_alloc;
-        decoder->file_size     = 0;
-        decoder->borrowed      = 0;
+        input_reset(decoder->input);
         decoder->headers_valid = 0;
         return status;
     }
@@ -587,12 +552,9 @@ WPDStatus wpd_decoder_append(WPDDecoder *decoder, const uint8_t *data,
     decoder->input_mode = 1;
 
     file_compact(decoder);
-    status = file_reserve(decoder, size);
+    status = input_append(decoder->input, data, size);
     if (status != WPD_OK)
         return set_error(decoder, "cannot buffer input", status);
-    memcpy(decoder->file_alloc + file_buffered(decoder), data, size);
-    decoder->file_size += size;
-    memset(decoder->file_alloc + file_buffered(decoder), 0, WPD_FILE_PADDING);
 
     status = rescan_headers(decoder);
     /* Headers that are merely incomplete are the normal state of a stream. */
@@ -616,22 +578,17 @@ WPDStatus wpd_decoder_update(WPDDecoder *decoder, const uint8_t *data,
     if (decoder->input_mode == 1)
         return set_error(
             decoder, "cannot mix append and update", WPD_ERR_INVALID_ARG);
-    if (size < decoder->file_size)
+    if (size < input_size(decoder->input))
         return set_error(decoder, "stream buffer shrank", WPD_ERR_INVALID_ARG);
 
     decoder->input_mode = 2;
-    decoder->borrowed   = 1;
-    decoder->file       = data;
-    decoder->file_size  = size;
-    decoder->discarded  = 0;
+    input_borrow(decoder->input, data, size);
 
     status = rescan_headers(decoder);
     if (status == WPD_ERR_TRUNCATED)
         return WPD_OK;
     if (status != WPD_OK) {
-        decoder->file          = decoder->file_alloc;
-        decoder->file_size     = 0;
-        decoder->borrowed      = 0;
+        input_reset(decoder->input);
         decoder->headers_valid = 0;
         return set_error(decoder, "cannot read headers", status);
     }
@@ -1241,7 +1198,7 @@ void wpd_decoder_free(WPDDecoder *decoder) {
     scan_free(&decoder->scan);
     image_scratch_free(&decoder->rescale);
     free(decoder->alpha_plane);
-    free(decoder->file_alloc);
+    input_free(&decoder->input);
     free(decoder);
 }
 

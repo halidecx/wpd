@@ -2,6 +2,7 @@
 #define WPD_DEC_H
 
 #include "container.h"
+#include "input.h"
 #include "rescaler.h"
 #include "vp8.h"
 #include "vp8l.h"
@@ -29,12 +30,9 @@ struct WPDDecoder {
     int               premultiply;
     WPDDecoderOptions options;
 
-    const uint8_t *file;
-    uint8_t       *file_alloc;
-    size_t         file_size;
-    size_t         discarded;
-    size_t         pos, end;
-    HeaderScan    *scan;
+    InputBuffer *input;
+    size_t       pos, end;
+    HeaderScan  *scan;
     /* What the last scan found, refreshed on every rescan. */
     ScanInfo       scanned;
     int            animation;
@@ -94,14 +92,12 @@ struct WPDDecoder {
     uint8_t *meta[WPD_METADATA_NB];
     size_t   meta_size[WPD_METADATA_NB];
 
-    size_t file_capacity;
-    int    opened;
-    int    streaming;
-    int    eos;
-    int    headers_valid;
-    int    truncated;
-    int    borrowed;
-    int    input_mode;
+    int opened;
+    int streaming;
+    int eos;
+    int headers_valid;
+    int truncated;
+    int input_mode;
 
     WPDOutputPlane ext[4];
     int            ext_active;
@@ -110,12 +106,8 @@ struct WPDDecoder {
     char      error[128];
 };
 
-static inline size_t file_buffered(const WPDDecoder *decoder) {
-    return decoder->file_size - decoder->discarded;
-}
-
 static inline const uint8_t *file_at(const WPDDecoder *decoder, size_t offset) {
-    return decoder->file + (offset - decoder->discarded);
+    return input_at(decoder->input, offset);
 }
 
 static inline void update_canvas_size(WPDDecoder *s, int w, int h) {

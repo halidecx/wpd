@@ -86,8 +86,9 @@ int decode_anmf(WPDDecoder *s, const uint8_t *data, size_t size) {
                 return WPD_ERROR_INVALID_DATA;
             }
             int alpha_header     = p[0];
-            s->alpha_data_offset = s->discarded + (size_t)(p + 1 - s->file);
-            s->alpha_data_size   = payload_size - 1;
+            s->alpha_data_offset = input_discarded(s->input) +
+                (size_t)(p + 1 - input_at(s->input, input_discarded(s->input)));
+            s->alpha_data_size = payload_size - 1;
 
             int filter_m    = (alpha_header >> 2) & 0x03;
             int compression = alpha_header & 0x03;
