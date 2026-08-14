@@ -97,10 +97,11 @@ Each gets a measurement at the phase that ports it.
 | 1 | VP8L entropy pixel loop — bounds checks on `base[4 * pos..]` | not yet |
 | 2 | `copy_block32` overlapping LZ77 copy                         | not yet |
 | 3 | `huff_read_symbol` table indexing                            | not yet |
-| 4 | VP56 range coder refill near the buffer end                  | not yet |
+| 4 | VP56 range coder refill near the buffer end                  | clear   |
 | 5 | yuvdsp row glue under `--no-default-features`                | not yet |
 | 6 | `Vec` zeroing vs `calloc` on large canvases                  | not yet |
 | 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
+| 8 | DSP wrapper call per kernel invocation, Tier A vs raw symbol | clear   |
 
 ## Milestones
 
@@ -378,37 +379,115 @@ The y4m writer is the one place the tool reaches past the public header, as the
 C tool did with `#include "yuvdsp.h"`. It now uses the real `WPDYUVDSP` type
 from `wpd-capi` instead of redeclaring it.
 
-### Phase 2 — scoped, not started
+### Phase 2 — `vp8.c` and `vp56rac` in Rust
 
-`src/vp8.c` (1720 lines) plus `src/vp56rac.{c,h}` (350) is the next unit. The
-range coder cannot move on its own: everything hot in it is
-`static wpd_always_inline` in the header, so it is compiled into `vp8.c` and has
-no symbol to replace. Only four cold functions would actually change hands. It
-moves with its caller, as noted under the ordering correction below.
+1720 lines of lossy frame decoder plus 350 of range coder leave the tree. What
+replaces them is `crates/wpd/src/vp8/`, which contains no `unsafe`.
 
-The blocking question was how tightly `VP8Context` is wired into the rest of the
-C, since `struct WPDDecoder` embeds it **by value** alongside `HeaderScan` and
-both DSP tables. Porting it would mean either mirroring the layout of
-`WPDDecoder` in Rust or making the VP8 state opaque first.
+**Making the state opaque first paid for itself twice over.**
+`struct
+WPDDecoder` embedded `VP8Context` by value, and only two lines in the
+tree named it. Replacing it with a pointer was a prerequisite for the port —
+otherwise Rust would have had to mirror `WPDDecoder`'s layout as well — but it
+also turned out to be the single largest speed-up of the project so far: **1.9x
+on lossy, 1.18x on lossless**, against a decoder whose lossless path that commit
+does not touch at all. `VP8Context` is several kilobytes of probability tables
+and coefficient blocks, and it sat in the middle of the struct holding `ldsp`,
+`ydsp` and the VP8L cursor fields that the pixel loops reload constantly. Taking
+it out compacted everything the hot loops read into far fewer cache lines. The
+same shape as the aliasing-hoist win recorded below, at a different scale.
 
-Counting the actual references settles it: `VP8Context` is reached through
-`codec.priv_data`, which is already a `void *`, and exactly two lines name it
-directly — `src/lossy.c:126` sets `priv_data = &s->vp8`, and `src/lossy.c:192`
-reads `s->vp8.frame`. Nothing else in the tree touches the struct.
+**Two things are expressed differently from the C.**
 
-So the first step of Phase 2 is small: give `WPDDecoder` an opaque pointer
-instead of an embedded `VP8Context`, and add an accessor for the frame that
-`lossy.c` wants. After that the port only has to agree with `WpdCodecContext`,
-`WpdFrame`, `WpdPacket` and `VP8ResumeState` from `src/wpd_codec.h`, and
-`VP8Context` itself becomes private to Rust — no `#[repr(C)]` obligation, and
-therefore free to use `Vec` and slices for `top_border`, `top_nnz`,
-`filter_strength` and `intra4x4_pred_mode_top` rather than the four manual
-allocations `free_buffers()` currently juggles.
+Each plane is one flat `Vec<u8>` addressed by offset rather than an interior
+pointer. The decoder deliberately reads and writes outside the visible frame:
+the left border column at `dst[-1]`, the row above the first macroblock, the
+four samples above and to the right of a subblock. Against a flat allocation
+those are ordinary indices. This is playbook item 1, and it is what lets the
+entire macroblock loop be safe code rather than a wall of `unsafe`.
 
-The gates for it are `scripts/md5check.sh` against the C baseline, the testdata
-matrix (which covers lossy in every packed format), `tests/parity.c`, and
-`scripts/rac32.sh`, which forces the 32-bit range coder so the `WPD_RAC_64`
-fallback path is exercised rather than assumed.
+The range coders hold offsets instead of pointers, which deletes
+`wpd_vp56_save_offsets` and `wpd_vp56_restore_offsets` outright. The C had to
+re-point three raw pointers into the chunk after every streaming append that
+reallocated it; an offset cannot be invalidated that way. The chunk arrives as a
+`&[u8]` argument per call, so a coder that outlives the buffer it was reading is
+not expressible.
+
+**The DSP tables grew their safe tier.** A Tier A entry takes the plane and the
+offset of the position it acts on; the wrapper in `wpd::asm` turns those two
+numbers into the pointer the assembly wants, after checking the plane reaches
+that far. Because a table field is a plain `fn` pointer with nowhere to keep a
+symbol, each assembly entry point is a marker type carrying the symbol as an
+associated constant, and one generic wrapper body monomorphises into a distinct
+function per instruction set. That also let every symbol move to a single
+declaration site: `wpd-capi` now builds its C ABI table from the same items, so
+there is no second list of `#[link_name]`s to drift, and `checkasm --bench`
+still sees bare symbols.
+
+### The two chroma planes cannot share one offset
+
+The C passed `dst[1]` and `dst[2]` to the chroma loop filters as two pointers.
+The obvious Rust translation gives the entry the two plane slices and one shared
+offset, since U and V have identical geometry.
+
+They do not. Each plane is its own allocation, and the padding each needs to put
+its rows on a 64-byte boundary depends on where the allocator happened to put
+it, so their origins differ. Filtering V at U's offset is wrong by whatever that
+difference is.
+
+It survived every gate that only looks at whole-frame output for content whose
+dimensions are a multiple of 16, and `md5check.sh` caught it on the five inputs
+that are not — sixteen bytes differed in the V plane, in adjacent pairs at
+multiples of four, which is the signature of a subblock edge filtered in the
+wrong place. The rule to carry forward: an offset belongs to an allocation, and
+two allocations do not share one, however alike their shapes.
+
+### Closing the 3% the safe version started with
+
+The port arrived 2-3% slower and three changes closed it. Each was found by
+profile, not by guessing, and the first guess was wrong every time.
+
+The innermost coefficient loop passed the eleven-byte probability array **by
+value** where the C kept a pointer, copying it per token. Taking a reference
+(with a lifetime tying it to `probs`) recovered lossy on its own.
+
+`decode_mb_coeffs`, `xchg_mb_border`, `intra_predict`, `idct_mb` and the two
+filter helpers are `wpd_always_inline` in the C and were not being inlined here.
+Marking them `#[inline(always)]` made the profile match the C's shape exactly —
+`decode_rows_tmpl` plus `decode_coeffs_inner` came to 48.1% against the C's
+47.9% — but did not move the wall clock, which was the clue that the remaining
+cost was instruction count rather than call overhead. Pinned to one core: 1400M
+instructions in 469M cycles for the C, 1586M in 480M for Rust. 13% more
+instructions absorbed by better IPC into 2.3% more cycles.
+
+Those instructions were bounds checks. `block[ZIGZAG_SCAN[i] as usize]` indexes
+a sixteen-entry array with a table value the compiler cannot bound, so `& 15` —
+a no-op on every entry the table holds — removes the check. And
+`decode_mb_coeffs` reached through `self.top_nnz[mb_x]` thirteen times; taking a
+copy of the row, working on it and writing it back at the end is what the C did
+by holding a pointer to it, and costs nothing.
+
+Do not measure on a hybrid CPU without `taskset`. An unpinned three-way
+comparison put one binary on an efficiency core and reported a 19% difference
+between two builds whose code for that input is byte-identical.
+
+**Results**, pinned, 15 runs, `--repeat 60`, against `3a5e80d` (same tree, VP8
+still in C) and against the C baseline `d241ef8`:
+
+| file           | vs pre-port | vs C baseline |
+| -------------- | ----------- | ------------- |
+| lossy          | 1.01x       | 1.92x         |
+| a_lossy        | 1.00x       | 1.83x         |
+| simplelf-lossy | 1.01x       | 1.41x         |
+| anim_yuv       | 1.01x       | 1.28x         |
+| anim_yuva      | 1.01x       | 1.15x         |
+| lossless       | 1.00x       | 1.18x         |
+
+Gates: `checkasm` 151/151, `meson test` 186/186, `clicheck.sh` 794/794,
+`testdata.sh` across five configurations, `animcheck.sh`, `rac32.sh` 186/186
+(which is what exercises the 32-bit range coder — its own module, not a
+compile-time variant of the 64-bit one), `md5check.sh`, `sanitize.sh` 186 and
+185, `fuzz.sh` 300 trials per file.
 
 ## Measuring the fallbacks needs two no-asm builds
 

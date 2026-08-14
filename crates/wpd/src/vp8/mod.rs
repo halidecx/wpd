@@ -662,6 +662,7 @@ impl Decoder {
             self.c.get_tree(buf, &PRED8X8C_TREE, &PRED8X8C_PROB_INTRA);
     }
 
+    #[inline(always)]
     fn decode_mb_coeffs(
         &mut self,
         buf: &[u8],
@@ -674,9 +675,11 @@ impl Decoder {
         let mut luma_ctx = 3;
         let mut block_dc = 0;
         let segment = self.segment;
+        let mut t_nnz = self.top_nnz[mb_x];
+        let mut l_nnz = self.left_nnz;
 
         if mb.mode != MODE_I4 {
-            let nnz_pred = i32::from(self.top_nnz[mb_x][8] + self.left_nnz[8]);
+            let nnz_pred = i32::from(t_nnz[8]) + i32::from(l_nnz[8]);
             let qmul = self.qmat[segment].luma_dc_qmul;
             let nnz = decode_block_coeffs(
                 &mut self.coeff_partition[part],
@@ -688,8 +691,8 @@ impl Decoder {
                 qmul,
             );
 
-            self.top_nnz[mb_x][8] = u8::from(nnz != 0);
-            self.left_nnz[8] = u8::from(nnz != 0);
+            t_nnz[8] = u8::from(nnz != 0);
+            l_nnz[8] = u8::from(nnz != 0);
             if nnz != 0 {
                 nnz_total += nnz;
                 block_dc = 1;
@@ -709,8 +712,7 @@ impl Decoder {
 
         for y in 0..4 {
             for x in 0..4 {
-                let nnz_pred =
-                    i32::from(self.left_nnz[y]) + i32::from(self.top_nnz[mb_x][x]);
+                let nnz_pred = i32::from(l_nnz[y]) + i32::from(t_nnz[x]);
                 let qmul = self.qmat[segment].luma_qmul;
                 let nnz = decode_block_coeffs(
                     &mut self.coeff_partition[part],
@@ -723,8 +725,8 @@ impl Decoder {
                 );
 
                 self.non_zero_count_cache[y][x] = (nnz + block_dc) as u8;
-                self.top_nnz[mb_x][x] = u8::from(nnz != 0);
-                self.left_nnz[y] = u8::from(nnz != 0);
+                t_nnz[x] = u8::from(nnz != 0);
+                l_nnz[y] = u8::from(nnz != 0);
                 nnz_total += nnz;
             }
         }
@@ -732,8 +734,8 @@ impl Decoder {
         for i in 4..6 {
             for y in 0..2 {
                 for x in 0..2 {
-                    let nnz_pred = i32::from(self.left_nnz[i + 2 * y])
-                        + i32::from(self.top_nnz[mb_x][i + 2 * x]);
+                    let nnz_pred =
+                        i32::from(l_nnz[i + 2 * y]) + i32::from(t_nnz[i + 2 * x]);
                     let qmul = self.qmat[segment].chroma_qmul;
                     let nnz = decode_block_coeffs(
                         &mut self.coeff_partition[part],
@@ -746,12 +748,15 @@ impl Decoder {
                     );
 
                     self.non_zero_count_cache[i][(y << 1) + x] = nnz as u8;
-                    self.top_nnz[mb_x][i + 2 * x] = u8::from(nnz != 0);
-                    self.left_nnz[i + 2 * y] = u8::from(nnz != 0);
+                    t_nnz[i + 2 * x] = u8::from(nnz != 0);
+                    l_nnz[i + 2 * y] = u8::from(nnz != 0);
                     nnz_total += nnz;
                 }
             }
         }
+
+        self.top_nnz[mb_x] = t_nnz;
+        self.left_nnz = l_nnz;
 
         // An empty coefficient block skips both IDCT and the inner loop filter.
         if nnz_total == 0 {
@@ -759,6 +764,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn backup_mb_border(&mut self, mb_x: usize, off: [usize; 3], simple: bool) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
@@ -778,6 +784,7 @@ impl Decoder {
 
     /// Moves eight bytes between the saved macroblock border and the plane, in
     /// whichever direction `swap` asks for. `WPD_SWAP64`/`WPD_COPY64` in the C.
+    #[inline(always)]
     fn xchg8(&mut self, tb: usize, to: usize, plane: usize, po: usize, swap: bool) {
         let border: [u8; 8] = self.top_border[tb][to..to + 8].try_into().unwrap();
         let data = &mut self.picture.planes[plane].data;
@@ -790,6 +797,7 @@ impl Decoder {
         data[po..po + 8].copy_from_slice(&border);
     }
 
+    #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn xchg_mb_border(
         &mut self,
@@ -822,6 +830,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn intra_predict(
         &mut self,
         mb: &Macroblock,
@@ -903,6 +912,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn idct_mb(&mut self, mb: &Macroblock, off: [usize; 3]) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
@@ -1005,6 +1015,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn filter_level_for_mb(&self, mb: &Macroblock) -> FilterStrength {
         let mut filter_level = if self.segmentation.enabled {
             let level = i32::from(self.segmentation.filter_level[self.segment]);
@@ -1041,6 +1052,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn filter_mb(
         &mut self,
         off: [usize; 3],
@@ -1189,6 +1201,7 @@ impl Decoder {
         }
     }
 
+    #[inline(always)]
     fn filter_mb_simple(
         &mut self,
         off: usize,
@@ -1523,13 +1536,13 @@ fn check_intra_pred8x8_mode(mode: usize, mb_x: usize, mb_y: usize) -> usize {
 /// nested loops here have the same shape: the inner one is the zero run and
 /// falls through to a coefficient, and the outer one tests for end of block
 /// only after a coefficient has been read.
-fn decode_coeffs_inner(
+fn decode_coeffs_inner<'p>(
     c: &mut RangeCoder,
     buf: &[u8],
     block: &mut [i16; 16],
-    probs: &[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16],
+    probs: &'p [[[u8; NUM_DCT_TOKENS - 1]; 3]; 16],
     mut i: usize,
-    mut token_prob: [u8; NUM_DCT_TOKENS - 1],
+    mut token_prob: &'p [u8; NUM_DCT_TOKENS - 1],
     qmul: [i16; 2],
 ) -> i32 {
     loop {
@@ -1538,7 +1551,7 @@ fn decode_coeffs_inner(
             if i == 16 {
                 return i as i32;
             }
-            token_prob = probs[i][0];
+            token_prob = &probs[i][0];
         }
 
         let coeff;
@@ -1573,14 +1586,14 @@ fn decode_coeffs_inner(
             next_ctx = 2;
         }
 
-        block[ZIGZAG_SCAN[i] as usize] =
+        block[ZIGZAG_SCAN[i] as usize & 15] =
             (c.get_signed(buf, coeff) * i32::from(qmul[usize::from(i != 0)])) as i16;
 
         i += 1;
         if i >= 16 {
             return i as i32;
         }
-        token_prob = probs[i][next_ctx];
+        token_prob = &probs[i][next_ctx];
         if !c.get_prob_branchy(buf, token_prob[0]) {
             return i as i32;
         }
@@ -1598,7 +1611,7 @@ fn decode_block_coeffs(
     zero_nhood: i32,
     qmul: [i16; 2],
 ) -> i32 {
-    let token_prob = probs[i][zero_nhood as usize];
+    let token_prob = &probs[i][zero_nhood as usize];
 
     if !c.get_prob_branchy(buf, token_prob[0]) {
         return 0;
