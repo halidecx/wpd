@@ -14,3 +14,4 @@
 
 mod cpu;
 mod dsp;
+mod rescale;
