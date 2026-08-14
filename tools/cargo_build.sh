@@ -29,7 +29,7 @@ esac
 cargo "${args[@]}"
 
 built="$OUT_DIR/cargo-$NAME/$PROFILE"
-cp -f "$built/libwpd.a" "$OUT_DIR/lib$NAME.a"
+cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"
 
 # Only the installed configuration needs a shared library.
 [ "$NAME" = wpd ] || exit 0

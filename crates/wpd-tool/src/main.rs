@@ -1,0 +1,790 @@
+//! The `wpd` command-line decoder.
+//!
+//! Option parsing reproduces what `getopt_long` gave the C tool — clustered
+//! short options, `--name value` and `--name=value`, `--` to stop — because
+//! `scripts/md5check.sh`, `scripts/testdata.sh` and the testdata suite all
+//! drive this binary and its output has to stay byte for byte what it was.
+
+mod md5;
+mod output;
+mod sys;
+
+use std::io::{Read, Write};
+use std::process::ExitCode;
+
+use output::{format_name, Muxer, Output, PIXEL_FORMATS};
+use sys::*;
+
+const VCS_VERSION: &str = env!("WPD_VCS_VERSION");
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+const CPU_MASK_NAMES: &str = "sse, sse2, ssse3, sse41, avx2, none";
+#[cfg(target_arch = "arm")]
+const CPU_MASK_NAMES: &str = "armv6, neon, none";
+#[cfg(target_arch = "aarch64")]
+const CPU_MASK_NAMES: &str = "neon, none";
+#[cfg(not(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "arm",
+    target_arch = "aarch64"
+)))]
+const CPU_MASK_NAMES: &str = "none";
+
+/// Named CPU masks, each including everything it implies, as `tools/wpd.c`
+/// spelled them out.
+fn cpu_masks() -> Vec<(&'static str, u32)> {
+    #[allow(unused_mut)]
+    let mut masks: Vec<(&'static str, u32)> = Vec::new();
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        use wpd::cpu::CpuFlags as F;
+
+        let sse = F::SSE.bits();
+        let sse2 = sse | F::SSE2.bits();
+        let ssse3 = sse2 | F::SSSE3.bits();
+        let sse41 = ssse3 | F::SSE41.bits();
+
+        masks.push(("sse", sse));
+        masks.push(("sse2", sse2));
+        masks.push(("ssse3", ssse3));
+        masks.push(("sse41", sse41));
+        masks.push(("avx2", sse41 | F::AVX2.bits()));
+    }
+    #[cfg(target_arch = "arm")]
+    {
+        use wpd::cpu::CpuFlags as F;
+
+        masks.push(("armv6", F::ARMV6.bits()));
+        masks.push(("neon", F::NEON.bits() | F::ARMV6.bits()));
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        masks.push(("neon", wpd::cpu::CpuFlags::NEON.bits()));
+    }
+    masks.push(("none", 0));
+    masks
+}
+
+fn print_banner() {
+    eprintln!(
+        "wpd by Halide Compression, LLC | {} | {VCS_VERSION}",
+        unsafe { cstr(wpd_version_string()) }
+    );
+}
+
+const USAGE_HEAD: &str = concat!(
+    "\noptions:\n",
+    " -h, --help\n",
+    "    view help menu\n",
+    " -r, --repeat u32\n",
+    "    repeat decode for benchmarking (1..INT_MAX); default 1\n",
+    " -f, --fmt str\n",
+    "    output pixel format; default auto. one of\n",
+    "    auto, yuv420p, yuva420p,\n",
+    "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA,\n",
+    "    rgb565, rgba4444, rgbA4444,\n",
+    "    bgr565, bgra4444, bgrA4444\n",
+    "    the packed formats convert lossy frames and match the\n",
+    "    like-named libwebp colorspace bit-exactly; a lowercase\n",
+    "    letter marks the channels alpha is multiplied into, and\n",
+    "    the bgr 16-bit ones swap the two bytes of every pixel\n",
+    " --muxer str\n",
+    "    output muxer (raw, md5, ppm, pam, y4m); default is selected\n",
+    "    from a .ppm, .pam or .y4m output extension, or raw\n",
+    " --verify md5\n",
+    "    verify decoded md5; implies --muxer md5 and no output\n",
+    " --cpumask str\n",
+    "    restrict the instruction sets used; ",
+);
+
+const USAGE_TAIL: &str = concat!(
+    "    or a number; default all detected\n",
+    " --info\n",
+    "    print canvas, animation, the frame table and per-frame\n",
+    "    timing to stdout\n",
+    " --stream u32\n",
+    "    decode incrementally, appending this many bytes at a time,\n",
+    "    instead of opening the file whole\n",
+    " --subframe\n",
+    "    yield each animation sub-frame uncomposited, with its own\n",
+    "    dimensions and canvas offset, instead of a finished canvas\n",
+    " --loops u32\n",
+    "    replay the animation this many times, rewinding between\n",
+    "    passes; --stream, which cannot be rewound, reopens instead.\n",
+    "    only the first pass is written out. default 1\n",
+);
+
+fn usage(app: &str, reason: Option<&str>) {
+    if let Some(reason) = reason {
+        eprintln!("\n{reason}");
+    }
+    eprint!("\nusage:  {app} [options] input [output]\n");
+    eprint!("{USAGE_HEAD}{CPU_MASK_NAMES},\n{USAGE_TAIL}");
+}
+
+fn parse_repeat(value: &str) -> Option<i32> {
+    if value.starts_with('-') {
+        return None;
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v >= 1 && *v <= i32::MAX as u64)
+        .map(|v| v as i32)
+}
+
+fn parse_format(value: &str) -> Option<(Option<&'static str>, WPDPixelFormat)> {
+    if value == "auto" {
+        return Some((None, WPD_PIX_FMT_NONE));
+    }
+    PIXEL_FORMATS
+        .iter()
+        .find(|(name, _)| *name == value)
+        .map(|(name, format)| (Some(*name), *format))
+}
+
+/// `strtoul(value, &end, 0)`: decimal, or `0x`-prefixed hex, or octal.
+fn parse_cpumask(value: &str) -> Option<u32> {
+    if let Some((_, mask)) = cpu_masks().iter().find(|(name, _)| *name == value) {
+        return Some(*mask);
+    }
+    if value.starts_with('-') {
+        return None;
+    }
+    let (digits, radix) = if let Some(rest) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (rest, 16)
+    } else if value.len() > 1 && value.starts_with('0') {
+        (&value[1..], 8)
+    } else {
+        (value, 10)
+    };
+
+    u32::from_str_radix(digits, radix).ok()
+}
+
+fn warn_baseline_cpumask(mask: u32) {
+    if cfg!(feature = "trim_dsp") {
+        let forced = wpd::cpu::CpuFlags::compile_time().bits() & !mask;
+
+        if forced != 0 {
+            eprintln!(
+                "warning: cannot disable flags 0x{forced:x} below the build \
+                 target; reconfigure with -Dtrim_dsp=false"
+            );
+        }
+    }
+}
+
+fn parse_md5(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32 {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut digest = [0u8; 16];
+
+    for (i, out) in digest.iter_mut().enumerate() {
+        let hi = (bytes[2 * i] as char).to_digit(16)?;
+        let lo = (bytes[2 * i + 1] as char).to_digit(16)?;
+
+        *out = (hi * 16 + lo) as u8;
+    }
+    Some(digest)
+}
+
+#[derive(Default)]
+struct Options {
+    repeat: i32,
+    loops: i32,
+    stream: usize,
+    info: bool,
+    subframe: bool,
+    muxer: Option<String>,
+    verify: Option<String>,
+    pixel_format: Option<&'static str>,
+    out_format: WPDPixelFormat,
+    positional: Vec<String>,
+}
+
+enum Parsed {
+    Ok(Box<Options>),
+    Help,
+    Bad(&'static str),
+}
+
+/// Reproduces `getopt_long` with `opterr = 0`: options and operands may be
+/// interleaved, `--` ends the options, and a long option takes its value
+/// either after `=` or as the next argument.
+fn parse_args(argv: &[String]) -> Parsed {
+    let mut o = Options {
+        repeat: 1,
+        loops: 1,
+        out_format: WPD_PIX_FMT_NONE,
+        ..Default::default()
+    };
+    let mut i = 1;
+    let mut only_operands = false;
+
+    while i < argv.len() {
+        let arg = &argv[i];
+
+        i += 1;
+        if only_operands || arg == "-" || !arg.starts_with('-') {
+            o.positional.push(arg.clone());
+            continue;
+        }
+        if arg == "--" {
+            only_operands = true;
+            continue;
+        }
+
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, inline) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_owned())),
+                None => (long, None),
+            };
+            let mut value = || match inline.clone() {
+                Some(v) => Some(v),
+                None => {
+                    let v = argv.get(i).cloned();
+                    if v.is_some() {
+                        i += 1;
+                    }
+                    v
+                }
+            };
+
+            match name {
+                "help" => return Parsed::Help,
+                "repeat" => match value().as_deref().and_then(parse_repeat) {
+                    Some(v) => o.repeat = v,
+                    None => {
+                        return Parsed::Bad("invalid repeat value; expected 1..INT_MAX")
+                    }
+                },
+                "fmt" => match value().as_deref().and_then(parse_format) {
+                    Some((name, format)) => {
+                        o.pixel_format = name;
+                        o.out_format = format;
+                    }
+                    None => return Parsed::Bad("invalid output pixel format"),
+                },
+                "muxer" => match value() {
+                    Some(v)
+                        if matches!(
+                            v.as_str(),
+                            "raw" | "md5" | "ppm" | "pam" | "y4m"
+                        ) =>
+                    {
+                        o.muxer = Some(v)
+                    }
+                    _ => {
+                        return Parsed::Bad(
+                            "invalid output muxer; expected raw, md5, ppm, \
+                             pam or y4m",
+                        )
+                    }
+                },
+                "verify" => match value() {
+                    Some(v) => o.verify = Some(v),
+                    None => return Parsed::Bad(MISSING),
+                },
+                "info" => o.info = true,
+                "subframe" => o.subframe = true,
+                "loops" => match value().as_deref().and_then(parse_repeat) {
+                    Some(v) => o.loops = v,
+                    None => {
+                        return Parsed::Bad("invalid loop count; expected 1..INT_MAX")
+                    }
+                },
+                "stream" => match value().as_deref().and_then(parse_repeat) {
+                    Some(v) => o.stream = v as usize,
+                    None => {
+                        return Parsed::Bad(
+                            "invalid stream chunk size; expected 1..INT_MAX",
+                        )
+                    }
+                },
+                "cpumask" => match value().as_deref().and_then(parse_cpumask) {
+                    Some(mask) => {
+                        warn_baseline_cpumask(mask);
+                        unsafe { wpd_set_cpu_flags_mask(mask) };
+                    }
+                    None => return Parsed::Bad(BAD_CPUMASK),
+                },
+                _ => return Parsed::Bad(MISSING),
+            }
+            continue;
+        }
+
+        // A short-option cluster: -r5, -r 5, -hf argb.
+        let cluster: Vec<char> = arg[1..].chars().collect();
+        let mut c = 0;
+
+        while c < cluster.len() {
+            let opt = cluster[c];
+
+            c += 1;
+            let mut value = |i: &mut usize| {
+                if c < cluster.len() {
+                    let v: String = cluster[c..].iter().collect();
+                    c = cluster.len();
+                    Some(v)
+                } else {
+                    let v = argv.get(*i).cloned();
+                    if v.is_some() {
+                        *i += 1;
+                    }
+                    v
+                }
+            };
+
+            match opt {
+                'h' => return Parsed::Help,
+                'r' => match value(&mut i).as_deref().and_then(parse_repeat) {
+                    Some(v) => o.repeat = v,
+                    None => {
+                        return Parsed::Bad("invalid repeat value; expected 1..INT_MAX")
+                    }
+                },
+                'f' => match value(&mut i).as_deref().and_then(parse_format) {
+                    Some((name, format)) => {
+                        o.pixel_format = name;
+                        o.out_format = format;
+                    }
+                    None => return Parsed::Bad("invalid output pixel format"),
+                },
+                _ => return Parsed::Bad(MISSING),
+            }
+        }
+    }
+    Parsed::Ok(Box::new(o))
+}
+
+const MISSING: &str = "unknown option or missing option value";
+const BAD_CPUMASK: &str = "invalid cpu mask";
+
+struct DecodeContext<'a> {
+    sink: Option<&'a mut Output>,
+    pixel_format: Option<&'static str>,
+    info: bool,
+    frames: i32,
+}
+
+fn print_image_info(decoder: *mut WPDDecoder, printed: &mut bool) {
+    const CODINGS: [&str; 3] = ["unknown", "lossy", "lossless"];
+    let mut image = WPDImageInfo::default();
+
+    if *printed || unsafe { wpd_decoder_get_info(decoder, &mut image) } != WPD_OK {
+        return;
+    }
+    *printed = true;
+    println!("canvas: {}x{}", image.width, image.height);
+    println!("coding: {}", CODINGS[image.coding as usize]);
+    println!("alpha: {}", image.has_alpha);
+    println!("animation: {}", image.is_animation);
+    println!("frames: {}", image.frame_count);
+    println!("loops: {}", image.loop_count);
+    println!("background: 0x{:08x}", image.background_argb);
+
+    for i in 0.. {
+        let mut entry = WPDFrameInfo::default();
+
+        if unsafe { wpd_decoder_frame_info(decoder, i, &mut entry) } != WPD_OK {
+            break;
+        }
+        println!(
+            "table {}: {}x{} at {},{} duration {} dispose {} blend {} \
+             alpha {} complete {}",
+            i,
+            entry.width,
+            entry.height,
+            entry.pos_x,
+            entry.pos_y,
+            entry.duration,
+            entry.dispose,
+            entry.blend,
+            entry.has_alpha,
+            entry.complete
+        );
+    }
+}
+
+fn print_metadata(decoder: *mut WPDDecoder) {
+    const KINDS: [(i32, &str); 3] = [
+        (WPD_METADATA_ICCP, "iccp"),
+        (WPD_METADATA_EXIF, "exif"),
+        (WPD_METADATA_XMP, "xmp"),
+    ];
+
+    for (which, name) in KINDS {
+        let mut data = std::ptr::null();
+        let mut size = 0usize;
+
+        if unsafe { wpd_decoder_metadata(decoder, which, &mut data, &mut size) }
+            == WPD_OK
+            && size != 0
+        {
+            println!("{name}: {size} bytes");
+        }
+    }
+}
+
+/// Pulls every frame currently available. Returns 0 when the decoder has
+/// nothing more for now, or negative on error.
+fn drain_frames(decoder: *mut WPDDecoder, ctx: &mut DecodeContext) -> i32 {
+    loop {
+        let mut frame = WPDFrame::default();
+        let ret = unsafe { wpd_decoder_next_frame(decoder, &mut frame) };
+
+        if ret <= 0 {
+            return ret;
+        }
+        if ctx.info {
+            println!(
+                "frame {}: {}x{} {} duration {} timestamp {} at {},{} \
+                 dispose {} blend {} alpha {}",
+                ctx.frames,
+                frame.width,
+                frame.height,
+                format_name(frame.format),
+                frame.duration,
+                frame.timestamp,
+                frame.pos_x,
+                frame.pos_y,
+                frame.dispose,
+                frame.blend,
+                frame.has_alpha
+            );
+        }
+        if let Some(sink) = ctx.sink.as_deref_mut() {
+            if sink.write_frame(&frame, ctx.pixel_format).is_err() {
+                return -1;
+            }
+        }
+        ctx.frames += 1;
+    }
+}
+
+fn decode_stream(
+    decoder: *mut WPDDecoder,
+    data: &[u8],
+    chunk: usize,
+    ctx: &mut DecodeContext,
+    info_printed: &mut bool,
+) -> i32 {
+    let mut last_rows = 0;
+
+    if unsafe { wpd_decoder_open_stream(decoder) } < 0 {
+        return -1;
+    }
+    for part in data.chunks(chunk) {
+        if unsafe { wpd_decoder_append(decoder, part.as_ptr(), part.len()) } < 0 {
+            return -1;
+        }
+        if drain_frames(decoder, ctx) < 0 {
+            return -1;
+        }
+        if ctx.info {
+            let mut partial = WPDFrame::default();
+            let mut rows = 0;
+
+            if unsafe { wpd_decoder_partial_frame(decoder, &mut partial, &mut rows) }
+                == WPD_OK
+                && rows > 0
+                && rows != last_rows
+            {
+                println!("partial: {} of {} rows", rows, partial.height);
+                last_rows = rows;
+            }
+        }
+    }
+    if unsafe { wpd_decoder_end_of_stream(decoder) } < 0 {
+        return -1;
+    }
+    if ctx.info {
+        print_image_info(decoder, info_printed);
+    }
+    drain_frames(decoder, ctx)
+}
+
+/// Owns the decoder handle so that every early return frees it.
+struct Decoder(*mut WPDDecoder);
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        unsafe { wpd_decoder_free(self.0) };
+    }
+}
+
+impl Decoder {
+    fn create(
+        out_format: WPDPixelFormat,
+        pixel_format: Option<&str>,
+        subframe: bool,
+    ) -> Option<Self> {
+        let handle = unsafe { wpd_decoder_create() };
+
+        if handle.is_null() {
+            eprintln!("out of memory");
+            return None;
+        }
+        let decoder = Self(handle);
+
+        if out_format != WPD_PIX_FMT_NONE
+            && unsafe { wpd_decoder_set_output_format(handle, out_format) } < 0
+        {
+            eprintln!("cannot select {} output", pixel_format.unwrap_or("auto"));
+            return None;
+        }
+        if subframe
+            && unsafe { wpd_decoder_set_animation_mode(handle, WPD_ANIM_SUBFRAME) } < 0
+        {
+            eprintln!("cannot select sub-frame output");
+            return None;
+        }
+        Some(decoder)
+    }
+}
+
+fn read_file(name: &str) -> std::io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+
+    if name == "-" {
+        std::io::stdin().read_to_end(&mut data)?;
+    } else {
+        std::fs::File::open(name)?.read_to_end(&mut data)?;
+    }
+    Ok(data)
+}
+
+fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    let app = argv.first().cloned().unwrap_or_else(|| "wpd".into());
+
+    print_banner();
+
+    let opts = match parse_args(&argv) {
+        Parsed::Ok(o) => o,
+        Parsed::Help => {
+            usage(&app, None);
+            return ExitCode::SUCCESS;
+        }
+        Parsed::Bad(reason) => {
+            let reason = if reason == BAD_CPUMASK {
+                format!("invalid cpu mask; expected {CPU_MASK_NAMES}, or a number")
+            } else {
+                reason.to_owned()
+            };
+
+            usage(&app, Some(&reason));
+            return ExitCode::from(2);
+        }
+    };
+
+    if opts.verify.is_some() && opts.muxer.as_deref().is_some_and(|m| m != "md5") {
+        usage(&app, Some("verification requires the md5 muxer"));
+        return ExitCode::from(2);
+    }
+    let expected_md5 = match opts.verify.as_deref() {
+        Some(v) => match parse_md5(v) {
+            Some(d) => Some(d),
+            None => {
+                usage(
+                    &app,
+                    Some("invalid md5; expected exactly 32 hexadecimal digits"),
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
+    let verifying = expected_md5.is_some();
+    let operands = opts.positional.len();
+    let max = if verifying { 1 } else { 2 };
+
+    if operands < 1 || operands > max || (!verifying && !opts.info && operands != 2) {
+        let reason = if verifying {
+            if operands < 1 {
+                "input is required"
+            } else {
+                "verification does not accept output"
+            }
+        } else if operands < 1 {
+            "input is required"
+        } else {
+            "unexpected argument"
+        };
+
+        usage(&app, Some(reason));
+        return ExitCode::from(2);
+    }
+
+    let input_name = &opts.positional[0];
+    let output_name = if verifying || operands < 2 {
+        None
+    } else {
+        Some(opts.positional[1].as_str())
+    };
+
+    run(&opts, input_name, output_name, expected_md5)
+}
+
+fn run(
+    opts: &Options,
+    input_name: &str,
+    output_name: Option<&str>,
+    expected_md5: Option<[u8; 16]>,
+) -> ExitCode {
+    let data = match read_file(input_name) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{input_name}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let opened = expected_md5.is_some() || output_name.is_some();
+    let mut output = if opened {
+        let muxer = if expected_md5.is_some() {
+            Some("md5")
+        } else {
+            opts.muxer.as_deref()
+        };
+
+        match Output::open(muxer, output_name) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("{}: {e}", output_name.unwrap_or(""));
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        Output::null()
+    };
+
+    let mut pixel_format = opts.pixel_format;
+    let mut out_format = opts.out_format;
+
+    if opened && output.muxer != Muxer::Raw {
+        let mut image = WPDImageInfo::default();
+
+        if unsafe { wpd_get_info(data.as_ptr(), data.len(), &mut image) } < 0 {
+            eprintln!("{input_name}: cannot read image header");
+            return ExitCode::FAILURE;
+        }
+        if output
+            .select_format(&image, &mut pixel_format, &mut out_format)
+            .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let writes = opened && !output.is_null();
+    let mut frames = 0;
+
+    for iter in 0..opts.repeat {
+        let mut info_printed = false;
+        let mut ctx = DecodeContext {
+            sink: if iter == 0 && writes {
+                Some(&mut output)
+            } else {
+                None
+            },
+            pixel_format,
+            info: opts.info && iter == 0,
+            frames: 0,
+        };
+
+        let Some(mut decoder) =
+            Decoder::create(out_format, pixel_format, opts.subframe)
+        else {
+            return ExitCode::FAILURE;
+        };
+        let mut ret = 0;
+
+        if opts.stream != 0 {
+            // A stream cannot be rewound, so a replay reopens instead.
+            for loop_index in 0..opts.loops {
+                if loop_index > 0 {
+                    let Some(next) =
+                        Decoder::create(out_format, pixel_format, opts.subframe)
+                    else {
+                        return ExitCode::FAILURE;
+                    };
+
+                    decoder = next;
+                    ctx.sink = None;
+                    ctx.frames = 0;
+                }
+                ret = decode_stream(
+                    decoder.0,
+                    &data,
+                    opts.stream,
+                    &mut ctx,
+                    &mut info_printed,
+                );
+                if ret < 0 {
+                    break;
+                }
+            }
+        } else if unsafe { wpd_decoder_open(decoder.0, data.as_ptr(), data.len()) } < 0
+        {
+            ret = -1;
+        } else {
+            if ctx.info {
+                print_image_info(decoder.0, &mut info_printed);
+            }
+            ret = drain_frames(decoder.0, &mut ctx);
+            let mut loop_index = 1;
+
+            while loop_index < opts.loops && ret >= 0 {
+                ctx.sink = None;
+                ctx.frames = 0;
+                ret = unsafe { wpd_decoder_rewind(decoder.0) };
+                if ret >= 0 {
+                    ret = drain_frames(decoder.0, &mut ctx);
+                }
+                loop_index += 1;
+            }
+        }
+        if ctx.info && ret >= 0 {
+            print_metadata(decoder.0);
+        }
+        frames = ctx.frames;
+        if ret < 0 {
+            eprintln!("{input_name}: {}", unsafe {
+                cstr(wpd_decoder_error(decoder.0))
+            });
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if frames == 0 {
+        eprintln!("{input_name}: no image data found");
+        return ExitCode::FAILURE;
+    }
+    if let Some(expected) = expected_md5 {
+        return if output.verify(&expected) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    if !opened {
+        return ExitCode::SUCCESS;
+    }
+    match output.close() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "write: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}

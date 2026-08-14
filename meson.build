@@ -48,13 +48,6 @@ if get_option('buildtype') not in ['debug', 'plain']
 endif
 add_project_arguments(cc.get_supported_arguments(optional_c_args), language: 'c')
 
-vcs_version = vcs_tag(
-  command: ['git', '-C', source_root, 'rev-parse', '--short=7', 'HEAD'],
-  fallback: 'unknown',
-  input: 'tools/vcs_version.h.in',
-  output: 'vcs_version.h',
-)
-
 getopt_sources = []
 getopt_inc_dirs = []
 if not cc.has_function('getopt_long', prefix: '#include <getopt.h>')
@@ -232,16 +225,22 @@ wpd_dep = declare_dependency(
   ],
 )
 
-wpd = executable(
-  'wpd',
-  files(
-    'tools/md5.c',
-    'tools/wpd.c',
-  ),
-  vcs_version,
-  getopt_sources,
-  dependencies: wpd_dep,
-  include_directories: getopt_inc_dirs,
+# The tool is a cargo binary; it links the same archive the library target
+# stages, so it goes through the C ABI exactly as an outside consumer would.
+wpd = custom_target(
+  'wpd-tool',
+  output: 'wpd',
+  command: [
+    files('tools/cargo_tool.sh'),
+    source_root,
+    meson.current_build_dir(),
+    cargo_profile,
+    cargo_features,
+  ],
+  env: cargo_env,
+  depends: libwpd_artifacts,
+  build_always_stale: true,
+  build_by_default: true,
   install: false,
 )
 
@@ -273,17 +272,6 @@ if cc.has_header('sys/mman.h')
   )
   test('rowbounds', rowbounds_test, suite: 'rowbounds')
 endif
-
-md5_test = executable(
-  'test_md5',
-  files(
-    'tests/md5.c',
-    'tools/md5.c',
-  ),
-  include_directories: include_directories('tools'),
-  install: false,
-)
-test('md5', md5_test, suite: 'md5')
 
 # libwebp is the reference the parity suite and libwebpdec measure against, so
 # which one gets linked is a correctness question, not just a convenience: a

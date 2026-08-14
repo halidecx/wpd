@@ -8,12 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [lib]
-# The artifact C consumers link, so it keeps the historical libwpd name.
-name = "wpd"
+# Renamed from the historical libwpd because the archive now also ships as an
+# rlib, which crates/wpd already claims that name for; tools/cargo_build.sh
+# stages it back to libwpd.a for C consumers.
+name = "wpd_capi"
 # The shared library is linked from this archive by tools/cargo_build.sh, so
 # that its export list comes from include/wpd.h rather than from whichever
 # entry points have been ported to Rust so far.
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 wpd = { path = "../wpd", default-features = false }

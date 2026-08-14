@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/wpd", "crates/wpd-capi"]
+members = ["crates/wpd", "crates/wpd-capi", "crates/wpd-tool"]
 resolver = "2"
 
 [workspace.package]

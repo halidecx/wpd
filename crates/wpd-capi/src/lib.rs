@@ -12,6 +12,6 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
-mod cpu;
-mod dsp;
-mod rescale;
+pub mod cpu;
+pub mod dsp;
+pub mod rescale;
