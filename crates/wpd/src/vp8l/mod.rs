@@ -346,6 +346,28 @@ impl Decoder {
         Some(if self.peeked { &self.out } else { &self.argb })
     }
 
+    /// As [`Self::picture`], writable, which the compositor's per-frame
+    /// premultiply needs: it weights the canvas in place rather than copying
+    /// it aside first, as libwebp does.
+    pub fn picture_out_mut(&mut self, target: Target) -> &mut Picture {
+        match target {
+            Target::Argb => &mut self.argb,
+            Target::Alpha => &mut self.alpha_argb,
+        }
+    }
+
+    /// As [`Self::still_picture`], writable.
+    pub fn still_picture_mut(&mut self) -> Option<&mut Picture> {
+        if !self.staged {
+            return None;
+        }
+        Some(if self.peeked {
+            &mut self.out
+        } else {
+            &mut self.argb
+        })
+    }
+
     fn picture_mut(&mut self, role: usize, target: Target) -> &mut Picture {
         if role != ROLE_ARGB {
             return &mut self.image[role].storage;

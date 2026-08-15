@@ -392,7 +392,7 @@ struct DecodeContext<'a> {
     frames: i32,
 }
 
-fn print_image_info(decoder: &Decoder<'_>, printed: &mut bool) {
+fn print_image_info(decoder: &mut Decoder<'_>, printed: &mut bool) {
     let Ok(image) = decoder.info() else {
         return;
     };
@@ -431,7 +431,7 @@ fn print_image_info(decoder: &Decoder<'_>, printed: &mut bool) {
     }
 }
 
-fn print_metadata(decoder: &Decoder<'_>) {
+fn print_metadata(decoder: &mut Decoder<'_>) {
     const KINDS: [(Metadata, &str); 3] = [
         (Metadata::Iccp, "iccp"),
         (Metadata::Exif, "exif"),
@@ -728,7 +728,7 @@ fn run(
             ret = -1;
         } else {
             if ctx.info {
-                print_image_info(&decoder, &mut info_printed);
+                print_image_info(&mut decoder, &mut info_printed);
             }
             ret = drain_frames(&mut decoder, &mut ctx);
 
@@ -745,7 +745,7 @@ fn run(
             }
         }
         if ctx.info && ret >= 0 {
-            print_metadata(&decoder);
+            print_metadata(&mut decoder);
         }
         frames = ctx.frames;
         if ret < 0 {

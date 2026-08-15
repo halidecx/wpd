@@ -1352,14 +1352,83 @@ zero. Both would have been silent without that gate.
 The C ABI is not left untested by the move: `tests/api.c` is 3,558 lines and 521
 calls covering every entry point `include/wpd.h` declares.
 
-**What is left of the driver port.** `anim`, `lossy`, `export` and `decoder`
-still hold raw pointers where they reach across their own fields — 557 uses of
-`unsafe` in `wpd-capi`, against 785 when Phase 8c started, and none at all in
-`convert`. The remaining ones are the same shape: a `*mut WPDDecoder` taken so
-that two fields can be written at once. Destructuring the decoder at the call,
-the way `FrameMut::planes_mut` destructures the plane array, is what removes
-them, and it is what has to happen before the driver can move into `crates/wpd`
-and the API with it.
+### Phase 8h — the driver stops pointing at itself
+
+Four things went at once, because they were one thing.
+
+**The internal C ABI had no C left on the other side of it.** `crates/wpd-capi`
+carried `extern "C"` shims for the input buffer, the container scanner and both
+codecs — 122 uses of `unsafe` whose whole job was to turn a pointer back into
+the slice the core wanted. Grepping `src/` and `tests/` for the symbols they
+export finds nothing: the only callers were Rust. They are gone, and the driver
+calls the core directly. A shim you keep for a caller that no longer exists is
+not a boundary, it is a copy of one.
+
+**The input became a type.** `wpd::input::Input<'a>` owns a growing `Vec` for a
+stream and borrows a slice for a whole file the caller lends, and which of the
+two it is holding is now in the type rather than in a `borrowed` flag beside a
+pointer. `Input::at(offset)` hands out the stream from an offset on, so
+`WPDDecoder::file_at` returns `&[u8]` and the chunk walk in `next_frame` and
+`decode_anmf` indexes slices instead of doing pointer arithmetic against an
+`end` pointer. `WPDDecoder<'a>` carries the input's lifetime, and
+`Decoder<'a>::open_borrowed` in the safe API is now that lifetime rather than a
+`PhantomData` standing next to one.
+
+**The decoder's pictures became borrows.** `WebPImage` — the `(pointer,
+stride)`
+set the two codecs' output was latched into after every decode — is deleted. The
+VP8 planes and the alpha plane beside them are fields of the same struct, so
+`lossy_view` builds a `Frame` out of both and it cannot go stale. Which picture
+an export reads is a `Source`, a name, not a pointer captured at some earlier
+moment.
+
+**The targets became borrows too, and that named a rule.** `ExportTargets` was
+nine raw pointers into the decoder. It is nine references now, taken by
+destructuring the decoder at the call — which promptly failed to compile,
+because a whole-frame export can be _handed_ the conversion buffer as its
+source, and the resumable row exports _write_ it. Both were reachable through
+the same struct of pointers and nothing said they were never the same buffer at
+the same time. Splitting it into `ExportTargets` and `RowTargets` is what says
+it. The compiler asked the question the C never had to answer.
+
+`anim.rs` and `lossy.rs` are at zero `unsafe`; `wpd-capi` is at 286, against 579
+before this phase and 785 when Phase 8c started. The alpha filter's inverse
+prediction, which walked four pointers per pixel, is `PlaneMut::row_pair_mut`
+and plain indexing.
+
+**Two things a `Vec` charges for that a `malloc` did not.** Both showed up as a
+1.36x regression on the small hand-written lossless files, where a decode is
+five microseconds and anything fixed dominates.
+
+`Vec::resize` zeroes what it adds, and `realloc` does not. The input buffer's
+capacity doubles from 64 KiB, so sizing the _length_ to the capacity meant a 64
+KiB memset for every decoder — for a 300-byte file. The fix is to reserve the
+capacity and only lengthen to what is used: growth stays amortised, and the
+zeroing is proportional to the bytes that exist.
+
+Holding `wpd::vp8::Decoder` by value put 4 KiB into `WPDDecoder` that a
+lossless-only file never touches. The C built it on the first VP8 chunk, and
+`Option<Box<_>>` says the same thing. Worth keeping even though the constructor
+itself measures 186ns: the cost was the struct, not the work.
+
+Neither is visible against the C baseline alone — `bench.sh` and `cmpbench.sh`
+compare against `d241ef8`, which is four commits and a whole phase away, so a 9%
+difference there says nothing about the change in hand. Building the previous
+commit in a `git worktree` and benchmarking against _that_ is what separated
+"this phase regressed the small files" from "the small files have been 9% off
+the C since the driver became Rust." The first was true mid-phase and is fixed;
+the second is true and predates it.
+
+**Why the driver still cannot move into `crates/wpd`.** The lossless canvas is a
+`Vec<u32>` — the pixel loops want words — and everything downstream of it wants
+rows of bytes. Reinterpreting one as the other needs either `unsafe` or a
+dependency, and the core promises neither: `#![forbid(unsafe_code)]` without the
+`asm` feature is a headline property, and rav1d reaches for `zerocopy` for
+exactly this. So `crates/wpd-capi/src/vp8l.rs` is what is left of the module —
+about fifty lines whose only job is that cast, holding four of the crate's 286.
+Everything else in the driver could move today. This is worth stating plainly
+rather than working around, because the cost of the workaround (a dependency, or
+a hole in the core's safety claim) is larger than the cost of the boundary.
 
 ## Measuring the fallbacks needs two no-asm builds
 

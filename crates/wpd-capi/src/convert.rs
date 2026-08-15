@@ -15,8 +15,6 @@ use wpd::image::{self, ceil_rshift, Crop, Format};
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
 
-use crate::vp8::{WPD_ENOMEM, WPD_ERROR_TOO_LARGE};
-
 const WPD_OK: c_int = 0;
 const WPD_ERR_INVALID_ARG: c_int = -1;
 const WPD_ERR_TOO_LARGE: c_int = -7;
@@ -137,10 +135,7 @@ pub fn scaled_size(
 
 /// What the allocators report, as the rest of the decoder's statuses.
 pub(crate) fn alloc_status(e: wpd::error::Error) -> c_int {
-    match e {
-        wpd::error::Error::NoMemory => WPD_ENOMEM,
-        _ => WPD_ERROR_TOO_LARGE,
-    }
+    crate::decoder::status(e)
 }
 
 /// The crop rectangle inside `src`, or `src` itself when cropping is off.

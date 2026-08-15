@@ -1,12 +1,18 @@
-//! C ABI for the animation compositor, as declared by `src/anim.h`.
+//! The animation compositor's plumbing, as `src/anim.c` did it.
 //!
 //! The geometry — whether a frame stands on its own, and how it divides into
 //! blended and copied regions — is [`wpd::anim`]. What is here brings the
 //! canvas into the format the next frame will be composited in, disposes what
 //! the frame before asked to be disposed, and walks the regions.
+//!
+//! The canvas is the decoder's own buffer and the frame being composited is
+//! one of the codecs' pictures, so both arrive as borrows taken from one
+//! destructuring of the decoder. That is what says they are not the same
+//! memory — except in the one case where they are, which
+//! [`prepare_canvas`] moves aside by name.
 
-use std::ffi::{c_int, c_uint};
-use std::{mem, ptr};
+use std::ffi::c_int;
+use std::mem;
 
 use wpd::anim::{regions, Placement, Region};
 use wpd::image::Format;
@@ -18,20 +24,18 @@ use crate::convert::{
     convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
 };
 use crate::decoder::{
-    rl24, rl32, Subframe, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8,
-    TAG_VP8L,
+    rl24, rl32, Source, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8, TAG_VP8L,
 };
-use crate::vp8::WPD_ERROR_INVALID_DATA;
-use crate::vp8l::{vp8l_decode_frame, VP8L_TARGET_ARGB};
 use wpd::dsp::yuv::YuvDsp;
-use wpd::picture::{Buffer, Frame, FrameMut};
+use wpd::picture::{Buffer, Frame};
 use wpd::rescale::premultiply_argb_row;
 
 const WPD_OK: c_int = 0;
+const WPD_ERR_BITSTREAM: c_int = -3;
 const WPD_ANIM_SUBFRAME: c_int = 1;
 
-/// `Placement` from `src/anim.h`.
-#[repr(C)]
+/// Everything the compositor asks the decoder about a frame's placement,
+/// gathered at the call.
 pub struct CPlacement {
     pub canvas_width: c_int,
     pub canvas_height: c_int,
@@ -39,29 +43,26 @@ pub struct CPlacement {
     pub pos_y: c_int,
     pub anmf_flags: c_int,
     pub frame_index: c_int,
-    pub frame_has_alpha: c_int,
-    pub key_frame: c_int,
+    pub frame_has_alpha: bool,
+    pub key_frame: bool,
     pub prev_anmf_flags: c_int,
     pub prev_width: c_int,
     pub prev_height: c_int,
     pub prev_pos_x: c_int,
     pub prev_pos_y: c_int,
-    pub prev_key_frame: c_int,
-    pub premultiply: c_int,
-    pub no_fancy_upsampling: c_int,
+    pub prev_key_frame: bool,
+    pub premultiply: bool,
+    pub no_fancy_upsampling: bool,
     pub clear_argb: [u8; 4],
     pub clear_yuva: [u8; 4],
 }
 
-/// `CompositeTargets` from `src/anim.h`.
-#[repr(C)]
-pub struct CompositeTargets {
-    pub ldsp: *const Vp8lDsp,
-    pub ydsp: *const YuvDsp,
-    pub canvas: *mut Buffer,
+/// The tables the compositor dispatches through, and the canvas it paints on.
+pub struct CompositeTargets<'a> {
+    pub ldsp: &'a Vp8lDsp,
+    pub ydsp: &'a YuvDsp,
+    pub canvas: &'a mut Buffer,
 }
-
-const _: () = assert!(mem::size_of::<CPlacement>() == 16 * 4 + 8);
 
 impl CPlacement {
     fn geometry(&self) -> Placement {
@@ -72,40 +73,23 @@ impl CPlacement {
             pos_y: self.pos_y,
             anmf_flags: self.anmf_flags as u8,
             frame_index: self.frame_index,
-            frame_has_alpha: self.frame_has_alpha != 0,
-            key_frame: self.key_frame != 0,
+            frame_has_alpha: self.frame_has_alpha,
+            key_frame: self.key_frame,
             prev_anmf_flags: self.prev_anmf_flags as u8,
             prev_width: self.prev_width,
             prev_height: self.prev_height,
             prev_pos_x: self.prev_pos_x,
             prev_pos_y: self.prev_pos_y,
-            prev_key_frame: self.prev_key_frame != 0,
+            prev_key_frame: self.prev_key_frame,
         }
     }
 }
 
-/// # Safety
-///
-/// `pl` must point to a live `Placement`.
-#[no_mangle]
-pub unsafe extern "C" fn anim_is_key_frame(
-    pl: *const CPlacement,
-    width: c_int,
-    height: c_int,
-) -> c_int {
-    let pl = unsafe { &*pl };
-
-    c_int::from(pl.geometry().is_key_frame(width, height))
-}
-
 /// Paints `region` of `frame` onto the canvas at the frame's position.
-///
-/// # Safety
-///
-/// Both images must hold the region at their respective corners.
-unsafe fn paint(
+fn paint(
     pl: &CPlacement,
-    ct: &CompositeTargets,
+    ldsp: &Vp8lDsp,
+    canvas: &mut Buffer,
     frame: &Frame<'_>,
     region: Region,
 ) {
@@ -118,39 +102,32 @@ unsafe fn paint(
         w: region.w,
         h: region.h,
     };
-    let argb = unsafe { (*ct.canvas).format } == Some(Format::Argb);
-    let mut dst = unsafe { (*ct.canvas).frame_mut() };
+    let argb = canvas.format == Some(Format::Argb);
+    let mut dst = canvas.frame_mut();
     let (x, y) = (pl.pos_x, pl.pos_y);
-    let src = frame;
 
     match (argb, region.blend) {
-        (true, true) => blit::blend_argb(
-            unsafe { &*ct.ldsp },
-            pl.premultiply != 0,
-            &mut dst,
-            src,
-            r,
-            x,
-            y,
-        ),
-        (true, false) => blit::copy_argb(&mut dst, src, r, x, y),
-        (false, true) => blit::blend_yuva(&mut dst, src, r, x, y),
-        (false, false) => blit::copy_yuva(&mut dst, src, r, x, y),
+        (true, true) => {
+            blit::blend_argb(ldsp, pl.premultiply, &mut dst, frame, r, x, y)
+        }
+        (true, false) => blit::copy_argb(&mut dst, frame, r, x, y),
+        (false, true) => blit::blend_yuva(&mut dst, frame, r, x, y),
+        (false, false) => blit::copy_yuva(&mut dst, frame, r, x, y),
     }
 }
 
 /// Fills a rectangle of the canvas with the background colour.
-unsafe fn clear_rect(
+fn clear_rect(
     pl: &CPlacement,
-    ct: &CompositeTargets,
+    canvas: &mut Buffer,
     pos_x: c_int,
     pos_y: c_int,
     width: c_int,
     height: c_int,
 ) {
-    let argb = unsafe { (*ct.canvas).format } == Some(Format::Argb);
+    let argb = canvas.format == Some(Format::Argb);
     let colour = if argb { pl.clear_argb } else { pl.clear_yuva };
-    let mut dst = unsafe { (*ct.canvas).frame_mut() };
+    let mut dst = canvas.frame_mut();
 
     blit::clear(
         &mut dst,
@@ -169,31 +146,30 @@ unsafe fn clear_rect(
 /// when its pixels were composited, and the caller may change that format
 /// between frames. Bring what is already there into the convention the next
 /// frame will be blended in, so the two are never mixed.
-unsafe fn reconcile_alpha(pl: &CPlacement, ct: &CompositeTargets) {
-    let canvas = unsafe { &mut *ct.canvas };
-
+fn reconcile_alpha(pl: &CPlacement, ydsp: &YuvDsp, canvas: &mut Buffer) {
     if !canvas.is_empty()
         && canvas.format == Some(Format::Argb)
-        && canvas.premultiplied != (pl.premultiply != 0)
+        && canvas.premultiplied != pl.premultiply
     {
         let mut view = canvas.frame_mut();
 
         for y in 0..view.height {
             let row = view.row(0, y);
 
-            if pl.premultiply != 0 {
-                unsafe { ((*ct.ydsp).premultiply_row)(row, true) };
+            if pl.premultiply {
+                (ydsp.premultiply_row)(row, true);
             } else {
                 premultiply_argb_row(row, true);
             }
         }
     }
-    canvas.premultiplied = pl.premultiply != 0;
+    canvas.premultiplied = pl.premultiply;
 }
 
-unsafe fn prepare_canvas(
+fn prepare_canvas(
     pl: &CPlacement,
-    ct: &CompositeTargets,
+    ydsp: &YuvDsp,
+    canvas: &mut Buffer,
     frame: &Frame<'_>,
     format: Format,
 ) -> c_int {
@@ -201,9 +177,8 @@ unsafe fn prepare_canvas(
         && pl.pos_y == 0
         && frame.width == pl.canvas_width
         && frame.height == pl.canvas_height;
-    let canvas = unsafe { &mut *ct.canvas };
 
-    if pl.key_frame != 0 && !canvas.is_empty() && canvas.format != Some(format) {
+    if pl.key_frame && !canvas.is_empty() && canvas.format != Some(format) {
         canvas.release();
     }
 
@@ -219,61 +194,51 @@ unsafe fn prepare_canvas(
         if let Err(e) = alloc {
             return crate::convert::alloc_status(e);
         }
-        canvas.premultiplied = pl.premultiply != 0;
+        canvas.premultiplied = pl.premultiply;
     }
-    if fresh || pl.key_frame != 0 {
+    if fresh || pl.key_frame {
         if !covers_canvas {
             let (w, h) = (canvas.width, canvas.height);
 
-            unsafe { clear_rect(pl, ct, 0, 0, w, h) };
+            clear_rect(pl, canvas, 0, 0, w, h);
         }
     } else {
         if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
             /* The canvas is its own source here, so it is moved aside whole
             and the converted picture built into the slot it left. */
             let yuva = mem::take(canvas);
-            let ret = unsafe {
-                convert_to_argb(
-                    &*ct.ydsp,
-                    &mut *ct.canvas,
-                    &yuva.frame(),
-                    pl.no_fancy_upsampling != 0,
-                )
-            };
+            let ret =
+                convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling);
 
             if ret < 0 {
                 return ret;
             }
         }
         if pl.prev_anmf_flags & wpd::container::ANMF_FLAG_DISPOSE as c_int != 0 {
-            unsafe {
-                clear_rect(
-                    pl,
-                    ct,
-                    pl.prev_pos_x,
-                    pl.prev_pos_y,
-                    pl.prev_width,
-                    pl.prev_height,
-                )
-            };
+            clear_rect(
+                pl,
+                canvas,
+                pl.prev_pos_x,
+                pl.prev_pos_y,
+                pl.prev_width,
+                pl.prev_height,
+            );
         }
     }
 
-    unsafe { reconcile_alpha(pl, ct) };
+    reconcile_alpha(pl, ydsp, canvas);
     WPD_OK
 }
 
-/// # Safety
-///
-/// Every pointer must be live, and `sub` must fit the canvas at the
-/// placement's position, which the caller checked against the ANMF header.
-pub unsafe fn anim_composite(
+/// Composites one decoded sub-frame onto the canvas.
+pub fn anim_composite(
     pl: &CPlacement,
-    ct: &CompositeTargets,
+    ct: CompositeTargets<'_>,
     frame: &Frame<'_>,
     target: Format,
 ) -> c_int {
-    let ret = unsafe { prepare_canvas(pl, ct, frame, target) };
+    let CompositeTargets { ldsp, ydsp, canvas } = ct;
+    let ret = prepare_canvas(pl, ydsp, canvas, frame, target);
 
     if ret < 0 {
         return ret;
@@ -281,7 +246,7 @@ pub unsafe fn anim_composite(
     /* A frame coded without an alpha plane has nothing to blend with, and a
     planar canvas cannot split the 2x2 chroma block an overlap would land in. */
     let has_alpha_plane = frame.format != Format::Yuv420p;
-    let chroma_aligned = unsafe { (*ct.canvas).format } != Some(Format::Argb);
+    let chroma_aligned = canvas.format != Some(Format::Argb);
     let mut out = [Region {
         x: 0,
         y: 0,
@@ -299,15 +264,15 @@ pub unsafe fn anim_composite(
     );
 
     for region in &out[..n] {
-        unsafe { paint(pl, ct, frame, *region) };
+        paint(pl, ldsp, canvas, frame, *region);
     }
     WPD_OK
 }
 
-impl WPDDecoder {
+impl<'a> WPDDecoder<'a> {
     /// The decoder's answers to what the compositor asks, gathered at the
     /// call. `key_frame` is the one field it does not know yet:
-    /// [`anim_is_key_frame`] decides it from the rest.
+    /// [`Placement::is_key_frame`] decides it from the rest.
     fn placement(&self) -> CPlacement {
         CPlacement {
             canvas_width: self.canvas_width,
@@ -316,64 +281,49 @@ impl WPDDecoder {
             pos_y: self.pos_y,
             anmf_flags: self.anmf_flags,
             frame_index: self.frame_index,
-            frame_has_alpha: c_int::from(self.frame_has_alpha),
-            key_frame: 0,
+            frame_has_alpha: self.frame_has_alpha,
+            key_frame: false,
             prev_anmf_flags: self.prev_anmf_flags,
             prev_width: self.prev_width,
             prev_height: self.prev_height,
             prev_pos_x: self.prev_pos_x,
             prev_pos_y: self.prev_pos_y,
-            prev_key_frame: c_int::from(self.prev_key_frame),
-            premultiply: self.premultiply,
-            no_fancy_upsampling: self.options.no_fancy_upsampling,
+            prev_key_frame: self.prev_key_frame,
+            premultiply: self.premultiply != 0,
+            no_fancy_upsampling: self.options.no_fancy_upsampling != 0,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva,
         }
     }
 
-    /// The named sub-frame picture. Two of the three are views of memory a
-    /// codec owns; the third is the decoder's own conversion buffer.
-    pub(crate) fn frame_of(&self, which: Subframe) -> Frame<'_> {
-        match which {
-            Subframe::Lossy => unsafe { self.subframe.frame() },
-            Subframe::Argb => unsafe { self.argb.frame() },
-            Subframe::Converted => self.converted.frame(),
+    /// Reads the ANMF header and latches what the frame declares.
+    ///
+    /// Returns the declared size, or nothing when the chunk is too short to
+    /// carry one.
+    fn read_anmf_header(&mut self, header: &[u8]) -> Option<(c_int, c_int)> {
+        if header.len() < 16 {
+            return None;
         }
-    }
-
-    /// As [`WPDDecoder::frame_of`], writable, which the per-frame premultiply
-    /// needs.
-    pub(crate) fn frame_mut_of(&mut self, which: Subframe) -> FrameMut<'_> {
-        match which {
-            Subframe::Lossy => unsafe { self.subframe.frame_mut() },
-            Subframe::Argb => unsafe { self.argb.frame_mut() },
-            Subframe::Converted => self.converted.frame_mut(),
-        }
+        self.pos_x = rl24(header) as c_int * 2;
+        self.pos_y = rl24(&header[3..]) as c_int * 2;
+        self.frame_duration = rl24(&header[12..]) as c_int;
+        self.anmf_flags = header[15] as c_int;
+        Some((
+            rl24(&header[6..]) as c_int + 1,
+            rl24(&header[9..]) as c_int + 1,
+        ))
     }
 
     /// Decodes one ANMF chunk and composites it onto the canvas.
     ///
-    /// # Safety
-    ///
-    /// `data` must be readable for `size` bytes and sit inside the buffered
-    /// window, which is where the alpha offset is measured from.
-    pub(crate) unsafe fn decode_anmf(&mut self, data: *const u8, size: usize) -> c_int {
-        if size < 16 {
-            return WPD_ERROR_INVALID_DATA;
-        }
-        let end = unsafe { data.add(size) };
-        let mut p = data;
-
-        unsafe {
-            self.pos_x = rl24(p) as c_int * 2;
-            self.pos_y = rl24(p.add(3)) as c_int * 2;
-            self.frame_duration = rl24(p.add(12)) as c_int;
-            self.anmf_flags = p.add(15).read() as c_int;
-        }
-        let declared_width = unsafe { rl24(p.add(6)) } as c_int + 1;
-        let declared_height = unsafe { rl24(p.add(9)) } as c_int + 1;
-
-        p = unsafe { p.add(16) };
+    /// `base` is where the chunk's payload sits in the stream, which is what
+    /// the alpha offset is measured from.
+    pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> c_int {
+        let header = self.input.chunk(base, size.min(16)).to_owned();
+        let Some((declared_width, declared_height)) = self.read_anmf_header(&header)
+        else {
+            return WPD_ERR_BITSTREAM;
+        };
 
         if self.pos_x + declared_width > self.canvas_width
             || self.pos_y + declared_height > self.canvas_height
@@ -383,26 +333,35 @@ impl WPDDecoder {
                  fit into canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
             ));
-            return WPD_ERROR_INVALID_DATA;
+            return WPD_ERR_BITSTREAM;
         }
 
         self.has_alpha = false;
         self.width = 0;
         self.height = 0;
 
-        let mut sub: Option<Subframe> = None;
+        let mut sub: Option<Source> = None;
+        let mut at = base + 16;
+        let end = base + size;
 
-        while unsafe { end.offset_from(p) } >= 8 {
-            let chunk_type = unsafe { rl32(p) };
-            let payload_size = unsafe { rl32(p.add(4)) };
+        while end - at >= 8 {
+            let (chunk_type, payload_size) = {
+                let head = self.input.chunk(at, 8);
+
+                if head.len() < 8 {
+                    break;
+                }
+                (rl32(head), rl32(&head[4..]))
+            };
 
             if payload_size == u32::MAX {
-                return WPD_ERROR_INVALID_DATA;
+                return WPD_ERR_BITSTREAM;
             }
-            let padded_size = (payload_size + (payload_size & 1)) as usize;
+            let payload_size = payload_size as usize;
+            let padded_size = payload_size + (payload_size & 1);
 
-            p = unsafe { p.add(8) };
-            if (unsafe { end.offset_from(p) } as usize) < padded_size {
+            at += 8;
+            if end - at < padded_size {
                 break;
             }
 
@@ -410,12 +369,12 @@ impl WPDDecoder {
                 TAG_ALPH => {
                     if payload_size == 0 {
                         wpd::log::error("invalid ALPHA chunk size");
-                        return WPD_ERROR_INVALID_DATA;
+                        return WPD_ERR_BITSTREAM;
                     }
-                    let alpha_header = unsafe { p.read() } as c_int;
+                    let alpha_header = self.input.chunk(at, 1)[0] as c_int;
 
-                    self.alpha_data_offset = self.stream_offset(unsafe { p.add(1) });
-                    self.alpha_data_size = payload_size as c_int - 1;
+                    self.alpha_data_offset = at + 1;
+                    self.alpha_data_size = payload_size - 1;
 
                     let filter_m = (alpha_header >> 2) & 0x03;
                     let compression = alpha_header & 0x03;
@@ -429,43 +388,31 @@ impl WPDDecoder {
                     }
                 }
                 TAG_VP8 if sub.is_none() => {
-                    let ret = unsafe { self.vp8_lossy_decode_frame(p, payload_size) };
+                    let ret = self.vp8_lossy_decode_frame(at, payload_size);
 
                     if ret < 0 {
                         return ret;
                     }
-                    sub = Some(Subframe::Lossy);
+                    sub = Some(Source::Lossy);
                     self.frame_has_alpha = self.has_alpha;
                 }
                 TAG_VP8L if sub.is_none() => {
-                    self.lossless_canvas_in();
+                    let ret = self.lossless_decode(at, payload_size);
 
-                    let ret = unsafe {
-                        vp8l_decode_frame(
-                            &mut *self.vp8l,
-                            VP8L_TARGET_ARGB,
-                            &mut self.argb,
-                            p,
-                            payload_size as c_uint,
-                            0,
-                        )
-                    };
-
-                    self.lossless_canvas_out();
                     if ret < 0 {
                         return ret;
                     }
-                    sub = Some(Subframe::Argb);
+                    sub = Some(Source::Lossless);
                     self.frame_has_alpha = self.lossless_has_alpha;
                 }
                 _ => {}
             }
-            p = unsafe { p.add(padded_size) };
+            at += padded_size;
         }
 
         let Some(mut which) = sub else {
             wpd::log::error("image data not found");
-            return WPD_ERROR_INVALID_DATA;
+            return WPD_ERR_BITSTREAM;
         };
         let (sub_width, sub_height, sub_format) = {
             let img = self.frame_of(which);
@@ -487,13 +434,13 @@ impl WPDDecoder {
                  canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
             ));
-            return WPD_ERROR_INVALID_DATA;
+            return WPD_ERR_BITSTREAM;
         }
 
         let mut pl = self.placement();
 
-        self.key_frame = unsafe { anim_is_key_frame(&pl, sub_width, sub_height) } != 0;
-        pl.key_frame = c_int::from(self.key_frame);
+        self.key_frame = pl.geometry().is_key_frame(sub_width, sub_height);
+        pl.key_frame = self.key_frame;
 
         let argb = Format::Argb;
         let mut target = Format::Yuva420p;
@@ -508,21 +455,30 @@ impl WPDDecoder {
         }
 
         if target == argb && sub_format != argb {
-            let this: *mut WPDDecoder = self;
-            let src = self.frame_of(which);
-            let ret = unsafe {
-                convert_to_argb(
-                    &(*this).ydsp,
-                    &mut (*this).converted,
-                    &src,
-                    self.options.no_fancy_upsampling != 0,
-                )
-            };
+            let no_fancy = self.options.no_fancy_upsampling != 0;
+            let Self {
+                ydsp,
+                converted,
+                vp8,
+                alpha_plane,
+                has_alpha,
+                width,
+                height,
+                ..
+            } = self;
+            let src = crate::decoder::lossy_view(
+                vp8.as_deref(),
+                alpha_plane,
+                *has_alpha,
+                *width,
+                *height,
+            );
+            let ret = convert_to_argb(ydsp, converted, &src, no_fancy);
 
             if ret < 0 {
                 return ret;
             }
-            which = Subframe::Converted;
+            which = Source::Converted;
         }
 
         /* libwebp premultiplies each frame before compositing it, which is not
@@ -535,11 +491,25 @@ impl WPDDecoder {
             && !(premultiply_after_pack(self.animation, self.anim_mode)
                 && format_bpp(self.out_format) == 2)
         {
-            let this: *const WPDDecoder = self;
-            let mut view = self.frame_mut_of(which);
+            let Self {
+                ydsp,
+                converted,
+                vp8l,
+                lossless_out,
+                ..
+            } = self;
+            /* The ARGB target rule above leaves only these two: a frame that
+            was converted, and a lossless one, which is written back into the
+            codec's own canvas as the C did through its latched pointer. */
+            let view = match which {
+                Source::Converted => Some(converted.frame_mut()),
+                _ => lossless_out.and_then(|which| which.of_mut(vp8l)),
+            };
 
-            for y in 0..view.height {
-                unsafe { ((*this).ydsp.premultiply_row)(view.row(0, y), true) };
+            if let Some(mut view) = view {
+                for y in 0..view.height {
+                    (ydsp.premultiply_row)(view.row(0, y), true);
+                }
             }
         }
 
@@ -551,16 +521,7 @@ impl WPDDecoder {
         wants a canvas to stay compatible with and correctly declines when there
         is none. Switching modes mid-animation is refused for that reason. */
         if self.anim_mode != WPD_ANIM_SUBFRAME {
-            let this: *mut WPDDecoder = self;
-            let src = self.frame_of(which);
-            let ct = unsafe {
-                CompositeTargets {
-                    ldsp: ptr::addr_of!((*this).ldsp),
-                    ydsp: ptr::addr_of!((*this).ydsp),
-                    canvas: ptr::addr_of_mut!((*this).canvas),
-                }
-            };
-            let ret = unsafe { anim_composite(&pl, &ct, &src, target) };
+            let ret = self.composite(&pl, which, target);
 
             if ret < 0 {
                 return ret;
@@ -577,5 +538,37 @@ impl WPDDecoder {
         self.frame_index += 1;
 
         WPD_OK
+    }
+
+    /// The canvas, the tables and the sub-frame, taken from one destructuring
+    /// so that the compositor cannot be handed the canvas as its own source.
+    fn composite(&mut self, pl: &CPlacement, which: Source, target: Format) -> c_int {
+        let Self {
+            ldsp,
+            ydsp,
+            canvas,
+            converted,
+            vp8,
+            vp8l,
+            lossless_out,
+            alpha_plane,
+            has_alpha,
+            width,
+            height,
+            ..
+        } = self;
+        let src = match which {
+            Source::Lossy => crate::decoder::lossy_view(
+                vp8.as_deref(),
+                alpha_plane,
+                *has_alpha,
+                *width,
+                *height,
+            ),
+            Source::Lossless => crate::decoder::lossless_view(vp8l, *lossless_out),
+            _ => converted.frame(),
+        };
+
+        anim_composite(pl, CompositeTargets { ldsp, ydsp, canvas }, &src, target)
     }
 }

@@ -19,8 +19,6 @@
 
 use std::ffi::CStr;
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::ptr;
 
 use wpd::image::Format;
 
@@ -341,7 +339,7 @@ impl Picture<'_> {
 /// bytes, and the input's own for one opened with
 /// [`Decoder::open_borrowed`].
 pub struct Decoder<'a> {
-    inner: Box<WPDDecoder>,
+    inner: Box<WPDDecoder<'a>>,
     input: PhantomData<&'a [u8]>,
 }
 
@@ -353,6 +351,9 @@ impl Default for Decoder<'_> {
 
 impl<'a> Decoder<'a> {
     pub fn new() -> Self {
+        wpd::log::set_sink(crate::compat::forward_log);
+        wpd::cpu::init();
+
         Decoder {
             inner: Box::new(WPDDecoder::new()),
             input: PhantomData,
@@ -363,110 +364,61 @@ impl<'a> Decoder<'a> {
     /// file codes natively, which is planar for a lossy frame and ARGB for a
     /// lossless one.
     pub fn set_format(&mut self, format: Format) -> Result<()> {
-        check(unsafe {
-            crate::decoder::wpd_decoder_set_output_format(
-                &mut *self.inner,
-                format as i32,
-            )
-        })
+        check(self.inner.set_output_format(format as i32))
     }
 
     pub fn set_animation(&mut self, mode: Animation) -> Result<()> {
-        let mode = match mode {
+        check(self.inner.set_animation_mode(match mode {
             Animation::Composited => 0,
             Animation::Subframe => 1,
-        };
-
-        check(unsafe {
-            crate::decoder::wpd_decoder_set_animation_mode(&mut *self.inner, mode)
-        })
+        }))
     }
 
     pub fn set_options(&mut self, options: Options) -> Result<()> {
-        let c = options.to_c();
-
-        check(unsafe { crate::decoder::wpd_decoder_set_options(&mut *self.inner, &c) })
+        check(self.inner.set_options(&options.to_c()))
     }
 
     /// Opens a file the decoder copies, so nothing has to outlive the call.
     pub fn open(&mut self, data: &[u8]) -> Result<()> {
-        check(unsafe {
-            crate::decoder::wpd_decoder_open(
-                &mut *self.inner,
-                data.as_ptr(),
-                data.len(),
-            )
-        })
+        check(self.inner.open(data))
     }
 
     /// Opens a file the decoder reads in place. The bytes must outlive the
     /// decoder, which is what the lifetime says.
     pub fn open_borrowed(&mut self, data: &'a [u8]) -> Result<()> {
-        check(unsafe {
-            crate::decoder::wpd_decoder_open_borrowed(
-                &mut *self.inner,
-                data.as_ptr(),
-                data.len(),
-            )
-        })
+        check(self.inner.open_borrowed(data))
     }
 
     /// Starts a stream the caller appends to as bytes arrive.
     pub fn open_stream(&mut self) -> Result<()> {
-        check(unsafe { crate::decoder::wpd_decoder_open_stream(&mut *self.inner) })
+        check(self.inner.open_stream())
     }
 
     pub fn append(&mut self, chunk: &[u8]) -> Result<()> {
-        check(unsafe {
-            crate::decoder::wpd_decoder_append(
-                &mut *self.inner,
-                chunk.as_ptr(),
-                chunk.len(),
-            )
-        })
+        check(self.inner.append(chunk))
     }
 
     /// Replaces the stream's contents with a longer prefix of the same file,
     /// which is what a caller reading into a growing buffer has.
     pub fn update(&mut self, data: &'a [u8]) -> Result<()> {
-        check(unsafe {
-            crate::decoder::wpd_decoder_update(
-                &mut *self.inner,
-                data.as_ptr(),
-                data.len(),
-            )
-        })
+        check(self.inner.update(data))
     }
 
     pub fn end_of_stream(&mut self) -> Result<()> {
-        check(unsafe { crate::decoder::wpd_decoder_end_of_stream(&mut *self.inner) })
+        check(self.inner.end_of_stream())
     }
 
-    pub fn info(&self) -> Result<ImageInfo> {
+    pub fn info(&mut self) -> Result<ImageInfo> {
         let mut info = WPDImageInfo::zeroed();
 
-        check(unsafe {
-            crate::decoder::wpd_decoder_get_info(&*self.inner, &mut info)
-        })?;
+        check(self.inner.get_info(&mut info))?;
         Ok(ImageInfo::from_c(&info))
     }
 
-    pub fn frame_info(&self, index: i32) -> Result<FrameInfo> {
-        let mut info = MaybeUninit::<WPDFrameInfo>::zeroed();
+    pub fn frame_info(&mut self, index: i32) -> Result<FrameInfo> {
+        let mut info = WPDFrameInfo::zeroed();
 
-        unsafe {
-            (*info.as_mut_ptr()).struct_size = std::mem::size_of::<WPDFrameInfo>();
-        }
-        check(unsafe {
-            crate::decoder::wpd_decoder_frame_info(
-                &*self.inner,
-                index,
-                info.as_mut_ptr(),
-            )
-        })?;
-
-        let info = unsafe { info.assume_init() };
-
+        check(self.inner.frame_info(index, &mut info))?;
         Ok(FrameInfo {
             pos_x: info.pos_x,
             pos_y: info.pos_y,
@@ -481,33 +433,20 @@ impl<'a> Decoder<'a> {
     }
 
     /// The named metadata chunk, or none when the file carries no such chunk.
-    pub fn metadata(&self, kind: Metadata) -> Option<&[u8]> {
+    pub fn metadata(&mut self, kind: Metadata) -> Option<&[u8]> {
         let kind = match kind {
             Metadata::Iccp => 1,
             Metadata::Exif => 2,
             Metadata::Xmp => 4,
         };
-        let mut data = ptr::null();
-        let mut size = 0usize;
-        let ok = unsafe {
-            crate::decoder::wpd_decoder_metadata(
-                &*self.inner,
-                kind,
-                &mut data,
-                &mut size,
-            )
-        };
 
-        if ok < 0 || data.is_null() || size == 0 {
-            return None;
-        }
-        Some(unsafe { std::slice::from_raw_parts(data, size) })
+        self.inner.metadata(kind).ok().flatten()
     }
 
     /// Returns to the first frame. A stream that was appended to cannot be
     /// rewound, because the bytes it has read are gone.
     pub fn rewind(&mut self) -> Result<()> {
-        check(unsafe { crate::decoder::wpd_decoder_rewind(&mut *self.inner) })
+        check(self.inner.rewind())
     }
 
     /// The next frame, or none when the file is finished or the stream has
@@ -516,9 +455,7 @@ impl<'a> Decoder<'a> {
     /// The picture borrows the decoder: the next call reuses its memory.
     pub fn next_frame(&mut self) -> Result<Option<Picture<'_>>> {
         let mut frame = WPDFrame::zeroed();
-        let got = unsafe {
-            crate::decoder::wpd_decoder_next_frame(&mut *self.inner, &mut frame)
-        };
+        let got = self.inner.next_frame(&mut frame);
 
         check(got)?;
         if got == 0 {
@@ -539,13 +476,7 @@ impl<'a> Decoder<'a> {
         let mut frame = WPDFrame::zeroed();
         let mut rows = 0;
 
-        check(unsafe {
-            crate::decoder::wpd_decoder_partial_frame(
-                &mut *self.inner,
-                &mut frame,
-                &mut rows,
-            )
-        })?;
+        check(self.inner.partial_frame(&mut frame, &mut rows))?;
         Ok((
             Picture {
                 frame,
@@ -557,10 +488,7 @@ impl<'a> Decoder<'a> {
 
     /// The last failure's message, which says more than the status does.
     pub fn error(&self) -> &str {
-        let s =
-            unsafe { CStr::from_ptr(crate::decoder::wpd_decoder_error(&*self.inner)) };
-
-        s.to_str().unwrap_or("")
+        self.inner.error_message()
     }
 }
 

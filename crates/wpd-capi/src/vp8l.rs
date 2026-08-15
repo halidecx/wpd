@@ -1,296 +1,82 @@
-//! C ABI for the lossless frame decoder, as declared by `src/vp8l.h`.
+//! The lossless decoder's pictures, seen as bytes.
 //!
-//! Two pieces of caller-owned memory cross here and neither one enters the
-//! core. The chunk is rebuilt as a slice per call, as in [`crate::vp8`]. The
-//! alpha plane an ALPH chunk can be decoded straight into is a pointer the C
-//! hands over with `vp8l_set_alpha_dst` and takes back afterwards; the shim
-//! keeps it as a `(pointer, stride)` pair and turns it into a `&mut [u8]` only
-//! for the duration of the decode call that uses it.
+//! [`wpd::vp8l`] works a pixel at a time and stores its canvas as `u32`;
+//! everything downstream of it — the packers, the compositor, the copy into a
+//! caller's buffer — works a row of bytes at a time. Reinterpreting the one as
+//! the other is the whole of this module, and it is the reason the driver
+//! cannot yet be safe code end to end: the core promises no `unsafe` at all
+//! without the `asm` feature, and a `&[u32]` cannot become a `&[u8]` without
+//! either `unsafe` or a dependency the core does not have.
 //!
-//! The pictures the C reads back are views: a `WebPImage` whose `data[0]`
-//! points into memory the decoder owns and whose `alloc` fields are null, so
-//! nothing on that side will try to free it. That is what `image_view` did.
+//! Nothing else here reaches for a pointer. Which of the decoder's pictures a
+//! caller means is a name, not a latched view.
 
-use std::ffi::{c_int, c_uint};
-use std::{ptr, slice};
+use std::slice;
 
-use wpd::error::Status;
-use wpd::vp8l::{AlphaDst, Decoder, Picture, Target};
+use wpd::image::Format;
+use wpd::picture::{Frame, FrameMut, PlaneMut};
+use wpd::vp8l::{Decoder, Picture, Target};
 
-use crate::compat::forward_log;
-use crate::image::WebPImage;
-use crate::vp8::{status, WPD_ERROR_INVALID_DATA};
-
-pub const VP8L_NEED_MORE: c_int = 1;
-
-/// `enum VP8LTarget` from `src/vp8l.h`.
-pub const VP8L_TARGET_ARGB: c_int = 0;
-pub const VP8L_TARGET_ALPHA: c_int = 1;
-
-const WPD_PIX_FMT_ARGB: c_int = 2;
-
-/// The decoder plus the alpha plane it was last pointed at.
-pub struct Context {
-    decoder: Decoder,
-    alpha_dst: *mut u8,
-    alpha_stride: c_int,
+/// Which of the lossless decoder's pictures a decode left its output in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Lossless {
+    /// What [`Decoder::decode_frame`] filled in for [`Target::Argb`].
+    Argb,
+    /// What the resumable path is filling in, which alternates between two
+    /// pictures as the caller peeks at it.
+    Still,
 }
 
-/// # Safety
-///
-/// `ctx` must point to a live `Context` from [`vp8l_alloc`].
-unsafe fn context<'a>(ctx: *mut Context) -> Option<&'a mut Context> {
-    unsafe { ctx.as_mut() }
-}
+impl Lossless {
+    /// The named picture, or nothing when the decoder has not produced one.
+    pub fn of(self, decoder: &Decoder) -> Option<Frame<'_>> {
+        let pic = match self {
+            Lossless::Argb => decoder.picture(Target::Argb),
+            Lossless::Still => decoder.still_picture()?,
+        };
 
-/// Writes a view of `pic` into `out`, on the terms `image_view` set: the caller
-/// may read it but must not free it.
-fn view(out: *mut WebPImage, pic: &Picture) {
-    if out.is_null() {
-        return;
+        (pic.width > 0 && !pic.data.is_empty()).then(|| frame(pic))
     }
-    let mut img = WebPImage::empty();
 
-    if pic.width > 0 && !pic.data.is_empty() {
-        img.data[0] = pic.data.as_ptr().cast::<u8>().cast_mut();
-        img.linesize[0] = (pic.stride * 4) as c_int;
-        img.width = pic.width;
-        img.height = pic.height;
-        img.format = WPD_PIX_FMT_ARGB;
-    }
-    unsafe { out.write(img) };
-}
+    /// As [`Self::of`], writable, which the compositor's per-frame
+    /// premultiply weights in place.
+    pub fn of_mut(self, decoder: &mut Decoder) -> Option<FrameMut<'_>> {
+        let pic = match self {
+            Lossless::Argb => decoder.picture_out_mut(Target::Argb),
+            Lossless::Still => decoder.still_picture_mut()?,
+        };
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes.
-unsafe fn chunk<'a>(data: *const u8, size: c_uint) -> &'a [u8] {
-    if data.is_null() {
-        return &[];
-    }
-    unsafe { slice::from_raw_parts(data, size as usize) }
-}
-
-impl Context {
-    pub(crate) fn new() -> Self {
-        wpd::log::set_sink(forward_log);
-        wpd::cpu::init();
-
-        Context {
-            decoder: Decoder::new(),
-            alpha_dst: ptr::null_mut(),
-            alpha_stride: 0,
+        if pic.width <= 0 || pic.data.is_empty() {
+            return None;
         }
+        Some(frame_mut(pic))
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vp8l_alloc() -> *mut Context {
-    Box::into_raw(Box::new(Context::new()))
-}
-
-/// # Safety
+/// A picture as a packed ARGB [`Frame`].
 ///
-/// `ctx` must point to a writable pointer to a live [`Context`], or to null.
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_free(ctx: *mut *mut Context) {
-    unsafe {
-        let p = *ctx;
-
-        if !p.is_null() {
-            drop(Box::from_raw(p));
-            *ctx = ptr::null_mut();
-        }
-    }
-}
-
-/// # Safety
-///
-/// `ctx` must point to a live [`Context`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_reset(ctx: *mut Context) {
-    if let Some(c) = unsafe { context(ctx) } {
-        c.decoder.reset();
-    }
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_release(ctx: *mut Context) {
-    if let Some(c) = unsafe { context(ctx) } {
-        c.decoder.release();
-    }
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_set_canvas(
-    ctx: *mut Context,
-    width: c_int,
-    height: c_int,
-) {
-    if let Some(c) = unsafe { context(ctx) } {
-        c.decoder.set_canvas(width, height);
-    }
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_width(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c.decoder.width)
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_height(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c.decoder.height)
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_has_alpha(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c_int::from(c.decoder.has_alpha))
-}
-
-/// # Safety
-///
-/// `dst` must be readable and writable for `stride` bytes on each of the
-/// canvas's rows until the pointer is replaced, which is what the C decoder
-/// required of it too.
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_set_alpha_dst(
-    ctx: *mut Context,
-    dst: *mut u8,
-    stride: c_int,
-) {
-    if let Some(c) = unsafe { context(ctx) } {
-        c.alpha_dst = dst;
-        c.alpha_stride = stride;
-    }
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_alpha_dst_used(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c_int::from(c.decoder.alpha_dst_used()))
-}
-
-/// # Safety
-///
-/// `data` must be readable for `size` bytes and `out`, when not null, writable.
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_decode_frame(
-    ctx: *mut Context,
-    target: c_int,
-    out: *mut WebPImage,
-    data: *const u8,
-    size: c_uint,
-    is_alpha_chunk: c_int,
-) -> c_int {
-    let Some(c) = (unsafe { context(ctx) }) else {
-        return WPD_ERROR_INVALID_DATA;
-    };
-    let target = if target == 1 {
-        Target::Alpha
-    } else {
-        Target::Argb
-    };
-    let buf = unsafe { chunk(data, size) };
-    let stride = c.alpha_stride.max(0) as usize;
-    let rows = c.decoder.height.max(0) as usize;
-    let alpha = (!c.alpha_dst.is_null() && stride > 0 && rows > 0).then(|| AlphaDst {
-        data: unsafe { slice::from_raw_parts_mut(c.alpha_dst, stride * rows) },
-        stride,
-    });
-
-    let ret = c
-        .decoder
-        .decode_frame(target, buf, is_alpha_chunk != 0, alpha);
-
-    view(out, c.decoder.picture(target));
-
-    match ret {
-        Ok(()) => 0,
-        Err(e) => status(e),
-    }
-}
-
-/// # Safety
-///
-/// `payload` must be readable for `avail` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_still_step(
-    ctx: *mut Context,
-    payload: *const u8,
-    avail: c_uint,
-    size: c_uint,
-    complete: c_int,
-) -> c_int {
-    let Some(c) = (unsafe { context(ctx) }) else {
-        return WPD_ERROR_INVALID_DATA;
-    };
-    let buf = unsafe { chunk(payload, avail) };
-
-    match c.decoder.still_step(buf, size as usize, complete != 0) {
-        Ok(Status::Done) => 1,
-        Ok(Status::NeedMore) => 0,
-        Err(e) => status(e),
-    }
-}
-
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_still_peek(ctx: *mut Context) -> c_int {
-    let Some(c) = (unsafe { context(ctx) }) else {
-        return WPD_ERROR_INVALID_DATA;
+/// The cast is the module's reason for existing; the slice it produces covers
+/// exactly the allocation it came from, so every row a caller can name is in
+/// bounds.
+pub fn frame(pic: &Picture) -> Frame<'_> {
+    let bytes = unsafe {
+        slice::from_raw_parts(pic.data.as_ptr().cast::<u8>(), pic.data.len() * 4)
     };
 
-    match c.decoder.still_peek() {
-        Ok(()) => 0,
-        Err(e) => status(e),
-    }
+    Frame::packed(bytes, pic.stride * 4, pic.width, pic.height, Format::Argb)
 }
 
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_still_active(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c_int::from(c.decoder.still_active()))
-}
+/// As [`frame`], writable.
+pub fn frame_mut(pic: &mut Picture) -> FrameMut<'_> {
+    let len = pic.data.len() * 4;
+    let bytes =
+        unsafe { slice::from_raw_parts_mut(pic.data.as_mut_ptr().cast::<u8>(), len) };
+    let plane = [
+        PlaneMut::borrowed(bytes, pic.stride * 4),
+        PlaneMut::borrowed(&mut [], 0),
+        PlaneMut::borrowed(&mut [], 0),
+        PlaneMut::borrowed(&mut [], 0),
+    ];
 
-/// # Safety
-///
-/// As [`vp8l_reset`].
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_still_rows_out(ctx: *const Context) -> c_int {
-    unsafe { ctx.as_ref() }.map_or(0, |c| c.decoder.still_rows_out())
-}
-
-/// # Safety
-///
-/// `out` must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn vp8l_still_frame(ctx: *const Context, out: *mut WebPImage) {
-    let Some(c) = (unsafe { ctx.as_ref() }) else {
-        return;
-    };
-
-    if let Some(pic) = c.decoder.still_picture() {
-        view(out, pic);
-    }
+    FrameMut::borrowed(plane, pic.width, pic.height, Format::Argb, false)
 }

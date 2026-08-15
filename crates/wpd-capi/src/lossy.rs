@@ -4,23 +4,21 @@
 //! the alpha plane a WebP file carries beside the luma, the planar view handed
 //! out for it, and the in-loop filter a scaled decode drops. The pixels are
 //! [`wpd::vp8`]; what is here is the WebP container's idea of a lossy frame.
+//!
+//! The alpha plane is the decoder's own `Vec`, and the chunk it is decoded
+//! from is a slice of the input, so every call below destructures the decoder
+//! to take both at once. The C reached for each through the decoder pointer
+//! and the aliasing rule was the reader's to reconstruct.
 
-use std::ffi::{c_int, c_uint};
-use std::{ptr, slice};
+use std::ffi::c_int;
 
-use wpd::image::Format;
+use wpd::error::Status;
+use wpd::picture::PlaneMut;
+use wpd::vp8l::{AlphaDst, Target};
 
 use crate::convert::scaled_size;
 use crate::decoder::{
-    WPDDecoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L, WPD_OK,
-};
-use crate::image::WebPImage;
-use crate::vp8::{
-    vp8_decode_extend, vp8_decode_frame, vp8_decode_frame_init, vp8_decode_init,
-    vp8_decode_rows, WpdFrame, WpdPacket, WPD_ENOMEM,
-};
-use crate::vp8l::{
-    vp8l_alpha_dst_used, vp8l_decode_frame, vp8l_set_alpha_dst, VP8L_TARGET_ALPHA,
+    status, WPDDecoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L, WPD_OK,
 };
 
 const ALPHA_FILTER_NONE: c_int = 0;
@@ -32,166 +30,150 @@ const ALPHA_FILTER_GRADIENT: c_int = 3;
 ///
 /// The first row and the first column are predicted from their one neighbour
 /// whatever the mode is, so they are walked before the mode is looked at.
-///
-/// # Safety
-///
-/// Plane three must hold the image's geometry.
-unsafe fn alpha_inverse_prediction(frame: &WebPImage, mode: c_int) {
-    let ls = frame.linesize[3] as isize;
-    let base = frame.data[3];
-
-    unsafe {
-        let mut dec = base.add(1);
-
-        for _ in 1..frame.width {
-            *dec = (*dec).wrapping_add(*dec.sub(1));
-            dec = dec.add(1);
-        }
-
-        let mut dec = base.offset(ls);
-
-        for _ in 1..frame.height {
-            *dec = (*dec).wrapping_add(*dec.offset(-ls));
-            dec = dec.offset(ls);
-        }
-
-        /* The mode is chosen once, not per pixel: it cannot change inside a
-        frame, and a branch in the innermost loop is one the C did not have. */
-        match mode {
-            ALPHA_FILTER_HORIZONTAL => rows(frame, ls, |dec| *dec.sub(1)),
-            ALPHA_FILTER_VERTICAL => rows(frame, ls, |dec| *dec.offset(-ls)),
-            ALPHA_FILTER_GRADIENT => rows(frame, ls, |dec| {
-                let sum = *dec.sub(1) as i32 + *dec.offset(-ls) as i32
-                    - *dec.offset(-ls - 1) as i32;
-
-                sum.clamp(0, 255) as u8
-            }),
-            _ => {}
-        }
+fn alpha_inverse_prediction(
+    plane: &mut PlaneMut<'_>,
+    width: usize,
+    height: i32,
+    mode: c_int,
+) {
+    if width == 0 || height == 0 {
+        return;
     }
-}
 
-/// Adds each pixel's prediction to it, over every row but the first and every
-/// column but the first, which the caller has already undone.
-///
-/// # Safety
-///
-/// As [`alpha_inverse_prediction`].
-unsafe fn rows(frame: &WebPImage, ls: isize, predict: impl Fn(*const u8) -> u8) {
-    for y in 1..frame.height {
-        let mut dec = unsafe { frame.data[3].offset(y as isize * ls + 1) };
+    let top = plane.row_mut(0, 0, width);
 
-        for _ in 1..frame.width {
-            unsafe {
-                *dec = (*dec).wrapping_add(predict(dec));
-                dec = dec.add(1);
+    for x in 1..width {
+        top[x] = top[x].wrapping_add(top[x - 1]);
+    }
+    for y in 1..height {
+        let (above, row) = plane.row_pair_mut(y - 1, y, 0, 1);
+
+        row[0] = row[0].wrapping_add(above[0]);
+    }
+
+    /* The mode is chosen once, not per pixel: it cannot change inside a frame,
+    and a branch in the innermost loop is one the C did not have. */
+    match mode {
+        ALPHA_FILTER_HORIZONTAL => {
+            for y in 1..height {
+                let row = plane.row_mut(y, 0, width);
+
+                for x in 1..width {
+                    row[x] = row[x].wrapping_add(row[x - 1]);
+                }
             }
         }
+        ALPHA_FILTER_VERTICAL => {
+            for y in 1..height {
+                let (above, row) = plane.row_pair_mut(y - 1, y, 0, width);
+
+                for x in 1..width {
+                    row[x] = row[x].wrapping_add(above[x]);
+                }
+            }
+        }
+        ALPHA_FILTER_GRADIENT => {
+            for y in 1..height {
+                let (above, row) = plane.row_pair_mut(y - 1, y, 0, width);
+
+                for x in 1..width {
+                    let sum = row[x - 1] as i32 + above[x] as i32 - above[x - 1] as i32;
+
+                    row[x] = row[x].wrapping_add(sum.clamp(0, 255) as u8);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
-impl WPDDecoder {
-    /// # Safety
-    ///
-    /// `data_start` must be readable for `data_size` bytes, and `out` must
-    /// carry an alpha plane of the frame's geometry.
-    unsafe fn decode_alpha(
-        &mut self,
-        out: &WebPImage,
-        data_start: *const u8,
-        data_size: c_uint,
-    ) -> c_int {
+impl<'a> WPDDecoder<'a> {
+    /// What the last VP8 frame header declared.
+    fn vp8_size(&self) -> (c_int, c_int) {
+        self.vp8
+            .as_ref()
+            .map_or((0, 0), |vp8| (vp8.width, vp8.height))
+    }
+
+    /// Fills the alpha plane in from the ALPH chunk the decoder latched.
+    fn decode_alpha(&mut self) -> c_int {
+        let (offset, size) = (self.alpha_data_offset, self.alpha_data_size);
+        let width = self.width.max(0) as usize;
+        let height = self.height.max(0);
+        let extent = width * height as usize;
+
         if self.alpha_compression == ALPHA_COMPRESSION_NONE {
-            let mut src = data_start;
-            let mut left = data_size as usize;
+            let Self {
+                input, alpha_plane, ..
+            } = self;
+            let mut left = input.chunk(offset, size);
 
-            for y in 0..self.height {
-                let n = (self.width as usize).min(left);
+            for y in 0..height as usize {
+                let n = width.min(left.len());
+                let (row, rest) = left.split_at(n);
 
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        src,
-                        out.data[3].offset(y as isize * out.linesize[3] as isize),
-                        n,
-                    );
-                    src = src.add(n);
-                }
-                left -= n;
+                alpha_plane[y * width..][..n].copy_from_slice(row);
+                left = rest;
             }
         } else if self.alpha_compression == ALPHA_COMPRESSION_VP8L {
             self.lossless_canvas_in();
 
-            let (ret, direct) = unsafe {
-                vp8l_set_alpha_dst(&mut *self.vp8l, out.data[3], out.linesize[3]);
+            let ret = {
+                let Self {
+                    vp8l,
+                    input,
+                    alpha_plane,
+                    ..
+                } = self;
+                let dst = AlphaDst {
+                    data: &mut alpha_plane[..extent],
+                    stride: width,
+                };
 
-                let ret = vp8l_decode_frame(
-                    &mut *self.vp8l,
-                    VP8L_TARGET_ALPHA,
-                    &mut self.alpha_argb,
-                    data_start,
-                    data_size,
-                    1,
-                );
-                let direct = vp8l_alpha_dst_used(&*self.vp8l);
-
-                vp8l_set_alpha_dst(&mut *self.vp8l, ptr::null_mut(), 0);
-                (ret, direct)
+                vp8l.decode_frame(
+                    Target::Alpha,
+                    input.chunk(offset, size),
+                    true,
+                    Some(dst),
+                )
             };
 
-            if ret < 0 {
-                return ret;
+            if let Err(e) = ret {
+                return status(e);
             }
-            if direct == 0 {
-                let argb = unsafe { self.alpha_argb.frame() };
-                let width = self.width as usize;
+            if !self.vp8l.alpha_dst_used() {
+                let Self {
+                    vp8l,
+                    alpha_plane,
+                    ldsp,
+                    ..
+                } = self;
+                let argb = crate::vp8l::frame(vp8l.picture(Target::Alpha));
 
-                for y in 0..self.height {
-                    let src = argb.plane[0].row(y, 0, width * 4);
-                    let dst = unsafe {
-                        slice::from_raw_parts_mut(
-                            out.data[3].offset(y as isize * out.linesize[3] as isize),
-                            width,
-                        )
-                    };
-
-                    (self.ldsp.extract_green)(dst, src);
+                for y in 0..height {
+                    (ldsp.extract_green)(
+                        &mut alpha_plane[y as usize * width..][..width],
+                        &argb.row(0, y)[..width * 4],
+                    );
                 }
             }
         }
 
         if self.alpha_filter != ALPHA_FILTER_NONE {
-            unsafe { alpha_inverse_prediction(out, self.alpha_filter) };
+            let mode = self.alpha_filter;
+            let mut plane = PlaneMut::borrowed(&mut self.alpha_plane[..extent], width);
+
+            alpha_inverse_prediction(&mut plane, width, height, mode);
         }
         WPD_OK
     }
 
-    /// A view of the three planes the VP8 decoder produced, plus the alpha
-    /// plane this module keeps beside them.
-    fn export_planes(&mut self, decoded: &WpdFrame) {
-        let mut out = WebPImage::empty();
-
-        out.width = self.width;
-        out.height = self.height;
-        out.format = Format::Yuv420p as c_int;
-        for plane in 0..3 {
-            out.data[plane] = decoded.data[plane];
-            out.linesize[plane] = decoded.linesize[plane];
-        }
-        if self.has_alpha {
-            out.data[3] = self.alpha_plane.as_mut_ptr();
-            out.linesize[3] = self.width;
-            out.format = Format::Yuva420p as c_int;
-        }
-        self.subframe = out;
-    }
-
-    /// # Safety
-    ///
-    /// The alpha chunk the decoder latched must still be buffered.
-    unsafe fn alpha_plane_decode(&mut self) -> c_int {
-        let Some(alpha_size) = (self.width as usize).checked_mul(self.height as usize)
+    /// Sizes and clears the alpha plane, then fills it in.
+    fn alpha_plane_decode(&mut self) -> c_int {
+        let Some(alpha_size) =
+            (self.width.max(0) as usize).checked_mul(self.height.max(0) as usize)
         else {
-            return WPD_ENOMEM;
+            return crate::decoder::WPD_ERR_NO_MEMORY;
         };
 
         if self.alpha_plane.len() < alpha_size {
@@ -200,38 +182,16 @@ impl WPDDecoder {
                 .try_reserve(alpha_size - self.alpha_plane.len())
                 .is_err()
             {
-                return WPD_ENOMEM;
+                return crate::decoder::WPD_ERR_NO_MEMORY;
             }
             self.alpha_plane.resize(alpha_size, 0);
         }
         self.alpha_plane[..alpha_size].fill(0);
 
-        let mut out = self.subframe;
-
-        out.data[3] = self.alpha_plane.as_mut_ptr();
-        out.linesize[3] = self.width;
-        out.format = Format::Yuva420p as c_int;
-        self.subframe = out;
-
-        let data = self.file_at(self.alpha_data_offset);
-        let ret =
-            unsafe { self.decode_alpha(&out, data, self.alpha_data_size as c_uint) };
+        let ret = self.decode_alpha();
 
         self.alpha_pending = false;
         ret
-    }
-
-    fn lossy_init(&mut self) -> c_int {
-        if self.vp8_initialized {
-            return WPD_OK;
-        }
-        let ret = unsafe { vp8_decode_init(&mut self.codec) };
-
-        if ret < 0 {
-            return ret;
-        }
-        self.vp8_initialized = true;
-        WPD_OK
     }
 
     /* libwebp drops the in-loop filter once a scaled decode shrinks the frame
@@ -240,7 +200,7 @@ impl WPDDecoder {
     filter goes too. The threshold is measured against the whole frame, not the
     cropped part. */
     fn update_filter_bypass(&mut self) {
-        self.codec.bypass_filtering = self.options.bypass_filtering;
+        self.bypass_filtering = self.options.bypass_filtering != 0;
         if self.options.use_scaling == 0
             || self.canvas_width == 0
             || self.canvas_height == 0
@@ -256,54 +216,41 @@ impl WPDDecoder {
             return;
         };
         if width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4 {
-            self.codec.bypass_filtering = 1;
+            self.bypass_filtering = true;
         }
     }
 
     /// Returns 1 when the frame is complete, 0 when more of the chunk is
     /// needed, or a negative status.
-    ///
-    /// # Safety
-    ///
-    /// `data_start` must be readable for `avail` bytes and stay valid until
-    /// the next call that replaces it.
-    pub(crate) unsafe fn vp8_lossy_step(
+    pub(crate) fn vp8_lossy_step(
         &mut self,
-        data_start: *const u8,
-        avail: c_uint,
-        data_size: c_uint,
+        offset: usize,
+        avail: usize,
+        size: usize,
     ) -> c_int {
-        let ret = self.lossy_init();
-
-        if ret < 0 {
-            return ret;
-        }
         self.update_filter_bypass();
 
         if !self.vp8_active {
-            let ret = unsafe {
-                vp8_decode_frame_init(
-                    &mut self.codec,
-                    data_start,
-                    avail as c_int,
-                    data_size as c_int,
-                )
-            };
+            let bypass = self.bypass_filtering;
+            let Self { vp8, input, .. } = self;
+            let vp8 = vp8.get_or_insert_with(Default::default);
 
-            if ret < 0 {
-                return ret;
+            /* Latched with the frame header, as the C's `vp8_decode_frame_init`
+            read it out of the codec context: a mid-frame options change does
+            not reach the rows already being filtered. */
+            vp8.bypass_filtering = bypass;
+
+            match vp8.frame_init(input.chunk(offset, avail), avail, size) {
+                Err(e) => return status(e),
+                Ok(Status::NeedMore) => return 0,
+                Ok(Status::Done) => {}
             }
-            if ret != 0 {
-                return 0;
-            }
-            self.update_canvas_size(self.codec.width, self.codec.height);
 
-            let mut current = WpdFrame::empty();
+            let (w, h) = self.vp8_size();
 
-            unsafe { crate::vp8::vp8_current_frame(&self.codec, &mut current) };
-            self.export_planes(&current);
+            self.update_canvas_size(w, h);
             if self.has_alpha {
-                let ret = unsafe { self.alpha_plane_decode() };
+                let ret = self.alpha_plane_decode();
 
                 if ret < 0 {
                     return ret;
@@ -312,53 +259,54 @@ impl WPDDecoder {
             self.still_lossy = !self.animation;
             self.vp8_active = true;
         } else {
-            unsafe { vp8_decode_extend(&mut self.codec, data_start, avail as c_int) };
+            let Self { vp8, input, .. } = self;
+            let vp8 = vp8.get_or_insert_with(Default::default);
+
+            vp8.extend(input.chunk(offset, avail), avail);
         }
 
-        let mut decoded = WpdFrame::empty();
-        let ret = unsafe { vp8_decode_rows(&mut self.codec, &mut decoded) };
+        let ret = {
+            let Self { vp8, input, .. } = self;
+            let vp8 = vp8.get_or_insert_with(Default::default);
 
-        if ret < 0 {
-            return ret;
+            vp8.decode_rows(input.chunk(offset, avail))
+        };
+
+        match ret {
+            Err(e) => status(e),
+            Ok(Status::NeedMore) => 0,
+            Ok(Status::Done) => {
+                self.vp8_active = false;
+                1
+            }
         }
-        self.export_planes(&decoded);
-        if ret != 0 {
-            return 0;
-        }
-        self.vp8_active = false;
-        1
     }
 
-    /// # Safety
-    ///
-    /// `data_start` must be readable for `data_size` bytes.
-    pub(crate) unsafe fn vp8_lossy_decode_frame(
+    pub(crate) fn vp8_lossy_decode_frame(
         &mut self,
-        data_start: *const u8,
-        data_size: c_uint,
+        offset: usize,
+        size: usize,
     ) -> c_int {
-        let ret = self.lossy_init();
-
-        if ret < 0 {
-            return ret;
-        }
         self.update_filter_bypass();
 
-        let mut packet = WpdPacket {
-            data: data_start,
-            size: data_size as c_int,
-        };
-        let mut decoded = WpdFrame::empty();
-        let ret =
-            unsafe { vp8_decode_frame(&mut self.codec, &mut decoded, &mut packet) };
+        let ret = {
+            let bypass = self.bypass_filtering;
+            let Self { vp8, input, .. } = self;
+            let vp8 = vp8.get_or_insert_with(Default::default);
 
-        if ret < 0 {
-            return ret;
+            vp8.bypass_filtering = bypass;
+            vp8.decode_frame(input.chunk(offset, size))
+        };
+
+        if let Err(e) = ret {
+            return status(e);
         }
-        self.update_canvas_size(self.codec.width, self.codec.height);
-        self.export_planes(&decoded);
+
+        let (w, h) = self.vp8_size();
+
+        self.update_canvas_size(w, h);
         if self.has_alpha {
-            let ret = unsafe { self.alpha_plane_decode() };
+            let ret = self.alpha_plane_decode();
 
             if ret < 0 {
                 return ret;
