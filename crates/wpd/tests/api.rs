@@ -11,6 +11,13 @@ use wpd::api::{Animation, Decoder, Options};
 use wpd::image::Format;
 
 fn corpus() -> Vec<PathBuf> {
+    /* miri interprets every instruction, so decoding the corpus in eight
+    formats under it would take hours. The unit tests reach the same paths on
+    a one-pixel file, which is what that run is for. */
+    if cfg!(miri) {
+        return Vec::new();
+    }
+
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../wpd-test-data")
         .canonicalize();

@@ -5,7 +5,7 @@
 //! them a chunk belongs to and hands each the part of the decoder it needs.
 //!
 //! Nothing here is the C ABI. A caller's memory arrives as a
-//! [`RowSink`](crate::handout::RowSink) and a finished picture leaves as a
+//! [`crate::handout::RowSink`] and a finished picture leaves as a
 //! [`Handout`]; the versioned structs `include/wpd.h` declares, and the
 //! pointers in them, belong to whoever crosses that boundary.
 
