@@ -151,6 +151,7 @@ impl<'a> Decoder<'a> {
                     );
                 }
             }
+            self.vp8l.release_alpha_canvas();
         }
 
         if self.alpha_filter != ALPHA_FILTER_NONE {

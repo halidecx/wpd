@@ -1572,6 +1572,64 @@ inside `#![forbid(unsafe_code)]`. `wpd-capi` is 229 across 3,530 lines, against
 286 at the end of Phase 8h and 785 when Phase 8c started, and every one of them
 is now within reach of a pointer the header handed over.
 
+## Peak heap, not allocation count, is what glibc charges for
+
+`a_lossy` decoded to `rgba` ran 1.50x slower than the C baseline while using
+_less_ user time — 0.24 s against 0.26 s. The whole difference was kernel time,
+and the counter that showed it was minor page faults: 242,166 against 1,225 over
+256 decodes. That is about 950 pages per decode, roughly 3.9 MB, which is the
+entire working set for that file being returned to the kernel and faulted back
+in on every decoder lifecycle.
+
+Interposing `malloc` and printing the calls in order found it in one read. Both
+builds make the same allocations at the same sizes; only the order differs:
+
+```
+C                                Rust
+c 1440064   alpha ARGB canvas    m 1440064   alpha ARGB canvas
+f 1441768   freed at once        m 1440064   RGBA output, both now live
+c 1440064   RGBA output, reusing  ...
+            the block just freed f 1441768   } freed only at
+                                 f 1441768   } decoder teardown
+```
+
+An ALPH chunk is decoded as a lossless image into a full ARGB canvas and the
+alpha plane is the green channel extracted from it. The C freed that canvas the
+moment it had the plane, so the packed conversion that follows reused the block.
+The port kept it, because it is a field of the lossless decoder and the decoder
+keeps its buffers to reuse them — which is right everywhere else and wrong here,
+since nothing reads that canvas again.
+
+**Why holding it costs so much more than it looks.** glibc's `free` raises
+`mmap_threshold` to the size of the largest mmapped chunk it has released and
+sets `trim_threshold` to twice that. The largest allocation here is 1,440,064
+bytes, so the trim threshold settles at about 2.88 MB — and peak heap decides
+which side of it a decode lands on:
+
+```
+C baseline        2,755,872 bytes   under  -> no trim
+port, before      4,141,512 bytes   over   -> trims every decode
+port, after       2,699,744 bytes   under  -> no trim
+```
+
+Releasing the canvas takes the peak below the line: 242,166 faults become 1,432,
+and the case goes from 1.50x slower than the C to 1.11x faster. Nothing else in
+the corpus moves.
+
+**What this does not buy.** The margin is thin on both sides — the C was 124 KB
+under the threshold and the port is now 180 KB under it. Any change that adds a
+couple of hundred kilobytes to what a lossy-with-alpha frame holds at once will
+tip it back, and the symptom will again be system time with no change in the
+work done. Peak heap for that shape is worth measuring, and an interposed
+`malloc` that tracks live bytes is enough to do it.
+
+The real fix is the one libwebp made: decode an alpha chunk straight into the
+one-byte plane instead of through a four-byte canvas. The machinery is half
+there — `AlphaDst` exists, and the colour-indexing transform already writes
+through it when it is the only transform — but the general pixel loop writes
+ARGB words. That would remove the buffer rather than free it early, and take the
+extract-green pass with it.
+
 ## The small-file gap is `libstd` starting, not the decoder
 
 `cmpbench.sh` reports the C baseline ahead on the small hand-written lossless

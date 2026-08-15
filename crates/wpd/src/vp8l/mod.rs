@@ -366,6 +366,19 @@ impl Decoder {
         self.lengths = Vec::new();
     }
 
+    /// Drops the ARGB canvas an alpha chunk was decoded through.
+    ///
+    /// Nothing reads it once the alpha plane has been taken out of it, and it
+    /// is four bytes per pixel against the plane's one. Holding it until the
+    /// decoder drops means a lossy frame with alpha has two full-size ARGB
+    /// buffers live at its peak — the canvas and whatever the frame is being
+    /// converted into — where it needs one at a time. The C freed it here for
+    /// the same reason, and the block it leaves behind is the size the
+    /// conversion then asks for.
+    pub fn release_alpha_canvas(&mut self) {
+        self.alpha_argb.release();
+    }
+
     /// The canvas the container has already committed to. A lossless frame
     /// header carries its own dimensions, an alpha chunk does not, and the two
     /// have to agree.
