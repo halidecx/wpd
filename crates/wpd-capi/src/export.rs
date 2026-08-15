@@ -141,7 +141,6 @@ pub struct ExportSettings {
     pub premultiply: bool,
     pub animation: bool,
     pub anim_mode: c_int,
-    pub ext_active: bool,
     pub duration: c_int,
     pub pos_x: c_int,
     pub pos_y: c_int,
@@ -160,7 +159,10 @@ pub struct ExportTargets<'a> {
     pub rescale: &'a mut Scratch,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
-    pub ext: &'a mut dyn RowSink,
+    /// Where the rows go when the caller supplied its own memory. `None` is
+    /// what says the decoder hands out its own instead, which is why there is
+    /// no separate flag: the destination and the choice are one value.
+    pub ext: Option<&'a mut (dyn RowSink + 'static)>,
 }
 
 /// The scratch a resumable row export writes through, plus how far it has got.
@@ -172,7 +174,7 @@ pub struct RowTargets<'a> {
     pub options: &'a Options,
     pub output: &'a mut Buffer,
     pub converted: &'a mut Buffer,
-    pub ext: &'a mut dyn RowSink,
+    pub ext: Option<&'a mut (dyn RowSink + 'static)>,
     pub converted_rows: &'a mut c_int,
     pub converted_format: &'a mut c_int,
 }
@@ -245,7 +247,7 @@ fn frame_planes(format: c_int) -> usize {
 /// `struct_size` bytes.
 pub(crate) unsafe fn write_frame(
     handout: &Handout<'_>,
-    ext: &External,
+    ext: &[WPDOutputPlane; 4],
     frame: *mut WPDFrame,
 ) {
     unsafe { frame_clear(frame) };
@@ -263,7 +265,7 @@ pub(crate) unsafe fn write_frame(
             }
         }
         Pixels::Sink => {
-            for (p, plane) in ext.0.iter().enumerate() {
+            for (p, plane) in ext.iter().enumerate() {
                 out.data[p] = if p < planes { plane.data } else { ptr::null() };
                 out.stride[p] = if p < planes { plane.stride } else { 0 };
             }
@@ -494,7 +496,7 @@ pub fn export_packed<'a>(
         if options.flip {
             planar = planar.flipped();
         }
-        if set.ext_active {
+        if let Some(ext) = ext {
             return export_external_planar(set, ext, &planar, format, out);
         }
         export_own(set, planar, format, out);
@@ -504,11 +506,11 @@ pub fn export_packed<'a>(
     if !format_is_packed(format) {
         let img = if options.flip { img.flipped() } else { img };
         let native = img.format as c_int;
-
-        if !set.ext_active {
+        let Some(ext) = ext else {
             export_own(set, img, native, out);
             return Ok(());
-        }
+        };
+
         if !format_is_packed(native) {
             return export_external_planar(set, ext, &img, native, out);
         }
@@ -595,7 +597,7 @@ pub fn export_packed<'a>(
     if options.flip {
         img = img.flipped();
     }
-    if set.ext_active {
+    if let Some(ext) = ext {
         return export_external_rows(set, dsp, ext, &img, format, out, 0, img.height);
     }
     export_own(set, img, format, out);
@@ -638,7 +640,7 @@ pub fn export_still_packed<'a>(
     before that would be of the memory as it was. */
     let dst = converted.frame();
 
-    if set.ext_active {
+    if let Some(ext) = ext {
         export_external_rows(set, dsp, ext, &dst, format, out, converted_from, upto)?;
         *converted_rows = upto;
         *converted_format = format;
@@ -840,10 +842,11 @@ pub fn export_still_lossless<'a>(
 
         let planar = output.frame();
 
-        if set.ext_active {
-            export_external_planar_rows(set, ext, &planar, format, out, first, upto)?;
-        } else {
-            export_own(set, planar, format, out);
+        match ext {
+            Some(ext) => export_external_planar_rows(
+                set, ext, &planar, format, out, first, upto,
+            )?,
+            None => export_own(set, planar, format, out),
         }
         finish();
         return Ok(());
@@ -851,12 +854,12 @@ pub fn export_still_lossless<'a>(
 
     if !format_is_packed(format) {
         let native = img.format as c_int;
-
-        if !set.ext_active {
+        let Some(ext) = ext else {
             export_own(set, *img, native, out);
             finish();
             return Ok(());
-        }
+        };
+
         export_external_rows(set, dsp, ext, img, native, out, first, upto)?;
         finish();
         return Ok(());
@@ -866,7 +869,7 @@ pub fn export_still_lossless<'a>(
     let alpha_first = format_layout(format) == LAYOUT_ARGB;
     let out_len = img.width as usize * format_bpp(format);
 
-    if set.ext_active {
+    if let Some(ext) = ext {
         export_external_rows(set, dsp, ext, img, format, out, first, upto)?;
         if set.premultiply {
             for y in first..upto {

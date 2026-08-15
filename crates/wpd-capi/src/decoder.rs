@@ -32,7 +32,7 @@ use crate::export::{
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
 use wpd::error::Error;
-use wpd::handout::Handout;
+use wpd::handout::{Handout, RowSink};
 use wpd::info::{FrameInfo, ImageInfo};
 use wpd::input::Input;
 use wpd::options::Options;
@@ -277,8 +277,17 @@ pub struct WPDDecoder<'a> {
     pub(crate) truncated: bool,
     pub(crate) input_mode: u8,
 
-    pub(crate) ext: External,
-    pub(crate) ext_active: bool,
+    /// Where a decode's rows go when the caller supplied its own memory.
+    ///
+    /// The decoder knows only that it is somewhere it can ask for a row of;
+    /// what the memory actually is belongs to whoever handed it over, which
+    /// for the C ABI is a pointer, a length and a stride that may run
+    /// backwards.
+    pub(crate) sink: Option<Box<dyn RowSink>>,
+    /// The same planes as the sink, kept so the frame handed back can name
+    /// them. Only the C ABI needs this: a `WPDFrame` reports where the pixels
+    /// went, and for a caller's own buffer that is the caller's own pointers.
+    pub(crate) planes: [WPDOutputPlane; 4],
 
     pub(crate) status: Option<Error>,
     /// A fixed buffer rather than a `String`: `wpd_decoder_error` hands out a
@@ -420,8 +429,8 @@ impl<'a> WPDDecoder<'a> {
             truncated: false,
             input_mode: 0,
 
-            ext: External([WPDOutputPlane::empty(); 4]),
-            ext_active: false,
+            sink: None,
+            planes: [WPDOutputPlane::empty(); 4],
 
             status: None,
             error: [0; ERROR_MAX],
@@ -530,7 +539,6 @@ impl<'a> WPDDecoder<'a> {
             premultiply: self.premultiply != 0,
             animation: self.animation,
             anim_mode: self.anim_mode,
-            ext_active: self.ext_active,
             duration: self.frame_duration,
             pos_x: self.pos_x,
             pos_y: self.pos_y,
@@ -565,7 +573,7 @@ impl<'a> WPDDecoder<'a> {
             transformed,
             output,
             converted,
-            ext,
+            sink,
             vp8,
             vp8l,
             lossless_out,
@@ -593,7 +601,7 @@ impl<'a> WPDDecoder<'a> {
                 rescale,
                 transformed,
                 output,
-                ext,
+                ext: sink.as_deref_mut(),
             },
             img,
         )
@@ -608,7 +616,7 @@ impl<'a> WPDDecoder<'a> {
             options,
             output,
             converted,
-            ext,
+            sink,
             converted_rows,
             converted_format,
             vp8,
@@ -634,7 +642,7 @@ impl<'a> WPDDecoder<'a> {
                 options,
                 output,
                 converted,
-                ext,
+                ext: sink.as_deref_mut(),
                 converted_rows,
                 converted_format,
             },
@@ -919,27 +927,27 @@ pub unsafe extern "C" fn wpd_decoder_free(decoder: *mut WPDDecoderRaw) {
     }
 }
 
-impl WPDDecoder<'_> {
-    /// The versioned C struct: check what only its encoding can get wrong,
-    /// then hand the rest to [`Self::set_core_options`].
-    pub(crate) fn set_options(
-        &mut self,
-        options: &WPDDecoderOptions,
-    ) -> Result<(), Error> {
-        let flag = |v: c_int| v == 0 || v == 1;
+/// The versioned C struct: check what only its encoding can get wrong, then
+/// hand the rest to [`WPDDecoder::set_core_options`].
+fn set_options(
+    decoder: &mut WPDDecoder<'_>,
+    options: &WPDDecoderOptions,
+) -> Result<(), Error> {
+    let flag = |v: c_int| v == 0 || v == 1;
 
-        if options.struct_size < WPDDecoderOptions::v1()
-            || !flag(options.bypass_filtering)
-            || !flag(options.no_fancy_upsampling)
-            || !flag(options.use_cropping)
-            || !flag(options.use_scaling)
-            || !flag(options.flip)
-        {
-            return Err(self.fail("invalid decoder options", Error::InvalidArgument));
-        }
-        self.set_core_options(options.to_core())
+    if options.struct_size < WPDDecoderOptions::v1()
+        || !flag(options.bypass_filtering)
+        || !flag(options.no_fancy_upsampling)
+        || !flag(options.use_cropping)
+        || !flag(options.use_scaling)
+        || !flag(options.flip)
+    {
+        return Err(decoder.fail("invalid decoder options", Error::InvalidArgument));
     }
+    decoder.set_core_options(options.to_core())
+}
 
+impl WPDDecoder<'_> {
     /// A crop that names no pixels and a scale that names no size are the two
     /// things the type cannot rule out on its own.
     pub(crate) fn set_core_options(&mut self, options: Options) -> Result<(), Error> {
@@ -1005,40 +1013,54 @@ impl WPDDecoder<'_> {
         self.converted_format = WPD_PIX_FMT_NONE;
     }
 
-    /// # Safety
+    /// Points the decode at somewhere to put its rows, or back at the
+    /// decoder's own memory.
     ///
-    /// The buffer's planes must be as it declares them.
-    pub(crate) unsafe fn set_output_buffer(
-        &mut self,
-        buffer: Option<&WPDOutputBuffer>,
-    ) -> Result<(), Error> {
-        let Some(buffer) = buffer else {
-            if self.ext_active {
-                self.drop_converted_rows();
-            }
-            self.ext_active = false;
-            self.ext = External([WPDOutputPlane::empty(); 4]);
-            return Ok(());
-        };
-
-        if buffer.struct_size < output_buffer_v1()
-            || buffer.plane[0].data.is_null()
-            || buffer.plane[0].stride == 0
-        {
-            return Err(self.fail("invalid output buffer", Error::InvalidArgument));
-        }
-        for plane in &buffer.plane {
-            if plane.data.is_null() != (plane.stride == 0) {
-                return Err(self.fail("invalid output buffer", Error::InvalidArgument));
-            }
-        }
-        if !self.ext_active || self.ext.0 != buffer.plane {
+    /// Rows already handed out live in whichever destination was current at
+    /// the time, so a new one has to be filled from the top again. Naming the
+    /// same destination twice is the caller's business, not the decoder's:
+    /// this cannot tell one sink from another, so it takes every call as a
+    /// change and whoever can compare them does not call it.
+    pub(crate) fn set_sink(&mut self, sink: Option<Box<dyn RowSink>>) {
+        if self.sink.is_some() || sink.is_some() {
             self.drop_converted_rows();
         }
-        self.ext = External(buffer.plane);
-        self.ext_active = true;
-        Ok(())
+        self.sink = sink;
     }
+}
+
+/// # Safety
+///
+/// The buffer's planes must be as it declares them.
+unsafe fn set_output_buffer(
+    decoder: &mut WPDDecoder<'_>,
+    buffer: Option<&WPDOutputBuffer>,
+) -> Result<(), Error> {
+    let Some(buffer) = buffer else {
+        decoder.planes = [WPDOutputPlane::empty(); 4];
+        decoder.set_sink(None);
+        return Ok(());
+    };
+
+    if buffer.struct_size < output_buffer_v1()
+        || buffer.plane[0].data.is_null()
+        || buffer.plane[0].stride == 0
+    {
+        return Err(decoder.fail("invalid output buffer", Error::InvalidArgument));
+    }
+    for plane in &buffer.plane {
+        if plane.data.is_null() != (plane.stride == 0) {
+            return Err(decoder.fail("invalid output buffer", Error::InvalidArgument));
+        }
+    }
+    /* The same planes named twice keeps the rows already converted, which is
+    what lets a caller ask for a partial frame repeatedly without redoing the
+    ones it has. */
+    if decoder.sink.is_none() || decoder.planes != buffer.plane {
+        decoder.planes = buffer.plane;
+        decoder.set_sink(Some(Box::new(External(buffer.plane))));
+    }
+    Ok(())
 }
 
 /// # Safety
@@ -1057,7 +1079,7 @@ pub unsafe extern "C" fn wpd_decoder_set_options(
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    reported(decoder.set_options(options).map(|()| WPD_OK))
+    reported(set_options(decoder, options).map(|()| WPD_OK))
 }
 
 /// # Safety
@@ -1101,7 +1123,7 @@ pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
         return WPD_ERR_INVALID_ARG;
     };
 
-    reported(unsafe { decoder.set_output_buffer(buffer.as_ref()) }.map(|()| WPD_OK))
+    reported(unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK))
 }
 
 /// The caller's bytes as a slice, with the one lifetime extension the C ABI
@@ -1657,7 +1679,7 @@ unsafe fn next_frame(
     /* The handout borrows the decoder, so everything the shim needs from it
     besides the pixels is taken first, and a failure carries a message rather
     than setting one -- `set_error` wants the decoder back. */
-    let ext = External(decoder.ext.0);
+    let ext = decoder.planes;
     let mut out = Handout::default();
 
     match decoder.next_picture(&mut out) {
@@ -1878,7 +1900,7 @@ unsafe fn partial_frame(
         return Err(decoder.fail("invalid frame", Error::InvalidArgument));
     }
 
-    let ext = External(decoder.ext.0);
+    let ext = decoder.planes;
     let mut out = Handout::default();
     let mut rows = 0;
 
@@ -2021,7 +2043,7 @@ impl WPDDecoder<'_> {
 
             let ret = {
                 let WPDDecoder {
-                    ext,
+                    sink,
                     output,
                     vp8,
                     alpha_plane,
@@ -2036,13 +2058,14 @@ impl WPDDecoder<'_> {
                     lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
                 };
 
-                if set.ext_active {
-                    export_external_planar_rows(
+                match sink.as_deref_mut() {
+                    Some(ext) => export_external_planar_rows(
                         &set, ext, &plane, format, out, first, rows,
-                    )
-                } else {
-                    export_own(&set, plane, format, out);
-                    Ok(())
+                    ),
+                    None => {
+                        export_own(&set, plane, format, out);
+                        Ok(())
+                    }
                 }
             };
 
