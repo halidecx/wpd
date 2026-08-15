@@ -29,12 +29,12 @@ use crate::export::{
     export_still_packed, frame_clear, frame_valid, ExportSettings, ExportTargets,
     RowTargets, WPDFrame, WPDOutputPlane,
 };
-use crate::vp8l::Lossless;
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
 use wpd::input::Input;
 use wpd::picture::{Buffer, Frame, PlaneRef};
 use wpd::rescale::Scratch;
+use wpd::vp8l::Output as Lossless;
 
 pub const WPD_OK: c_int = 0;
 pub const WPD_ERR_INVALID_ARG: c_int = -1;
@@ -175,7 +175,7 @@ pub(crate) fn lossless_view(
     vp8l: &wpd::vp8l::Decoder,
     which: Option<Lossless>,
 ) -> Frame<'_> {
-    match which.and_then(|which| which.of(vp8l)) {
+    match which.and_then(|which| vp8l.view(which)) {
         Some(frame) => frame,
         None => Frame::packed(&[], 0, 0, 0, Format::Argb),
     }

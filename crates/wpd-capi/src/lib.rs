@@ -25,4 +25,3 @@ pub mod dsp;
 pub mod export;
 pub mod lossy;
 pub mod rescale;
-pub mod vp8l;

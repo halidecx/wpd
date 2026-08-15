@@ -148,7 +148,7 @@ impl<'a> WPDDecoder<'a> {
                     ldsp,
                     ..
                 } = self;
-                let argb = crate::vp8l::frame(vp8l.picture(Target::Alpha));
+                let argb = vp8l.picture(Target::Alpha).frame();
 
                 for y in 0..height {
                     (ldsp.extract_green)(

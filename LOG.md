@@ -1419,33 +1419,39 @@ commit in a `git worktree` and benchmarking against _that_ is what separated
 the C since the driver became Rust." The first was true mid-phase and is fixed;
 the second is true and predates it.
 
-**Why the driver still cannot move into `crates/wpd`.** The lossless canvas is a
+**The lossless canvas, and the crate's first dependency.** The canvas is a
 `Vec<u32>` — the pixel loops want words — and everything downstream of it wants
 rows of bytes. There is no way to reinterpret one as the other in the standard
-library without `unsafe`: `slice::align_to` is itself unsafe, and `to_ne_bytes`
-copies. So it needs `unsafe` or a dependency, and the core promises neither —
-`#![forbid(unsafe_code)]` without the `asm` feature is a headline property. What
-is left of the module is `crates/wpd-capi/src/vp8l.rs`, about fifty lines whose
-only job is that cast, holding four of the crate's 286. Everything else in the
-driver could move today.
+library without `unsafe`: `slice::align_to` is itself unsafe and `to_ne_bytes`
+copies. So it needs `unsafe` or a dependency, and the core promised neither.
 
-**What rav1d does about the same problem.** It stores picture buffers as `[u8]`
-and produces typed views with `zerocopy`: `DisjointMutGuard::cast_slice::<V>`
-calls `V::slice_from(bytes)` for `V: AsBytes + FromBytes`, which is safe and
-fallible — the `[u8] -> [u16]` direction can fail on alignment, which is why the
-allocation is `AlignedVec64`. Not every path goes through it;
-`Pixels::as_mut_ptr` does a raw `.cast()` and its comment says the invariant is
-verified by the `zerocopy` bound elsewhere. So the honest summary is that rav1d
-picked bytes as the canonical storage and used `zerocopy` to get words back out
-of them.
+It is `zerocopy` now, and the cast lives in `wpd::vp8l::Picture::frame`.
+`#![forbid(unsafe_code)]` without the `asm` feature still holds, which was the
+point: the property is binary and compiler-checked, and it is what makes
+`miri.sh` meaningful over the whole core. One `#[allow(unsafe_code)]` module
+would have been cheaper in lines and worse in what it gave up.
 
-wpd picked the other canonical storage, and the direction it needs is the easy
-one: `[u32] -> [u8]` only ever weakens alignment and `u32` has no invalid bit
-patterns, so `zerocopy`'s `as_bytes()` is infallible — no `Option`, no alignment
-check, no `AlignedVec`. That makes the dependency cheaper than the framing above
-suggests, and it is the one thing standing between the driver and the core.
-Deferred rather than declined: wpd has no runtime dependencies today, and that
-is worth spending deliberately rather than in passing.
+**What rav1d does about the same problem, and why not to copy it.** It stores
+picture buffers as `[u8]` and produces typed views with `zerocopy`:
+`DisjointMutGuard::cast_slice::<V>` calls `V::slice_from(bytes)` for
+`V: AsBytes + FromBytes`. Not every path goes through it — `Pixels::as_mut_ptr`
+does a raw `.cast()` and its comment says the invariant is verified by the
+`zerocopy` bound elsewhere. The shape is right for rav1d, whose kernels are
+bit-depth-generic over `u8` and `u16`.
+
+It would be wrong here, because it is the _fallible_ direction. `[u8] -> [u16]`
+can fail on alignment, which is why `slice_from` returns an `Option` and why the
+allocation is `AlignedVec64`. wpd's lossless canvas is always 32-bit and it
+needs the other direction: `[u32] -> [u8]` only ever weakens alignment, and
+`u32` has no padding and no invalid bit patterns, so `as_bytes()` is infallible.
+Adopting rav1d's storage would have meant rewriting the vp8l pixel loops onto
+bytes, taking the dependency anyway, and inheriting the alignment burden —
+paying twice for a worse result.
+
+The dependency is `zerocopy = { version = "0.8", default-features = false }`. No
+derives are needed: the impls for primitives are in the crate proper and
+`[u32]: IntoBytes` is a blanket impl, so `zerocopy-derive` and its `syn` never
+enter the tree. `cargo tree -p wpd -e normal` is two lines.
 
 ## Measuring the fallbacks needs two no-asm builds
 

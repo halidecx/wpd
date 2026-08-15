@@ -12,7 +12,16 @@
 //! pixels, so `u32` is the unit the whole module wants — and it takes the
 //! per-byte index arithmetic, and its bounds checks, out of the hot loop. A
 //! pixel is stored in native byte order over the memory the C laid out as
-//! `[A, R, G, B]`, which is what the assembly and the C ABI both still see.
+//! `[A, R, G, B]`, which is what the assembly and the C ABI both still see, and
+//! [`Picture::frame`] is where the canvas becomes those bytes again.
+//!
+//! That last step is the crate's one dependency. Reinterpreting `[u32]` as
+//! `[u8]` cannot be done in the standard library without `unsafe`, and this
+//! crate forbids it; `zerocopy::IntoBytes::as_bytes` is infallible for `u32`,
+//! because the cast only ever weakens alignment and no bit pattern is invalid.
+//! rav1d has the same problem in the other direction — it stores bytes and
+//! casts up to pixels, which *can* fail on alignment, which is why its
+//! allocations are `AlignedVec64`.
 //!
 //! The bit reader holds an offset into the chunk rather than a pointer to it,
 //! so `br_extend` has no counterpart: a streaming append that reallocates the
@@ -27,8 +36,12 @@ pub mod entropy;
 pub mod huffman;
 pub mod transform;
 
+use zerocopy::IntoBytes;
+
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{check_image_size, Error, Result, Status};
+use crate::image::Format;
+use crate::picture::{Frame, FrameMut, PlaneMut};
 use bitreader::BitReader;
 use huffman::{Plan, Reader};
 
@@ -106,6 +119,19 @@ pub struct AlphaDst<'a> {
     pub stride: usize,
 }
 
+/// Which of the decoder's pictures a decode left its output in.
+///
+/// Naming it is what lets a caller hold on to the answer without holding a
+/// borrow, which is what the C latched a `(pointer, stride)` pair for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Output {
+    /// What [`Decoder::decode_frame`] filled in for [`Target::Argb`].
+    Argb,
+    /// What the resumable path is filling in, which alternates between two
+    /// pictures as the caller peeks at it.
+    Still,
+}
+
 /// A picture, one pixel per `u32`, rows contiguous at `stride`.
 #[derive(Default)]
 pub struct Picture {
@@ -116,6 +142,36 @@ pub struct Picture {
 }
 
 impl Picture {
+    /// The canvas as the `[A, R, G, B]` bytes everything downstream reads.
+    pub fn frame(&self) -> Frame<'_> {
+        Frame::packed(
+            self.data.as_bytes(),
+            self.stride * 4,
+            self.width,
+            self.height,
+            Format::Argb,
+        )
+    }
+
+    /// As [`Self::frame`], writable, which the compositor's per-frame
+    /// premultiply weights in place.
+    pub fn frame_mut(&mut self) -> FrameMut<'_> {
+        let (width, height, stride) = (self.width, self.height, self.stride * 4);
+        let plane = [
+            PlaneMut::borrowed(self.data.as_mut_bytes(), stride),
+            PlaneMut::borrowed(&mut [], 0),
+            PlaneMut::borrowed(&mut [], 0),
+            PlaneMut::borrowed(&mut [], 0),
+        ];
+
+        FrameMut::borrowed(plane, width, height, Format::Argb, false)
+    }
+
+    /// Whether the picture describes any pixels at all.
+    pub fn is_empty(&self) -> bool {
+        self.width <= 0 || self.data.is_empty()
+    }
+
     /// Sizes the picture to `w` by `h` and zeroes it, keeping the allocation
     /// when it is already large enough, as `image_alloc_plane` does.
     fn alloc(&mut self, w: i32, h: i32) -> Result<()> {
@@ -366,6 +422,30 @@ impl Decoder {
         } else {
             &mut self.argb
         })
+    }
+
+    /// The picture `which` names, as a borrowed view, or nothing when the
+    /// decoder has not produced one.
+    pub fn view(&self, which: Output) -> Option<Frame<'_>> {
+        let pic = match which {
+            Output::Argb => self.picture(Target::Argb),
+            Output::Still => self.still_picture()?,
+        };
+
+        (!pic.is_empty()).then(|| pic.frame())
+    }
+
+    /// As [`Self::view`], writable.
+    pub fn view_mut(&mut self, which: Output) -> Option<FrameMut<'_>> {
+        let pic = match which {
+            Output::Argb => self.picture_out_mut(Target::Argb),
+            Output::Still => self.still_picture_mut()?,
+        };
+
+        if pic.is_empty() {
+            return None;
+        }
+        Some(pic.frame_mut())
     }
 
     fn picture_mut(&mut self, role: usize, target: Target) -> &mut Picture {
