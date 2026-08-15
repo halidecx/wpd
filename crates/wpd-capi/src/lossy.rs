@@ -12,14 +12,12 @@
 
 use std::ffi::c_int;
 
-use wpd::error::Status;
+use wpd::error::{Error, Result, Status};
 use wpd::picture::PlaneMut;
 use wpd::vp8l::{AlphaDst, Target};
 
 use crate::convert::scaled_size;
-use crate::decoder::{
-    status, WPDDecoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L, WPD_OK,
-};
+use crate::decoder::{WPDDecoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L};
 
 const ALPHA_FILTER_NONE: c_int = 0;
 const ALPHA_FILTER_HORIZONTAL: c_int = 1;
@@ -96,7 +94,7 @@ impl<'a> WPDDecoder<'a> {
     }
 
     /// Fills the alpha plane in from the ALPH chunk the decoder latched.
-    fn decode_alpha(&mut self) -> c_int {
+    fn decode_alpha(&mut self) -> Result<()> {
         let (offset, size) = (self.alpha_data_offset, self.alpha_data_size);
         let width = self.width.max(0) as usize;
         let height = self.height.max(0);
@@ -138,9 +136,7 @@ impl<'a> WPDDecoder<'a> {
                 )
             };
 
-            if let Err(e) = ret {
-                return status(e);
-            }
+            ret?;
             if !self.vp8l.alpha_dst_used() {
                 let Self {
                     vp8l,
@@ -165,15 +161,15 @@ impl<'a> WPDDecoder<'a> {
 
             alpha_inverse_prediction(&mut plane, width, height, mode);
         }
-        WPD_OK
+        Ok(())
     }
 
     /// Sizes and clears the alpha plane, then fills it in.
-    fn alpha_plane_decode(&mut self) -> c_int {
+    fn alpha_plane_decode(&mut self) -> Result<()> {
         let Some(alpha_size) =
             (self.width.max(0) as usize).checked_mul(self.height.max(0) as usize)
         else {
-            return crate::decoder::WPD_ERR_NO_MEMORY;
+            return Err(Error::NoMemory);
         };
 
         if self.alpha_plane.len() < alpha_size {
@@ -182,7 +178,7 @@ impl<'a> WPDDecoder<'a> {
                 .try_reserve(alpha_size - self.alpha_plane.len())
                 .is_err()
             {
-                return crate::decoder::WPD_ERR_NO_MEMORY;
+                return Err(Error::NoMemory);
             }
             self.alpha_plane.resize(alpha_size, 0);
         }
@@ -217,14 +213,14 @@ impl<'a> WPDDecoder<'a> {
         }
     }
 
-    /// Returns 1 when the frame is complete, 0 when more of the chunk is
-    /// needed, or a negative status.
+    /// Returns whether the frame is complete; `false` means more of the chunk
+    /// is needed.
     pub(crate) fn vp8_lossy_step(
         &mut self,
         offset: usize,
         avail: usize,
         size: usize,
-    ) -> c_int {
+    ) -> Result<bool> {
         self.update_filter_bypass();
 
         if !self.vp8_active {
@@ -237,21 +233,16 @@ impl<'a> WPDDecoder<'a> {
             not reach the rows already being filtered. */
             vp8.bypass_filtering = bypass;
 
-            match vp8.frame_init(input.chunk(offset, avail), avail, size) {
-                Err(e) => return status(e),
-                Ok(Status::NeedMore) => return 0,
-                Ok(Status::Done) => {}
+            match vp8.frame_init(input.chunk(offset, avail), avail, size)? {
+                Status::NeedMore => return Ok(false),
+                Status::Done => {}
             }
 
             let (w, h) = self.vp8_size();
 
             self.update_canvas_size(w, h);
             if self.has_alpha {
-                let ret = self.alpha_plane_decode();
-
-                if ret < 0 {
-                    return ret;
-                }
+                self.alpha_plane_decode()?;
             }
             self.still_lossy = !self.animation;
             self.vp8_active = true;
@@ -269,12 +260,11 @@ impl<'a> WPDDecoder<'a> {
             vp8.decode_rows(input.chunk(offset, avail))
         };
 
-        match ret {
-            Err(e) => status(e),
-            Ok(Status::NeedMore) => 0,
-            Ok(Status::Done) => {
+        match ret? {
+            Status::NeedMore => Ok(false),
+            Status::Done => {
                 self.vp8_active = false;
-                1
+                Ok(true)
             }
         }
     }
@@ -283,7 +273,7 @@ impl<'a> WPDDecoder<'a> {
         &mut self,
         offset: usize,
         size: usize,
-    ) -> c_int {
+    ) -> Result<()> {
         self.update_filter_bypass();
 
         let ret = {
@@ -295,21 +285,15 @@ impl<'a> WPDDecoder<'a> {
             vp8.decode_frame(input.chunk(offset, size))
         };
 
-        if let Err(e) = ret {
-            return status(e);
-        }
+        ret?;
 
         let (w, h) = self.vp8_size();
 
         self.update_canvas_size(w, h);
         if self.has_alpha {
-            let ret = self.alpha_plane_decode();
-
-            if ret < 0 {
-                return ret;
-            }
+            self.alpha_plane_decode()?;
         }
         self.still_lossy = !self.animation;
-        WPD_OK
+        Ok(())
     }
 }

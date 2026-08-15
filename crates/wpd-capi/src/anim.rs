@@ -15,6 +15,7 @@ use std::ffi::c_int;
 use std::mem;
 
 use wpd::anim::{regions, Placement, Region};
+use wpd::error::{Error, Result};
 use wpd::image::Format;
 
 use wpd::blit::{self, Rect};
@@ -30,8 +31,6 @@ use wpd::dsp::yuv::YuvDsp;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::premultiply_argb_row;
 
-const WPD_OK: c_int = 0;
-const WPD_ERR_BITSTREAM: c_int = -3;
 const WPD_ANIM_SUBFRAME: c_int = 1;
 
 /// Everything the compositor asks the decoder about a frame's placement,
@@ -172,7 +171,7 @@ fn prepare_canvas(
     canvas: &mut Buffer,
     frame: &Frame<'_>,
     format: Format,
-) -> c_int {
+) -> Result<()> {
     let covers_canvas = pl.pos_x == 0
         && pl.pos_y == 0
         && frame.width == pl.canvas_width
@@ -191,9 +190,7 @@ fn prepare_canvas(
             canvas.alloc_planar(pl.canvas_width, pl.canvas_height, true)
         };
 
-        if let Err(e) = alloc {
-            return crate::convert::alloc_status(e);
-        }
+        alloc?;
         canvas.premultiplied = pl.premultiply;
     }
     if fresh || pl.key_frame {
@@ -207,12 +204,8 @@ fn prepare_canvas(
             /* The canvas is its own source here, so it is moved aside whole
             and the converted picture built into the slot it left. */
             let yuva = mem::take(canvas);
-            let ret =
-                convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling);
 
-            if ret < 0 {
-                return ret;
-            }
+            convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
         }
         if pl.prev_anmf_flags & wpd::container::ANMF_FLAG_DISPOSE as c_int != 0 {
             clear_rect(
@@ -227,7 +220,7 @@ fn prepare_canvas(
     }
 
     reconcile_alpha(pl, ydsp, canvas);
-    WPD_OK
+    Ok(())
 }
 
 /// Composites one decoded sub-frame onto the canvas.
@@ -236,13 +229,10 @@ pub fn anim_composite(
     ct: CompositeTargets<'_>,
     frame: &Frame<'_>,
     target: Format,
-) -> c_int {
+) -> Result<()> {
     let CompositeTargets { ldsp, ydsp, canvas } = ct;
-    let ret = prepare_canvas(pl, ydsp, canvas, frame, target);
 
-    if ret < 0 {
-        return ret;
-    }
+    prepare_canvas(pl, ydsp, canvas, frame, target)?;
     /* A frame coded without an alpha plane has nothing to blend with, and a
     planar canvas cannot split the 2x2 chroma block an overlap would land in. */
     let has_alpha_plane = frame.format != Format::Yuv420p;
@@ -266,7 +256,7 @@ pub fn anim_composite(
     for region in &out[..n] {
         paint(pl, ldsp, canvas, frame, *region);
     }
-    WPD_OK
+    Ok(())
 }
 
 impl<'a> WPDDecoder<'a> {
@@ -318,11 +308,11 @@ impl<'a> WPDDecoder<'a> {
     ///
     /// `base` is where the chunk's payload sits in the stream, which is what
     /// the alpha offset is measured from.
-    pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> c_int {
+    pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {
         let header = self.input.chunk(base, size.min(16)).to_owned();
         let Some((declared_width, declared_height)) = self.read_anmf_header(&header)
         else {
-            return WPD_ERR_BITSTREAM;
+            return Err(Error::InvalidData);
         };
 
         if self.pos_x + declared_width > self.canvas_width
@@ -333,7 +323,7 @@ impl<'a> WPDDecoder<'a> {
                  fit into canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
             ));
-            return WPD_ERR_BITSTREAM;
+            return Err(Error::InvalidData);
         }
 
         self.has_alpha = false;
@@ -355,7 +345,7 @@ impl<'a> WPDDecoder<'a> {
             };
 
             if payload_size == u32::MAX {
-                return WPD_ERR_BITSTREAM;
+                return Err(Error::InvalidData);
             }
             let payload_size = payload_size as usize;
             let padded_size = payload_size + (payload_size & 1);
@@ -369,7 +359,7 @@ impl<'a> WPDDecoder<'a> {
                 TAG_ALPH => {
                     if payload_size == 0 {
                         wpd::log::error("invalid ALPHA chunk size");
-                        return WPD_ERR_BITSTREAM;
+                        return Err(Error::InvalidData);
                     }
                     let alpha_header = self.input.chunk(at, 1)[0] as c_int;
 
@@ -388,20 +378,12 @@ impl<'a> WPDDecoder<'a> {
                     }
                 }
                 TAG_VP8 if sub.is_none() => {
-                    let ret = self.vp8_lossy_decode_frame(at, payload_size);
-
-                    if ret < 0 {
-                        return ret;
-                    }
+                    self.vp8_lossy_decode_frame(at, payload_size)?;
                     sub = Some(Source::Lossy);
                     self.frame_has_alpha = self.has_alpha;
                 }
                 TAG_VP8L if sub.is_none() => {
-                    let ret = self.lossless_decode(at, payload_size);
-
-                    if ret < 0 {
-                        return ret;
-                    }
+                    self.lossless_decode(at, payload_size)?;
                     sub = Some(Source::Lossless);
                     self.frame_has_alpha = self.lossless_has_alpha;
                 }
@@ -412,7 +394,7 @@ impl<'a> WPDDecoder<'a> {
 
         let Some(mut which) = sub else {
             wpd::log::error("image data not found");
-            return WPD_ERR_BITSTREAM;
+            return Err(Error::InvalidData);
         };
         let (sub_width, sub_height, sub_format) = {
             let img = self.frame_of(which);
@@ -434,7 +416,7 @@ impl<'a> WPDDecoder<'a> {
                  canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
             ));
-            return WPD_ERR_BITSTREAM;
+            return Err(Error::InvalidData);
         }
 
         let mut pl = self.placement();
@@ -473,11 +455,7 @@ impl<'a> WPDDecoder<'a> {
                 *width,
                 *height,
             );
-            let ret = convert_to_argb(ydsp, converted, &src, no_fancy);
-
-            if ret < 0 {
-                return ret;
-            }
+            convert_to_argb(ydsp, converted, &src, no_fancy)?;
             which = Source::Converted;
         }
 
@@ -521,11 +499,7 @@ impl<'a> WPDDecoder<'a> {
         wants a canvas to stay compatible with and correctly declines when there
         is none. Switching modes mid-animation is refused for that reason. */
         if self.anim_mode != WPD_ANIM_SUBFRAME {
-            let ret = self.composite(&pl, which, target);
-
-            if ret < 0 {
-                return ret;
-            }
+            self.composite(&pl, which, target)?;
         }
 
         self.frame_timestamp += self.frame_duration as i64;
@@ -537,12 +511,17 @@ impl<'a> WPDDecoder<'a> {
         self.prev_key_frame = self.key_frame;
         self.frame_index += 1;
 
-        WPD_OK
+        Ok(())
     }
 
     /// The canvas, the tables and the sub-frame, taken from one destructuring
     /// so that the compositor cannot be handed the canvas as its own source.
-    fn composite(&mut self, pl: &CPlacement, which: Source, target: Format) -> c_int {
+    fn composite(
+        &mut self,
+        pl: &CPlacement,
+        which: Source,
+        target: Format,
+    ) -> Result<()> {
         let Self {
             ldsp,
             ydsp,

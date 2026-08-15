@@ -11,14 +11,11 @@ use std::ffi::c_int;
 
 use wpd::convert::YuvPlanes;
 use wpd::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
+use wpd::error::{Error, Result};
 use wpd::image::{self, ceil_rshift, Crop, Format};
 use wpd::options::Options;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
-
-const WPD_OK: c_int = 0;
-const WPD_ERR_INVALID_ARG: c_int = -1;
-const WPD_ERR_TOO_LARGE: c_int = -7;
 
 /// `WPDDecoderOptions` from `include/wpd.h`.
 #[repr(C)]
@@ -106,19 +103,14 @@ pub fn scaled_size(
     options: &Options,
     src_width: c_int,
     src_height: c_int,
-) -> Result<(c_int, c_int), c_int> {
+) -> Result<(c_int, c_int)> {
     let (w, h) = options.scale.unwrap_or((0, 0));
 
-    image::scaled_size(w, h, src_width, src_height).map_err(|_| WPD_ERR_TOO_LARGE)
-}
-
-/// What the allocators report, as the rest of the decoder's statuses.
-pub(crate) fn alloc_status(e: wpd::error::Error) -> c_int {
-    crate::decoder::status(e)
+    image::scaled_size(w, h, src_width, src_height).map_err(|_| Error::TooLarge)
 }
 
 /// The crop rectangle inside `src`, or `src` itself when cropping is off.
-pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>, c_int> {
+pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     let Some((left, top, width, height)) = options.crop else {
         return Ok(src);
     };
@@ -130,7 +122,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>, c_
     };
     let packed = src.format.is_packed();
     let (left, top) = image::crop_origin(&crop, src.width, src.height, packed)
-        .map_err(|_| WPD_ERR_INVALID_ARG)?;
+        .map_err(|_| Error::InvalidArgument)?;
 
     Ok(src.window(left, top, crop.width, crop.height))
 }
@@ -149,7 +141,7 @@ fn scale_image(
     height: c_int,
     chroma_full: bool,
     weight_luma: bool,
-) -> c_int {
+) -> Result<()> {
     let format = src.format;
     let packed = format.is_packed();
     let bpp = if packed { format.bpp() } else { 1 };
@@ -163,14 +155,12 @@ fn scale_image(
         dst.alloc_planar(width, height, !chroma_full)
     };
 
-    if let Err(e) = alloc {
-        return alloc_status(e);
-    }
+    alloc?;
     dst.format = Some(format);
     dst.chroma_full = !packed && chroma_full;
-    if scratch.grow(width, src.width, bpp).is_err() {
-        return WPD_ERR_TOO_LARGE;
-    }
+    scratch
+        .grow(width, src.width, bpp)
+        .map_err(|_| Error::TooLarge)?;
 
     let mut out = dst.frame_mut();
 
@@ -232,7 +222,7 @@ fn scale_image(
         dst.format = Some(Format::Yuv420p);
     }
     dst.premultiplied = src.premultiplied;
-    WPD_OK
+    Ok(())
 }
 
 /// Resolves the crop and the scale, returning the picture the output should be
@@ -243,7 +233,7 @@ pub fn transform_image<'a>(
     scaled: &'a mut Buffer,
     src: Frame<'a>,
     format: c_int,
-) -> Result<Frame<'a>, c_int> {
+) -> Result<Frame<'a>> {
     let view = crop_image(options, src)?;
 
     if options.scale.is_none() {
@@ -261,7 +251,8 @@ pub fn transform_image<'a>(
         && Format::from_raw(format) != Some(Format::Yuv420p)
         && src.format.nb_components() == 4;
     let (width, height) = scaled_size(options, view.width, view.height)?;
-    let ret = scale_image(
+
+    scale_image(
         scratch,
         scaled,
         &view,
@@ -269,11 +260,7 @@ pub fn transform_image<'a>(
         height,
         chroma_full,
         weight_luma,
-    );
-
-    if ret < 0 {
-        return Err(ret);
-    }
+    )?;
     Ok(scaled.frame())
 }
 
@@ -294,7 +281,7 @@ pub fn convert_to_packed(
     format: c_int,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
-) -> c_int {
+) -> Result<()> {
     let layout = format_layout(format);
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
 
@@ -311,9 +298,7 @@ pub fn convert_to_packed(
 
     let (width, height) = (src.width, src.height);
 
-    if let Err(e) = dst.alloc_packed(width, height, target.bpp(), target) {
-        return alloc_status(e);
-    }
+    dst.alloc_packed(width, height, target.bpp(), target)?;
 
     let planes = yuv_planes(src);
     let mut out = dst.frame_mut();
@@ -327,14 +312,14 @@ pub fn convert_to_packed(
                 dispatch(plane.row_mut(y, 0, 4 * w), a.row(y, 0, w));
             }
         }
-        return WPD_OK;
+        return Ok(());
     }
     if no_fancy_upsampling {
         wpd::convert::yuv420_to_packed_simple(dsp, layout, plane, &planes, w, 0, h);
     } else {
         wpd::convert::yuv420_to_packed_rows(dsp, layout, plane, &planes, w, h, 0, h);
     }
-    WPD_OK
+    Ok(())
 }
 
 /// The two-byte formats are packed from ARGB, so a source that is not already
@@ -346,30 +331,24 @@ fn convert_to_packed_2byte(
     format: c_int,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
-) -> c_int {
+) -> Result<()> {
     let mut temp = Buffer::default();
 
     if src.format != Format::Argb {
-        let ret = convert_to_packed(
+        convert_to_packed(
             dsp,
             &mut temp,
             src,
             Format::Argb as c_int,
             no_fancy_upsampling,
             premultiply_packed,
-        );
-
-        if ret < 0 {
-            return ret;
-        }
+        )?;
     }
 
     let argb = if temp.is_empty() { *src } else { temp.frame() };
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
 
-    if let Err(e) = dst.alloc_packed(argb.width, argb.height, 2, target) {
-        return alloc_status(e);
-    }
+    dst.alloc_packed(argb.width, argb.height, 2, target)?;
 
     let mut out = dst.frame_mut();
 
@@ -385,7 +364,7 @@ fn convert_to_packed_2byte(
             premultiply(out.row(0, y));
         }
     }
-    WPD_OK
+    Ok(())
 }
 
 pub fn convert_to_argb(
@@ -393,7 +372,7 @@ pub fn convert_to_argb(
     dst: &mut Buffer,
     src: &Frame<'_>,
     no_fancy_upsampling: bool,
-) -> c_int {
+) -> Result<()> {
     convert_to_packed(
         dsp,
         dst,
@@ -411,13 +390,11 @@ pub fn ensure_yuva_rows(
     want_alpha: bool,
     row_start: c_int,
     row_end: c_int,
-) -> c_int {
+) -> Result<()> {
     let (width, height) = (src.width, src.height);
 
     if row_start == 0 {
-        if let Err(e) = dst.alloc_planar(width, height, true) {
-            return alloc_status(e);
-        }
+        dst.alloc_planar(width, height, true)?;
     }
 
     let mut out = dst.frame_mut();
@@ -438,7 +415,7 @@ pub fn ensure_yuva_rows(
                 out.row(3, y).fill(255);
             }
         }
-        return WPD_OK;
+        return Ok(());
     }
 
     let opaque = src.format == Format::Yuv420p;
@@ -455,7 +432,7 @@ pub fn ensure_yuva_rows(
             }
         }
     }
-    WPD_OK
+    Ok(())
 }
 
 pub fn ensure_yuva(
@@ -463,7 +440,7 @@ pub fn ensure_yuva(
     dst: &mut Buffer,
     src: &Frame<'_>,
     want_alpha: bool,
-) -> c_int {
+) -> Result<()> {
     let height = src.height;
 
     ensure_yuva_rows(dsp, dst, src, want_alpha, 0, height)

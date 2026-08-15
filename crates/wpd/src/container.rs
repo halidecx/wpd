@@ -59,6 +59,16 @@ pub enum Coding {
     Lossless,
 }
 
+impl Coding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Coding::Unknown => "unknown",
+            Coding::Lossy => "lossy",
+            Coding::Lossless => "lossless",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Dispose {
     #[default]

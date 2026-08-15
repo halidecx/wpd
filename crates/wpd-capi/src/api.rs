@@ -26,71 +26,7 @@ use crate::container::WPDImageInfo;
 use crate::decoder::{WPDDecoder, WPDFrameInfo};
 use crate::export::WPDFrame;
 
-/// What a decode can fail with, as `WPDStatus` names them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    InvalidArgument,
-    NotWebp,
-    Bitstream,
-    Truncated,
-    Unsupported,
-    NoMemory,
-    TooLarge,
-    BufferTooSmall,
-    /// A status this build does not know a name for.
-    Other(i32),
-}
-
-impl Error {
-    fn from_status(status: i32) -> Self {
-        match status {
-            crate::decoder::WPD_ERR_INVALID_ARG => Error::InvalidArgument,
-            crate::decoder::WPD_ERR_NOT_WEBP => Error::NotWebp,
-            crate::decoder::WPD_ERR_BITSTREAM => Error::Bitstream,
-            crate::decoder::WPD_ERR_TRUNCATED => Error::Truncated,
-            crate::decoder::WPD_ERR_UNSUPPORTED => Error::Unsupported,
-            crate::decoder::WPD_ERR_NO_MEMORY => Error::NoMemory,
-            crate::decoder::WPD_ERR_TOO_LARGE => Error::TooLarge,
-            crate::decoder::WPD_ERR_BUFFER_TOO_SMALL => Error::BufferTooSmall,
-            other => Error::Other(other),
-        }
-    }
-
-    /// The same one-line description `wpd_status_string` returns.
-    pub fn message(self) -> &'static str {
-        let status = match self {
-            Error::InvalidArgument => crate::decoder::WPD_ERR_INVALID_ARG,
-            Error::NotWebp => crate::decoder::WPD_ERR_NOT_WEBP,
-            Error::Bitstream => crate::decoder::WPD_ERR_BITSTREAM,
-            Error::Truncated => crate::decoder::WPD_ERR_TRUNCATED,
-            Error::Unsupported => crate::decoder::WPD_ERR_UNSUPPORTED,
-            Error::NoMemory => crate::decoder::WPD_ERR_NO_MEMORY,
-            Error::TooLarge => crate::decoder::WPD_ERR_TOO_LARGE,
-            Error::BufferTooSmall => crate::decoder::WPD_ERR_BUFFER_TOO_SMALL,
-            Error::Other(status) => status,
-        };
-        let s = unsafe { CStr::from_ptr(crate::decoder::wpd_status_string(status)) };
-
-        s.to_str().unwrap_or("unknown error")
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-fn check(status: i32) -> Result<()> {
-    if status < 0 {
-        return Err(Error::from_status(status));
-    }
-    Ok(())
-}
+pub use wpd::error::{Error, Result};
 
 /// What an animation hands out: the composited canvas, or each sub-frame on
 /// its own at its own position.
@@ -102,22 +38,7 @@ pub enum Animation {
 }
 
 /// How the image was coded, which a still declares before it is decoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Coding {
-    Unknown,
-    Lossy,
-    Lossless,
-}
-
-impl Coding {
-    pub fn name(self) -> &'static str {
-        match self {
-            Coding::Unknown => "unknown",
-            Coding::Lossy => "lossy",
-            Coding::Lossless => "lossless",
-        }
-    }
-}
+pub use wpd::container::Coding;
 
 /// Which metadata chunk to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,61 +248,61 @@ impl<'a> Decoder<'a> {
     /// file codes natively, which is planar for a lossy frame and ARGB for a
     /// lossless one.
     pub fn set_format(&mut self, format: Format) -> Result<()> {
-        check(self.inner.set_output_format(format as i32))
+        self.inner.set_output_format(format as i32)
     }
 
     pub fn set_animation(&mut self, mode: Animation) -> Result<()> {
-        check(self.inner.set_animation_mode(match mode {
+        self.inner.set_animation_mode(match mode {
             Animation::Composited => 0,
             Animation::Subframe => 1,
-        }))
+        })
     }
 
     pub fn set_options(&mut self, options: Options) -> Result<()> {
-        check(self.inner.set_core_options(options))
+        self.inner.set_core_options(options)
     }
 
     /// Opens a file the decoder copies, so nothing has to outlive the call.
     pub fn open(&mut self, data: &[u8]) -> Result<()> {
-        check(self.inner.open(data))
+        self.inner.open(data)
     }
 
     /// Opens a file the decoder reads in place. The bytes must outlive the
     /// decoder, which is what the lifetime says.
     pub fn open_borrowed(&mut self, data: &'a [u8]) -> Result<()> {
-        check(self.inner.open_borrowed(data))
+        self.inner.open_borrowed(data)
     }
 
     /// Starts a stream the caller appends to as bytes arrive.
     pub fn open_stream(&mut self) -> Result<()> {
-        check(self.inner.open_stream())
+        self.inner.open_stream()
     }
 
     pub fn append(&mut self, chunk: &[u8]) -> Result<()> {
-        check(self.inner.append(chunk))
+        self.inner.append(chunk)
     }
 
     /// Replaces the stream's contents with a longer prefix of the same file,
     /// which is what a caller reading into a growing buffer has.
     pub fn update(&mut self, data: &'a [u8]) -> Result<()> {
-        check(self.inner.update(data))
+        self.inner.update(data)
     }
 
     pub fn end_of_stream(&mut self) -> Result<()> {
-        check(self.inner.end_of_stream())
+        self.inner.end_of_stream()
     }
 
     pub fn info(&mut self) -> Result<ImageInfo> {
         let mut info = WPDImageInfo::zeroed();
 
-        check(self.inner.get_info(&mut info))?;
+        self.inner.get_info(&mut info)?;
         Ok(ImageInfo::from_c(&info))
     }
 
     pub fn frame_info(&mut self, index: i32) -> Result<FrameInfo> {
         let mut info = WPDFrameInfo::zeroed();
 
-        check(self.inner.frame_info(index, &mut info))?;
+        self.inner.frame_info(index, &mut info)?;
         Ok(FrameInfo {
             pos_x: info.pos_x,
             pos_y: info.pos_y,
@@ -409,7 +330,7 @@ impl<'a> Decoder<'a> {
     /// Returns to the first frame. A stream that was appended to cannot be
     /// rewound, because the bytes it has read are gone.
     pub fn rewind(&mut self) -> Result<()> {
-        check(self.inner.rewind())
+        self.inner.rewind()
     }
 
     /// The next frame, or none when the file is finished or the stream has
@@ -418,10 +339,8 @@ impl<'a> Decoder<'a> {
     /// The picture borrows the decoder: the next call reuses its memory.
     pub fn next_frame(&mut self) -> Result<Option<Picture<'_>>> {
         let mut frame = WPDFrame::zeroed();
-        let got = self.inner.next_frame(&mut frame);
 
-        check(got)?;
-        if got == 0 {
+        if !self.inner.next_frame(&mut frame)? {
             return Ok(None);
         }
         Ok(Some(Picture {
@@ -439,7 +358,7 @@ impl<'a> Decoder<'a> {
         let mut frame = WPDFrame::zeroed();
         let mut rows = 0;
 
-        check(self.inner.partial_frame(&mut frame, &mut rows))?;
+        self.inner.partial_frame(&mut frame, &mut rows)?;
         Ok((
             Picture {
                 frame,
@@ -470,12 +389,18 @@ pub fn set_cpu_flags_mask(mask: u32) {
 
 /// What a file says about itself, without opening a decoder for it.
 pub fn info(data: &[u8]) -> Result<ImageInfo> {
-    let mut c = WPDImageInfo::zeroed();
+    let scanned = wpd::container::get_info(data)?;
 
-    check(unsafe {
-        crate::container::wpd_get_info(data.as_ptr(), data.len(), &mut c)
-    })?;
-    Ok(ImageInfo::from_c(&c))
+    Ok(ImageInfo {
+        width: scanned.width,
+        height: scanned.height,
+        has_alpha: scanned.has_alpha,
+        is_animation: scanned.animation,
+        frame_count: scanned.frame_count,
+        loop_count: scanned.loop_count,
+        background_argb: scanned.background_argb,
+        coding: scanned.coding,
+    })
 }
 
 #[cfg(test)]

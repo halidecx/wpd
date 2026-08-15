@@ -25,21 +25,17 @@ use wpd::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
 use wpd::dsp::yuv::LAYOUT_ARGB;
 use wpd::image::{external_plane_fits, Format};
 
-use crate::convert::{alloc_status, yuv_planes};
 use crate::convert::{
     convert_to_packed, ensure_yuva, ensure_yuva_rows, format_bpp, format_is_packed,
     format_layout, format_packer, format_premultiplier_4444, premultiply_after_pack,
-    transform_image,
+    transform_image, yuv_planes,
 };
 use wpd::dsp::yuv::{RowFn, YuvDsp};
+use wpd::error::{Error, Result};
 use wpd::handout::{Handout, Pixels, RowSink};
 use wpd::options::Options;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::Scratch;
-
-const WPD_OK: c_int = 0;
-const WPD_ERR_UNSUPPORTED: c_int = -5;
-const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
 
 const WPD_DISPOSE_BACKGROUND: c_int = 1;
 const WPD_DISPOSE_NONE: c_int = 0;
@@ -361,7 +357,7 @@ fn export_external_rows(
     out: &mut Handout<'_>,
     row_start: c_int,
     row_end: c_int,
-) -> c_int {
+) -> Result<()> {
     let row = img.width as usize * format_bpp(format);
     let pack = if img.format as c_int == format {
         None
@@ -370,10 +366,10 @@ fn export_external_rows(
     };
 
     if pack.is_none() && img.format.bpp() != format_bpp(format) {
-        return WPD_ERR_UNSUPPORTED;
+        return Err(Error::Unsupported);
     }
     if !ext.fits(0, row, img.height) {
-        return WPD_ERR_BUFFER_TOO_SMALL;
+        return Err(Error::BufferTooSmall);
     }
 
     for y in row_start..row_end {
@@ -389,7 +385,7 @@ fn export_external_rows(
 
     export_frame(set, img, format, out);
     out.pixels = Pixels::Sink;
-    WPD_OK
+    Ok(())
 }
 
 /// As [`export_external_rows`], for a planar format's three or four planes.
@@ -402,7 +398,7 @@ pub(crate) fn export_external_planar_rows(
     out: &mut Handout<'_>,
     row_start: c_int,
     row_end: c_int,
-) -> c_int {
+) -> Result<()> {
     let planes = frame_planes(format);
 
     for p in 0..planes {
@@ -411,7 +407,7 @@ pub(crate) fn export_external_planar_rows(
         let h = wpd::image::ceil_rshift(img.height, shift);
 
         if !ext.fits(p, w, h) {
-            return WPD_ERR_BUFFER_TOO_SMALL;
+            return Err(Error::BufferTooSmall);
         }
     }
 
@@ -428,7 +424,7 @@ pub(crate) fn export_external_planar_rows(
 
     export_frame(set, img, format, out);
     out.pixels = Pixels::Sink;
-    WPD_OK
+    Ok(())
 }
 
 fn export_external_planar(
@@ -437,7 +433,7 @@ fn export_external_planar(
     img: &Frame<'_>,
     format: c_int,
     out: &mut Handout<'_>,
-) -> c_int {
+) -> Result<()> {
     let height = img.height;
 
     export_external_planar_rows(set, ext, img, format, out, 0, height)
@@ -470,7 +466,7 @@ pub fn export_packed<'a>(
     t: ExportTargets<'a>,
     img: Frame<'a>,
     out: &mut Handout<'a>,
-) -> c_int {
+) -> Result<()> {
     let ExportTargets {
         dsp,
         options,
@@ -480,10 +476,7 @@ pub fn export_packed<'a>(
         ext,
     } = t;
     let format = set.out_format;
-    let img = match transform_image(options, rescale, transformed, img, format) {
-        Ok(img) => img,
-        Err(e) => return e,
-    };
+    let img = transform_image(options, rescale, transformed, img, format)?;
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
@@ -494,11 +487,7 @@ pub fn export_packed<'a>(
         {
             img
         } else {
-            let ret = ensure_yuva(dsp, output, &img, want_alpha);
-
-            if ret < 0 {
-                return ret;
-            }
+            ensure_yuva(dsp, output, &img, want_alpha)?;
             output.frame()
         };
 
@@ -509,7 +498,7 @@ pub fn export_packed<'a>(
             return export_external_planar(set, ext, &planar, format, out);
         }
         export_own(set, planar, format, out);
-        return WPD_OK;
+        return Ok(());
     }
 
     if !format_is_packed(format) {
@@ -518,7 +507,7 @@ pub fn export_packed<'a>(
 
         if !set.ext_active {
             export_own(set, img, native, out);
-            return WPD_OK;
+            return Ok(());
         }
         if !format_is_packed(native) {
             return export_external_planar(set, ext, &img, native, out);
@@ -533,7 +522,7 @@ pub fn export_packed<'a>(
             Some(pack) => Route::Pack(pack),
             None => {
                 if target != Some(Format::ArgbPre) || img.format != Format::Argb {
-                    return WPD_ERR_UNSUPPORTED;
+                    return Err(Error::Unsupported);
                 }
                 if set.animation {
                     Route::Relabel
@@ -563,25 +552,17 @@ pub fn export_packed<'a>(
 
             match route {
                 Route::Upsample => {
-                    let ret = convert_to_packed(
+                    convert_to_packed(
                         dsp,
                         output,
                         &img,
                         format,
                         options.no_fancy_upsampling,
                         premultiply_after_pack(set.animation, set.anim_mode),
-                    );
-
-                    if ret < 0 {
-                        return ret;
-                    }
+                    )?;
                 }
                 Route::Pack(pack) => {
-                    if let Err(e) =
-                        output.alloc_packed(img.width, img.height, packed.bpp(), packed)
-                    {
-                        return alloc_status(e);
-                    }
+                    output.alloc_packed(img.width, img.height, packed.bpp(), packed)?;
 
                     let mut view = output.frame_mut();
 
@@ -590,11 +571,7 @@ pub fn export_packed<'a>(
                     }
                 }
                 _ => {
-                    if let Err(e) =
-                        output.alloc_packed(img.width, img.height, 4, Format::ArgbPre)
-                    {
-                        return alloc_status(e);
-                    }
+                    output.alloc_packed(img.width, img.height, 4, Format::ArgbPre)?;
 
                     let mut view = output.frame_mut();
 
@@ -622,7 +599,7 @@ pub fn export_packed<'a>(
         return export_external_rows(set, dsp, ext, &img, format, out, 0, img.height);
     }
     export_own(set, img, format, out);
-    WPD_OK
+    Ok(())
 }
 
 /// Converts and hands out rows `[0, upto)` of the still lossy frame,
@@ -637,7 +614,7 @@ pub fn export_still_packed<'a>(
     src: &Frame<'_>,
     out: &mut Handout<'a>,
     upto: c_int,
-) -> c_int {
+) -> Result<()> {
     let RowTargets {
         dsp,
         options,
@@ -652,45 +629,28 @@ pub fn export_still_packed<'a>(
     let first = if *converted_format == format { done } else { 0 };
     let upto = upto.max(done);
     let converted_from = if format_bpp(format) == 2 {
-        still_packed_2byte(set, dsp, options, output, converted, src, first, upto)
+        still_packed_2byte(set, dsp, options, output, converted, src, first, upto)?
     } else {
-        still_packed_direct(set, dsp, options, converted, src, first, upto)
+        still_packed_direct(set, dsp, options, converted, src, first, upto)?
     };
 
-    if converted_from < 0 {
-        return converted_from;
-    }
     /* Bound only now: both helpers may have grown the image, and a view taken
     before that would be of the memory as it was. */
     let dst = converted.frame();
 
     if set.ext_active {
-        let ret = export_external_rows(
-            set,
-            dsp,
-            ext,
-            &dst,
-            format,
-            out,
-            converted_from,
-            upto,
-        );
-
-        if ret < 0 {
-            return ret;
-        }
+        export_external_rows(set, dsp, ext, &dst, format, out, converted_from, upto)?;
         *converted_rows = upto;
         *converted_format = format;
-        return WPD_OK;
+        return Ok(());
     }
     *converted_rows = upto;
     *converted_format = format;
     export_own(set, dst, format, out);
-    WPD_OK
+    Ok(())
 }
 
-/// Upsamples straight into the output format. Returns the first row written,
-/// or a negative status.
+/// Upsamples straight into the output format. Returns the first row written.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_direct(
     set: &ExportSettings,
@@ -700,16 +660,14 @@ fn still_packed_direct(
     src: &Frame<'_>,
     first: c_int,
     upto: c_int,
-) -> c_int {
+) -> Result<c_int> {
     let format = set.out_format;
     let layout = format_layout(format);
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
     let mut converted_from = first;
 
     if first == 0 {
-        if let Err(e) = dst.alloc_packed(src.width, src.height, target.bpp(), target) {
-            return alloc_status(e);
-        }
+        dst.alloc_packed(src.width, src.height, target.bpp(), target)?;
     }
     if options.no_fancy_upsampling {
         upsample_simple(dsp, dst, src, layout, first, upto);
@@ -724,13 +682,13 @@ fn still_packed_direct(
             (dsp.premultiply_row)(view.row(0, y), alpha_first);
         }
     }
-    converted_from
+    Ok(converted_from)
 }
 
 /// The two-byte formats are packed from ARGB, so the intermediate has to be
 /// carried between calls too, rather than rebuilt for the whole frame.
 ///
-/// Returns the first row it wrote, or a negative status.
+/// Returns the first row it wrote.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_2byte(
     set: &ExportSettings,
@@ -741,22 +699,18 @@ fn still_packed_2byte(
     src: &Frame<'_>,
     first: c_int,
     upto: c_int,
-) -> c_int {
+) -> Result<c_int> {
     let format = set.out_format;
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
     let mut converted_from = first;
 
     if first == 0 {
-        if let Err(e) = argb.alloc_argb(src.width, src.height) {
-            return alloc_status(e);
-        }
-        if let Err(e) = dst.alloc_packed(src.width, src.height, 2, target) {
-            return alloc_status(e);
-        }
+        argb.alloc_argb(src.width, src.height)?;
+        dst.alloc_packed(src.width, src.height, 2, target)?;
     }
     if upto > first {
         let Some(pack) = format_packer(dsp, format) else {
-            return WPD_ERR_UNSUPPORTED;
+            return Err(Error::Unsupported);
         };
         let premultiply = format_premultiplier_4444(dsp, format);
 
@@ -775,7 +729,7 @@ fn still_packed_2byte(
             upto,
         );
     }
-    converted_from
+    Ok(converted_from)
 }
 
 fn pack_2byte_rows(
@@ -860,7 +814,7 @@ pub fn export_still_lossless<'a>(
     img: &Frame<'a>,
     out: &mut Handout<'a>,
     upto: c_int,
-) -> c_int {
+) -> Result<()> {
     let RowTargets {
         dsp,
         output,
@@ -874,34 +828,25 @@ pub fn export_still_lossless<'a>(
     let first = if *converted_format == format { done } else { 0 };
     let upto = upto.max(done);
     let target = Format::from_raw(format);
-    let mut finish = |code: c_int| {
+    let mut finish = || {
         *converted_rows = upto;
         *converted_format = format;
-        code
     };
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
         let want_alpha = target == Some(Format::Yuva420p);
-        let ret = ensure_yuva_rows(dsp, output, img, want_alpha, first, upto);
 
-        if ret < 0 {
-            return ret;
-        }
+        ensure_yuva_rows(dsp, output, img, want_alpha, first, upto)?;
 
         let planar = output.frame();
 
         if set.ext_active {
-            let ret = export_external_planar_rows(
-                set, ext, &planar, format, out, first, upto,
-            );
-
-            if ret < 0 {
-                return ret;
-            }
+            export_external_planar_rows(set, ext, &planar, format, out, first, upto)?;
         } else {
             export_own(set, planar, format, out);
         }
-        return finish(WPD_OK);
+        finish();
+        return Ok(());
     }
 
     if !format_is_packed(format) {
@@ -909,14 +854,12 @@ pub fn export_still_lossless<'a>(
 
         if !set.ext_active {
             export_own(set, *img, native, out);
-            return finish(WPD_OK);
+            finish();
+            return Ok(());
         }
-        let ret = export_external_rows(set, dsp, ext, img, native, out, first, upto);
-
-        if ret < 0 {
-            return ret;
-        }
-        return finish(WPD_OK);
+        export_external_rows(set, dsp, ext, img, native, out, first, upto)?;
+        finish();
+        return Ok(());
     }
 
     let premultiply = format_premultiplier_4444(dsp, format);
@@ -924,11 +867,7 @@ pub fn export_still_lossless<'a>(
     let out_len = img.width as usize * format_bpp(format);
 
     if set.ext_active {
-        let ret = export_external_rows(set, dsp, ext, img, format, out, first, upto);
-
-        if ret < 0 {
-            return ret;
-        }
+        export_external_rows(set, dsp, ext, img, format, out, first, upto)?;
         if set.premultiply {
             for y in first..upto {
                 let row = ext.row(0, y, out_len);
@@ -940,23 +879,22 @@ pub fn export_still_lossless<'a>(
                 }
             }
         }
-        return finish(WPD_OK);
+        finish();
+        return Ok(());
     }
 
     let pack = format_packer(dsp, format);
 
     if !set.premultiply && (pack.is_none() || img.format as c_int == format) {
         export_own(set, *img, format, out);
-        return finish(WPD_OK);
+        finish();
+        return Ok(());
     }
 
     if first == 0 {
         let target = Format::from_raw(format).unwrap_or(Format::Argb);
 
-        if let Err(e) = output.alloc_packed(img.width, img.height, target.bpp(), target)
-        {
-            return alloc_status(e);
-        }
+        output.alloc_packed(img.width, img.height, target.bpp(), target)?;
     }
 
     {
@@ -980,5 +918,6 @@ pub fn export_still_lossless<'a>(
     }
 
     export_own(set, output.frame(), format, out);
-    finish(WPD_OK)
+    finish();
+    Ok(())
 }
