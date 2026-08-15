@@ -23,7 +23,7 @@ use std::marker::PhantomData;
 use wpd::image::Format;
 
 use crate::decoder::WPDDecoder;
-use crate::export::WPDFrame;
+use crate::frame::WPDFrame;
 
 pub use wpd::error::{Error, Result};
 

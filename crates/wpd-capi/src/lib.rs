@@ -23,5 +23,7 @@ pub mod cpu;
 pub mod decoder;
 pub mod dsp;
 pub mod export;
+pub mod frame;
 pub mod lossy;
+pub mod options;
 pub mod rescale;

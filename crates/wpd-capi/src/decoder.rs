@@ -22,13 +22,16 @@ use wpd::image::Format;
 use crate::container::{info_clear, WPDImageInfo};
 use crate::convert::{
     ensure_yuva_rows, format_bpp, format_is_packed, format_is_premultiplied,
-    format_valid, WPDDecoderOptions,
+    format_valid,
 };
 use crate::export::{
     export_external_planar_rows, export_own, export_packed, export_still_lossless,
-    export_still_packed, frame_clear, frame_valid, write_frame, ExportSettings,
-    ExportTargets, External, RowTargets, WPDFrame, WPDOutputPlane,
+    export_still_packed, ExportSettings, ExportTargets, RowTargets,
 };
+use crate::frame::{
+    frame_clear, frame_valid, write_frame, External, WPDFrame, WPDOutputPlane,
+};
+use crate::options::WPDDecoderOptions;
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
 use wpd::error::Error;
@@ -2331,8 +2334,8 @@ pub unsafe extern "C" fn wpd_decode(
 /// a newer, longer revision of the struct, and its own size has to survive.
 fn frame_copy(dst: *mut WPDFrame, src: &WPDFrame) {
     let head = mem::size_of::<usize>();
-    let extent = unsafe { crate::export::frame_extent(dst) }
-        .min(unsafe { crate::export::frame_extent(src) });
+    let extent = unsafe { crate::frame::frame_extent(dst) }
+        .min(unsafe { crate::frame::frame_extent(src) });
 
     unsafe {
         ptr::copy_nonoverlapping(
