@@ -1421,14 +1421,31 @@ the second is true and predates it.
 
 **Why the driver still cannot move into `crates/wpd`.** The lossless canvas is a
 `Vec<u32>` — the pixel loops want words — and everything downstream of it wants
-rows of bytes. Reinterpreting one as the other needs either `unsafe` or a
-dependency, and the core promises neither: `#![forbid(unsafe_code)]` without the
-`asm` feature is a headline property, and rav1d reaches for `zerocopy` for
-exactly this. So `crates/wpd-capi/src/vp8l.rs` is what is left of the module —
-about fifty lines whose only job is that cast, holding four of the crate's 286.
-Everything else in the driver could move today. This is worth stating plainly
-rather than working around, because the cost of the workaround (a dependency, or
-a hole in the core's safety claim) is larger than the cost of the boundary.
+rows of bytes. There is no way to reinterpret one as the other in the standard
+library without `unsafe`: `slice::align_to` is itself unsafe, and `to_ne_bytes`
+copies. So it needs `unsafe` or a dependency, and the core promises neither —
+`#![forbid(unsafe_code)]` without the `asm` feature is a headline property. What
+is left of the module is `crates/wpd-capi/src/vp8l.rs`, about fifty lines whose
+only job is that cast, holding four of the crate's 286. Everything else in the
+driver could move today.
+
+**What rav1d does about the same problem.** It stores picture buffers as `[u8]`
+and produces typed views with `zerocopy`: `DisjointMutGuard::cast_slice::<V>`
+calls `V::slice_from(bytes)` for `V: AsBytes + FromBytes`, which is safe and
+fallible — the `[u8] -> [u16]` direction can fail on alignment, which is why the
+allocation is `AlignedVec64`. Not every path goes through it;
+`Pixels::as_mut_ptr` does a raw `.cast()` and its comment says the invariant is
+verified by the `zerocopy` bound elsewhere. So the honest summary is that rav1d
+picked bytes as the canonical storage and used `zerocopy` to get words back out
+of them.
+
+wpd picked the other canonical storage, and the direction it needs is the easy
+one: `[u32] -> [u8]` only ever weakens alignment and `u32` has no invalid bit
+patterns, so `zerocopy`'s `as_bytes()` is infallible — no `Option`, no alignment
+check, no `AlignedVec`. That makes the dependency cheaper than the framing above
+suggests, and it is the one thing standing between the driver and the core.
+Deferred rather than declined: wpd has no runtime dependencies today, and that
+is worth spending deliberately rather than in passing.
 
 ## Measuring the fallbacks needs two no-asm builds
 
