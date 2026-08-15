@@ -25,12 +25,13 @@ use crate::convert::{
     format_valid, WPDDecoderOptions,
 };
 use crate::export::{
-    export_external_planar_rows, export_frame, export_packed, export_still_lossless,
-    export_still_packed, frame_clear, frame_valid, ExportSettings, ExportTargets,
-    RowTargets, WPDFrame, WPDOutputPlane,
+    export_external_planar_rows, export_own, export_packed, export_still_lossless,
+    export_still_packed, frame_clear, frame_valid, write_frame, ExportSettings,
+    ExportTargets, External, RowTargets, WPDFrame, WPDOutputPlane,
 };
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
+use wpd::handout::Handout;
 use wpd::input::Input;
 use wpd::options::Options;
 use wpd::picture::{Buffer, Frame, PlaneRef};
@@ -274,7 +275,7 @@ pub struct WPDDecoder<'a> {
     pub(crate) truncated: bool,
     pub(crate) input_mode: u8,
 
-    pub(crate) ext: [WPDOutputPlane; 4],
+    pub(crate) ext: External,
     pub(crate) ext_active: bool,
 
     pub(crate) status: c_int,
@@ -420,7 +421,7 @@ impl<'a> WPDDecoder<'a> {
             truncated: false,
             input_mode: 0,
 
-            ext: [WPDOutputPlane::empty(); 4],
+            ext: External([WPDOutputPlane::empty(); 4]),
             ext_active: false,
 
             status: WPD_OK,
@@ -1029,7 +1030,7 @@ impl WPDDecoder<'_> {
                 self.drop_converted_rows();
             }
             self.ext_active = false;
-            self.ext = [WPDOutputPlane::empty(); 4];
+            self.ext = External([WPDOutputPlane::empty(); 4]);
             return WPD_OK;
         };
 
@@ -1044,10 +1045,10 @@ impl WPDDecoder<'_> {
                 return self.set_error("invalid output buffer", WPD_ERR_INVALID_ARG);
             }
         }
-        if !self.ext_active || self.ext != buffer.plane {
+        if !self.ext_active || self.ext.0 != buffer.plane {
             self.drop_converted_rows();
         }
-        self.ext = buffer.plane;
+        self.ext = External(buffer.plane);
         self.ext_active = true;
         WPD_OK
     }
@@ -1494,28 +1495,34 @@ impl<'a> WPDDecoder<'a> {
         }
     }
 
-    fn emit_still_lossless(&mut self, frame: *mut WPDFrame) -> c_int {
+    fn emit_still_lossless<'o>(
+        &'o mut self,
+        out: &mut Handout<'o>,
+    ) -> Result<c_int, (&'static str, c_int)> {
         self.still_done = true;
 
         let set = self.export_settings();
         let ret = if self.options.transforms() {
             let (t, img) = self.export_parts(Source::Lossless);
 
-            unsafe { export_packed(&set, t, img, frame) }
+            export_packed(&set, t, img, out)
         } else {
             let (t, img) = self.row_parts(Source::Lossless);
             let height = img.height;
 
-            unsafe { export_still_lossless(&set, t, &img, frame, height) }
+            export_still_lossless(&set, t, &img, out, height)
         };
 
         if ret < 0 {
-            return self.set_error("cannot output frame", ret);
+            return Err(("cannot output frame", ret));
         }
-        1
+        Ok(1)
     }
 
-    fn emit_still_lossy(&mut self, frame: *mut WPDFrame) -> c_int {
+    fn emit_still_lossy<'o>(
+        &'o mut self,
+        out: &mut Handout<'o>,
+    ) -> Result<c_int, (&'static str, c_int)> {
         self.still_done = true;
 
         let packed_only =
@@ -1525,32 +1532,35 @@ impl<'a> WPDDecoder<'a> {
             let (t, img) = self.row_parts(Source::Lossy);
             let height = img.height;
 
-            unsafe { export_still_packed(&set, t, &img, frame, height) }
+            export_still_packed(&set, t, &img, out, height)
         } else {
             let (t, img) = self.export_parts(Source::Lossy);
 
-            unsafe { export_packed(&set, t, img, frame) }
+            export_packed(&set, t, img, out)
         };
 
         if ret < 0 {
-            return self.set_error("cannot output frame", ret);
+            return Err(("cannot output frame", ret));
         }
-        1
+        Ok(1)
     }
 
     /// A file with no RIFF wrapper: one image chunk, and for the lossy shape
     /// possibly an ALPH chunk ahead of it.
-    fn decode_raw(&mut self, frame: *mut WPDFrame) -> c_int {
+    fn decode_raw<'o>(
+        &'o mut self,
+        out: &mut Handout<'o>,
+    ) -> Result<c_int, (&'static str, c_int)> {
         let hs = self.scanned();
 
         if !self.eos {
-            return 0;
+            return Ok(0);
         }
         if hs.truncated {
-            return self.set_error("raw image is truncated", WPD_ERR_TRUNCATED);
+            return Err(("raw image is truncated", WPD_ERR_TRUNCATED));
         }
         if hs.raw_image_size > c_int::MAX as usize {
-            return self.set_error("raw image is too large", WPD_ERR_TOO_LARGE);
+            return Err(("raw image is too large", WPD_ERR_TOO_LARGE));
         }
         self.width = 0;
         self.height = 0;
@@ -1559,7 +1569,7 @@ impl<'a> WPDDecoder<'a> {
             let ret = self.lossless_decode(hs.raw_image_offset, hs.raw_image_size);
 
             if ret < 0 {
-                return self.set_error("VP8L decode failed", ret);
+                return Err(("VP8L decode failed", ret));
             }
             self.still_done = true;
             self.still_lossless = true;
@@ -1568,15 +1578,12 @@ impl<'a> WPDDecoder<'a> {
         } else {
             if hs.raw == Raw::AlphaAndLossy {
                 if hs.raw_alpha_size == 0 {
-                    return self.set_error("invalid ALPHA chunk", WPD_ERR_BITSTREAM);
+                    return Err(("invalid ALPHA chunk", WPD_ERR_BITSTREAM));
                 }
                 let header = self.file_at(hs.raw_alpha_offset)[0] as c_int;
 
                 if header & 3 > ALPHA_COMPRESSION_VP8L {
-                    return self.set_error(
-                        "unsupported ALPHA compression",
-                        WPD_ERR_UNSUPPORTED,
-                    );
+                    return Err(("unsupported ALPHA compression", WPD_ERR_UNSUPPORTED));
                 }
                 self.has_alpha = true;
                 self.alpha_compression = header & 3;
@@ -1588,19 +1595,19 @@ impl<'a> WPDDecoder<'a> {
                 self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size);
 
             if ret < 0 {
-                return self.set_error("VP8 decode failed", ret);
+                return Err(("VP8 decode failed", ret));
             }
             self.still_done = true;
             Source::Lossy
         };
         let set = self.export_settings();
         let (t, img) = self.export_parts(source);
-        let ret = unsafe { export_packed(&set, t, img, frame) };
+        let ret = export_packed(&set, t, img, out);
 
         if ret < 0 {
-            return self.set_error("cannot output frame", ret);
+            return Err(("cannot output frame", ret));
         }
-        1
+        Ok(1)
     }
 }
 
@@ -1626,185 +1633,215 @@ unsafe fn next_frame(decoder: &mut WPDDecoder<'_>, frame: *mut WPDFrame) -> c_in
     if !unsafe { frame_valid(frame) } {
         return decoder.set_error("invalid frame", WPD_ERR_INVALID_ARG);
     }
-    if !decoder.opened {
-        return decoder.set_error("no file opened", WPD_ERR_INVALID_ARG);
-    }
-    if !decoder.headers_valid {
-        if !decoder.eos {
-            return 0; /* the headers have not arrived yet */
+
+    /* The handout borrows the decoder, so everything the shim needs from it
+    besides the pixels is taken first, and a failure carries a message rather
+    than setting one -- `set_error` wants the decoder back. */
+    let ext = External(decoder.ext.0);
+    let mut out = Handout::default();
+
+    match decoder.next_picture(&mut out) {
+        Ok(ret) => {
+            if ret > 0 {
+                unsafe { write_frame(&out, &ext, frame) };
+            }
+            ret
         }
-        return decoder.set_error("no image data found", WPD_ERR_TRUNCATED);
+        Err((message, code)) => decoder.set_error(message, code),
     }
-    if decoder.scanned().raw != Raw::No {
-        return if decoder.still_done {
-            0
-        } else {
-            decoder.decode_raw(frame)
-        };
-    }
+}
 
-    while decoder.pos + 8 <= decoder.end {
-        let chunk_pos = decoder.pos;
-        let (chunk_type, size) = {
-            let chunk = decoder.file_at(chunk_pos);
+impl WPDDecoder<'_> {
+    /// Decodes the next frame into `out`. Returns 1 for a picture, 0 when the
+    /// file is finished or the stream has not caught up, or a status.
+    fn next_picture<'o>(
+        &'o mut self,
+        out: &mut Handout<'o>,
+    ) -> Result<c_int, (&'static str, c_int)> {
+        let decoder = self;
 
-            (rl32(chunk), rl32(&chunk[4..]))
-        };
-        let payload_pos = chunk_pos + 8;
-
-        if size == u32::MAX {
-            return decoder.set_error("invalid chunk size", WPD_ERR_BITSTREAM);
+        if !decoder.opened {
+            return Err(("no file opened", WPD_ERR_INVALID_ARG));
         }
-        let size = size as usize;
-        let padded_size = size + (size & 1);
-
-        if decoder.end - payload_pos < padded_size {
+        if !decoder.headers_valid {
             if !decoder.eos {
-                let avail = decoder.end - payload_pos;
-
-                if decoder.still_lossy_pending(chunk_type) {
-                    let ret = decoder.vp8_lossy_step(payload_pos, avail, size);
-
-                    if ret < 0 {
-                        return decoder.set_error("VP8 decode failed", ret);
-                    }
-                    if ret != 0 {
-                        return decoder.emit_still_lossy(frame);
-                    }
-                } else if decoder.still_lossless_pending(chunk_type) {
-                    let ret = decoder.lossless_step(payload_pos, avail, size, false);
-
-                    if ret < 0 {
-                        return decoder.set_error("VP8L decode failed", ret);
-                    }
-                    if ret != 0 {
-                        return decoder.emit_still_lossless(frame);
-                    }
-                }
-                return 0; /* the rest of this chunk has not arrived yet */
+                return Ok(0); /* the headers have not arrived yet */
             }
-            return decoder
-                .set_error("chunk runs past the end of the file", WPD_ERR_TRUNCATED);
+            return Err(("no image data found", WPD_ERR_TRUNCATED));
         }
-        decoder.pos += 8 + padded_size;
+        if decoder.scanned().raw != Raw::No {
+            return if decoder.still_done {
+                Ok(0)
+            } else {
+                decoder.decode_raw(out)
+            };
+        }
 
-        match chunk_type {
-            TAG_ALPH => {
-                if size == 0 {
-                    return decoder
-                        .set_error("invalid ALPHA chunk size", WPD_ERR_BITSTREAM);
-                }
-                let alpha_header = decoder.file_at(payload_pos)[0] as c_int;
+        while decoder.pos + 8 <= decoder.end {
+            let chunk_pos = decoder.pos;
+            let (chunk_type, size) = {
+                let chunk = decoder.file_at(chunk_pos);
 
-                decoder.alpha_data_offset = payload_pos + 1;
-                decoder.alpha_pending = true;
-                decoder.alpha_data_size = size - 1;
+                (rl32(chunk), rl32(&chunk[4..]))
+            };
+            let payload_pos = chunk_pos + 8;
 
-                let filter_m = (alpha_header >> 2) & 0x03;
-                let compression = alpha_header & 0x03;
-
-                if compression > ALPHA_COMPRESSION_VP8L {
-                    wpd::log::warning("skipping unsupported ALPHA chunk");
-                } else {
-                    decoder.has_alpha = true;
-                    decoder.alpha_compression = compression;
-                    decoder.alpha_filter = filter_m;
-                }
+            if size == u32::MAX {
+                return Err(("invalid chunk size", WPD_ERR_BITSTREAM));
             }
-            TAG_VP8 => {
-                if decoder.animation || decoder.still_done {
-                    continue;
-                }
-                let ret = if decoder.vp8_active {
-                    let ret = decoder.vp8_lossy_step(payload_pos, size, size);
+            let size = size as usize;
+            let padded_size = size + (size & 1);
 
-                    if ret == 0 {
-                        WPD_ERR_BITSTREAM
-                    } else {
-                        ret
+            if decoder.end - payload_pos < padded_size {
+                if !decoder.eos {
+                    let avail = decoder.end - payload_pos;
+
+                    if decoder.still_lossy_pending(chunk_type) {
+                        let ret = decoder.vp8_lossy_step(payload_pos, avail, size);
+
+                        if ret < 0 {
+                            return Err(("VP8 decode failed", ret));
+                        }
+                        if ret != 0 {
+                            return decoder.emit_still_lossy(out);
+                        }
+                    } else if decoder.still_lossless_pending(chunk_type) {
+                        let ret =
+                            decoder.lossless_step(payload_pos, avail, size, false);
+
+                        if ret < 0 {
+                            return Err(("VP8L decode failed", ret));
+                        }
+                        if ret != 0 {
+                            return decoder.emit_still_lossless(out);
+                        }
                     }
-                } else {
+                    return Ok(0); /* the rest of this chunk has not arrived yet */
+                }
+                return Err(("chunk runs past the end of the file", WPD_ERR_TRUNCATED));
+            }
+            decoder.pos += 8 + padded_size;
+
+            match chunk_type {
+                TAG_ALPH => {
+                    if size == 0 {
+                        return Err(("invalid ALPHA chunk size", WPD_ERR_BITSTREAM));
+                    }
+                    let alpha_header = decoder.file_at(payload_pos)[0] as c_int;
+
+                    decoder.alpha_data_offset = payload_pos + 1;
+                    decoder.alpha_pending = true;
+                    decoder.alpha_data_size = size - 1;
+
+                    let filter_m = (alpha_header >> 2) & 0x03;
+                    let compression = alpha_header & 0x03;
+
+                    if compression > ALPHA_COMPRESSION_VP8L {
+                        wpd::log::warning("skipping unsupported ALPHA chunk");
+                    } else {
+                        decoder.has_alpha = true;
+                        decoder.alpha_compression = compression;
+                        decoder.alpha_filter = filter_m;
+                    }
+                }
+                TAG_VP8 => {
+                    if decoder.animation || decoder.still_done {
+                        continue;
+                    }
+                    let ret = if decoder.vp8_active {
+                        let ret = decoder.vp8_lossy_step(payload_pos, size, size);
+
+                        if ret == 0 {
+                            WPD_ERR_BITSTREAM
+                        } else {
+                            ret
+                        }
+                    } else {
+                        decoder.width = 0;
+                        decoder.height = 0;
+                        decoder.vp8_lossy_decode_frame(payload_pos, size)
+                    };
+
+                    if ret < 0 {
+                        return Err(("VP8 decode failed", ret));
+                    }
+                    return decoder.emit_still_lossy(out);
+                }
+                TAG_VP8L => {
+                    if decoder.animation || decoder.still_done {
+                        continue;
+                    }
+                    if decoder.vp8l.still_active() {
+                        let mut ret =
+                            decoder.lossless_step(payload_pos, size, size, true);
+
+                        if ret == 0 {
+                            ret = WPD_ERR_BITSTREAM;
+                        }
+                        if ret < 0 {
+                            return Err(("VP8L decode failed", ret));
+                        }
+                        return decoder.emit_still_lossless(out);
+                    }
                     decoder.width = 0;
                     decoder.height = 0;
-                    decoder.vp8_lossy_decode_frame(payload_pos, size)
-                };
 
-                if ret < 0 {
-                    return decoder.set_error("VP8 decode failed", ret);
-                }
-                return decoder.emit_still_lossy(frame);
-            }
-            TAG_VP8L => {
-                if decoder.animation || decoder.still_done {
-                    continue;
-                }
-                if decoder.vp8l.still_active() {
-                    let mut ret = decoder.lossless_step(payload_pos, size, size, true);
+                    let ret = decoder.lossless_decode(payload_pos, size);
 
-                    if ret == 0 {
-                        ret = WPD_ERR_BITSTREAM;
-                    }
                     if ret < 0 {
-                        return decoder.set_error("VP8L decode failed", ret);
+                        return Err(("VP8L decode failed", ret));
                     }
-                    return decoder.emit_still_lossless(frame);
+                    decoder.still_done = true;
+
+                    let set = decoder.export_settings();
+                    let height = decoder.frame_of(Source::Lossless).height;
+
+                    decoder.still_lossless = true;
+                    decoder.converted_rows = height;
+
+                    let (t, img) = decoder.export_parts(Source::Lossless);
+                    let ret = export_packed(&set, t, img, out);
+
+                    if ret < 0 {
+                        return Err(("cannot output frame", ret));
+                    }
+                    return Ok(1);
                 }
-                decoder.width = 0;
-                decoder.height = 0;
+                TAG_ANMF => {
+                    if !decoder.animation
+                        || decoder.canvas_width == 0
+                        || decoder.canvas_height == 0
+                    {
+                        return Err((
+                            "ANMF chunk without animation header",
+                            WPD_ERR_BITSTREAM,
+                        ));
+                    }
+                    let ret = decoder.decode_anmf(payload_pos, size);
 
-                let ret = decoder.lossless_decode(payload_pos, size);
+                    if ret < 0 {
+                        return Err(("animation frame decode failed", ret));
+                    }
+                    let set = decoder.export_settings();
+                    let source = match (decoder.anim_mode, decoder.subframe_out) {
+                        (WPD_ANIM_SUBFRAME, Some(which)) => which,
+                        (WPD_ANIM_SUBFRAME, None) => Source::None,
+                        _ => Source::Canvas,
+                    };
+                    let (t, img) = decoder.export_parts(source);
+                    let ret = export_packed(&set, t, img, out);
 
-                if ret < 0 {
-                    return decoder.set_error("VP8L decode failed", ret);
+                    if ret < 0 {
+                        return Err(("cannot output frame", ret));
+                    }
+                    return Ok(1);
                 }
-                decoder.still_done = true;
-
-                let set = decoder.export_settings();
-                let (t, img) = decoder.export_parts(Source::Lossless);
-                let height = img.height;
-                let ret = unsafe { export_packed(&set, t, img, frame) };
-
-                if ret < 0 {
-                    return decoder.set_error("cannot output frame", ret);
-                }
-                decoder.still_lossless = true;
-                decoder.converted_rows = height;
-                return 1;
+                _ => {}
             }
-            TAG_ANMF => {
-                if !decoder.animation
-                    || decoder.canvas_width == 0
-                    || decoder.canvas_height == 0
-                {
-                    return decoder.set_error(
-                        "ANMF chunk without animation header",
-                        WPD_ERR_BITSTREAM,
-                    );
-                }
-                let ret = decoder.decode_anmf(payload_pos, size);
-
-                if ret < 0 {
-                    return decoder.set_error("animation frame decode failed", ret);
-                }
-                let set = decoder.export_settings();
-                let source = match (decoder.anim_mode, decoder.subframe_out) {
-                    (WPD_ANIM_SUBFRAME, Some(which)) => which,
-                    (WPD_ANIM_SUBFRAME, None) => Source::None,
-                    _ => Source::Canvas,
-                };
-                let (t, img) = decoder.export_parts(source);
-                let ret = unsafe { export_packed(&set, t, img, frame) };
-
-                if ret < 0 {
-                    return decoder.set_error("cannot output frame", ret);
-                }
-                return 1;
-            }
-            _ => {}
         }
-    }
 
-    0
+        Ok(0)
+    }
 }
 
 /// # Safety
@@ -1834,184 +1871,208 @@ unsafe fn partial_frame(
     if !unsafe { frame_valid(frame) } {
         return decoder.set_error("invalid frame", WPD_ERR_INVALID_ARG);
     }
-    if !decoder.opened {
-        return decoder.set_error("no file opened", WPD_ERR_INVALID_ARG);
-    }
-    let set = decoder.export_settings();
+
+    let ext = External(decoder.ext.0);
+    let mut out = Handout::default();
+    let mut rows = 0;
 
     unsafe { frame_clear(frame) };
+
+    let ret = match decoder.partial_picture(&mut out, &mut rows) {
+        Ok(had_picture) => {
+            if had_picture {
+                unsafe { write_frame(&out, &ext, frame) };
+            }
+            WPD_OK
+        }
+        Err((message, code)) => decoder.set_error(message, code),
+    };
+
     if !rows_valid.is_null() {
-        unsafe { rows_valid.write(0) };
+        unsafe { rows_valid.write(rows) };
     }
+    ret
+}
 
-    if decoder.still_lossless && decoder.vp8l.still_active() {
-        let ret = decoder.lossless_peek();
+impl WPDDecoder<'_> {
+    /// As much of the frame in progress as is finished. Returns whether a
+    /// picture was produced, and fills `rows` in with how many of its rows
+    /// are valid.
+    fn partial_picture<'o>(
+        &'o mut self,
+        out: &mut Handout<'o>,
+        rows_valid: &mut c_int,
+    ) -> Result<bool, (&'static str, c_int)> {
+        let decoder = self;
 
-        if ret < 0 {
-            return decoder.set_error("VP8L decode failed", ret);
+        if !decoder.opened {
+            return Err(("no file opened", WPD_ERR_INVALID_ARG));
         }
-    }
+        let set = decoder.export_settings();
 
-    fn lossless_rows(d: &WPDDecoder<'_>) -> c_int {
-        if d.vp8l.still_active() {
-            d.vp8l.still_rows_out()
-        } else {
-            d.frame_of(Source::Lossless).height
-        }
-    }
-    fn lossy_rows(d: &WPDDecoder<'_>) -> c_int {
-        match (d.vp8_active, d.vp8.as_deref()) {
-            (true, Some(vp8)) => vp8.rows_finalized(),
-            (true, None) => 0,
-            (false, _) => d.height,
-        }
-    }
-
-    if decoder.options.transforms() {
-        let ret = if decoder.still_lossless {
-            if lossless_rows(decoder) < decoder.frame_of(Source::Lossless).height {
-                return WPD_OK;
-            }
-
-            let (t, img) = decoder.export_parts(Source::Lossless);
-
-            unsafe { export_packed(&set, t, img, frame) }
-        } else if decoder.still_lossy {
-            if lossy_rows(decoder) < decoder.height {
-                return WPD_OK;
-            }
-
-            let (t, img) = decoder.export_parts(Source::Lossy);
-
-            unsafe { export_packed(&set, t, img, frame) }
-        } else {
-            return WPD_OK;
-        };
-
-        if ret < 0 {
-            return decoder.set_error("cannot output frame", ret);
-        }
-        if !rows_valid.is_null() {
-            unsafe { rows_valid.write((*frame).height) };
-        }
-        return WPD_OK;
-    }
-
-    if decoder.still_lossless {
-        let upto = lossless_rows(decoder);
-        let (t, img) = decoder.row_parts(Source::Lossless);
-        let ret = unsafe { export_still_lossless(&set, t, &img, frame, upto) };
-
-        if ret < 0 {
-            return decoder.set_error("cannot output frame", ret);
-        }
-        if !rows_valid.is_null() {
-            unsafe { rows_valid.write(decoder.converted_rows) };
-        }
-        return WPD_OK;
-    }
-    if !decoder.still_lossy {
-        return WPD_OK;
-    }
-
-    let mut rows = lossy_rows(decoder);
-
-    if !format_is_packed(decoder.out_format) {
-        let have = decoder.frame_of(Source::Lossy).format as c_int;
-        let format = if decoder.out_format == WPD_PIX_FMT_NONE {
-            have
-        } else {
-            decoder.out_format
-        };
-        let first = if decoder.converted_format == format {
-            decoder.converted_rows
-        } else {
-            0
-        };
-
-        if rows < first {
-            rows = first;
-        }
-
-        let planar = have != Format::Yuva420p as c_int && format != have;
-
-        if planar {
-            let want_alpha = format == Format::Yuva420p as c_int;
-            let WPDDecoder {
-                ydsp,
-                output,
-                vp8,
-                alpha_plane,
-                has_alpha,
-                width,
-                height,
-                ..
-            } = &mut *decoder;
-            let src =
-                lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height);
-            let ret = ensure_yuva_rows(ydsp, output, &src, want_alpha, first, rows);
+        if decoder.still_lossless && decoder.vp8l.still_active() {
+            let ret = decoder.lossless_peek();
 
             if ret < 0 {
-                return decoder.set_error("cannot output frame", ret);
+                return Err(("VP8L decode failed", ret));
             }
         }
 
-        let ret = {
-            let WPDDecoder {
-                ext,
-                output,
-                vp8,
-                alpha_plane,
-                has_alpha,
-                width,
-                height,
-                ..
-            } = &mut *decoder;
-            let plane = if planar {
-                output.frame()
+        fn lossless_rows(d: &WPDDecoder<'_>) -> c_int {
+            if d.vp8l.still_active() {
+                d.vp8l.still_rows_out()
             } else {
-                lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
+                d.frame_of(Source::Lossless).height
+            }
+        }
+        fn lossy_rows(d: &WPDDecoder<'_>) -> c_int {
+            match (d.vp8_active, d.vp8.as_deref()) {
+                (true, Some(vp8)) => vp8.rows_finalized(),
+                (true, None) => 0,
+                (false, _) => d.height,
+            }
+        }
+
+        if decoder.options.transforms() {
+            let source = if decoder.still_lossless {
+                if lossless_rows(decoder) < decoder.frame_of(Source::Lossless).height {
+                    return Ok(false);
+                }
+                Source::Lossless
+            } else if decoder.still_lossy {
+                if lossy_rows(decoder) < decoder.height {
+                    return Ok(false);
+                }
+                Source::Lossy
+            } else {
+                return Ok(false);
+            };
+            let (t, img) = decoder.export_parts(source);
+            let ret = export_packed(&set, t, img, out);
+
+            if ret < 0 {
+                return Err(("cannot output frame", ret));
+            }
+            *rows_valid = out.height;
+            return Ok(true);
+        }
+
+        if decoder.still_lossless {
+            let upto = lossless_rows(decoder);
+            let done = decoder.converted_rows;
+            let (t, img) = decoder.row_parts(Source::Lossless);
+            let ret = export_still_lossless(&set, t, &img, out, upto);
+
+            if ret < 0 {
+                return Err(("cannot output frame", ret));
+            }
+            *rows_valid = upto.max(done);
+            return Ok(true);
+        }
+        if !decoder.still_lossy {
+            return Ok(false);
+        }
+
+        let mut rows = lossy_rows(decoder);
+
+        if !format_is_packed(decoder.out_format) {
+            let have = decoder.frame_of(Source::Lossy).format as c_int;
+            let format = if decoder.out_format == WPD_PIX_FMT_NONE {
+                have
+            } else {
+                decoder.out_format
+            };
+            let first = if decoder.converted_format == format {
+                decoder.converted_rows
+            } else {
+                0
             };
 
-            if set.ext_active {
-                unsafe {
-                    export_external_planar_rows(
-                        &set, ext, &plane, format, frame, first, rows,
-                    )
-                }
-            } else {
-                unsafe { export_frame(&set, &plane, format, frame) };
-                WPD_OK
+            if rows < first {
+                rows = first;
             }
-        };
+
+            let planar = have != Format::Yuva420p as c_int && format != have;
+
+            if planar {
+                let want_alpha = format == Format::Yuva420p as c_int;
+                let WPDDecoder {
+                    ydsp,
+                    output,
+                    vp8,
+                    alpha_plane,
+                    has_alpha,
+                    width,
+                    height,
+                    ..
+                } = &mut *decoder;
+                let src = lossy_view(
+                    vp8.as_deref(),
+                    alpha_plane,
+                    *has_alpha,
+                    *width,
+                    *height,
+                );
+                let ret = ensure_yuva_rows(ydsp, output, &src, want_alpha, first, rows);
+
+                if ret < 0 {
+                    return Err(("cannot output frame", ret));
+                }
+            }
+
+            decoder.converted_rows = rows;
+            decoder.converted_format = format;
+
+            let ret = {
+                let WPDDecoder {
+                    ext,
+                    output,
+                    vp8,
+                    alpha_plane,
+                    has_alpha,
+                    width,
+                    height,
+                    ..
+                } = &mut *decoder;
+                let plane = if planar {
+                    output.frame()
+                } else {
+                    lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
+                };
+
+                if set.ext_active {
+                    export_external_planar_rows(
+                        &set, ext, &plane, format, out, first, rows,
+                    )
+                } else {
+                    export_own(&set, plane, format, out);
+                    WPD_OK
+                }
+            };
+
+            if ret < 0 {
+                return Err(("cannot output frame", ret));
+            }
+            *rows_valid = rows;
+            return Ok(true);
+        }
+
+        /* The fancy upsampler pairs a row with the one below it, so the last
+        finished row cannot be converted until the row after it exists. */
+        if rows != 0 && rows < decoder.height {
+            rows -= 1;
+        }
+
+        let done = decoder.converted_rows;
+        let (t, img) = decoder.row_parts(Source::Lossy);
+        let ret = export_still_packed(&set, t, &img, out, rows);
 
         if ret < 0 {
-            return decoder.set_error("cannot output frame", ret);
+            return Err(("cannot output frame", ret));
         }
-        decoder.converted_rows = rows;
-        decoder.converted_format = format;
-        if !rows_valid.is_null() {
-            unsafe { rows_valid.write(rows) };
-        }
-        return WPD_OK;
+        *rows_valid = rows.max(done);
+        Ok(true)
     }
-
-    /* The fancy upsampler pairs a row with the one below it, so the last
-    finished row cannot be converted until the row after it exists. */
-    if rows != 0 && rows < decoder.height {
-        rows -= 1;
-    }
-
-    let (t, img) = decoder.row_parts(Source::Lossy);
-    let ret = unsafe { export_still_packed(&set, t, &img, frame, rows) };
-
-    if ret < 0 {
-        return decoder.set_error("cannot output frame", ret);
-    }
-    if !rows_valid.is_null() {
-        unsafe { rows_valid.write(decoder.converted_rows) };
-    }
-    WPD_OK
 }
 
 /// # Safety

@@ -26,6 +26,7 @@ pub mod convert;
 pub mod cpu;
 pub mod dsp;
 pub mod error;
+pub mod handout;
 pub mod image;
 pub mod input;
 pub mod log;

@@ -32,6 +32,7 @@ use crate::convert::{
     transform_image,
 };
 use wpd::dsp::yuv::{RowFn, YuvDsp};
+use wpd::handout::{Handout, Pixels, RowSink};
 use wpd::options::Options;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::Scratch;
@@ -66,7 +67,34 @@ impl WPDOutputPlane {
 
 /// The caller's own output planes, which the decoder writes into when
 /// `wpd_decoder_set_output_buffer` has named them.
-pub type External = [WPDOutputPlane; 4];
+///
+/// This is the one destination in the decoder that is neither its own memory
+/// nor checked by the compiler: a plane is a pointer, a byte count and a
+/// stride that may run backwards. [`wpd::image::external_plane_fits`] is asked
+/// about the geometry before a single row is written, and nothing else here
+/// takes the caller's word for anything.
+pub struct External(pub [WPDOutputPlane; 4]);
+
+impl RowSink for External {
+    fn fits(&self, p: usize, row_len: usize, rows: i32) -> bool {
+        let plane = &self.0[p];
+
+        !plane.data.is_null()
+            && plane.stride != 0
+            && external_plane_fits(plane.size, plane.stride, row_len, rows)
+    }
+
+    fn row(&mut self, p: usize, y: i32, len: usize) -> &mut [u8] {
+        let plane = &self.0[p];
+
+        /* Sound because `fits` has agreed that the plane holds this row: the
+        stride may be negative, so the offset is signed and the pointer walks
+        backwards from the plane's first byte exactly as the C's did. */
+        unsafe {
+            slice::from_raw_parts_mut(plane.data.offset(y as isize * plane.stride), len)
+        }
+    }
+}
 
 /// `WPDFrame` from `include/wpd.h`.
 #[repr(C)]
@@ -136,7 +164,7 @@ pub struct ExportTargets<'a> {
     pub rescale: &'a mut Scratch,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
-    pub ext: &'a External,
+    pub ext: &'a mut dyn RowSink,
 }
 
 /// The scratch a resumable row export writes through, plus how far it has got.
@@ -148,7 +176,7 @@ pub struct RowTargets<'a> {
     pub options: &'a Options,
     pub output: &'a mut Buffer,
     pub converted: &'a mut Buffer,
-    pub ext: &'a External,
+    pub ext: &'a mut dyn RowSink,
     pub converted_rows: &'a mut c_int,
     pub converted_format: &'a mut c_int,
 }
@@ -200,18 +228,6 @@ pub(crate) unsafe fn frame_clear(frame: *mut WPDFrame) {
     unsafe { ptr::write_bytes(frame.cast::<u8>().add(head), 0, extent - head) };
 }
 
-/// Row `y` of the caller's plane `p`, which may run backwards.
-///
-/// # Safety
-///
-/// The plane must be as the caller declared it, which
-/// [`external_plane_fits`] has been asked about first.
-unsafe fn ext_row<'a>(ext: &External, p: usize, y: c_int, len: usize) -> &'a mut [u8] {
-    unsafe {
-        slice::from_raw_parts_mut(ext[p].data.offset(y as isize * ext[p].stride), len)
-    }
-}
-
 /// The planes a format hands out: three or four for planar, one for packed.
 fn frame_planes(format: c_int) -> usize {
     match Format::from_raw(format) {
@@ -221,12 +237,74 @@ fn frame_planes(format: c_int) -> usize {
     }
 }
 
+/// Writes a finished handout into the caller's `WPDFrame`.
+///
+/// This is the only place the C ABI's shape is built, and the only place a
+/// flip becomes the negative stride `include/wpd.h` promises: everywhere
+/// inside the decoder a flip is a reading order.
+///
+/// # Safety
+///
+/// `frame` must point to a `WPDFrame` of at least its own declared
+/// `struct_size` bytes.
+pub(crate) unsafe fn write_frame(
+    handout: &Handout<'_>,
+    ext: &External,
+    frame: *mut WPDFrame,
+) {
+    unsafe { frame_clear(frame) };
+
+    let out = unsafe { &mut *frame };
+    let planes = handout.planes();
+
+    match &handout.pixels {
+        Pixels::Own(img) => {
+            for p in 0..planes {
+                let (data, stride) = handout_plane(img, p);
+
+                out.data[p] = data;
+                out.stride[p] = stride;
+            }
+        }
+        Pixels::Sink => {
+            for (p, plane) in ext.0.iter().enumerate() {
+                out.data[p] = if p < planes { plane.data } else { ptr::null() };
+                out.stride[p] = if p < planes { plane.stride } else { 0 };
+            }
+        }
+        Pixels::None => {}
+    }
+    out.width = handout.width;
+    out.height = handout.height;
+    out.format = handout.format as c_int;
+    out.duration = handout.duration;
+    out.timestamp = handout.timestamp;
+    if unsafe { frame_extent(frame) } < has_alpha_extent() {
+        return;
+    }
+    let out = unsafe { &mut *frame };
+
+    out.pos_x = handout.pos_x;
+    out.pos_y = handout.pos_y;
+    out.dispose = if handout.dispose_to_background {
+        WPD_DISPOSE_BACKGROUND
+    } else {
+        WPD_DISPOSE_NONE
+    };
+    out.blend = if handout.blend {
+        WPD_BLEND_ALPHA
+    } else {
+        WPD_BLEND_NONE
+    };
+    out.has_alpha = c_int::from(handout.has_alpha);
+}
+
 /// The `(pointer, stride)` pair the C ABI hands plane `p` out as.
 ///
 /// A flip is a reading order everywhere inside the decoder; here it becomes
 /// the negative stride `include/wpd.h` promises, pointing at what is now the
 /// first row.
-fn handout(img: &Frame<'_>, p: usize) -> (*const u8, isize) {
+fn handout_plane(img: &Frame<'_>, p: usize) -> (*const u8, isize) {
     if img.plane[p].is_empty() {
         return (ptr::null(), 0);
     }
@@ -238,63 +316,49 @@ fn handout(img: &Frame<'_>, p: usize) -> (*const u8, isize) {
     )
 }
 
-/// # Safety
-///
-/// `frame` must point to a `WPDFrame` of at least its own declared
-/// `struct_size` bytes.
-pub(crate) unsafe fn export_frame(
+/// Describes `img` as the picture a decode hands back.
+pub(crate) fn export_frame(
     set: &ExportSettings,
     img: &Frame<'_>,
     format: c_int,
-    frame: *mut WPDFrame,
+    out: &mut Handout<'_>,
 ) {
-    unsafe { frame_clear(frame) };
-
-    let out = unsafe { &mut *frame };
-
-    for p in 0..frame_planes(format) {
-        let (data, stride) = handout(img, p);
-
-        out.data[p] = data;
-        out.stride[p] = stride;
-    }
-    out.width = img.width;
-    out.height = img.height;
-    out.format = format;
-    out.duration = set.duration;
-    out.timestamp = set.timestamp;
-    if unsafe { frame_extent(frame) } < has_alpha_extent() {
-        return;
-    }
-    let out = unsafe { &mut *frame };
     let flags = set.anmf_flags as u8;
 
+    out.pixels = Pixels::None;
+    out.format = Format::from_raw(format).unwrap_or(Format::Argb);
+    out.width = img.width;
+    out.height = img.height;
+    out.duration = set.duration;
+    out.timestamp = set.timestamp;
     out.pos_x = set.pos_x;
     out.pos_y = set.pos_y;
-    out.dispose = if flags & ANMF_FLAG_DISPOSE != 0 {
-        WPD_DISPOSE_BACKGROUND
-    } else {
-        WPD_DISPOSE_NONE
-    };
-    out.blend = if flags & ANMF_FLAG_NO_BLEND != 0 {
-        WPD_BLEND_NONE
-    } else {
-        WPD_BLEND_ALPHA
-    };
-    out.has_alpha = c_int::from(set.has_alpha);
+    out.dispose_to_background = flags & ANMF_FLAG_DISPOSE != 0;
+    out.blend = flags & ANMF_FLAG_NO_BLEND == 0;
+    out.has_alpha = set.has_alpha;
 }
 
-/// # Safety
-///
-/// The caller's planes must be as they were declared.
+/// As [`export_frame`], keeping the picture itself, which is what a caller
+/// that supplied no buffer of its own reads.
+pub(crate) fn export_own<'a>(
+    set: &ExportSettings,
+    img: Frame<'a>,
+    format: c_int,
+    out: &mut Handout<'a>,
+) {
+    export_frame(set, &img, format, out);
+    out.pixels = Pixels::Own(img);
+}
+
+/// Packs rows `[row_start, row_end)` of `img` into the caller's own plane.
 #[allow(clippy::too_many_arguments)]
-unsafe fn export_external_rows(
+fn export_external_rows(
     set: &ExportSettings,
     dsp: &YuvDsp,
-    ext: &External,
+    ext: &mut dyn RowSink,
     img: &Frame<'_>,
     format: c_int,
-    frame: *mut WPDFrame,
+    out: &mut Handout<'_>,
     row_start: c_int,
     row_end: c_int,
 ) -> c_int {
@@ -308,57 +372,45 @@ unsafe fn export_external_rows(
     if pack.is_none() && img.format.bpp() != format_bpp(format) {
         return WPD_ERR_UNSUPPORTED;
     }
-    if !external_plane_fits(ext[0].size, ext[0].stride, row, img.height) {
+    if !ext.fits(0, row, img.height) {
         return WPD_ERR_BUFFER_TOO_SMALL;
     }
 
     for y in row_start..row_end {
-        /* The caller's plane may have a negative stride, so it is walked a row
-        at a time rather than borrowed whole. */
-        let out = unsafe { ext_row(ext, 0, y, row) };
+        /* The caller's plane may have a negative stride, so it is asked for a
+        row at a time rather than borrowed whole. */
+        let dst = ext.row(0, y, row);
 
         match pack {
-            Some(pack) => pack(out, img.row(0, y)),
-            None => out.copy_from_slice(img.row(0, y)),
+            Some(pack) => pack(dst, img.row(0, y)),
+            None => dst.copy_from_slice(img.row(0, y)),
         }
     }
 
-    unsafe { export_frame(set, img, format, frame) };
-
-    let out = unsafe { &mut *frame };
-
-    for p in 1..4 {
-        out.data[p] = ptr::null();
-        out.stride[p] = 0;
-    }
-    out.data[0] = ext[0].data;
-    out.stride[0] = ext[0].stride;
+    export_frame(set, img, format, out);
+    out.pixels = Pixels::Sink;
     WPD_OK
 }
 
-/// # Safety
-///
-/// As [`export_external_rows`].
-pub(crate) unsafe fn export_external_planar_rows(
+/// As [`export_external_rows`], for a planar format's three or four planes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_external_planar_rows(
     set: &ExportSettings,
-    ext: &External,
+    ext: &mut dyn RowSink,
     img: &Frame<'_>,
     format: c_int,
-    frame: *mut WPDFrame,
+    out: &mut Handout<'_>,
     row_start: c_int,
     row_end: c_int,
 ) -> c_int {
     let planes = frame_planes(format);
 
-    for (p, plane) in ext.iter().enumerate().take(planes) {
+    for p in 0..planes {
         let shift = u32::from(p == 1 || p == 2);
         let w = wpd::image::ceil_rshift(img.width, shift) as usize;
         let h = wpd::image::ceil_rshift(img.height, shift);
 
-        if plane.data.is_null()
-            || plane.stride == 0
-            || !external_plane_fits(plane.size, plane.stride, w, h)
-        {
+        if !ext.fits(p, w, h) {
             return WPD_ERR_BUFFER_TOO_SMALL;
         }
     }
@@ -370,34 +422,25 @@ pub(crate) unsafe fn export_external_planar_rows(
         let h = wpd::image::ceil_rshift(row_end, shift);
 
         for y in y0..h {
-            unsafe { ext_row(ext, p, y, w) }.copy_from_slice(&img.row(p, y)[..w]);
+            ext.row(p, y, w).copy_from_slice(&img.row(p, y)[..w]);
         }
     }
 
-    unsafe { export_frame(set, img, format, frame) };
-
-    let out = unsafe { &mut *frame };
-
-    for (p, plane) in ext.iter().enumerate() {
-        out.data[p] = if p < planes { plane.data } else { ptr::null() };
-        out.stride[p] = if p < planes { plane.stride } else { 0 };
-    }
+    export_frame(set, img, format, out);
+    out.pixels = Pixels::Sink;
     WPD_OK
 }
 
-/// # Safety
-///
-/// As [`export_external_rows`].
-unsafe fn export_external_planar(
+fn export_external_planar(
     set: &ExportSettings,
-    ext: &External,
+    ext: &mut dyn RowSink,
     img: &Frame<'_>,
     format: c_int,
-    frame: *mut WPDFrame,
+    out: &mut Handout<'_>,
 ) -> c_int {
     let height = img.height;
 
-    unsafe { export_external_planar_rows(set, ext, img, format, frame, 0, height) }
+    export_external_planar_rows(set, ext, img, format, out, 0, height)
 }
 
 /// Which conversion the output format needs, decided before anything is
@@ -422,11 +465,11 @@ enum Route {
 /// # Safety
 ///
 /// `frame` must be writable, and the caller's planes as they were declared.
-pub unsafe fn export_packed(
+pub fn export_packed<'a>(
     set: &ExportSettings,
-    t: ExportTargets<'_>,
-    img: Frame<'_>,
-    frame: *mut WPDFrame,
+    t: ExportTargets<'a>,
+    img: Frame<'a>,
+    out: &mut Handout<'a>,
 ) -> c_int {
     let ExportTargets {
         dsp,
@@ -463,9 +506,9 @@ pub unsafe fn export_packed(
             planar = planar.flipped();
         }
         if set.ext_active {
-            return unsafe { export_external_planar(set, ext, &planar, format, frame) };
+            return export_external_planar(set, ext, &planar, format, out);
         }
-        unsafe { export_frame(set, &planar, format, frame) };
+        export_own(set, planar, format, out);
         return WPD_OK;
     }
 
@@ -474,15 +517,13 @@ pub unsafe fn export_packed(
         let native = img.format as c_int;
 
         if !set.ext_active {
-            unsafe { export_frame(set, &img, native, frame) };
+            export_own(set, img, native, out);
             return WPD_OK;
         }
         if !format_is_packed(native) {
-            return unsafe { export_external_planar(set, ext, &img, native, frame) };
+            return export_external_planar(set, ext, &img, native, out);
         }
-        return unsafe {
-            export_external_rows(set, dsp, ext, &img, native, frame, 0, img.height)
-        };
+        return export_external_rows(set, dsp, ext, &img, native, out, 0, img.height);
     }
 
     let route = if !format_is_packed(img.format as c_int) || format_bpp(format) == 2 {
@@ -578,11 +619,9 @@ pub unsafe fn export_packed(
         img = img.flipped();
     }
     if set.ext_active {
-        return unsafe {
-            export_external_rows(set, dsp, ext, &img, format, frame, 0, img.height)
-        };
+        return export_external_rows(set, dsp, ext, &img, format, out, 0, img.height);
     }
-    unsafe { export_frame(set, &img, format, frame) };
+    export_own(set, img, format, out);
     WPD_OK
 }
 
@@ -592,11 +631,11 @@ pub unsafe fn export_packed(
 /// # Safety
 ///
 /// `frame` must be writable, and the caller's planes as they were declared.
-pub unsafe fn export_still_packed(
+pub fn export_still_packed<'a>(
     set: &ExportSettings,
-    t: RowTargets<'_>,
+    t: RowTargets<'a>,
     src: &Frame<'_>,
-    frame: *mut WPDFrame,
+    out: &mut Handout<'a>,
     upto: c_int,
 ) -> c_int {
     let RowTargets {
@@ -626,18 +665,16 @@ pub unsafe fn export_still_packed(
     let dst = converted.frame();
 
     if set.ext_active {
-        let ret = unsafe {
-            export_external_rows(
-                set,
-                dsp,
-                ext,
-                &dst,
-                format,
-                frame,
-                converted_from,
-                upto,
-            )
-        };
+        let ret = export_external_rows(
+            set,
+            dsp,
+            ext,
+            &dst,
+            format,
+            out,
+            converted_from,
+            upto,
+        );
 
         if ret < 0 {
             return ret;
@@ -648,7 +685,7 @@ pub unsafe fn export_still_packed(
     }
     *converted_rows = upto;
     *converted_format = format;
-    unsafe { export_frame(set, &dst, format, frame) };
+    export_own(set, dst, format, out);
     WPD_OK
 }
 
@@ -817,11 +854,11 @@ fn upsample_fancy(
 /// # Safety
 ///
 /// `frame` must be writable, and the caller's planes as they were declared.
-pub unsafe fn export_still_lossless(
+pub fn export_still_lossless<'a>(
     set: &ExportSettings,
-    t: RowTargets<'_>,
-    img: &Frame<'_>,
-    frame: *mut WPDFrame,
+    t: RowTargets<'a>,
+    img: &Frame<'a>,
+    out: &mut Handout<'a>,
     upto: c_int,
 ) -> c_int {
     let RowTargets {
@@ -851,18 +888,18 @@ pub unsafe fn export_still_lossless(
             return ret;
         }
 
-        let out = output.frame();
+        let planar = output.frame();
 
         if set.ext_active {
-            let ret = unsafe {
-                export_external_planar_rows(set, ext, &out, format, frame, first, upto)
-            };
+            let ret = export_external_planar_rows(
+                set, ext, &planar, format, out, first, upto,
+            );
 
             if ret < 0 {
                 return ret;
             }
         } else {
-            unsafe { export_frame(set, &out, format, frame) };
+            export_own(set, planar, format, out);
         }
         return finish(WPD_OK);
     }
@@ -871,12 +908,10 @@ pub unsafe fn export_still_lossless(
         let native = img.format as c_int;
 
         if !set.ext_active {
-            unsafe { export_frame(set, img, native, frame) };
+            export_own(set, *img, native, out);
             return finish(WPD_OK);
         }
-        let ret = unsafe {
-            export_external_rows(set, dsp, ext, img, native, frame, first, upto)
-        };
+        let ret = export_external_rows(set, dsp, ext, img, native, out, first, upto);
 
         if ret < 0 {
             return ret;
@@ -889,16 +924,14 @@ pub unsafe fn export_still_lossless(
     let out_len = img.width as usize * format_bpp(format);
 
     if set.ext_active {
-        let ret = unsafe {
-            export_external_rows(set, dsp, ext, img, format, frame, first, upto)
-        };
+        let ret = export_external_rows(set, dsp, ext, img, format, out, first, upto);
 
         if ret < 0 {
             return ret;
         }
         if set.premultiply {
             for y in first..upto {
-                let row = unsafe { ext_row(ext, 0, y, out_len) };
+                let row = ext.row(0, y, out_len);
 
                 if format_bpp(format) == 2 {
                     premultiply(row);
@@ -913,7 +946,7 @@ pub unsafe fn export_still_lossless(
     let pack = format_packer(dsp, format);
 
     if !set.premultiply && (pack.is_none() || img.format as c_int == format) {
-        unsafe { export_frame(set, img, format, frame) };
+        export_own(set, *img, format, out);
         return finish(WPD_OK);
     }
 
@@ -946,8 +979,6 @@ pub unsafe fn export_still_lossless(
         }
     }
 
-    let out = output.frame();
-
-    unsafe { export_frame(set, &out, format, frame) };
+    export_own(set, output.frame(), format, out);
     finish(WPD_OK)
 }
