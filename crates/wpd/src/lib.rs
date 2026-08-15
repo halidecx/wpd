@@ -28,6 +28,7 @@ pub mod dsp;
 pub mod error;
 pub mod handout;
 pub mod image;
+pub mod info;
 pub mod input;
 pub mod log;
 pub mod options;

@@ -33,6 +33,7 @@ use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
 use wpd::error::Error;
 use wpd::handout::Handout;
+use wpd::info::{FrameInfo, ImageInfo};
 use wpd::input::Input;
 use wpd::options::Options;
 use wpd::picture::{Buffer, Frame, PlaneRef};
@@ -1240,32 +1241,62 @@ pub unsafe extern "C" fn wpd_decoder_get_info(
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
 
-    reported(decoder.get_info(info).map(|()| WPD_OK))
+    reported(get_info(decoder, info).map(|()| WPD_OK))
+}
+
+/// Fills the caller's versioned struct in from what the decoder reports.
+fn get_info(
+    decoder: &mut WPDDecoder<'_>,
+    info: &mut WPDImageInfo,
+) -> Result<(), Error> {
+    if info.struct_size < WPDImageInfo::v1() {
+        return Err(decoder.fail("invalid decoder state", Error::InvalidArgument));
+    }
+
+    let got = decoder.image_info()?;
+
+    info_clear(info);
+    info.width = got.width;
+    info.height = got.height;
+    info.has_alpha = c_int::from(got.has_alpha);
+    info.is_animation = c_int::from(got.is_animation);
+    info.frame_count = got.frame_count;
+    info.loop_count = got.loop_count;
+    info.background_argb = got.background_argb;
+    info.coding = match got.coding {
+        Coding::Unknown => 0,
+        Coding::Lossy => 1,
+        Coding::Lossless => 2,
+    };
+    info.metadata = got.metadata;
+    Ok(())
 }
 
 impl WPDDecoder<'_> {
-    pub(crate) fn get_info(&mut self, info: &mut WPDImageInfo) -> Result<(), Error> {
-        if info.struct_size < WPDImageInfo::v1() || !self.opened {
+    /// The two checks every question about the file's shape shares.
+    fn headers_ready(&mut self) -> Result<(), Error> {
+        if !self.opened {
             return Err(self.fail("invalid decoder state", Error::InvalidArgument));
         }
         if !self.headers_valid {
             return Err(self.fail("headers incomplete", Error::Truncated));
         }
-        info_clear(info);
-        info.width = self.canvas_width;
-        info.height = self.canvas_height;
-        info.has_alpha = c_int::from(self.info_has_alpha);
-        info.is_animation = c_int::from(self.animation);
-        info.frame_count = self.anim_frame_count;
-        info.loop_count = self.anim_loop_count;
-        info.background_argb = self.anim_background_argb;
-        info.coding = match self.info_coding {
-            Coding::Unknown => 0,
-            Coding::Lossy => 1,
-            Coding::Lossless => 2,
-        };
-        info.metadata = self.scanned().metadata;
         Ok(())
+    }
+
+    pub(crate) fn image_info(&mut self) -> Result<ImageInfo, Error> {
+        self.headers_ready()?;
+        Ok(ImageInfo {
+            width: self.canvas_width,
+            height: self.canvas_height,
+            has_alpha: self.info_has_alpha,
+            is_animation: self.animation,
+            frame_count: self.anim_frame_count,
+            loop_count: self.anim_loop_count,
+            background_argb: self.anim_background_argb,
+            coding: self.info_coding,
+            metadata: self.scanned().metadata,
+        })
     }
 
     pub(crate) fn rewind(&mut self) -> Result<(), Error> {
@@ -1288,33 +1319,8 @@ impl WPDDecoder<'_> {
         Ok(())
     }
 
-    pub(crate) fn frame_info(
-        &mut self,
-        index: c_int,
-        info: &mut WPDFrameInfo,
-    ) -> Result<(), Error> {
-        if info.struct_size < frame_info_v1() || !self.opened {
-            return Err(self.fail("invalid decoder state", Error::InvalidArgument));
-        }
-        if !self.headers_valid {
-            return Err(self.fail("headers incomplete", Error::Truncated));
-        }
-        /* Everything past `struct_size`, which is the caller's, survives; the
-        head is the size itself. */
-        let size = info.struct_size;
-
-        *info = WPDFrameInfo {
-            struct_size: size,
-            pos_x: 0,
-            pos_y: 0,
-            width: 0,
-            height: 0,
-            duration: 0,
-            dispose: 0,
-            blend: 0,
-            has_alpha: 0,
-            complete: 0,
-        };
+    pub(crate) fn frame_entry(&mut self, index: c_int) -> Result<FrameInfo, Error> {
+        self.headers_ready()?;
 
         let hs = self.scanned();
 
@@ -1324,17 +1330,20 @@ impl WPDDecoder<'_> {
             if index != 0 {
                 return Err(self.fail("no such frame", Error::InvalidArgument));
             }
-            info.width = self.canvas_width;
-            info.height = self.canvas_height;
-            /* The image's own alpha, not the VP8X declaration WPDImageInfo
-            reports, so that this agrees with the frame decoding produces. */
-            info.has_alpha = c_int::from(hs.image_has_alpha);
-            info.complete = c_int::from(if hs.raw == Raw::No {
-                hs.images != 0
-            } else {
-                self.eos
+            return Ok(FrameInfo {
+                width: self.canvas_width,
+                height: self.canvas_height,
+                /* The image's own alpha, not the VP8X declaration the image
+                info reports, so that this agrees with the frame decoding
+                produces. */
+                has_alpha: hs.image_has_alpha,
+                complete: if hs.raw == Raw::No {
+                    hs.images != 0
+                } else {
+                    self.eos
+                },
+                ..FrameInfo::default()
             });
-            return Ok(());
         }
 
         let Ok(index) = usize::try_from(index) else {
@@ -1344,16 +1353,17 @@ impl WPDDecoder<'_> {
             return Err(self.fail("no such frame", Error::InvalidArgument));
         };
 
-        info.pos_x = entry.pos_x;
-        info.pos_y = entry.pos_y;
-        info.width = entry.width;
-        info.height = entry.height;
-        info.duration = entry.duration;
-        info.dispose = entry.dispose as c_int;
-        info.blend = entry.blend as c_int;
-        info.has_alpha = c_int::from(entry.has_alpha);
-        info.complete = c_int::from(entry.complete);
-        Ok(())
+        Ok(FrameInfo {
+            pos_x: entry.pos_x,
+            pos_y: entry.pos_y,
+            width: entry.width,
+            height: entry.height,
+            duration: entry.duration,
+            dispose_to_background: entry.dispose == wpd::container::Dispose::Background,
+            blend: entry.blend == wpd::container::Blend::Alpha,
+            has_alpha: entry.has_alpha,
+            complete: entry.complete,
+        })
     }
 
     /// The named metadata chunk. `Ok(None)` means the file carries none.
@@ -1396,7 +1406,45 @@ pub unsafe extern "C" fn wpd_decoder_frame_info(
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
 
-    reported(decoder.frame_info(index, info).map(|()| WPD_OK))
+    reported(frame_info(decoder, index, info).map(|()| WPD_OK))
+}
+
+/// Fills the caller's versioned struct in from what the decoder reports.
+///
+/// The struct is cleared once the state checks have passed and before the
+/// frame is looked up, which is the order the C's did it in: asking for a
+/// frame that is not there leaves a zeroed struct behind, not the last one.
+fn frame_info(
+    decoder: &mut WPDDecoder<'_>,
+    index: c_int,
+    info: &mut WPDFrameInfo,
+) -> Result<(), Error> {
+    if info.struct_size < frame_info_v1() {
+        return Err(decoder.fail("invalid decoder state", Error::InvalidArgument));
+    }
+    decoder.headers_ready()?;
+
+    /* Everything past `struct_size`, which is the caller's, survives; the head
+    is the size itself. */
+    let size = info.struct_size;
+
+    *info = WPDFrameInfo {
+        struct_size: size,
+        ..WPDFrameInfo::zeroed()
+    };
+
+    let entry = decoder.frame_entry(index)?;
+
+    info.pos_x = entry.pos_x;
+    info.pos_y = entry.pos_y;
+    info.width = entry.width;
+    info.height = entry.height;
+    info.duration = entry.duration;
+    info.dispose = c_int::from(entry.dispose_to_background);
+    info.blend = c_int::from(!entry.blend);
+    info.has_alpha = c_int::from(entry.has_alpha);
+    info.complete = c_int::from(entry.complete);
+    Ok(())
 }
 
 /// # Safety

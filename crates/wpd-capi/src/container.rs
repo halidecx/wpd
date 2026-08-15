@@ -38,23 +38,6 @@ pub struct WPDImageInfo {
 }
 
 impl WPDImageInfo {
-    /// A zeroed struct of this build's revision, which is what the header's
-    /// `WPD_IMAGE_INFO_INIT` produces.
-    pub(crate) fn zeroed() -> Self {
-        WPDImageInfo {
-            struct_size: std::mem::size_of::<WPDImageInfo>(),
-            width: 0,
-            height: 0,
-            has_alpha: 0,
-            is_animation: 0,
-            frame_count: 0,
-            loop_count: 0,
-            background_argb: 0,
-            coding: 0,
-            metadata: 0,
-        }
-    }
-
     /// How much of a caller's struct this build may touch: through the last
     /// field it knows about, and no further.
     pub(crate) fn v1() -> usize {

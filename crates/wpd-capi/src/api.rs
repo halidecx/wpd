@@ -22,8 +22,7 @@ use std::marker::PhantomData;
 
 use wpd::image::Format;
 
-use crate::container::WPDImageInfo;
-use crate::decoder::{WPDDecoder, WPDFrameInfo};
+use crate::decoder::WPDDecoder;
 use crate::export::WPDFrame;
 
 pub use wpd::error::{Error, Result};
@@ -50,53 +49,9 @@ pub enum Metadata {
 
 pub use wpd::options::Options;
 
-/// What a file says about itself before any of it is decoded.
-#[derive(Debug, Clone, Copy)]
-pub struct ImageInfo {
-    pub width: i32,
-    pub height: i32,
-    pub has_alpha: bool,
-    pub is_animation: bool,
-    pub frame_count: i32,
-    pub loop_count: i32,
-    pub background_argb: u32,
-    pub coding: Coding,
-}
-
-impl ImageInfo {
-    fn from_c(c: &WPDImageInfo) -> Self {
-        ImageInfo {
-            width: c.width,
-            height: c.height,
-            has_alpha: c.has_alpha != 0,
-            is_animation: c.is_animation != 0,
-            frame_count: c.frame_count,
-            loop_count: c.loop_count,
-            background_argb: c.background_argb,
-            coding: match c.coding {
-                1 => Coding::Lossy,
-                2 => Coding::Lossless,
-                _ => Coding::Unknown,
-            },
-        }
-    }
-}
-
-/// What one frame says about itself before it is decoded.
-#[derive(Debug, Clone, Copy)]
-pub struct FrameInfo {
-    pub pos_x: i32,
-    pub pos_y: i32,
-    pub width: i32,
-    pub height: i32,
-    pub duration: i32,
-    pub dispose_to_background: bool,
-    pub blend: bool,
-    pub has_alpha: bool,
-    /// Whether the whole payload is buffered. A streamed file may expose an
-    /// incomplete final frame.
-    pub complete: bool,
-}
+/// What a file, and each of its frames, says about itself before any of it is
+/// decoded.
+pub use wpd::info::{FrameInfo, ImageInfo};
 
 /// One decoded picture, borrowed from the decoder that produced it.
 ///
@@ -293,27 +248,11 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn info(&mut self) -> Result<ImageInfo> {
-        let mut info = WPDImageInfo::zeroed();
-
-        self.inner.get_info(&mut info)?;
-        Ok(ImageInfo::from_c(&info))
+        self.inner.image_info()
     }
 
     pub fn frame_info(&mut self, index: i32) -> Result<FrameInfo> {
-        let mut info = WPDFrameInfo::zeroed();
-
-        self.inner.frame_info(index, &mut info)?;
-        Ok(FrameInfo {
-            pos_x: info.pos_x,
-            pos_y: info.pos_y,
-            width: info.width,
-            height: info.height,
-            duration: info.duration,
-            dispose_to_background: info.dispose == 1,
-            blend: info.blend == 0,
-            has_alpha: info.has_alpha != 0,
-            complete: info.complete != 0,
-        })
+        self.inner.frame_entry(index)
     }
 
     /// The named metadata chunk, or none when the file carries no such chunk.
@@ -400,6 +339,7 @@ pub fn info(data: &[u8]) -> Result<ImageInfo> {
         loop_count: scanned.loop_count,
         background_argb: scanned.background_argb,
         coding: scanned.coding,
+        metadata: scanned.metadata,
     })
 }
 
