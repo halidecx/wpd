@@ -12,6 +12,7 @@ use std::ffi::c_int;
 use wpd::convert::YuvPlanes;
 use wpd::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use wpd::image::{self, ceil_rshift, Crop, Format};
+use wpd::options::Options;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
 
@@ -43,39 +44,25 @@ impl WPDDecoderOptions {
         std::mem::offset_of!(WPDDecoderOptions, flip) + std::mem::size_of::<c_int>()
     }
 
-    pub(crate) fn new() -> Self {
-        WPDDecoderOptions {
-            struct_size: std::mem::size_of::<WPDDecoderOptions>(),
-            bypass_filtering: 0,
-            no_fancy_upsampling: 0,
-            use_cropping: 0,
-            crop_left: 0,
-            crop_top: 0,
-            crop_width: 0,
-            crop_height: 0,
-            use_scaling: 0,
-            scaled_width: 0,
-            scaled_height: 0,
-            flip: 0,
-        }
-    }
-
-    /// Field by field rather than whole: the caller's struct may be a shorter
-    /// revision than this one, and its `struct_size` is not ours to keep.
-    pub(crate) fn copy(&self) -> Self {
-        WPDDecoderOptions {
-            struct_size: std::mem::size_of::<WPDDecoderOptions>(),
-            bypass_filtering: self.bypass_filtering,
-            no_fancy_upsampling: self.no_fancy_upsampling,
-            use_cropping: self.use_cropping,
-            crop_left: self.crop_left,
-            crop_top: self.crop_top,
-            crop_width: self.crop_width,
-            crop_height: self.crop_height,
-            use_scaling: self.use_scaling,
-            scaled_width: self.scaled_width,
-            scaled_height: self.scaled_height,
-            flip: self.flip,
+    /// The versioned C struct as the decoder's own options.
+    ///
+    /// Read field by field rather than copied whole: the caller's struct may
+    /// be a shorter revision than this build's, and its `struct_size` is not
+    /// ours to keep. The `use_` flags become the `Option`s they were standing
+    /// in for.
+    pub(crate) fn to_core(&self) -> Options {
+        Options {
+            bypass_filtering: self.bypass_filtering != 0,
+            no_fancy_upsampling: self.no_fancy_upsampling != 0,
+            crop: (self.use_cropping != 0).then_some((
+                self.crop_left,
+                self.crop_top,
+                self.crop_width,
+                self.crop_height,
+            )),
+            scale: (self.use_scaling != 0)
+                .then_some((self.scaled_width, self.scaled_height)),
+            flip: self.flip != 0,
         }
     }
 }
@@ -115,22 +102,14 @@ pub fn premultiply_after_pack(animation: bool, anim_mode: c_int) -> bool {
     !animation || anim_mode == ANIM_SUBFRAME
 }
 
-pub fn options_transform(options: &WPDDecoderOptions) -> bool {
-    options.use_cropping != 0 || options.use_scaling != 0 || options.flip != 0
-}
-
 pub fn scaled_size(
-    options: &WPDDecoderOptions,
+    options: &Options,
     src_width: c_int,
     src_height: c_int,
 ) -> Result<(c_int, c_int), c_int> {
-    image::scaled_size(
-        options.scaled_width,
-        options.scaled_height,
-        src_width,
-        src_height,
-    )
-    .map_err(|_| WPD_ERR_TOO_LARGE)
+    let (w, h) = options.scale.unwrap_or((0, 0));
+
+    image::scaled_size(w, h, src_width, src_height).map_err(|_| WPD_ERR_TOO_LARGE)
 }
 
 /// What the allocators report, as the rest of the decoder's statuses.
@@ -139,18 +118,15 @@ pub(crate) fn alloc_status(e: wpd::error::Error) -> c_int {
 }
 
 /// The crop rectangle inside `src`, or `src` itself when cropping is off.
-pub fn crop_image<'a>(
-    options: &WPDDecoderOptions,
-    src: Frame<'a>,
-) -> Result<Frame<'a>, c_int> {
-    if options.use_cropping == 0 {
+pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>, c_int> {
+    let Some((left, top, width, height)) = options.crop else {
         return Ok(src);
-    }
+    };
     let crop = Crop {
-        left: options.crop_left,
-        top: options.crop_top,
-        width: options.crop_width,
-        height: options.crop_height,
+        left,
+        top,
+        width,
+        height,
     };
     let packed = src.format.is_packed();
     let (left, top) = image::crop_origin(&crop, src.width, src.height, packed)
@@ -262,7 +238,7 @@ fn scale_image(
 /// Resolves the crop and the scale, returning the picture the output should be
 /// read from — a window on `src`, or the whole of `scaled`.
 pub fn transform_image<'a>(
-    options: &WPDDecoderOptions,
+    options: &Options,
     scratch: &mut Scratch,
     scaled: &'a mut Buffer,
     src: Frame<'a>,
@@ -270,7 +246,7 @@ pub fn transform_image<'a>(
 ) -> Result<Frame<'a>, c_int> {
     let view = crop_image(options, src)?;
 
-    if options.use_scaling == 0 {
+    if options.scale.is_none() {
         return Ok(view);
     }
 

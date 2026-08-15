@@ -290,7 +290,7 @@ impl<'a> WPDDecoder<'a> {
             prev_pos_y: self.prev_pos_y,
             prev_key_frame: self.prev_key_frame,
             premultiply: self.premultiply != 0,
-            no_fancy_upsampling: self.options.no_fancy_upsampling != 0,
+            no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva,
         }
@@ -455,7 +455,7 @@ impl<'a> WPDDecoder<'a> {
         }
 
         if target == argb && sub_format != argb {
-            let no_fancy = self.options.no_fancy_upsampling != 0;
+            let no_fancy = self.options.no_fancy_upsampling;
             let Self {
                 ydsp,
                 converted,

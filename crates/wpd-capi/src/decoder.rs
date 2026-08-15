@@ -22,7 +22,7 @@ use wpd::image::Format;
 use crate::container::{info_clear, WPDImageInfo};
 use crate::convert::{
     ensure_yuva_rows, format_bpp, format_is_packed, format_is_premultiplied,
-    format_valid, options_transform, WPDDecoderOptions,
+    format_valid, WPDDecoderOptions,
 };
 use crate::export::{
     export_external_planar_rows, export_frame, export_packed, export_still_lossless,
@@ -32,6 +32,7 @@ use crate::export::{
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
 use wpd::input::Input;
+use wpd::options::Options;
 use wpd::picture::{Buffer, Frame, PlaneRef};
 use wpd::rescale::Scratch;
 use wpd::vp8l::Output as Lossless;
@@ -196,7 +197,7 @@ pub struct WPDDecoder<'a> {
     pub(crate) ydsp: YuvDsp,
     pub(crate) out_format: c_int,
     pub(crate) premultiply: c_int,
-    pub(crate) options: WPDDecoderOptions,
+    pub(crate) options: Options,
 
     pub(crate) input: Input<'a>,
     pub(crate) pos: usize,
@@ -348,7 +349,7 @@ impl<'a> WPDDecoder<'a> {
             ydsp: YuvDsp::new(),
             out_format: WPD_PIX_FMT_NONE,
             premultiply: 0,
-            options: WPDDecoderOptions::new(),
+            options: Options::default(),
 
             input: Input::new(),
             pos: 0,
@@ -934,42 +935,45 @@ pub unsafe extern "C" fn wpd_decoder_free(decoder: *mut WPDDecoderRaw) {
 }
 
 impl WPDDecoder<'_> {
+    /// The versioned C struct: check what only its encoding can get wrong,
+    /// then hand the rest to [`Self::set_core_options`].
     pub(crate) fn set_options(&mut self, options: &WPDDecoderOptions) -> c_int {
-        if options.struct_size < WPDDecoderOptions::v1() {
-            return self.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
-        }
         let flag = |v: c_int| v == 0 || v == 1;
 
-        if !flag(options.bypass_filtering)
+        if options.struct_size < WPDDecoderOptions::v1()
+            || !flag(options.bypass_filtering)
             || !flag(options.no_fancy_upsampling)
             || !flag(options.use_cropping)
             || !flag(options.use_scaling)
             || !flag(options.flip)
-            || (options.use_cropping != 0
-                && (options.crop_left < 0
-                    || options.crop_top < 0
-                    || options.crop_width <= 0
-                    || options.crop_height <= 0))
-            || (options.use_scaling != 0
-                && (options.scaled_width < 0
-                    || options.scaled_height < 0
-                    || (options.scaled_width == 0 && options.scaled_height == 0)))
         {
             return self.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
         }
-        if self.anim_mode == WPD_ANIM_SUBFRAME
-            && (options.use_cropping != 0
-                || options.use_scaling != 0
-                || options.flip != 0)
-        {
+        self.set_core_options(options.to_core())
+    }
+
+    /// A crop that names no pixels and a scale that names no size are the two
+    /// things the type cannot rule out on its own.
+    pub(crate) fn set_core_options(&mut self, options: Options) -> c_int {
+        let bad_crop = options
+            .crop
+            .is_some_and(|(l, t, w, h)| l < 0 || t < 0 || w <= 0 || h <= 0);
+        let bad_scale = options
+            .scale
+            .is_some_and(|(w, h)| w < 0 || h < 0 || (w == 0 && h == 0));
+
+        if bad_crop || bad_scale {
+            return self.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
+        }
+        if self.anim_mode == WPD_ANIM_SUBFRAME && options.transforms() {
             return self.set_error(
                 "cropping, scaling and flipping are defined against the canvas, \
                  which sub-frame mode does not produce",
                 WPD_ERR_INVALID_ARG,
             );
         }
-        self.options = options.copy();
-        self.bypass_filtering = options.bypass_filtering != 0;
+        self.bypass_filtering = options.bypass_filtering;
+        self.options = options;
         WPD_OK
     }
 
@@ -977,7 +981,7 @@ impl WPDDecoder<'_> {
         if mode != WPD_ANIM_COMPOSITED && mode != WPD_ANIM_SUBFRAME {
             return self.set_error("invalid animation mode", WPD_ERR_INVALID_ARG);
         }
-        if mode == WPD_ANIM_SUBFRAME && options_transform(&self.options) {
+        if mode == WPD_ANIM_SUBFRAME && self.options.transforms() {
             return self.set_error(
                 "sub-frame mode cannot be combined with cropping, scaling or flipping",
                 WPD_ERR_INVALID_ARG,
@@ -1494,7 +1498,7 @@ impl<'a> WPDDecoder<'a> {
         self.still_done = true;
 
         let set = self.export_settings();
-        let ret = if options_transform(&self.options) {
+        let ret = if self.options.transforms() {
             let (t, img) = self.export_parts(Source::Lossless);
 
             unsafe { export_packed(&set, t, img, frame) }
@@ -1515,7 +1519,7 @@ impl<'a> WPDDecoder<'a> {
         self.still_done = true;
 
         let packed_only =
-            !options_transform(&self.options) && format_is_packed(self.out_format);
+            !self.options.transforms() && format_is_packed(self.out_format);
         let set = self.export_settings();
         let ret = if packed_only {
             let (t, img) = self.row_parts(Source::Lossy);
@@ -1863,7 +1867,7 @@ unsafe fn partial_frame(
         }
     }
 
-    if options_transform(&decoder.options) {
+    if decoder.options.transforms() {
         let ret = if decoder.still_lossless {
             if lossless_rows(decoder) < decoder.frame_of(Source::Lossless).height {
                 return WPD_OK;

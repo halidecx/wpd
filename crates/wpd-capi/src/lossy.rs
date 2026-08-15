@@ -200,18 +200,15 @@ impl<'a> WPDDecoder<'a> {
     filter goes too. The threshold is measured against the whole frame, not the
     cropped part. */
     fn update_filter_bypass(&mut self) {
-        self.bypass_filtering = self.options.bypass_filtering != 0;
-        if self.options.use_scaling == 0
+        self.bypass_filtering = self.options.bypass_filtering;
+        if self.options.scale.is_none()
             || self.canvas_width == 0
             || self.canvas_height == 0
         {
             return;
         }
-        let (src_w, src_h) = if self.options.use_cropping != 0 {
-            (self.options.crop_width, self.options.crop_height)
-        } else {
-            (self.canvas_width, self.canvas_height)
-        };
+        let (.., src_w, src_h) =
+            self.options.crop_or(self.canvas_width, self.canvas_height);
         let Ok((width, height)) = scaled_size(&self.options, src_w, src_h) else {
             return;
         };

@@ -23,7 +23,6 @@ use std::marker::PhantomData;
 use wpd::image::Format;
 
 use crate::container::WPDImageInfo;
-use crate::convert::WPDDecoderOptions;
 use crate::decoder::{WPDDecoder, WPDFrameInfo};
 use crate::export::WPDFrame;
 
@@ -128,43 +127,7 @@ pub enum Metadata {
     Xmp,
 }
 
-/// The crop, scale and flip a decode may apply on the way out.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Options {
-    /// Skip the in-loop filter of a lossy frame. Faster and not bit-exact.
-    pub bypass_filtering: bool,
-    /// Point-sample chroma instead of interpolating it.
-    pub no_fancy_upsampling: bool,
-    /// `(left, top, width, height)`, in the source's coordinates.
-    pub crop: Option<(i32, i32, i32, i32)>,
-    /// `(width, height)`; either may be zero to keep the aspect ratio.
-    pub scale: Option<(i32, i32)>,
-    /// Hand the picture out bottom row first.
-    pub flip: bool,
-}
-
-impl Options {
-    fn to_c(self) -> WPDDecoderOptions {
-        let mut c = WPDDecoderOptions::new();
-
-        c.bypass_filtering = i32::from(self.bypass_filtering);
-        c.no_fancy_upsampling = i32::from(self.no_fancy_upsampling);
-        if let Some((left, top, width, height)) = self.crop {
-            c.use_cropping = 1;
-            c.crop_left = left;
-            c.crop_top = top;
-            c.crop_width = width;
-            c.crop_height = height;
-        }
-        if let Some((width, height)) = self.scale {
-            c.use_scaling = 1;
-            c.scaled_width = width;
-            c.scaled_height = height;
-        }
-        c.flip = i32::from(self.flip);
-        c
-    }
-}
+pub use wpd::options::Options;
 
 /// What a file says about itself before any of it is decoded.
 #[derive(Debug, Clone, Copy)]
@@ -375,7 +338,7 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn set_options(&mut self, options: Options) -> Result<()> {
-        check(self.inner.set_options(&options.to_c()))
+        check(self.inner.set_core_options(options))
     }
 
     /// Opens a file the decoder copies, so nothing has to outlive the call.

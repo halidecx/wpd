@@ -29,9 +29,10 @@ use crate::convert::{alloc_status, yuv_planes};
 use crate::convert::{
     convert_to_packed, ensure_yuva, ensure_yuva_rows, format_bpp, format_is_packed,
     format_layout, format_packer, format_premultiplier_4444, premultiply_after_pack,
-    transform_image, WPDDecoderOptions,
+    transform_image,
 };
 use wpd::dsp::yuv::{RowFn, YuvDsp};
+use wpd::options::Options;
 use wpd::picture::{Buffer, Frame};
 use wpd::rescale::Scratch;
 
@@ -131,7 +132,7 @@ pub struct ExportSettings {
 /// its source.
 pub struct ExportTargets<'a> {
     pub dsp: &'a YuvDsp,
-    pub options: &'a WPDDecoderOptions,
+    pub options: &'a Options,
     pub rescale: &'a mut Scratch,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
@@ -144,7 +145,7 @@ pub struct ExportTargets<'a> {
 /// buffers, so the conversion buffer is theirs to write.
 pub struct RowTargets<'a> {
     pub dsp: &'a YuvDsp,
-    pub options: &'a WPDDecoderOptions,
+    pub options: &'a Options,
     pub output: &'a mut Buffer,
     pub converted: &'a mut Buffer,
     pub ext: &'a External,
@@ -458,7 +459,7 @@ pub unsafe fn export_packed(
             output.frame()
         };
 
-        if options.flip != 0 {
+        if options.flip {
             planar = planar.flipped();
         }
         if set.ext_active {
@@ -469,11 +470,7 @@ pub unsafe fn export_packed(
     }
 
     if !format_is_packed(format) {
-        let img = if options.flip != 0 {
-            img.flipped()
-        } else {
-            img
-        };
+        let img = if options.flip { img.flipped() } else { img };
         let native = img.format as c_int;
 
         if !set.ext_active {
@@ -530,7 +527,7 @@ pub unsafe fn export_packed(
                         output,
                         &img,
                         format,
-                        options.no_fancy_upsampling != 0,
+                        options.no_fancy_upsampling,
                         premultiply_after_pack(set.animation, set.anim_mode),
                     );
 
@@ -577,7 +574,7 @@ pub unsafe fn export_packed(
         }
     };
 
-    if options.flip != 0 {
+    if options.flip {
         img = img.flipped();
     }
     if set.ext_active {
@@ -661,7 +658,7 @@ pub unsafe fn export_still_packed(
 fn still_packed_direct(
     set: &ExportSettings,
     dsp: &YuvDsp,
-    options: &WPDDecoderOptions,
+    options: &Options,
     dst: &mut Buffer,
     src: &Frame<'_>,
     first: c_int,
@@ -677,7 +674,7 @@ fn still_packed_direct(
             return alloc_status(e);
         }
     }
-    if options.no_fancy_upsampling != 0 {
+    if options.no_fancy_upsampling {
         upsample_simple(dsp, dst, src, layout, first, upto);
     } else if upto > first {
         converted_from = upsample_fancy(dsp, dst, src, layout, first, upto);
@@ -701,7 +698,7 @@ fn still_packed_direct(
 fn still_packed_2byte(
     set: &ExportSettings,
     dsp: &YuvDsp,
-    options: &WPDDecoderOptions,
+    options: &Options,
     argb: &mut Buffer,
     dst: &mut Buffer,
     src: &Frame<'_>,
@@ -726,7 +723,7 @@ fn still_packed_2byte(
         };
         let premultiply = format_premultiplier_4444(dsp, format);
 
-        if options.no_fancy_upsampling != 0 {
+        if options.no_fancy_upsampling {
             upsample_simple(dsp, argb, src, LAYOUT_ARGB, first, upto);
         } else {
             converted_from = upsample_fancy(dsp, argb, src, LAYOUT_ARGB, first, upto);
