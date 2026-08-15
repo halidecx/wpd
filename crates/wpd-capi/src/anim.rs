@@ -21,11 +21,11 @@ use crate::decoder::{
     rl24, rl32, Subframe, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8,
     TAG_VP8L,
 };
-use crate::dsp::yuv::WPDYUVDSP;
 use crate::image::{image_alloc_argb, image_alloc_yuva, image_free, WebPImage};
-use crate::rescale::wpd_premultiply_argb_row;
 use crate::vp8::WPD_ERROR_INVALID_DATA;
 use crate::vp8l::{vp8l_decode_frame, VP8L_TARGET_ARGB};
+use wpd::dsp::yuv::YuvDsp;
+use wpd::rescale::premultiply_argb_row;
 
 const WPD_OK: c_int = 0;
 const WPD_ANIM_SUBFRAME: c_int = 1;
@@ -57,7 +57,7 @@ pub struct CPlacement {
 #[repr(C)]
 pub struct CompositeTargets {
     pub ldsp: *const Vp8lDsp,
-    pub ydsp: *const WPDYUVDSP,
+    pub ydsp: *const YuvDsp,
     pub canvas: *mut WebPImage,
 }
 
@@ -178,17 +178,15 @@ unsafe fn reconcile_alpha(pl: &CPlacement, ct: &CompositeTargets) {
         && canvas.format == Format::Argb as c_int
         && canvas.premultiplied != pl.premultiply
     {
-        for y in 0..canvas.height {
-            let row = unsafe {
-                canvas.data[0].offset(y as isize * canvas.linesize[0] as isize)
-            };
+        let mut view = unsafe { canvas.frame_mut() };
 
-            unsafe {
-                if pl.premultiply != 0 {
-                    ((*ct.ydsp).premultiply_row)(row, 1, canvas.width);
-                } else {
-                    wpd_premultiply_argb_row(row, canvas.width, 1);
-                }
+        for y in 0..view.height {
+            let row = view.row(0, y);
+
+            if pl.premultiply != 0 {
+                unsafe { ((*ct.ydsp).premultiply_row)(row, true) };
+            } else {
+                premultiply_argb_row(row, true);
             }
         }
     }
@@ -248,7 +246,12 @@ unsafe fn prepare_canvas(
                 *ct.canvas = mem::zeroed();
             }
             let ret = unsafe {
-                convert_to_argb(ct.ydsp, ct.canvas, &yuva, pl.no_fancy_upsampling)
+                convert_to_argb(
+                    &*ct.ydsp,
+                    &mut *ct.canvas,
+                    &yuva,
+                    pl.no_fancy_upsampling != 0,
+                )
             };
 
             unsafe { image_free(&mut yuva) };
@@ -508,7 +511,7 @@ impl WPDDecoder {
         let mut target = Format::Yuva420p as c_int;
 
         if sub_format == argb
-            || format_is_packed(self.out_format) != 0
+            || format_is_packed(self.out_format)
             || (!self.key_frame
                 && !self.canvas.data[0].is_null()
                 && self.canvas.format == argb)
@@ -521,10 +524,10 @@ impl WPDDecoder {
             let src = self.image_of(which);
             let ret = unsafe {
                 convert_to_argb(
-                    ptr::addr_of!((*this).ydsp),
-                    ptr::addr_of_mut!((*this).converted),
-                    src,
-                    self.options.no_fancy_upsampling,
+                    &(*this).ydsp,
+                    &mut (*this).converted,
+                    &*src,
+                    self.options.no_fancy_upsampling != 0,
                 )
             };
 
@@ -541,20 +544,15 @@ impl WPDDecoder {
         feeds no canvas, so a two-byte output premultiplies after the pack
         instead, in the four-bit domain a still uses. */
         if self.premultiply != 0
-            && !(premultiply_after_pack(c_int::from(self.animation), self.anim_mode)
-                != 0
+            && !(premultiply_after_pack(self.animation, self.anim_mode)
                 && format_bpp(self.out_format) == 2)
         {
-            let img = unsafe { &*self.image_of(which) };
+            let this: *mut WPDDecoder = self;
+            let img = unsafe { &mut *self.image_of(which) };
+            let mut view = unsafe { img.frame_mut() };
 
-            for y in 0..img.height {
-                unsafe {
-                    (self.ydsp.premultiply_row)(
-                        img.data[0].offset(y as isize * img.linesize[0] as isize),
-                        1,
-                        img.width,
-                    );
-                }
+            for y in 0..view.height {
+                unsafe { ((*this).ydsp.premultiply_row)(view.row(0, y), true) };
             }
         }
 

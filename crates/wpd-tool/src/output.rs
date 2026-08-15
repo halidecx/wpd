@@ -2,10 +2,9 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::mem::MaybeUninit;
 use std::slice;
 
-use wpd_capi::dsp::yuv::{wpd_argb_to_yuv444, wpd_yuv_dsp_init, WPDYUVDSP};
+use wpd_capi::dsp::yuv::wpd_argb_to_yuv444;
 
 use crate::md5::{hex, Md5};
 use crate::sys::*;
@@ -35,7 +34,6 @@ pub struct Output {
     height: i32,
     pub has_alpha: bool,
     format: WPDPixelFormat,
-    yuvdsp: Box<WPDYUVDSP>,
 }
 
 pub const PIXEL_FORMATS: &[(&str, WPDPixelFormat)] = &[
@@ -73,15 +71,6 @@ fn extension(filename: &str) -> Option<&str> {
         .map(|i| &filename[start + i + 1..])
 }
 
-fn new_yuvdsp() -> Box<WPDYUVDSP> {
-    let mut dsp = Box::new(MaybeUninit::<WPDYUVDSP>::uninit());
-
-    unsafe {
-        wpd_yuv_dsp_init(dsp.as_mut_ptr());
-        Box::from_raw(Box::into_raw(dsp).cast::<WPDYUVDSP>())
-    }
-}
-
 impl Output {
     /// Mirrors `output_open`: a null `filename` is only valid with the md5
     /// muxer, which is how `--verify` runs with no output at all.
@@ -104,7 +93,6 @@ impl Output {
             height: 0,
             has_alpha: false,
             format: WPD_PIX_FMT_NONE,
-            yuvdsp: new_yuvdsp(),
         };
 
         if chosen == "md5" {
@@ -154,7 +142,6 @@ impl Output {
             height: 0,
             has_alpha: false,
             format: WPD_PIX_FMT_NONE,
-            yuvdsp: new_yuvdsp(),
         }
     }
 
@@ -291,7 +278,6 @@ impl Output {
 
         unsafe {
             wpd_argb_to_yuv444(
-                &*self.yuvdsp,
                 y.as_mut_ptr(),
                 frame.width as isize,
                 u.as_mut_ptr(),

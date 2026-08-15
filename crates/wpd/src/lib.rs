@@ -22,6 +22,7 @@ pub mod asm;
 pub mod anim;
 pub mod blit;
 pub mod container;
+pub mod convert;
 pub mod cpu;
 pub mod dsp;
 pub mod error;

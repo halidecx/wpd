@@ -5,19 +5,19 @@
 //! the assembly and nothing else. The fallbacks are trampolines that rebuild
 //! slices for the safe kernels in [`wpd::dsp::yuv`].
 //!
-//! The row drivers live here rather than in the core because they still take
-//! the caller's `(pointer, stride)` pairs and because they dispatch through
-//! the table. They move up with the rest of the image pipeline in Phase 5.
+//! The row drivers moved to [`wpd::convert`]; what is left of them here are
+//! three entry points the C harnesses in `tests/` and the tool still call.
 
 use std::ffi::c_int;
-use std::ptr;
 use std::slice;
 
+use wpd::convert::YuvPlanes;
 use wpd::dsp::yuv as k;
 use wpd::dsp::yuv::{
-    bpp, LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_NB, LAYOUT_RGB, LAYOUT_RGBA,
-    UPSAMPLE_BLOCK,
+    bpp, YuvDsp, LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_NB, LAYOUT_RGB,
+    LAYOUT_RGBA, UPSAMPLE_BLOCK,
 };
+use wpd::picture::{PlaneMut, PlaneRef};
 
 pub type UpsampleBlockFn = unsafe extern "C" fn(
     *const u8,
@@ -605,206 +605,21 @@ pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
     unsafe { dsp.write(WPDYUVDSP::new()) }
 }
 
-/// One output row pair of the fancy upsampler.
+/// Fancy-upsamples rows `[row_start, row_end)`, returning the first row
+/// written.
 ///
-/// The kernel reads `len` luma samples, `(len + 1) / 2` chroma samples and
-/// writes `len` pixels, which is what the block entry point plus the scalar
-/// head and tail add up to.
-///
-/// # Safety
-///
-/// The rows must hold those extents. A null `bottom_y` means the row pair is
-/// folded onto itself, in which case `bottom_dst` is null too.
-#[allow(clippy::too_many_arguments)]
-unsafe fn upsample_row<const L: usize>(
-    dsp: &WPDYUVDSP,
-    top_y: *const u8,
-    bottom_y: *const u8,
-    top_u: *const u8,
-    top_v: *const u8,
-    cur_u: *const u8,
-    cur_v: *const u8,
-    top_dst: *mut u8,
-    bottom_dst: *mut u8,
-    len: usize,
-) {
-    let bpp = bpp(L);
-    let last_pair = (len - 1) >> 1;
-    let blocks = if len >= UPSAMPLE_BLOCK + 2 {
-        (len - 2) / UPSAMPLE_BLOCK
-    } else {
-        0
-    };
-    let done = blocks * (UPSAMPLE_BLOCK / 2);
-    let chroma = last_pair + 1;
-
-    unsafe {
-        k::upsample_edge::<L>(
-            *top_y,
-            (!bottom_y.is_null()).then(|| *bottom_y),
-            *top_u,
-            *top_v,
-            *cur_u,
-            *cur_v,
-            slice::from_raw_parts_mut(top_dst, bpp),
-            (!bottom_dst.is_null()).then(|| slice::from_raw_parts_mut(bottom_dst, bpp)),
-        );
-
-        if blocks != 0 {
-            (dsp.upsample_block[L])(
-                top_y.add(1),
-                if bottom_y.is_null() {
-                    ptr::null()
-                } else {
-                    bottom_y.add(1)
-                },
-                top_u,
-                top_v,
-                cur_u,
-                cur_v,
-                top_dst.add(bpp),
-                if bottom_dst.is_null() {
-                    ptr::null_mut()
-                } else {
-                    bottom_dst.add(bpp)
-                },
-                blocks as c_int,
-            );
-        }
-
-        k::upsample_pairs::<L>(
-            slice::from_raw_parts(top_y, len),
-            (!bottom_y.is_null()).then(|| slice::from_raw_parts(bottom_y, len)),
-            slice::from_raw_parts(top_u, chroma),
-            slice::from_raw_parts(top_v, chroma),
-            slice::from_raw_parts(cur_u, chroma),
-            slice::from_raw_parts(cur_v, chroma),
-            slice::from_raw_parts_mut(top_dst, bpp * len),
-            (!bottom_dst.is_null())
-                .then(|| slice::from_raw_parts_mut(bottom_dst, bpp * len)),
-            done + 1,
-            last_pair,
-            2 * done + 1,
-        );
-
-        if len % 2 == 0 {
-            let tail = bpp * (len - 1);
-
-            k::upsample_edge::<L>(
-                *top_y.add(len - 1),
-                (!bottom_y.is_null()).then(|| *bottom_y.add(len - 1)),
-                *top_u.add(last_pair),
-                *top_v.add(last_pair),
-                *cur_u.add(last_pair),
-                *cur_v.add(last_pair),
-                slice::from_raw_parts_mut(top_dst.add(tail), bpp),
-                (!bottom_dst.is_null())
-                    .then(|| slice::from_raw_parts_mut(bottom_dst.add(tail), bpp)),
-            );
-        }
-    }
-}
-
-/// The pair index the upsampler must restart from to rewrite `row_start`.
-const fn first_pair(row_start: usize) -> usize {
-    if row_start != 0 {
-        row_start.div_ceil(2)
-    } else {
-        1
-    }
-}
-
-/// The first row `wpd_yuv420_to_packed_rows` actually writes.
-const fn first_row(row_start: usize) -> usize {
-    if row_start != 0 {
-        2 * first_pair(row_start) - 1
-    } else {
-        0
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn yuv420_to_packed<const L: usize>(
-    dsp: &WPDYUVDSP,
-    dst: *mut u8,
-    dst_stride: isize,
-    y: *const u8,
-    y_stride: isize,
-    u: *const u8,
-    v: *const u8,
-    uv_stride: isize,
-    width: usize,
-    height: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    unsafe {
-        if row_start == 0 {
-            upsample_row::<L>(
-                dsp,
-                y,
-                ptr::null(),
-                u,
-                v,
-                u,
-                v,
-                dst,
-                ptr::null_mut(),
-                width,
-            );
-        }
-
-        let mut j = first_pair(row_start);
-
-        while 2 * j < row_end {
-            let top_u = u.offset((j - 1) as isize * uv_stride);
-            let top_v = v.offset((j - 1) as isize * uv_stride);
-            let top = dst.offset((2 * j - 1) as isize * dst_stride);
-
-            upsample_row::<L>(
-                dsp,
-                y.offset((2 * j - 1) as isize * y_stride),
-                y.offset(2 * j as isize * y_stride),
-                top_u,
-                top_v,
-                top_u.offset(uv_stride),
-                top_v.offset(uv_stride),
-                top,
-                top.offset(dst_stride),
-                width,
-            );
-            j += 1;
-        }
-
-        if height % 2 == 0 && row_end == height {
-            let off = (height.div_ceil(2) - 1) as isize * uv_stride;
-
-            upsample_row::<L>(
-                dsp,
-                y.offset((height - 1) as isize * y_stride),
-                ptr::null(),
-                u.offset(off),
-                v.offset(off),
-                u.offset(off),
-                v.offset(off),
-                dst.offset((height - 1) as isize * dst_stride),
-                ptr::null_mut(),
-                width,
-            );
-        }
-    }
-}
-
-/// Converts rows `[row_start, row_end)` and returns the first row written.
+/// This entry point and its two siblings exist for the harnesses in `tests/`;
+/// the decoder calls [`wpd::convert`] directly. They take no table, because
+/// the one the core builds from the current CPU flags is the one under test —
+/// `checkasm` sets those flags before it asks for either.
 ///
 /// # Safety
 ///
-/// The planes must hold `height` rows of `width` pixels at the given strides,
+/// The planes must hold `height` rows of `width` samples at the given strides,
 /// and `dst` the same in the packed layout.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
-    dsp: *const WPDYUVDSP,
     layout: c_int,
     dst: *mut u8,
     dst_stride: isize,
@@ -824,51 +639,39 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
         return row_start;
     }
 
-    let dsp = unsafe { &*dsp };
     let layout = layout as usize;
-    let first = first_row(row_start as usize);
     let (w, h) = (width as usize, height as usize);
-    let (start, end) = (row_start as usize, row_end as usize);
+    let rows = |stride: isize, n: usize, len: usize| (n - 1) * stride as usize + len;
 
-    macro_rules! run {
-        ($l:expr) => {
-            unsafe {
-                yuv420_to_packed::<$l>(
-                    dsp, dst, dst_stride, y, y_stride, u, v, uv_stride, w, h, start,
-                    end,
-                )
-            }
-        };
-    }
-
-    match layout {
-        LAYOUT_RGBA => run!(LAYOUT_RGBA),
-        LAYOUT_BGRA => run!(LAYOUT_BGRA),
-        LAYOUT_RGB => run!(LAYOUT_RGB),
-        LAYOUT_BGR => run!(LAYOUT_BGR),
-        _ => run!(LAYOUT_ARGB),
-    }
-
-    if a.is_null() || layout == LAYOUT_RGB || layout == LAYOUT_BGR {
-        return first as c_int;
-    }
-
-    let dispatch = if layout == LAYOUT_ARGB {
-        dsp.dispatch_alpha_first
-    } else {
-        dsp.dispatch_alpha_last
-    };
-
-    for j in first..end {
-        unsafe {
-            dispatch(
-                dst.offset(j as isize * dst_stride),
-                a.offset(j as isize * a_stride),
-                width,
+    unsafe {
+        let mut out = PlaneMut::borrowed(
+            slice::from_raw_parts_mut(dst, rows(dst_stride, h, bpp(layout) * w)),
+            dst_stride as usize,
+        );
+        let plane = |p: *const u8, stride: isize, n: usize, len: usize| {
+            PlaneRef::borrowed(
+                slice::from_raw_parts(p, rows(stride, n, len)),
+                stride as usize,
             )
         };
+        let src = YuvPlanes {
+            y: plane(y, y_stride, h, w),
+            u: plane(u, uv_stride, h.div_ceil(2), w.div_ceil(2)),
+            v: plane(v, uv_stride, h.div_ceil(2), w.div_ceil(2)),
+            a: (!a.is_null()).then(|| plane(a, a_stride, h, w)),
+        };
+
+        wpd::convert::yuv420_to_packed_rows(
+            &YuvDsp::new(),
+            layout,
+            &mut out,
+            &src,
+            w,
+            h,
+            row_start as usize,
+            row_end as usize,
+        ) as c_int
     }
-    first as c_int
 }
 
 /// # Safety
@@ -877,7 +680,6 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed(
-    dsp: *const WPDYUVDSP,
     layout: c_int,
     dst: *mut u8,
     dst_stride: isize,
@@ -893,211 +695,19 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed(
 ) {
     unsafe {
         wpd_yuv420_to_packed_rows(
-            dsp, layout, dst, dst_stride, y, y_stride, u, v, uv_stride, a, a_stride,
-            width, height, 0, height,
+            layout, dst, dst_stride, y, y_stride, u, v, uv_stride, a, a_stride, width,
+            height, 0, height,
         )
     };
 }
 
-/// Point sampling, which libwebp uses when fancy upsampling is turned off.
-/// Every output row stands alone here, so `[row_start, row_end)` may be cut
-/// anywhere.
-///
 /// # Safety
 ///
-/// As [`wpd_yuv420_to_packed_rows`].
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wpd_yuv420_to_packed_simple(
-    dsp: *const WPDYUVDSP,
-    layout: c_int,
-    dst: *mut u8,
-    dst_stride: isize,
-    y: *const u8,
-    y_stride: isize,
-    u: *const u8,
-    v: *const u8,
-    uv_stride: isize,
-    a: *const u8,
-    a_stride: isize,
-    width: c_int,
-    row_start: c_int,
-    row_end: c_int,
-) {
-    let dsp = unsafe { &*dsp };
-    let layout = layout as usize;
-    let w = width as usize;
-    let chroma = w.div_ceil(2);
-
-    for j in row_start..row_end {
-        let out = unsafe { dst.offset(j as isize * dst_stride) };
-
-        unsafe {
-            let row = slice::from_raw_parts_mut(out, bpp(layout) * w);
-            let yy = slice::from_raw_parts(y.offset(j as isize * y_stride), w);
-            let uu =
-                slice::from_raw_parts(u.offset((j >> 1) as isize * uv_stride), chroma);
-            let vv =
-                slice::from_raw_parts(v.offset((j >> 1) as isize * uv_stride), chroma);
-
-            match layout {
-                LAYOUT_RGBA => k::yuv420_row::<LAYOUT_RGBA>(row, yy, uu, vv),
-                LAYOUT_BGRA => k::yuv420_row::<LAYOUT_BGRA>(row, yy, uu, vv),
-                LAYOUT_RGB => k::yuv420_row::<LAYOUT_RGB>(row, yy, uu, vv),
-                LAYOUT_BGR => k::yuv420_row::<LAYOUT_BGR>(row, yy, uu, vv),
-                _ => k::yuv420_row::<LAYOUT_ARGB>(row, yy, uu, vv),
-            }
-        }
-
-        if !a.is_null() && layout != LAYOUT_RGB && layout != LAYOUT_BGR {
-            let dispatch = if layout == LAYOUT_ARGB {
-                dsp.dispatch_alpha_first
-            } else {
-                dsp.dispatch_alpha_last
-            };
-
-            unsafe { dispatch(out, a.offset(j as isize * a_stride), width) };
-        }
-    }
-}
-
-/// Point conversion from full-resolution planes, which is what libwebp uses
-/// once the rescaler has brought chroma up to the output size.
-///
-/// # Safety
-///
-/// The planes must hold `height` rows of `width` samples at the given strides.
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wpd_yuv444_to_packed(
-    layout: c_int,
-    dst: *mut u8,
-    dst_stride: isize,
-    y: *const u8,
-    y_stride: isize,
-    u: *const u8,
-    v: *const u8,
-    uv_stride: isize,
-    width: c_int,
-    height: c_int,
-) {
-    let layout = layout as usize;
-    let w = width as usize;
-
-    for j in 0..height {
-        unsafe {
-            let row = slice::from_raw_parts_mut(
-                dst.offset(j as isize * dst_stride),
-                bpp(layout) * w,
-            );
-            let yy = slice::from_raw_parts(y.offset(j as isize * y_stride), w);
-            let uu = slice::from_raw_parts(u.offset(j as isize * uv_stride), w);
-            let vv = slice::from_raw_parts(v.offset(j as isize * uv_stride), w);
-
-            match layout {
-                LAYOUT_RGBA => k::yuv444_row::<LAYOUT_RGBA>(row, yy, uu, vv),
-                LAYOUT_BGRA => k::yuv444_row::<LAYOUT_BGRA>(row, yy, uu, vv),
-                LAYOUT_RGB => k::yuv444_row::<LAYOUT_RGB>(row, yy, uu, vv),
-                LAYOUT_BGR => k::yuv444_row::<LAYOUT_BGR>(row, yy, uu, vv),
-                _ => k::yuv444_row::<LAYOUT_ARGB>(row, yy, uu, vv),
-            }
-        }
-    }
-}
-
-/// Converts rows `[row_start, row_end)` of a packed ARGB image to planar
-/// 4:2:0. A null `a` means no alpha plane, and chroma is then averaged without
-/// weighting it, which is what libwebp does for its YUV colorspace.
-///
-/// # Safety
-///
-/// `argb` must hold `row_end` rows of `width` pixels, and the planes their
-/// matching extents.
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wpd_argb_to_yuva(
-    dsp: *const WPDYUVDSP,
-    y: *mut u8,
-    y_stride: isize,
-    u: *mut u8,
-    v: *mut u8,
-    uv_stride: isize,
-    a: *mut u8,
-    a_stride: isize,
-    argb: *const u8,
-    argb_stride: isize,
-    width: c_int,
-    row_start: c_int,
-    row_end: c_int,
-) {
-    let dsp = unsafe { &*dsp };
-    let weight_alpha = c_int::from(!a.is_null());
-    let mut row = row_start;
-
-    while row + 1 < row_end {
-        unsafe {
-            let src = argb.offset(row as isize * argb_stride);
-            let chroma = (row >> 1) as isize * uv_stride;
-
-            (dsp.argb_to_y)(y.offset(row as isize * y_stride), src, width);
-            (dsp.argb_to_y)(
-                y.offset((row + 1) as isize * y_stride),
-                src.offset(argb_stride),
-                width,
-            );
-            (dsp.argb_to_uv)(
-                u.offset(chroma),
-                v.offset(chroma),
-                src,
-                argb_stride,
-                width,
-                weight_alpha,
-            );
-        }
-        row += 2;
-    }
-    if row < row_end {
-        unsafe {
-            let src = argb.offset(row as isize * argb_stride);
-            let chroma = (row >> 1) as isize * uv_stride;
-
-            (dsp.argb_to_y)(y.offset(row as isize * y_stride), src, width);
-            (dsp.argb_to_uv)(
-                u.offset(chroma),
-                v.offset(chroma),
-                src,
-                0,
-                width,
-                weight_alpha,
-            );
-        }
-    }
-    if a.is_null() {
-        return;
-    }
-    for row in row_start..row_end {
-        unsafe {
-            k::extract_alpha(
-                slice::from_raw_parts_mut(
-                    a.offset(row as isize * a_stride),
-                    width as usize,
-                ),
-                slice::from_raw_parts(
-                    argb.offset(row as isize * argb_stride),
-                    4 * width as usize,
-                ),
-            )
-        };
-    }
-}
-
-/// # Safety
-///
-/// As [`wpd_argb_to_yuva`].
+/// `argb` must hold `height` rows of `width` pixels, and the three planes the
+/// same at their strides.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wpd_argb_to_yuv444(
-    dsp: *const WPDYUVDSP,
     y: *mut u8,
     y_stride: isize,
     u: *mut u8,
@@ -1108,17 +718,30 @@ pub unsafe extern "C" fn wpd_argb_to_yuv444(
     width: c_int,
     height: c_int,
 ) {
-    let dsp = unsafe { &*dsp };
+    let (w, h) = (width as usize, height as usize);
+    let extent = |stride: isize, len: usize| (h - 1) * stride as usize + len;
 
-    for row in 0..height {
-        unsafe {
-            (dsp.argb_to_yuv444)(
-                y.offset(row as isize * y_stride),
-                u.offset(row as isize * uv_stride),
-                v.offset(row as isize * uv_stride),
-                argb.offset(row as isize * argb_stride),
-                width,
-            )
-        };
+    unsafe {
+        let mut planes = [
+            PlaneMut::borrowed(
+                slice::from_raw_parts_mut(y, extent(y_stride, w)),
+                y_stride as usize,
+            ),
+            PlaneMut::borrowed(
+                slice::from_raw_parts_mut(u, extent(uv_stride, w)),
+                uv_stride as usize,
+            ),
+            PlaneMut::borrowed(
+                slice::from_raw_parts_mut(v, extent(uv_stride, w)),
+                uv_stride as usize,
+            ),
+            PlaneMut::borrowed(&mut [], 0),
+        ];
+        let src = PlaneRef::borrowed(
+            slice::from_raw_parts(argb, extent(argb_stride, 4 * w)),
+            argb_stride as usize,
+        );
+
+        wpd::convert::argb_to_yuv444(&YuvDsp::new(), &mut planes, &src, w, height);
     }
 }

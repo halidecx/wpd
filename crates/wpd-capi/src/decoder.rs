@@ -24,13 +24,12 @@ use crate::convert::{
     format_bpp, format_is_packed, format_is_premultiplied, format_valid,
     options_transform, WPDDecoderOptions,
 };
-use crate::dsp::yuv::WPDYUVDSP;
 use crate::export::{
     export_external_planar_rows, export_frame, export_packed, export_still_lossless,
     export_still_packed, frame_clear, frame_valid, ExportSettings, ExportTargets,
     WPDFrame, WPDOutputPlane,
 };
-use crate::image::{image_free, image_scratch_free, RescaleScratch, WebPImage};
+use crate::image::{image_free, WebPImage};
 use crate::input::{
     input_append, input_at, input_borrow, input_compact, input_discarded, input_own,
     input_reset, input_size, InputBuffer,
@@ -44,6 +43,8 @@ use crate::vp8l::{
     vp8l_still_rows_out, vp8l_still_step, vp8l_width, VP8L_TARGET_ARGB,
 };
 use wpd::dsp::vp8l::Vp8lDsp;
+use wpd::dsp::yuv::YuvDsp;
+use wpd::rescale::Scratch;
 
 pub const WPD_OK: c_int = 0;
 pub const WPD_ERR_INVALID_ARG: c_int = -1;
@@ -127,7 +128,7 @@ pub struct WPDDecoder {
     pub(crate) codec: WpdCodecContext,
     pub(crate) vp8_initialized: bool,
     pub(crate) ldsp: Vp8lDsp,
-    pub(crate) ydsp: WPDYUVDSP,
+    pub(crate) ydsp: YuvDsp,
     pub(crate) out_format: c_int,
     pub(crate) premultiply: c_int,
     pub(crate) options: WPDDecoderOptions,
@@ -169,7 +170,7 @@ pub struct WPDDecoder {
     pub(crate) converted: WebPImage,
     pub(crate) output: WebPImage,
     pub(crate) transformed: WebPImage,
-    pub(crate) rescale: RescaleScratch,
+    pub(crate) rescale: Scratch,
 
     pub(crate) canvas: WebPImage,
     pub(crate) subframe_out: Option<Subframe>,
@@ -225,7 +226,6 @@ impl Drop for WPDDecoder {
             image_free(&mut self.converted);
             image_free(&mut self.output);
             image_free(&mut self.transformed);
-            image_scratch_free(&mut self.rescale);
         }
     }
 }
@@ -289,7 +289,7 @@ impl WPDDecoder {
             },
             vp8_initialized: false,
             ldsp: Vp8lDsp::new(),
-            ydsp: WPDYUVDSP::new(),
+            ydsp: YuvDsp::new(),
             out_format: WPD_PIX_FMT_NONE,
             premultiply: 0,
             options: WPDDecoderOptions::new(),
@@ -329,7 +329,7 @@ impl WPDDecoder {
             converted: WebPImage::empty(),
             output: WebPImage::empty(),
             transformed: WebPImage::empty(),
-            rescale: RescaleScratch::empty(),
+            rescale: Scratch::default(),
 
             canvas: WebPImage::empty(),
             subframe_out: None,
@@ -741,8 +741,7 @@ pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
     if mode != WPD_ANIM_COMPOSITED && mode != WPD_ANIM_SUBFRAME {
         return decoder.set_error("invalid animation mode", WPD_ERR_INVALID_ARG);
     }
-    if mode == WPD_ANIM_SUBFRAME && unsafe { options_transform(&decoder.options) } != 0
-    {
+    if mode == WPD_ANIM_SUBFRAME && options_transform(&decoder.options) {
         return decoder.set_error(
             "sub-frame mode cannot be combined with cropping, scaling or flipping",
             WPD_ERR_INVALID_ARG,
@@ -773,11 +772,11 @@ pub unsafe extern "C" fn wpd_decoder_set_output_format(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if format != WPD_PIX_FMT_NONE && format_valid(format) == 0 {
+    if format != WPD_PIX_FMT_NONE && !format_valid(format) {
         return decoder.set_error("invalid output format", WPD_ERR_INVALID_ARG);
     }
     decoder.out_format = format;
-    decoder.premultiply = format_is_premultiplied(format);
+    decoder.premultiply = c_int::from(format_is_premultiplied(format));
     WPD_OK
 }
 
@@ -1253,7 +1252,7 @@ impl WPDDecoder {
 
         self.still_done = true;
 
-        let transform = unsafe { options_transform(&self.options) } != 0;
+        let transform = options_transform(&self.options);
         let height = self.argb.height;
         let ret = unsafe {
             if transform {
@@ -1275,8 +1274,8 @@ impl WPDDecoder {
 
         self.still_done = true;
 
-        let packed_only = unsafe { options_transform(&self.options) } == 0
-            && format_is_packed(self.out_format) != 0;
+        let packed_only =
+            !options_transform(&self.options) && format_is_packed(self.out_format);
         let height = self.subframe.height;
         let ret = unsafe {
             if packed_only {
@@ -1626,7 +1625,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
 
     let still_active = unsafe { vp8l_still_active(&*decoder.vp8l) } != 0;
 
-    if unsafe { options_transform(&decoder.options) } != 0 {
+    if options_transform(&decoder.options) {
         let ret = if decoder.still_lossless {
             if still_active {
                 let ret = decoder.lossless_peek();
@@ -1703,7 +1702,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
         decoder.subframe.height
     };
 
-    if format_is_packed(decoder.out_format) == 0 {
+    if !format_is_packed(decoder.out_format) {
         let format = if decoder.out_format == WPD_PIX_FMT_NONE {
             decoder.subframe.format
         } else {
@@ -1724,12 +1723,12 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
         let mut plane = unsafe { ptr::addr_of!((*this).subframe) };
 
         if have != Format::Yuva420p as c_int && format != have {
-            let want_alpha = c_int::from(format == Format::Yuva420p as c_int);
+            let want_alpha = format == Format::Yuva420p as c_int;
             let ret = unsafe {
                 crate::convert::ensure_yuva_rows(
-                    ptr::addr_of!((*this).ydsp),
-                    ptr::addr_of_mut!((*this).output),
-                    ptr::addr_of!((*this).subframe),
+                    &(*this).ydsp,
+                    &mut (*this).output,
+                    &(*this).subframe,
                     want_alpha,
                     first,
                     rows,

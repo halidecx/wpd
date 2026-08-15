@@ -1,8 +1,9 @@
-//! Scalar kernels for the YUV DSP.
+//! The YUV DSP: the scalar kernels, the [`YuvDsp`] table that picks between
+//! them and the assembly, and [`upsample_row`], which is the one piece of glue
+//! the drivers in [`crate::convert`] reach the table through.
 //!
-//! These are the fallbacks the assembly replaces at runtime; the dispatch
-//! table that chooses between them lives in `wpd-capi` for now. See `LOG.md`
-//! on the two DSP tiers.
+//! `wpd-capi` keeps a second, C-ABI table of the same kernels for `checkasm`;
+//! see `LOG.md` on the two DSP tiers.
 //!
 //! # Layouts
 //!
@@ -19,6 +20,8 @@
 //! a pixel for the block entry point, which would mean forming a slice that
 //! starts before the row — sound in neither language, and checkasm does hand
 //! it the very first byte of a buffer.
+
+use crate::image::Format;
 
 pub const LAYOUT_ARGB: usize = 0;
 pub const LAYOUT_RGBA: usize = 1;
@@ -547,6 +550,247 @@ pub fn yuv444_row<const L: usize>(dst: &mut [u8], y: &[u8], u: &[u8], v: &[u8]) 
 pub fn yuv420_row<const L: usize>(dst: &mut [u8], y: &[u8], u: &[u8], v: &[u8]) {
     for (i, (out, &yy)) in dst.chunks_exact_mut(bpp(L)).zip(y).enumerate() {
         yuv_to_out::<L>(yy.into(), u[i >> 1].into(), v[i >> 1].into(), out);
+    }
+}
+
+/// The six input rows an upsample entry point reads.
+///
+/// `bottom_y` is absent for the first and last rows of a picture, which are
+/// folded onto themselves rather than paired with a neighbour.
+pub struct UpsampleSrc<'a> {
+    pub top_y: &'a [u8],
+    pub bottom_y: Option<&'a [u8]>,
+    pub top_u: &'a [u8],
+    pub top_v: &'a [u8],
+    pub cur_u: &'a [u8],
+    pub cur_v: &'a [u8],
+}
+
+/// The one or two output rows it writes.
+pub struct UpsampleDst<'a> {
+    pub top: &'a mut [u8],
+    pub bottom: Option<&'a mut [u8]>,
+}
+
+/// Interpolates `16 * blocks` pixel pairs, starting at pair one.
+///
+/// The slices start at pixel zero, not at the first pair, because the kernel
+/// reads `top_u[0]` as the pair's left-hand neighbour.
+pub type UpsampleBlockFn = fn(&UpsampleSrc<'_>, &mut UpsampleDst<'_>, usize);
+
+/// One row in, one row out: the packers, the alpha dispatchers and the luma
+/// pass all have this shape, and the run is what the shorter one allows.
+pub type RowFn = fn(&mut [u8], &[u8]);
+pub type ArgbToYuv444Fn = fn(&mut [u8], &mut [u8], &mut [u8], &[u8]);
+pub type ArgbToUvFn = fn(&mut [u8], &mut [u8], &[u8], usize, usize, bool);
+
+fn upsample_block<const L: usize>(
+    src: &UpsampleSrc<'_>,
+    dst: &mut UpsampleDst<'_>,
+    blocks: usize,
+) {
+    upsample_pairs::<L>(
+        src.top_y,
+        src.bottom_y,
+        src.top_u,
+        src.top_v,
+        src.cur_u,
+        src.cur_v,
+        dst.top,
+        dst.bottom.as_deref_mut(),
+        1,
+        blocks * (UPSAMPLE_BLOCK / 2),
+        0,
+    );
+}
+
+/// The YUV DSP, one entry per kernel the assembly may replace.
+pub struct YuvDsp {
+    pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
+    pub dispatch_alpha_first: RowFn,
+    pub dispatch_alpha_last: RowFn,
+    pub pack_rgba: RowFn,
+    pub pack_bgra: RowFn,
+    pub pack_rgb: RowFn,
+    pub pack_bgr: RowFn,
+    pub pack_rgb565: RowFn,
+    pub pack_rgba4444: RowFn,
+    pub pack_bgr565: RowFn,
+    pub pack_bgra4444: RowFn,
+    pub premultiply_row: fn(&mut [u8], bool),
+    pub premultiply_row_4444: fn(&mut [u8]),
+    pub premultiply_row_4444_swap: fn(&mut [u8]),
+    pub argb_to_y: RowFn,
+    pub argb_to_yuv444: ArgbToYuv444Fn,
+    pub argb_to_uv: ArgbToUvFn,
+}
+
+fn premultiply_row_4444_plain(row: &mut [u8]) {
+    premultiply_row_4444(row, false);
+}
+
+fn premultiply_row_4444_swapped(row: &mut [u8]) {
+    premultiply_row_4444(row, true);
+}
+
+impl YuvDsp {
+    pub const fn scalar() -> Self {
+        YuvDsp {
+            upsample_block: [
+                upsample_block::<LAYOUT_ARGB>,
+                upsample_block::<LAYOUT_RGBA>,
+                upsample_block::<LAYOUT_BGRA>,
+                upsample_block::<LAYOUT_RGB>,
+                upsample_block::<LAYOUT_BGR>,
+            ],
+            dispatch_alpha_first,
+            dispatch_alpha_last,
+            pack_rgba,
+            pack_bgra,
+            pack_rgb,
+            pack_bgr,
+            pack_rgb565,
+            pack_rgba4444,
+            pack_bgr565,
+            pack_bgra4444,
+            premultiply_row,
+            premultiply_row_4444: premultiply_row_4444_plain,
+            premultiply_row_4444_swap: premultiply_row_4444_swapped,
+            argb_to_y,
+            argb_to_yuv444,
+            argb_to_uv,
+        }
+    }
+
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = Self::scalar();
+
+        #[cfg(feature = "asm")]
+        crate::asm::yuv::init(&mut table, crate::cpu::flags());
+        table
+    }
+
+    /// The packer for a packed output format, or none for the formats that are
+    /// written directly rather than reordered from ARGB.
+    pub fn packer(&self, format: Format) -> Option<RowFn> {
+        Some(match format {
+            Format::Rgba | Format::RgbaPre => self.pack_rgba,
+            Format::Bgra | Format::BgraPre => self.pack_bgra,
+            Format::Rgb => self.pack_rgb,
+            Format::Bgr => self.pack_bgr,
+            Format::Rgb565 => self.pack_rgb565,
+            Format::Rgba4444 | Format::Rgba4444Pre => self.pack_rgba4444,
+            Format::Bgr565 => self.pack_bgr565,
+            Format::Bgra4444 | Format::Bgra4444Pre => self.pack_bgra4444,
+            _ => return None,
+        })
+    }
+
+    /// The four-bit premultiplier for a two-byte format, which libwebp applies
+    /// in that precision rather than in eight bits and then truncating.
+    pub fn premultiplier_4444(&self, format: Format) -> fn(&mut [u8]) {
+        if format == Format::Bgra4444Pre {
+            self.premultiply_row_4444_swap
+        } else {
+            self.premultiply_row_4444
+        }
+    }
+
+    /// The alpha dispatcher for a layout, or none for the three-byte layouts,
+    /// which have nowhere to put it.
+    pub fn alpha_dispatcher(&self, layout: usize) -> Option<RowFn> {
+        match layout {
+            LAYOUT_ARGB => Some(self.dispatch_alpha_first),
+            LAYOUT_RGBA | LAYOUT_BGRA => Some(self.dispatch_alpha_last),
+            _ => None,
+        }
+    }
+}
+
+impl Default for YuvDsp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One output row pair of the fancy upsampler.
+///
+/// The rows must hold `len` luma samples, `(len + 1) / 2` chroma samples and
+/// `len` output pixels, which is what the block entry point plus the scalar
+/// head and tail add up to.
+pub fn upsample_row<const L: usize>(
+    dsp: &YuvDsp,
+    src: &UpsampleSrc<'_>,
+    dst: &mut UpsampleDst<'_>,
+    len: usize,
+) {
+    let bpp = bpp(L);
+    let last_pair = (len - 1) >> 1;
+    let blocks = if len >= UPSAMPLE_BLOCK + 2 {
+        (len - 2) / UPSAMPLE_BLOCK
+    } else {
+        0
+    };
+    let done = blocks * (UPSAMPLE_BLOCK / 2);
+
+    upsample_edge::<L>(
+        src.top_y[0],
+        src.bottom_y.map(|b| b[0]),
+        src.top_u[0],
+        src.top_v[0],
+        src.cur_u[0],
+        src.cur_v[0],
+        &mut dst.top[..bpp],
+        dst.bottom.as_deref_mut().map(|b| &mut b[..bpp]),
+    );
+
+    if blocks != 0 {
+        /* The block kernel starts one pixel in, where the first pair does; the
+        chroma rows it reads are indexed from the pair, so they do not move. */
+        let shifted = UpsampleSrc {
+            top_y: &src.top_y[1..],
+            bottom_y: src.bottom_y.map(|b| &b[1..]),
+            top_u: src.top_u,
+            top_v: src.top_v,
+            cur_u: src.cur_u,
+            cur_v: src.cur_v,
+        };
+        let mut shifted_dst = UpsampleDst {
+            top: &mut dst.top[bpp..],
+            bottom: dst.bottom.as_deref_mut().map(|b| &mut b[bpp..]),
+        };
+
+        (dsp.upsample_block[L])(&shifted, &mut shifted_dst, blocks);
+    }
+
+    upsample_pairs::<L>(
+        src.top_y,
+        src.bottom_y,
+        src.top_u,
+        src.top_v,
+        src.cur_u,
+        src.cur_v,
+        dst.top,
+        dst.bottom.as_deref_mut(),
+        done + 1,
+        last_pair,
+        2 * done + 1,
+    );
+
+    if len % 2 == 0 {
+        let tail = bpp * (len - 1);
+
+        upsample_edge::<L>(
+            src.top_y[len - 1],
+            src.bottom_y.map(|b| b[len - 1]),
+            src.top_u[last_pair],
+            src.top_v[last_pair],
+            src.cur_u[last_pair],
+            src.cur_v[last_pair],
+            &mut dst.top[tail..tail + bpp],
+            dst.bottom.as_deref_mut().map(|b| &mut b[tail..tail + bpp]),
+        );
     }
 }
 

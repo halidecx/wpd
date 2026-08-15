@@ -252,14 +252,9 @@ impl WPDDecoder {
         } else {
             (self.canvas_width, self.canvas_height)
         };
-        let mut width = 0;
-        let mut height = 0;
-
-        if unsafe { scaled_size(&self.options, src_w, src_h, &mut width, &mut height) }
-            < 0
-        {
+        let Ok((width, height)) = scaled_size(&self.options, src_w, src_h) else {
             return;
-        }
+        };
         if width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4 {
             self.codec.bypass_filtering = 1;
         }

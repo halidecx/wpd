@@ -115,6 +115,7 @@ impl Buffer {
         self.width = w;
         self.height = h;
         self.format = Some(format);
+        self.chroma_full = false;
         Ok(())
     }
 
@@ -145,6 +146,7 @@ impl Buffer {
         self.width = w;
         self.height = h;
         self.format = Some(Format::Yuva420p);
+        self.chroma_full = !subsample;
         Ok(())
     }
 
@@ -170,6 +172,7 @@ impl Buffer {
     pub fn frame_mut(&mut self) -> FrameMut<'_> {
         let (width, height) = (self.width, self.height);
         let format = self.format.unwrap_or(Format::Argb);
+        let chroma_full = self.chroma_full;
         let [p0, p1, p2, p3] = &mut self.plane;
 
         FrameMut {
@@ -182,6 +185,7 @@ impl Buffer {
             width,
             height,
             format,
+            chroma_full,
         }
     }
 }
@@ -270,6 +274,26 @@ impl<'a> PlaneMut<'a> {
 
         &mut self.data[at..at + len]
     }
+
+    /// Two rows of the same plane, which the fancy upsampler writes as a pair.
+    ///
+    /// They must be asked for in order, because splitting the plane at the
+    /// lower one is what proves the two do not overlap.
+    pub fn row_pair_mut(
+        &mut self,
+        a: i32,
+        b: i32,
+        from: usize,
+        len: usize,
+    ) -> (&mut [u8], &mut [u8]) {
+        assert!(a < b, "rows must be asked for in order");
+
+        let at_a = self.origin + a as usize * self.stride + from;
+        let at_b = self.origin + b as usize * self.stride + from;
+        let (lo, hi) = self.data.split_at_mut(at_b);
+
+        (&mut lo[at_a..at_a + len], &mut hi[..len])
+    }
 }
 
 /// A picture the decoder may read: a buffer's, a codec's, or a crop of either.
@@ -339,12 +363,23 @@ impl<'a> Frame<'a> {
         }
     }
 
+    /// How far plane `p` is subsampled, which `chroma_full` undoes: the
+    /// rescaler brings U and V up to the output size on the way to a packed
+    /// format, and the picture is still labelled YUVA.
+    fn shift(&self, p: usize) -> u32 {
+        if planes_of(self.format) == 1 || self.chroma_full {
+            0
+        } else {
+            chroma(p)
+        }
+    }
+
     /// The width of plane `p` in bytes.
     pub fn row_len(&self, p: usize) -> usize {
         if planes_of(self.format) == 1 {
             self.width as usize * self.format.bpp()
         } else {
-            ceil_rshift(self.width, chroma(p)) as usize
+            ceil_rshift(self.width, self.shift(p)) as usize
         }
     }
 
@@ -353,7 +388,7 @@ impl<'a> Frame<'a> {
         if planes_of(self.format) == 1 {
             self.height
         } else {
-            ceil_rshift(self.height, chroma(p))
+            ceil_rshift(self.height, self.shift(p))
         }
     }
 
@@ -382,11 +417,7 @@ impl<'a> Frame<'a> {
         let mut out = *self;
 
         for p in 0..4 {
-            let shift = if planes_of(self.format) == 1 {
-                0
-            } else {
-                chroma(p)
-            };
+            let shift = self.shift(p);
             let bpp = if planes_of(self.format) == 1 {
                 self.format.bpp()
             } else {
@@ -408,6 +439,8 @@ pub struct FrameMut<'a> {
     pub width: i32,
     pub height: i32,
     pub format: Format,
+    /// As [`Frame::chroma_full`].
+    pub chroma_full: bool,
 }
 
 impl<'a> FrameMut<'a> {
@@ -417,12 +450,22 @@ impl<'a> FrameMut<'a> {
         width: i32,
         height: i32,
         format: Format,
+        chroma_full: bool,
     ) -> Self {
         FrameMut {
             plane,
             width,
             height,
             format,
+            chroma_full,
+        }
+    }
+
+    fn shift(&self, p: usize) -> u32 {
+        if planes_of(self.format) == 1 || self.chroma_full {
+            0
+        } else {
+            chroma(p)
         }
     }
 
@@ -439,7 +482,7 @@ impl<'a> FrameMut<'a> {
         if planes_of(self.format) == 1 {
             self.width as usize * self.format.bpp()
         } else {
-            ceil_rshift(self.width, chroma(p)) as usize
+            ceil_rshift(self.width, self.shift(p)) as usize
         }
     }
 
@@ -447,7 +490,7 @@ impl<'a> FrameMut<'a> {
         if planes_of(self.format) == 1 {
             self.height
         } else {
-            ceil_rshift(self.height, chroma(p))
+            ceil_rshift(self.height, self.shift(p))
         }
     }
 

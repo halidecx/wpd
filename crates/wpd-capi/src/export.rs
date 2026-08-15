@@ -12,7 +12,7 @@
 //! the size — which the assertions below catch at compile time.
 
 use std::ffi::{c_int, c_void};
-use std::{mem, ptr};
+use std::{mem, ptr, slice};
 
 use wpd::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
 use wpd::dsp::yuv::LAYOUT_ARGB;
@@ -23,11 +23,10 @@ use crate::convert::{
     format_is_packed, format_layout, format_packer, format_premultiplier_4444,
     premultiply_after_pack, transform_image, WPDDecoderOptions,
 };
-use crate::dsp::yuv::{
-    wpd_yuv420_to_packed_rows, wpd_yuv420_to_packed_simple, PackRowFn,
-    Premultiply4444Fn, WPDYUVDSP,
-};
-use crate::image::{image_alloc_argb, image_alloc_packed, RescaleScratch, WebPImage};
+use crate::image::{image_alloc_argb, image_alloc_packed, WebPImage};
+use wpd::convert::YuvPlanes;
+use wpd::dsp::yuv::{RowFn, YuvDsp};
+use wpd::rescale::Scratch;
 
 const WPD_OK: c_int = 0;
 const WPD_ERR_UNSUPPORTED: c_int = -5;
@@ -92,12 +91,12 @@ pub struct ExportSettings {
     pub timestamp: i64,
 }
 
-/// `ExportTargets` from `src/export.h`.
-#[repr(C)]
+/// The scratch and the tables an export writes through, gathered at the call
+/// so that nothing here reads a decoder field that has moved on since.
 pub struct ExportTargets {
-    pub dsp: *const WPDYUVDSP,
+    pub dsp: *const YuvDsp,
     pub options: *const WPDDecoderOptions,
-    pub rescale: *mut RescaleScratch,
+    pub rescale: *mut Scratch,
     pub transformed: *mut WebPImage,
     pub output: *mut WebPImage,
     pub converted: *mut WebPImage,
@@ -107,8 +106,6 @@ pub struct ExportTargets {
 }
 
 const _: () = assert!(mem::size_of::<ExportSettings>() == 10 * 4 + 8);
-const _: () =
-    assert!(mem::size_of::<ExportTargets>() == 9 * mem::size_of::<*const ()>());
 
 /// How far into `WPDFrame` the sub-frame placement fields start, which a
 /// caller compiled against an older revision has not made room for.
@@ -158,7 +155,7 @@ pub(crate) unsafe fn frame_clear(frame: *mut WPDFrame) {
 }
 
 impl ExportTargets {
-    fn dsp(&self) -> &WPDYUVDSP {
+    fn dsp(&self) -> &YuvDsp {
         unsafe { &*self.dsp }
     }
 
@@ -257,12 +254,12 @@ unsafe fn export_external_rows(
     row_start: c_int,
     row_end: c_int,
 ) -> c_int {
-    let row = img.width as usize * format_bpp(format) as usize;
+    let row = img.width as usize * format_bpp(format);
     let ext = t.ext(0);
     let pack = if img.format == format {
         None
     } else {
-        unsafe { format_packer(t.dsp, format) }
+        format_packer(t.dsp(), format)
     };
 
     if pack.is_none() && format_bpp(img.format) != format_bpp(format) {
@@ -271,20 +268,18 @@ unsafe fn export_external_rows(
     if !external_plane_fits(ext.size, ext.stride, row, img.height) {
         return WPD_ERR_BUFFER_TOO_SMALL;
     }
+
     let mut dst = unsafe { ext.data.offset(row_start as isize * ext.stride) };
 
     for y in row_start..row_end {
+        /* The caller's plane may have a negative stride, and the picture may
+        already be a flip, so both are walked a row at a time rather than
+        borrowed whole. */
+        let out = unsafe { slice::from_raw_parts_mut(dst, row) };
+
         match pack {
-            Some(pack) => unsafe {
-                pack(
-                    dst,
-                    img.data[0].offset(y as isize * img.linesize[0] as isize),
-                    img.width,
-                )
-            },
-            None => unsafe {
-                ptr::copy_nonoverlapping(packed_row(img, y, row).as_ptr(), dst, row)
-            },
+            Some(pack) => pack(out, unsafe { img.row(0, y, img.width as usize * 4) }),
+            None => out.copy_from_slice(unsafe { packed_row(img, y, row) }),
         }
         dst = unsafe { dst.offset(ext.stride) };
     }
@@ -392,7 +387,7 @@ pub unsafe extern "C" fn export_packed(
 ) -> c_int {
     let (set, t) = unsafe { (&*set, &*t) };
     let format = set.out_format;
-    let mut view: WebPImage = unsafe { mem::zeroed() };
+    let mut view = WebPImage::empty();
     /* Each of these is written once and only from one of the others, so no
     assignment can have its own destination as its source. The C reused a
     single view for all three, which meant assigning it from a pointer that was
@@ -400,24 +395,21 @@ pub unsafe extern "C" fn export_packed(
     no reason to expect. */
     let mut relabelled: WebPImage;
     let mut flipped: WebPImage;
-    let mut processed: *mut WebPImage = ptr::null_mut();
 
-    let ret = unsafe {
+    let processed = unsafe {
         transform_image(
-            t.options,
-            t.rescale,
-            t.transformed,
-            img,
+            t.options(),
+            &mut *t.rescale,
+            &mut *t.transformed,
+            &*img,
             &mut view,
-            &mut processed,
             format,
         )
     };
-
-    if ret < 0 {
-        return ret;
-    }
-    let mut img = unsafe { &*processed };
+    let mut img = match processed {
+        Ok(img) => img,
+        Err(e) => return e,
+    };
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
@@ -428,8 +420,7 @@ pub unsafe extern "C" fn export_packed(
         {
             img
         } else {
-            let ret =
-                unsafe { ensure_yuva(t.dsp, t.output, img, c_int::from(want_alpha)) };
+            let ret = unsafe { ensure_yuva(t.dsp(), &mut *t.output, img, want_alpha) };
 
             if ret < 0 {
                 return ret;
@@ -439,7 +430,7 @@ pub unsafe extern "C" fn export_packed(
 
         if t.options().flip != 0 {
             flipped = *planar;
-            unsafe { flip_image(&mut flipped) };
+            flip_image(&mut flipped);
             planar = &flipped;
         }
         if set.ext_active != 0 {
@@ -449,17 +440,17 @@ pub unsafe extern "C" fn export_packed(
         return WPD_OK;
     }
 
-    if format_is_packed(format) == 0 {
+    if !format_is_packed(format) {
         if t.options().flip != 0 {
             flipped = *img;
-            unsafe { flip_image(&mut flipped) };
+            flip_image(&mut flipped);
             img = &flipped;
         }
         if set.ext_active == 0 {
             unsafe { export_frame(set, img, img.format, frame) };
             return WPD_OK;
         }
-        if format_is_packed(img.format) == 0 {
+        if !format_is_packed(img.format) {
             return unsafe { export_external_planar(set, t, img, img.format, frame) };
         }
         return unsafe {
@@ -467,15 +458,15 @@ pub unsafe extern "C" fn export_packed(
         };
     }
 
-    if format_is_packed(img.format) == 0 || format_bpp(format) == 2 {
+    if !format_is_packed(img.format) || format_bpp(format) == 2 {
         let ret = unsafe {
             convert_to_packed(
-                t.dsp,
-                t.output,
+                t.dsp(),
+                &mut *t.output,
                 img,
                 format,
-                t.options().no_fancy_upsampling,
-                premultiply_after_pack(set.animation, set.anim_mode),
+                t.options().no_fancy_upsampling != 0,
+                premultiply_after_pack(set.animation != 0, set.anim_mode),
             )
         };
 
@@ -484,7 +475,7 @@ pub unsafe extern "C" fn export_packed(
         }
         img = unsafe { &*t.output };
     } else if img.format != format {
-        match unsafe { format_packer(t.dsp, format) } {
+        match format_packer(t.dsp(), format) {
             None => {
                 if target != Some(Format::ArgbPre)
                     || Format::from_raw(img.format) != Some(Format::Argb)
@@ -523,7 +514,7 @@ pub unsafe extern "C" fn export_packed(
                         t.output,
                         img.width,
                         img.height,
-                        format_bpp(format),
+                        format_bpp(format) as c_int,
                         format,
                     )
                 };
@@ -532,15 +523,15 @@ pub unsafe extern "C" fn export_packed(
                     return ret;
                 }
                 let out = unsafe { &*t.output };
+                let (src_len, dst_len) = (
+                    img.width as usize * 4,
+                    img.width as usize * format_bpp(format),
+                );
 
                 for y in 0..img.height {
-                    unsafe {
-                        pack(
-                            out.data[0].offset(y as isize * out.linesize[0] as isize),
-                            img.data[0].offset(y as isize * img.linesize[0] as isize),
-                            img.width,
-                        );
-                    }
+                    pack(unsafe { out.row_mut(0, y, dst_len) }, unsafe {
+                        img.row(0, y, src_len)
+                    });
                 }
                 img = out;
             }
@@ -548,22 +539,16 @@ pub unsafe extern "C" fn export_packed(
     }
 
     if set.premultiply != 0 && set.animation == 0 && format_bpp(format) != 2 {
-        let alpha_first =
-            c_int::from(format_layout(img.format) == LAYOUT_ARGB as c_int);
+        let alpha_first = format_layout(img.format) == LAYOUT_ARGB;
+        let len = img.width as usize * format_bpp(img.format);
 
         for y in 0..img.height {
-            unsafe {
-                (t.dsp().premultiply_row)(
-                    img.data[0].offset(y as isize * img.linesize[0] as isize),
-                    alpha_first,
-                    img.width,
-                );
-            }
+            (t.dsp().premultiply_row)(unsafe { img.row_mut(0, y, len) }, alpha_first);
         }
     }
     if t.options().flip != 0 {
         flipped = *img;
-        unsafe { flip_image(&mut flipped) };
+        flip_image(&mut flipped);
         img = &flipped;
     }
     if set.ext_active != 0 {
@@ -647,7 +632,7 @@ unsafe fn still_packed_direct(
                 t.converted,
                 src.width,
                 src.height,
-                format_bpp(format),
+                format_bpp(format) as c_int,
                 format,
             )
         };
@@ -656,7 +641,7 @@ unsafe fn still_packed_direct(
             return ret;
         }
     }
-    let dst = unsafe { &*t.converted };
+    let dst = unsafe { &mut *t.converted };
 
     if t.options().no_fancy_upsampling != 0 {
         unsafe { upsample_simple(t, dst, src, layout, first, upto) };
@@ -664,16 +649,11 @@ unsafe fn still_packed_direct(
         converted_from = unsafe { upsample_fancy(t, dst, src, layout, first, upto) };
     }
     if set.premultiply != 0 {
-        let alpha_first = c_int::from(layout == LAYOUT_ARGB as c_int);
+        let alpha_first = layout == LAYOUT_ARGB;
+        let len = dst.width as usize * format_bpp(format);
 
         for y in converted_from..upto {
-            unsafe {
-                (t.dsp().premultiply_row)(
-                    dst.data[0].offset(y as isize * dst.linesize[0] as isize),
-                    alpha_first,
-                    dst.width,
-                );
-            }
+            (t.dsp().premultiply_row)(unsafe { dst.row_mut(0, y, len) }, alpha_first);
         }
     }
     converted_from
@@ -708,18 +688,17 @@ unsafe fn still_packed_2byte(
         }
     }
     if upto > first {
-        let Some(pack) = (unsafe { format_packer(t.dsp, format) }) else {
+        let Some(pack) = format_packer(t.dsp(), format) else {
             return WPD_ERR_UNSUPPORTED;
         };
-        let premultiply = unsafe { format_premultiplier_4444(t.dsp, format) };
-        let argb = unsafe { &*t.output };
+        let premultiply = format_premultiplier_4444(t.dsp(), format);
+        let argb = unsafe { &mut *t.output };
 
         if t.options().no_fancy_upsampling != 0 {
-            unsafe { upsample_simple(t, argb, src, LAYOUT_ARGB as c_int, first, upto) };
+            unsafe { upsample_simple(t, argb, src, LAYOUT_ARGB, first, upto) };
         } else {
-            converted_from = unsafe {
-                upsample_fancy(t, argb, src, LAYOUT_ARGB as c_int, first, upto)
-            };
+            converted_from =
+                unsafe { upsample_fancy(t, argb, src, LAYOUT_ARGB, first, upto) };
         }
         unsafe {
             pack_2byte_rows(
@@ -743,84 +722,87 @@ unsafe fn pack_2byte_rows(
     dst: &WebPImage,
     argb: &WebPImage,
     width: c_int,
-    pack: PackRowFn,
-    premultiply: Premultiply4444Fn,
+    pack: RowFn,
+    premultiply: fn(&mut [u8]),
     from: c_int,
     upto: c_int,
 ) {
-    for y in from..upto {
-        let row = unsafe { dst.data[0].offset(y as isize * dst.linesize[0] as isize) };
+    let (src_len, dst_len) = (width as usize * 4, width as usize * 2);
 
-        unsafe {
-            pack(
-                row,
-                argb.data[0].offset(y as isize * argb.linesize[0] as isize),
-                width,
-            );
-            if set.premultiply != 0 {
-                premultiply(row, width);
-            }
+    for y in from..upto {
+        let row = unsafe { dst.row_mut(0, y, dst_len) };
+
+        pack(row, unsafe { argb.row(0, y, src_len) });
+        if set.premultiply != 0 {
+            premultiply(row);
         }
+    }
+}
+
+/// The planar source of an upsample, alpha and all.
+///
+/// # Safety
+///
+/// `src` must be a live planar `WebPImage`.
+unsafe fn planes_of(src: &WebPImage) -> YuvPlanes<'_> {
+    let f = unsafe { src.frame() };
+    let alpha = f.format.nb_components() == 4;
+
+    YuvPlanes {
+        y: f.plane[0],
+        u: f.plane[1],
+        v: f.plane[2],
+        a: alpha.then_some(f.plane[3]),
     }
 }
 
 unsafe fn upsample_simple(
     t: &ExportTargets,
-    dst: &WebPImage,
+    dst: &mut WebPImage,
     src: &WebPImage,
-    layout: c_int,
+    layout: usize,
     first: c_int,
     upto: c_int,
 ) {
-    unsafe {
-        wpd_yuv420_to_packed_simple(
-            t.dsp,
-            layout,
-            dst.data[0],
-            dst.linesize[0] as isize,
-            src.data[0],
-            src.linesize[0] as isize,
-            src.data[1],
-            src.data[2],
-            src.linesize[1] as isize,
-            src.data[3],
-            src.linesize[3] as isize,
-            src.width,
-            first,
-            upto,
-        );
-    }
+    let width = src.width as usize;
+    let planes = unsafe { planes_of(src) };
+    let mut out = unsafe { dst.frame_mut() };
+
+    wpd::convert::yuv420_to_packed_simple(
+        t.dsp(),
+        layout,
+        &mut out.planes_mut()[0],
+        &planes,
+        width,
+        first as usize,
+        upto as usize,
+    );
 }
 
 /// Returns the first row the fancy upsampler actually wrote, which is one
 /// above `first` when it starts on an even row.
 unsafe fn upsample_fancy(
     t: &ExportTargets,
-    dst: &WebPImage,
+    dst: &mut WebPImage,
     src: &WebPImage,
-    layout: c_int,
+    layout: usize,
     first: c_int,
     upto: c_int,
 ) -> c_int {
-    unsafe {
-        wpd_yuv420_to_packed_rows(
-            t.dsp,
-            layout,
-            dst.data[0],
-            dst.linesize[0] as isize,
-            src.data[0],
-            src.linesize[0] as isize,
-            src.data[1],
-            src.data[2],
-            src.linesize[1] as isize,
-            src.data[3],
-            src.linesize[3] as isize,
-            src.width,
-            src.height,
-            first,
-            upto,
-        )
-    }
+    let (width, height) = (src.width as usize, src.height as usize);
+    let planes = unsafe { planes_of(src) };
+    let mut out = unsafe { dst.frame_mut() };
+
+    wpd::convert::yuv420_to_packed_rows(
+        t.dsp(),
+        layout,
+        &mut out.planes_mut()[0],
+        &planes,
+        width,
+        height,
+        first as usize,
+        upto as usize,
+    ) as c_int
 }
 
 /// Hands out rows `[0, upto)` of the still lossless frame, premultiplying and
@@ -849,9 +831,10 @@ pub unsafe extern "C" fn export_still_lossless(
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
-        let want_alpha = c_int::from(target == Some(Format::Yuva420p));
-        let ret =
-            unsafe { ensure_yuva_rows(t.dsp, t.output, img, want_alpha, first, upto) };
+        let want_alpha = target == Some(Format::Yuva420p);
+        let ret = unsafe {
+            ensure_yuva_rows(t.dsp(), &mut *t.output, img, want_alpha, first, upto)
+        };
 
         if ret < 0 {
             return ret;
@@ -873,7 +856,7 @@ pub unsafe extern "C" fn export_still_lossless(
         return WPD_OK;
     }
 
-    if format_is_packed(format) == 0 {
+    if !format_is_packed(format) {
         if set.ext_active == 0 {
             unsafe { export_frame(set, img, img.format, frame) };
             t.finish(upto, format);
@@ -890,8 +873,9 @@ pub unsafe extern "C" fn export_still_lossless(
         return WPD_OK;
     }
 
-    let premultiply = unsafe { format_premultiplier_4444(t.dsp, format) };
-    let alpha_first = c_int::from(format_layout(format) == LAYOUT_ARGB as c_int);
+    let premultiply = format_premultiplier_4444(t.dsp(), format);
+    let alpha_first = format_layout(format) == LAYOUT_ARGB;
+    let out_len = img.width as usize * format_bpp(format);
 
     if set.ext_active != 0 {
         let ret =
@@ -904,14 +888,17 @@ pub unsafe extern "C" fn export_still_lossless(
             let ext = t.ext(0);
 
             for y in first..upto {
-                let row = unsafe { ext.data.offset(y as isize * ext.stride) };
+                let row = unsafe {
+                    slice::from_raw_parts_mut(
+                        ext.data.offset(y as isize * ext.stride),
+                        out_len,
+                    )
+                };
 
-                unsafe {
-                    if format_bpp(format) == 2 {
-                        premultiply(row, img.width);
-                    } else {
-                        (t.dsp().premultiply_row)(row, alpha_first, img.width);
-                    }
+                if format_bpp(format) == 2 {
+                    premultiply(row);
+                } else {
+                    (t.dsp().premultiply_row)(row, alpha_first);
                 }
             }
         }
@@ -919,7 +906,7 @@ pub unsafe extern "C" fn export_still_lossless(
         return WPD_OK;
     }
 
-    let pack = unsafe { format_packer(t.dsp, format) };
+    let pack = format_packer(t.dsp(), format);
 
     if set.premultiply == 0 && (pack.is_none() || img.format == format) {
         unsafe { export_frame(set, img, format, frame) };
@@ -933,7 +920,7 @@ pub unsafe extern "C" fn export_still_lossless(
                 t.output,
                 img.width,
                 img.height,
-                format_bpp(format),
+                format_bpp(format) as c_int,
                 format,
             )
         };
@@ -943,22 +930,21 @@ pub unsafe extern "C" fn export_still_lossless(
         }
     }
     let out = unsafe { &*t.output };
+    let src_len = img.width as usize * 4;
 
     for y in first..upto {
-        let dst = unsafe { out.data[0].offset(y as isize * out.linesize[0] as isize) };
-        let src = unsafe { img.data[0].offset(y as isize * img.linesize[0] as isize) };
+        let dst = unsafe { out.row_mut(0, y, out_len) };
+        let src = unsafe { img.row(0, y, src_len) };
 
-        unsafe {
-            match pack {
-                Some(pack) => pack(dst, src, img.width),
-                None => ptr::copy_nonoverlapping(src, dst, img.width as usize * 4),
-            }
-            if set.premultiply != 0 {
-                if format_bpp(format) == 2 {
-                    premultiply(dst, img.width);
-                } else {
-                    (t.dsp().premultiply_row)(dst, alpha_first, img.width);
-                }
+        match pack {
+            Some(pack) => pack(dst, src),
+            None => dst.copy_from_slice(src),
+        }
+        if set.premultiply != 0 {
+            if format_bpp(format) == 2 {
+                premultiply(dst);
+            } else {
+                (t.dsp().premultiply_row)(dst, alpha_first);
             }
         }
     }

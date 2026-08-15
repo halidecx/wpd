@@ -1,31 +1,23 @@
-//! C ABI for format policy, cropping, scaling and the region blitters, as
-//! declared by `src/convert.h`.
+//! Format policy, cropping, scaling and format conversion.
 //!
 //! The decision-making — which format packs how, what a crop resolves to, what
-//! a scale rounds to — is [`wpd::image`], and so are the YUVA blend kernels.
-//! What stays here is the plane walking: the caller's images are C structs
-//! whose `data[p]` may already have been offset into a crop or flipped to a
-//! negative stride, so the rows are rebuilt per iteration rather than borrowed.
+//! a scale rounds to — is [`wpd::image`]; the row walking is [`wpd::convert`]
+//! and [`wpd::rescale`]. What is left here is the picture-level plumbing, and
+//! it is still written against `WebPImage`, because a crop is an offset into
+//! `data[p]` and a flip a negative `linesize[p]` and neither survives contact
+//! with an owning type. Each entry point bridges into a `Frame` or `FrameMut`
+//! for the row work.
 
 use std::ffi::c_int;
-use std::mem::MaybeUninit;
-use std::ptr;
 
+use wpd::convert::YuvPlanes;
+use wpd::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use wpd::image::{self, ceil_rshift, Crop, Format};
+use wpd::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
 
-use wpd::dsp::yuv::{LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_RGB};
-
-use crate::dsp::yuv::{
-    wpd_argb_to_yuva, wpd_yuv420_to_packed, wpd_yuv420_to_packed_simple,
-    wpd_yuv444_to_packed, PackRowFn, Premultiply4444Fn, WPDYUVDSP,
-};
 use crate::image::{
     image_alloc_packed, image_alloc_yuv444, image_alloc_yuva, image_drop_plane,
-    image_free, image_scratch_grow, RescaleScratch, WebPImage,
-};
-use crate::rescale::{
-    wpd_multiply_row, wpd_premultiply_argb_row, wpd_rescale_plane, wpd_rescaler_export,
-    wpd_rescaler_import, wpd_rescaler_init, WPDRescaler,
+    image_free, WebPImage,
 };
 
 const WPD_OK: c_int = 0;
@@ -93,16 +85,6 @@ impl WPDDecoderOptions {
     }
 }
 
-/// `SubRect` from `src/convert.h`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SubRect {
-    pub x: c_int,
-    pub y: c_int,
-    pub w: c_int,
-    pub h: c_int,
-}
-
 /// The format an image claims, or ARGB when the field holds something no
 /// version of the enum defines. Nothing downstream can act on a format it does
 /// not know, and the four-byte packed case is the one the decoder produces.
@@ -110,142 +92,62 @@ fn format_of(img: &WebPImage) -> Format {
     img.format().unwrap_or(Format::Argb)
 }
 
-#[no_mangle]
-pub extern "C" fn format_is_packed(format: c_int) -> c_int {
-    c_int::from(Format::from_raw(format).is_some_and(Format::is_packed))
+pub fn format_is_packed(format: c_int) -> bool {
+    Format::from_raw(format).is_some_and(Format::is_packed)
 }
 
-#[no_mangle]
-pub extern "C" fn format_bpp(format: c_int) -> c_int {
-    Format::from_raw(format).map_or(4, Format::bpp) as c_int
+pub fn format_bpp(format: c_int) -> usize {
+    Format::from_raw(format).map_or(4, Format::bpp)
 }
 
-#[no_mangle]
-pub extern "C" fn format_is_premultiplied(format: c_int) -> c_int {
-    c_int::from(Format::from_raw(format).is_some_and(Format::is_premultiplied))
+pub fn format_is_premultiplied(format: c_int) -> bool {
+    Format::from_raw(format).is_some_and(Format::is_premultiplied)
 }
 
-#[no_mangle]
-pub extern "C" fn format_valid(format: c_int) -> c_int {
-    c_int::from(Format::from_raw(format).is_some())
+pub fn format_valid(format: c_int) -> bool {
+    Format::from_raw(format).is_some()
 }
 
-#[no_mangle]
-pub extern "C" fn format_layout(format: c_int) -> c_int {
-    Format::from_raw(format).map_or(LAYOUT_ARGB, Format::layout) as c_int
+pub fn format_layout(format: c_int) -> usize {
+    Format::from_raw(format).map_or(LAYOUT_ARGB, Format::layout)
 }
 
-/// # Safety
-///
-/// `img` must point to a live `WebPImage`.
-#[no_mangle]
-pub unsafe extern "C" fn image_nb_components(img: *const WebPImage) -> c_int {
-    match unsafe { img.as_ref() } {
-        Some(img) => format_of(img).nb_components() as c_int,
-        None => 1,
-    }
+pub fn format_packer(dsp: &YuvDsp, format: c_int) -> Option<RowFn> {
+    dsp.packer(Format::from_raw(format)?)
 }
 
-/// # Safety
-///
-/// `dsp` must point to a live `WPDYUVDSP`.
-#[no_mangle]
-pub unsafe extern "C" fn format_packer(
-    dsp: *const WPDYUVDSP,
-    format: c_int,
-) -> Option<PackRowFn> {
-    let dsp = unsafe { dsp.as_ref() }?;
-
-    Some(match Format::from_raw(format)? {
-        Format::Rgba | Format::RgbaPre => dsp.pack_rgba,
-        Format::Bgra | Format::BgraPre => dsp.pack_bgra,
-        Format::Rgb => dsp.pack_rgb,
-        Format::Bgr => dsp.pack_bgr,
-        Format::Rgb565 => dsp.pack_rgb565,
-        Format::Rgba4444 | Format::Rgba4444Pre => dsp.pack_rgba4444,
-        Format::Bgr565 => dsp.pack_bgr565,
-        Format::Bgra4444 | Format::Bgra4444Pre => dsp.pack_bgra4444,
-        _ => return None,
-    })
-}
-
-/// # Safety
-///
-/// As [`format_packer`].
-#[no_mangle]
-pub unsafe extern "C" fn format_premultiplier_4444(
-    dsp: *const WPDYUVDSP,
-    format: c_int,
-) -> Premultiply4444Fn {
-    let dsp = unsafe { &*dsp };
-
-    if Format::from_raw(format) == Some(Format::Bgra4444Pre) {
-        dsp.premultiply_row_4444_swap
-    } else {
-        dsp.premultiply_row_4444
-    }
+pub fn format_premultiplier_4444(dsp: &YuvDsp, format: c_int) -> fn(&mut [u8]) {
+    dsp.premultiplier_4444(Format::from_raw(format).unwrap_or(Format::Argb))
 }
 
 /// `WPD_ANIM_SUBFRAME` from `include/wpd.h`.
 const ANIM_SUBFRAME: c_int = 1;
 
-#[no_mangle]
-pub extern "C" fn premultiply_after_pack(animation: c_int, anim_mode: c_int) -> c_int {
-    c_int::from(animation == 0 || anim_mode == ANIM_SUBFRAME)
+pub fn premultiply_after_pack(animation: bool, anim_mode: c_int) -> bool {
+    !animation || anim_mode == ANIM_SUBFRAME
 }
 
-/// # Safety
-///
-/// `options` must point to a live `WPDDecoderOptions`.
-#[no_mangle]
-pub unsafe extern "C" fn options_transform(options: *const WPDDecoderOptions) -> c_int {
-    let options = unsafe { &*options };
-
-    c_int::from(
-        options.use_cropping != 0 || options.use_scaling != 0 || options.flip != 0,
-    )
+pub fn options_transform(options: &WPDDecoderOptions) -> bool {
+    options.use_cropping != 0 || options.use_scaling != 0 || options.flip != 0
 }
 
-/// # Safety
-///
-/// As [`options_transform`], and both outputs must be writable.
-#[no_mangle]
-pub unsafe extern "C" fn scaled_size(
-    options: *const WPDDecoderOptions,
+pub fn scaled_size(
+    options: &WPDDecoderOptions,
     src_width: c_int,
     src_height: c_int,
-    width: *mut c_int,
-    height: *mut c_int,
-) -> c_int {
-    let options = unsafe { &*options };
-
-    match image::scaled_size(
+) -> Result<(c_int, c_int), c_int> {
+    image::scaled_size(
         options.scaled_width,
         options.scaled_height,
         src_width,
         src_height,
-    ) {
-        Ok((w, h)) => {
-            unsafe {
-                width.write(w);
-                height.write(h);
-            }
-            WPD_OK
-        }
-        Err(_) => WPD_ERR_TOO_LARGE,
-    }
+    )
+    .map_err(|_| WPD_ERR_TOO_LARGE)
 }
 
 /// Turns the image upside down in place by walking each plane backwards, which
 /// is the one thing a `WebPImage` view expresses that an owned buffer cannot.
-///
-/// # Safety
-///
-/// `view` must point to a live `WebPImage`.
-#[no_mangle]
-pub unsafe extern "C" fn flip_image(view: *mut WebPImage) {
-    let view = unsafe { &mut *view };
-
+pub fn flip_image(view: &mut WebPImage) {
     for p in 0..format_of(view).nb_components() {
         let shift = u32::from(p == 1 || p == 2);
         let h = ceil_rshift(view.height, shift);
@@ -292,80 +194,19 @@ fn crop_image(
     Ok(())
 }
 
-/// One plane through the area rescaler with alpha weighted in, which is what
-/// libwebp carries across a scale so a transparent edge does not bleed.
-///
-/// Each row is built in scratch rather than weighted in place: the decoded
-/// image is blended onto by the next animation frame and a still may be
-/// exported more than once, so it has to survive the scale unchanged.
-#[allow(clippy::too_many_arguments)]
-unsafe fn rescale_plane_weighted(
-    scratch: &RescaleScratch,
-    dst: *mut u8,
-    dst_stride: c_int,
-    dst_width: c_int,
-    dst_height: c_int,
-    src: *const u8,
-    src_stride: c_int,
-    alpha: *const u8,
-    alpha_stride: c_int,
-    src_width: c_int,
-    src_height: c_int,
-    channels: c_int,
-) {
-    let mut r = MaybeUninit::<WPDRescaler>::uninit();
-    let mut y = 0;
-
-    unsafe {
-        wpd_rescaler_init(
-            r.as_mut_ptr(),
-            src_width,
-            src_height,
-            dst,
-            dst_width,
-            dst_height,
-            dst_stride,
-            channels,
-            scratch.work,
-        );
-    }
-    let r = r.as_mut_ptr();
-
-    while y < src_height {
-        let len = src_width as usize * channels as usize;
-
-        unsafe {
-            ptr::copy_nonoverlapping(
-                src.offset(y as isize * src_stride as isize),
-                scratch.row,
-                len,
-            );
-            if alpha.is_null() {
-                wpd_premultiply_argb_row(scratch.row, src_width, 0);
-            } else {
-                wpd_multiply_row(
-                    scratch.row,
-                    alpha.offset(y as isize * alpha_stride as isize),
-                    src_width,
-                    0,
-                );
-            }
-            if wpd_rescaler_import(r, 1, scratch.row, 0) != 0 {
-                y += 1;
-            }
-            wpd_rescaler_export(r);
-        }
-    }
-}
-
 /// Scales the way libwebp does: an area rescaler over each plane, with the
 /// colour channels premultiplied across it.
 ///
 /// `chroma_full` brings U and V up to the output size instead of half it,
 /// which is what libwebp feeds its point converter when a scaled lossy frame
 /// is going to a packed format.
+///
+/// # Safety
+///
+/// `dst` must not alias `src`: the source is borrowed across the allocation
+/// that fills the destination.
 unsafe fn scale_image(
-    scratch: *mut RescaleScratch,
+    scratch: &mut Scratch,
     dst: &mut WebPImage,
     src: &WebPImage,
     width: c_int,
@@ -375,7 +216,7 @@ unsafe fn scale_image(
 ) -> c_int {
     let format = format_of(src);
     let packed = format.is_packed();
-    let bpp = if packed { format.bpp() } else { 1 } as c_int;
+    let bpp = if packed { format.bpp() } else { 1 };
     /* An already premultiplied source resamples correctly on its own: the
     weighted average of alpha-weighted colour is what the rescaler outputs
     directly, so weighting it a second time would skew it. */
@@ -383,7 +224,7 @@ unsafe fn scale_image(
 
     let ret = unsafe {
         if packed {
-            image_alloc_packed(dst, width, height, bpp, src.format)
+            image_alloc_packed(dst, width, height, bpp as c_int, src.format)
         } else if chroma_full {
             image_alloc_yuv444(dst, width, height)
         } else {
@@ -395,123 +236,99 @@ unsafe fn scale_image(
         return ret;
     }
     dst.format = src.format;
-
-    let ret = unsafe { image_scratch_grow(scratch, width, src.width, bpp) };
-
-    if ret < 0 {
-        return ret;
+    dst.chroma_full = c_int::from(!packed && chroma_full);
+    if scratch.grow(width, src.width, bpp).is_err() {
+        return WPD_ERR_TOO_LARGE;
     }
-    let scratch = unsafe { &*scratch };
 
-    for p in 0..format.nb_components() {
-        let chroma = p == 1 || p == 2;
-        let shift = u32::from(chroma && !chroma_full);
-        let sw = if packed {
-            src.width
-        } else {
-            ceil_rshift(src.width, u32::from(chroma))
-        };
-        let sh = if packed {
-            src.height
-        } else {
-            ceil_rshift(src.height, u32::from(chroma))
-        };
-        let dw = ceil_rshift(width, shift);
-        let dh = ceil_rshift(height, shift);
+    {
+        let inp = unsafe { src.frame() };
+        let mut out = unsafe { dst.frame_mut() };
 
-        if premult || (weight_luma && p == 0) {
-            unsafe {
+        for p in 0..format.nb_components() {
+            let chroma = p == 1 || p == 2;
+            let shift = u32::from(chroma && !chroma_full);
+            let (sw, sh) = if packed {
+                (src.width, src.height)
+            } else {
+                (
+                    ceil_rshift(src.width, u32::from(chroma)),
+                    ceil_rshift(src.height, u32::from(chroma)),
+                )
+            };
+            let dw = ceil_rshift(width, shift);
+            let dh = ceil_rshift(height, shift);
+            let plane = &mut out.planes_mut()[p];
+
+            if premult || (weight_luma && p == 0) {
                 rescale_plane_weighted(
                     scratch,
-                    dst.data[p],
-                    dst.linesize[p],
+                    plane,
                     dw,
                     dh,
-                    src.data[p],
-                    src.linesize[p],
-                    if premult { ptr::null() } else { src.data[3] },
-                    if premult { 0 } else { src.linesize[3] },
+                    &inp.plane[p],
+                    (!premult).then_some(&inp.plane[3]),
+                    sw,
+                    sh,
+                    bpp,
+                );
+            } else {
+                rescale_plane(
+                    scratch.work_mut(),
+                    plane,
+                    dw,
+                    dh,
+                    &inp.plane[p],
                     sw,
                     sh,
                     bpp,
                 );
             }
-        } else {
-            unsafe {
-                wpd_rescale_plane(
-                    dst.data[p],
-                    dst.linesize[p],
-                    dw,
-                    dh,
-                    src.data[p],
-                    src.linesize[p],
-                    sw,
-                    sh,
-                    bpp,
-                    scratch.work,
-                );
+        }
+
+        if premult {
+            for y in 0..height {
+                wpd::rescale::premultiply_argb_row(out.row(0, y), true);
+            }
+        } else if weight_luma {
+            for y in 0..height {
+                let (luma, alpha) = out.row_pair(0, 3, y);
+
+                wpd::rescale::multiply_row(luma, alpha, true);
             }
         }
     }
 
-    if premult {
-        for y in 0..height {
-            unsafe {
-                wpd_premultiply_argb_row(
-                    dst.data[0].offset(y as isize * dst.linesize[0] as isize),
-                    width,
-                    1,
-                );
-            }
-        }
-    } else if weight_luma {
-        for y in 0..height {
-            unsafe {
-                wpd_multiply_row(
-                    dst.data[0].offset(y as isize * dst.linesize[0] as isize),
-                    dst.data[3].offset(y as isize * dst.linesize[3] as isize),
-                    width,
-                    1,
-                );
-            }
-        }
-    }
     if !packed && format.nb_components() < 4 {
         unsafe { image_drop_plane(dst, 3) };
         dst.format = Format::Yuv420p as c_int;
     }
-    dst.chroma_full = c_int::from(!packed && chroma_full);
     dst.premultiplied = src.premultiplied;
     WPD_OK
 }
 
+/// Resolves the crop and the scale, leaving `result` pointing at whichever of
+/// `view` and `scaled` the output should be read from.
+///
 /// # Safety
 ///
-/// Every pointer must be live, and `result` writable.
-#[no_mangle]
+/// `scaled` must not alias `src`.
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn transform_image(
-    options: *const WPDDecoderOptions,
-    scratch: *mut RescaleScratch,
-    scaled: *mut WebPImage,
-    src: *const WebPImage,
-    view: *mut WebPImage,
-    result: *mut *mut WebPImage,
+pub unsafe fn transform_image<'a>(
+    options: &WPDDecoderOptions,
+    scratch: &mut Scratch,
+    scaled: &'a mut WebPImage,
+    src: &WebPImage,
+    view: &'a mut WebPImage,
     format: c_int,
-) -> c_int {
-    let options = unsafe { &*options };
-    let src = unsafe { &*src };
-
-    if let Err(e) = crop_image(options, src, unsafe { &mut *view }) {
-        return e;
-    }
-    unsafe { result.write(view) };
+) -> Result<&'a WebPImage, c_int> {
+    crop_image(options, src, view)?;
     if options.use_scaling == 0 {
-        return WPD_OK;
+        return Ok(view);
     }
-    let view = unsafe { &mut *view };
+
     let planar = !format_of(src).is_packed();
-    let target_packed = Format::from_raw(format).is_some_and(Format::is_packed);
+    let target_packed = format_is_packed(format);
     /* Going to a packed format, libwebp brings U and V all the way up to the
     output size and point-converts; staying planar, it keeps them half size
     and weights the luma by alpha across the rescaler. */
@@ -520,20 +337,11 @@ pub unsafe extern "C" fn transform_image(
         && !target_packed
         && Format::from_raw(format) != Some(Format::Yuv420p)
         && format_of(src).nb_components() == 4;
-
-    let (width, height) = match image::scaled_size(
-        options.scaled_width,
-        options.scaled_height,
-        view.width,
-        view.height,
-    ) {
-        Ok(size) => size,
-        Err(_) => return WPD_ERR_TOO_LARGE,
-    };
+    let (width, height) = scaled_size(options, view.width, view.height)?;
     let ret = unsafe {
         scale_image(
             scratch,
-            &mut *scaled,
+            scaled,
             view,
             width,
             height,
@@ -543,26 +351,40 @@ pub unsafe extern "C" fn transform_image(
     };
 
     if ret < 0 {
-        return ret;
+        return Err(ret);
     }
-    unsafe { result.write(scaled) };
-    WPD_OK
+    Ok(scaled)
+}
+
+/// The planar source of a conversion, as the row drivers take it.
+///
+/// # Safety
+///
+/// `img` must be a live planar `WebPImage` read the way its geometry says.
+unsafe fn yuv_planes(img: &WebPImage, alpha: bool) -> YuvPlanes<'_> {
+    let f = unsafe { img.frame() };
+
+    YuvPlanes {
+        y: f.plane[0],
+        u: f.plane[1],
+        v: f.plane[2],
+        a: alpha.then_some(f.plane[3]),
+    }
 }
 
 /// # Safety
 ///
-/// Every pointer must be live, and `dst` must not alias `src`: the source is
-/// borrowed across the allocation that fills the destination.
-#[no_mangle]
-pub unsafe extern "C" fn convert_to_packed(
-    dsp: *const WPDYUVDSP,
-    dst: *mut WebPImage,
-    src: *const WebPImage,
+/// `dst` must not alias `src`: the source is borrowed across the allocation
+/// that fills the destination.
+pub unsafe fn convert_to_packed(
+    dsp: &YuvDsp,
+    dst: &mut WebPImage,
+    src: &WebPImage,
     format: c_int,
-    no_fancy_upsampling: c_int,
-    premultiply_packed: c_int,
+    no_fancy_upsampling: bool,
+    premultiply_packed: bool,
 ) -> c_int {
-    let layout = format_layout(format) as usize;
+    let layout = format_layout(format);
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
 
     if target.bpp() == 2 {
@@ -578,118 +400,57 @@ pub unsafe extern "C" fn convert_to_packed(
         };
     }
 
-    let src_ref = unsafe { &*src };
+    let (width, height) = (src.width, src.height);
     let ret = unsafe {
-        image_alloc_packed(
-            dst,
-            src_ref.width,
-            src_ref.height,
-            target.bpp() as c_int,
-            format,
-        )
+        image_alloc_packed(dst, width, height, target.bpp() as c_int, format)
     };
 
     if ret < 0 {
         return ret;
     }
-    let dst_ref = unsafe { &*dst };
-    let src_format = format_of(src_ref);
 
-    if src_ref.chroma_full != 0 {
-        unsafe {
-            wpd_yuv444_to_packed(
-                layout as c_int,
-                dst_ref.data[0],
-                dst_ref.linesize[0] as isize,
-                src_ref.data[0],
-                src_ref.linesize[0] as isize,
-                src_ref.data[1],
-                src_ref.data[2],
-                src_ref.linesize[1] as isize,
-                src_ref.width,
-                src_ref.height,
-            );
-        }
-        if src_format.nb_components() == 4
-            && layout != LAYOUT_RGB
-            && layout != LAYOUT_BGR
-        {
-            let dsp = unsafe { &*dsp };
-            let dispatch = if layout == LAYOUT_ARGB {
-                dsp.dispatch_alpha_first
-            } else {
-                dsp.dispatch_alpha_last
-            };
+    let alpha = format_of(src).nb_components() == 4;
+    let planes = unsafe { yuv_planes(src, alpha) };
+    let mut out = unsafe { dst.frame_mut() };
+    let plane = &mut out.planes_mut()[0];
+    let (w, h) = (width as usize, height as usize);
 
-            for y in 0..src_ref.height {
-                unsafe {
-                    dispatch(
-                        dst_ref.data[0]
-                            .offset(y as isize * dst_ref.linesize[0] as isize),
-                        src_ref.data[3]
-                            .offset(y as isize * src_ref.linesize[3] as isize),
-                        src_ref.width,
-                    );
-                }
+    if src.chroma_full != 0 {
+        wpd::convert::yuv444_to_packed(layout, plane, &planes, w, h);
+        if let (Some(a), Some(dispatch)) = (&planes.a, dsp.alpha_dispatcher(layout)) {
+            for y in 0..height {
+                dispatch(plane.row_mut(y, 0, 4 * w), a.row(y, 0, w));
             }
         }
         return WPD_OK;
     }
-    unsafe {
-        if no_fancy_upsampling != 0 {
-            wpd_yuv420_to_packed_simple(
-                dsp,
-                layout as c_int,
-                dst_ref.data[0],
-                dst_ref.linesize[0] as isize,
-                src_ref.data[0],
-                src_ref.linesize[0] as isize,
-                src_ref.data[1],
-                src_ref.data[2],
-                src_ref.linesize[1] as isize,
-                src_ref.data[3],
-                src_ref.linesize[3] as isize,
-                src_ref.width,
-                0,
-                src_ref.height,
-            );
-        } else {
-            wpd_yuv420_to_packed(
-                dsp,
-                layout as c_int,
-                dst_ref.data[0],
-                dst_ref.linesize[0] as isize,
-                src_ref.data[0],
-                src_ref.linesize[0] as isize,
-                src_ref.data[1],
-                src_ref.data[2],
-                src_ref.linesize[1] as isize,
-                src_ref.data[3],
-                src_ref.linesize[3] as isize,
-                src_ref.width,
-                src_ref.height,
-            );
-        }
+    if no_fancy_upsampling {
+        wpd::convert::yuv420_to_packed_simple(dsp, layout, plane, &planes, w, 0, h);
+    } else {
+        wpd::convert::yuv420_to_packed_rows(dsp, layout, plane, &planes, w, h, 0, h);
     }
     WPD_OK
 }
 
 /// The two-byte formats are packed from ARGB, so a source that is not already
 /// ARGB is converted through a scratch image first.
+///
+/// # Safety
+///
+/// As [`convert_to_packed`].
 unsafe fn convert_to_packed_2byte(
-    dsp: *const WPDYUVDSP,
-    dst: *mut WebPImage,
-    src: *const WebPImage,
+    dsp: &YuvDsp,
+    dst: &mut WebPImage,
+    src: &WebPImage,
     format: c_int,
-    no_fancy_upsampling: c_int,
-    premultiply_packed: c_int,
+    no_fancy_upsampling: bool,
+    premultiply_packed: bool,
 ) -> c_int {
-    let mut temp: WebPImage = unsafe { std::mem::zeroed() };
-    let src_ref = unsafe { &*src };
-    let mut argb = src;
+    let mut temp = WebPImage::empty();
+    let mut ret = WPD_OK;
 
-    if format_of(src_ref) != Format::Argb {
-        let ret = unsafe {
+    if format_of(src) != Format::Argb {
+        ret = unsafe {
             convert_to_packed(
                 dsp,
                 &mut temp,
@@ -699,47 +460,29 @@ unsafe fn convert_to_packed_2byte(
                 premultiply_packed,
             )
         };
-
-        if ret < 0 {
-            unsafe { image_free(&mut temp) };
-            return ret;
-        }
-        argb = &temp;
     }
-    let argb = unsafe { &*argb };
-    let mut ret =
-        unsafe { image_alloc_packed(dst, argb.width, argb.height, 2, format) };
-
     if ret >= 0 {
-        let dst_ref = unsafe { &*dst };
-        let pack = unsafe { format_packer(dsp, format) };
+        let argb = if temp.data[0].is_null() { src } else { &temp };
 
-        if let Some(pack) = pack {
-            for y in 0..argb.height {
-                unsafe {
-                    pack(
-                        dst_ref.data[0]
-                            .offset(y as isize * dst_ref.linesize[0] as isize),
-                        argb.data[0].offset(y as isize * argb.linesize[0] as isize),
-                        argb.width,
-                    );
+        ret = unsafe { image_alloc_packed(dst, argb.width, argb.height, 2, format) };
+        if ret >= 0 {
+            let inp = unsafe { argb.frame() };
+            let mut out = unsafe { dst.frame_mut() };
+
+            if let Some(pack) = format_packer(dsp, format) {
+                for y in 0..argb.height {
+                    pack(out.row(0, y), inp.row(0, y));
                 }
             }
-        }
-        if format_is_premultiplied(format) != 0 && premultiply_packed != 0 {
-            let premultiply = unsafe { format_premultiplier_4444(dsp, format) };
+            if format_is_premultiplied(format) && premultiply_packed {
+                let premultiply = format_premultiplier_4444(dsp, format);
 
-            for y in 0..argb.height {
-                unsafe {
-                    premultiply(
-                        dst_ref.data[0]
-                            .offset(y as isize * dst_ref.linesize[0] as isize),
-                        argb.width,
-                    );
+                for y in 0..argb.height {
+                    premultiply(out.row(0, y));
                 }
             }
+            ret = WPD_OK;
         }
-        ret = WPD_OK;
     }
     unsafe { image_free(&mut temp) };
     ret
@@ -748,87 +491,78 @@ unsafe fn convert_to_packed_2byte(
 /// # Safety
 ///
 /// As [`convert_to_packed`].
-#[no_mangle]
-pub unsafe extern "C" fn convert_to_argb(
-    dsp: *const WPDYUVDSP,
-    dst: *mut WebPImage,
-    src: *const WebPImage,
-    no_fancy_upsampling: c_int,
+pub unsafe fn convert_to_argb(
+    dsp: &YuvDsp,
+    dst: &mut WebPImage,
+    src: &WebPImage,
+    no_fancy_upsampling: bool,
 ) -> c_int {
     unsafe {
-        convert_to_packed(dsp, dst, src, Format::Argb as c_int, no_fancy_upsampling, 0)
+        convert_to_packed(
+            dsp,
+            dst,
+            src,
+            Format::Argb as c_int,
+            no_fancy_upsampling,
+            false,
+        )
     }
 }
 
 /// # Safety
 ///
-/// As [`convert_to_packed`], including that `dst` does not alias `src`.
-#[no_mangle]
-pub unsafe extern "C" fn ensure_yuva_rows(
-    dsp: *const WPDYUVDSP,
-    dst: *mut WebPImage,
-    src: *const WebPImage,
-    want_alpha: c_int,
+/// As [`convert_to_packed`].
+pub unsafe fn ensure_yuva_rows(
+    dsp: &YuvDsp,
+    dst: &mut WebPImage,
+    src: &WebPImage,
+    want_alpha: bool,
     row_start: c_int,
     row_end: c_int,
 ) -> c_int {
-    let src_ref = unsafe { &*src };
+    let (width, height) = (src.width, src.height);
 
     if row_start == 0 {
-        let ret = unsafe { image_alloc_yuva(dst, src_ref.width, src_ref.height) };
+        let ret = unsafe { image_alloc_yuva(dst, width, height) };
 
         if ret < 0 {
             return ret;
         }
     }
-    let dst_ref = unsafe { &*dst };
 
-    if format_of(src_ref) == Format::Argb {
-        unsafe {
-            wpd_argb_to_yuva(
-                dsp,
-                dst_ref.data[0],
-                dst_ref.linesize[0] as isize,
-                dst_ref.data[1],
-                dst_ref.data[2],
-                dst_ref.linesize[1] as isize,
-                if want_alpha != 0 {
-                    dst_ref.data[3]
-                } else {
-                    ptr::null_mut()
-                },
-                dst_ref.linesize[3] as isize,
-                src_ref.data[0],
-                src_ref.linesize[0] as isize,
-                src_ref.width,
-                row_start,
-                row_end,
-            );
-        }
-        if want_alpha == 0 {
+    let inp = unsafe { src.frame() };
+    let mut out = unsafe { dst.frame_mut() };
+    let w = width as usize;
+
+    if format_of(src) == Format::Argb {
+        wpd::convert::argb_to_yuva(
+            dsp,
+            out.planes_mut(),
+            &inp.plane[0],
+            want_alpha,
+            w,
+            row_start,
+            row_end,
+        );
+        if !want_alpha {
             for y in row_start..row_end {
-                let row = unsafe { dst_ref.row_mut(3, y, src_ref.width as usize) };
-
-                row.fill(255);
+                out.row(3, y).fill(255);
             }
         }
         return WPD_OK;
     }
 
-    let opaque = format_of(src_ref) == Format::Yuv420p;
+    let opaque = format_of(src) == Format::Yuv420p;
 
     for p in 0..4 {
         let shift = u32::from(p == 1 || p == 2);
-        let w = ceil_rshift(src_ref.width, shift) as usize;
-        let h = ceil_rshift(row_end, shift);
+        let w = ceil_rshift(width, shift) as usize;
 
-        for y in (row_start >> shift)..h {
-            let out = unsafe { dst_ref.row_mut(p, y, w) };
-
+        for y in (row_start >> shift)..ceil_rshift(row_end, shift) {
             if p == 3 && opaque {
-                out.fill(255);
+                out.row(3, y).fill(255);
             } else {
-                out.copy_from_slice(unsafe { src_ref.row(p, y, w) });
+                out.row(p, y).copy_from_slice(inp.plane[p].row(y, 0, w));
             }
         }
     }
@@ -838,14 +572,13 @@ pub unsafe extern "C" fn ensure_yuva_rows(
 /// # Safety
 ///
 /// As [`convert_to_packed`].
-#[no_mangle]
-pub unsafe extern "C" fn ensure_yuva(
-    dsp: *const WPDYUVDSP,
-    dst: *mut WebPImage,
-    src: *const WebPImage,
-    want_alpha: c_int,
+pub unsafe fn ensure_yuva(
+    dsp: &YuvDsp,
+    dst: &mut WebPImage,
+    src: &WebPImage,
+    want_alpha: bool,
 ) -> c_int {
-    let height = unsafe { (*src).height };
+    let height = src.height;
 
     unsafe { ensure_yuva_rows(dsp, dst, src, want_alpha, 0, height) }
 }

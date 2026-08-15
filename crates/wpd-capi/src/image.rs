@@ -9,7 +9,6 @@
 
 use std::alloc::{self, Layout};
 use std::ffi::c_int;
-use std::mem::size_of;
 use std::{ptr, slice};
 
 use wpd::error::Error;
@@ -35,26 +34,6 @@ pub struct WebPImage {
     pub width: c_int,
     pub height: c_int,
     pub format: c_int,
-}
-
-/// `RescaleScratch` from `src/image.h`.
-#[repr(C)]
-pub struct RescaleScratch {
-    pub work: *mut u32,
-    pub work_size: usize,
-    pub row: *mut u8,
-    pub row_size: usize,
-}
-
-impl RescaleScratch {
-    pub(crate) fn empty() -> Self {
-        RescaleScratch {
-            work: ptr::null_mut(),
-            work_size: 0,
-            row: ptr::null_mut(),
-            row_size: 0,
-        }
-    }
 }
 
 fn layout(size: usize) -> Layout {
@@ -257,94 +236,6 @@ unsafe fn alloc_planar(
     0
 }
 
-/// # Safety
-///
-/// `scratch` must point to a live `RescaleScratch` allocated from here.
-#[no_mangle]
-pub unsafe extern "C" fn image_scratch_free(scratch: *mut RescaleScratch) {
-    let Some(scratch) = (unsafe { scratch.as_mut() }) else {
-        return;
-    };
-
-    if !scratch.work.is_null() {
-        let bytes = scratch.work_size * size_of::<u32>();
-
-        unsafe { alloc::dealloc(scratch.work.cast(), layout(bytes)) };
-    }
-    if !scratch.row.is_null() {
-        unsafe { alloc::dealloc(scratch.row, layout(scratch.row_size)) };
-    }
-    scratch.work = ptr::null_mut();
-    scratch.work_size = 0;
-    scratch.row = ptr::null_mut();
-    scratch.row_size = 0;
-}
-
-/// Grows the scratch to fit, discarding what was there: nothing in it lives
-/// across a call, so there is no reason to copy it forward.
-///
-/// # Safety
-///
-/// As [`image_scratch_free`].
-#[no_mangle]
-pub unsafe extern "C" fn image_scratch_grow(
-    scratch: *mut RescaleScratch,
-    dst_width: c_int,
-    src_width: c_int,
-    channels: c_int,
-) -> c_int {
-    let Some(scratch) = (unsafe { scratch.as_mut() }) else {
-        return WPD_ENOMEM;
-    };
-    let (Ok(dst_width), Ok(src_width), Ok(channels)) = (
-        usize::try_from(dst_width),
-        usize::try_from(src_width),
-        usize::try_from(channels),
-    ) else {
-        return WPD_ERROR_TOO_LARGE;
-    };
-    let Some(need) = dst_width
-        .checked_mul(channels)
-        .and_then(|n| n.checked_mul(2))
-    else {
-        return WPD_ERROR_TOO_LARGE;
-    };
-    let Some(row) = src_width.checked_mul(channels) else {
-        return WPD_ERROR_TOO_LARGE;
-    };
-
-    if scratch.work_size < need {
-        let Some(bytes) = need.checked_mul(size_of::<u32>()) else {
-            return WPD_ERROR_TOO_LARGE;
-        };
-        let grown = unsafe { alloc::alloc(layout(bytes)) };
-
-        if grown.is_null() {
-            return WPD_ENOMEM;
-        }
-        if !scratch.work.is_null() {
-            let had = scratch.work_size * size_of::<u32>();
-
-            unsafe { alloc::dealloc(scratch.work.cast(), layout(had)) };
-        }
-        scratch.work = grown.cast();
-        scratch.work_size = need;
-    }
-    if scratch.row_size < row {
-        let grown = unsafe { alloc::alloc(layout(row)) };
-
-        if grown.is_null() {
-            return WPD_ENOMEM;
-        }
-        if !scratch.row.is_null() {
-            unsafe { alloc::dealloc(scratch.row, layout(scratch.row_size)) };
-        }
-        scratch.row = grown;
-        scratch.row_size = row;
-    }
-    0
-}
-
 impl WebPImage {
     /// How many bytes of plane `p` the picture's geometry covers.
     fn extent(&self, p: usize) -> usize {
@@ -352,7 +243,7 @@ impl WebPImage {
             self.format(),
             Some(Format::Yuv420p) | Some(Format::Yuva420p)
         );
-        let shift = u32::from(planar && (p == 1 || p == 2));
+        let shift = u32::from(planar && self.chroma_full == 0 && (p == 1 || p == 2));
         let row = if planar {
             wpd::image::ceil_rshift(self.width, shift) as usize
         } else {
@@ -383,12 +274,16 @@ impl WebPImage {
             PlaneRef::borrowed(bytes, self.linesize[p] as usize)
         });
 
-        Frame::borrowed(
+        let mut frame = Frame::borrowed(
             plane,
             self.width,
             self.height,
             self.format().unwrap_or(Format::Argb),
-        )
+        );
+
+        frame.chroma_full = self.chroma_full != 0;
+        frame.premultiplied = self.premultiplied != 0;
+        frame
     }
 
     /// As [`WebPImage::frame`], writable.
@@ -399,6 +294,7 @@ impl WebPImage {
     pub(crate) unsafe fn frame_mut(&mut self) -> FrameMut<'_> {
         let (width, height) = (self.width, self.height);
         let format = self.format().unwrap_or(Format::Argb);
+        let chroma_full = self.chroma_full != 0;
         let extent: [usize; 4] = core::array::from_fn(|p| self.extent(p));
         let plane = core::array::from_fn(|p| {
             if self.data[p].is_null() || self.linesize[p] <= 0 {
@@ -409,7 +305,7 @@ impl WebPImage {
             PlaneMut::borrowed(bytes, self.linesize[p] as usize)
         });
 
-        FrameMut::borrowed(plane, width, height, format)
+        FrameMut::borrowed(plane, width, height, format, chroma_full)
     }
 
     /// An image that owns nothing and describes nothing, which is what a
