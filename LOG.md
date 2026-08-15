@@ -1177,6 +1177,42 @@ assembly, so seventeen warnings lived there unseen. It now runs both
 configurations, and the no-asm one is the configuration the safety claim rests
 on.
 
+### Phase 8c — the safe picture type, and what the driver port turns on
+
+The remaining Phase 8 goal is a safe Rust API, and the honest form of it is
+moving the driver into `crates/wpd` rather than wrapping the C ABI: the point of
+the rewrite is that a decode is provably free of memory-unsafety, and today that
+holds for the two codec cores and not for the plumbing around them.
+`crates/wpd/src/picture.rs` is the type the rest of that port stands on.
+
+**Why `WebPImage` could not just be moved.** It is a single struct that is
+sometimes an owner — it holds `alloc[p]` and frees it — and sometimes a view
+into memory the VP8 or VP8L decoder owns, and nothing in the type says which. It
+also expresses a crop by adding to `data[p]` and a flip by pointing at the last
+row and negating `linesize[p]`. None of those three survive contact with an
+owning Rust type.
+
+The split is `Buffer`, which owns plane memory and is reused frame to frame,
+against `Frame` and `FrameMut`, which are borrowed views. A crop becomes an
+`origin` offset and a flip becomes a `flip` flag applied by `Frame::row`, so the
+reading order is a property of the view rather than a rewrite of the pointers. A
+negative stride still has to exist, but only at the C ABI boundary, where the
+shim builds one on the way out — which is exactly where the C ABI demands it and
+nowhere else.
+
+**One thing the compiler would not take, and the fix was not a cast.**
+`FrameMut::row_pair` hands out rows of two planes at once, which every chroma
+kernel needs. The four planes are four separate allocations, so they can never
+overlap, but the borrow checker cannot see that through an index. The first
+draft reached for a raw pointer and `forbid(unsafe_code)` rejected it, which is
+the lint doing its job: `split_at_mut` on the plane array proves the same thing
+and costs nothing, at the price of requiring the two planes in order.
+
+What remains is converting `convert`, `export`, `anim`, `lossy` and `decoder` —
+about 5,000 lines and some 500 uses of `unsafe` — from pointer walking to this
+type. When that lands, `scripts/miri.sh` covers a whole decode rather than the
+kernels alone, which is the real reason to want it.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor

@@ -27,6 +27,7 @@ pub mod error;
 pub mod image;
 pub mod input;
 pub mod log;
+pub mod picture;
 pub mod rescale;
 pub mod vp8;
 pub mod vp8l;
