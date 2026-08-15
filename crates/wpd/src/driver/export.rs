@@ -3,7 +3,7 @@
 //! This is the last place a picture passes through, and it is all plumbing:
 //! which conversion the output format needs, which rows have already been
 //! done, and whether the bytes go into the decoder's memory or the caller's.
-//! The arithmetic that a caller's buffer sizes drive is [`wpd::image`]; what
+//! The arithmetic that a caller's buffer sizes drive is [`crate::image`]; what
 //! is here walks rows of a [`Frame`] that may already be a crop or a flip.
 //!
 //! The scratch an export writes through arrives as borrows of the decoder's
@@ -17,35 +17,33 @@
 //! not the decoder's own arrives as a [`RowSink`], which hands back one row at
 //! a time; what those rows are made of belongs to whoever supplied them.
 
-use std::ffi::c_int;
+use crate::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
+use crate::dsp::yuv::LAYOUT_ARGB;
+use crate::image::Format;
 
-use wpd::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
-use wpd::dsp::yuv::LAYOUT_ARGB;
-use wpd::image::Format;
-
-use crate::convert::{
+use super::convert::{
     convert_to_packed, ensure_yuva, ensure_yuva_rows, format_bpp, format_is_packed,
     format_layout, format_packer, format_premultiplier_4444, premultiply_after_pack,
     transform_image, yuv_planes,
 };
-use wpd::dsp::yuv::{RowFn, YuvDsp};
-use wpd::error::{Error, Result};
-use wpd::handout::{Handout, Pixels, RowSink};
-use wpd::options::Options;
-use wpd::picture::{Buffer, Frame};
-use wpd::rescale::Scratch;
+use crate::dsp::yuv::{RowFn, YuvDsp};
+use crate::error::{Error, Result};
+use crate::handout::{Handout, Pixels, RowSink};
+use crate::options::Options;
+use crate::picture::{Buffer, Frame};
+use crate::rescale::Scratch;
 
 /// What the decoder was asked for, gathered at the call rather than reached
 /// for, so nothing here can read a field that has moved on since.
 pub struct ExportSettings {
-    pub out_format: c_int,
+    pub out_format: i32,
     pub premultiply: bool,
     pub animation: bool,
-    pub anim_mode: c_int,
-    pub duration: c_int,
-    pub pos_x: c_int,
-    pub pos_y: c_int,
-    pub anmf_flags: c_int,
+    pub anim_mode: i32,
+    pub duration: i32,
+    pub pos_x: i32,
+    pub pos_y: i32,
+    pub anmf_flags: i32,
     pub has_alpha: bool,
     pub timestamp: i64,
 }
@@ -76,12 +74,12 @@ pub struct RowTargets<'a> {
     pub output: &'a mut Buffer,
     pub converted: &'a mut Buffer,
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
-    pub converted_rows: &'a mut c_int,
-    pub converted_format: &'a mut c_int,
+    pub converted_rows: &'a mut i32,
+    pub converted_format: &'a mut i32,
 }
 
 /// The planes a format hands out: three or four for planar, one for packed.
-fn frame_planes(format: c_int) -> usize {
+fn frame_planes(format: i32) -> usize {
     match Format::from_raw(format) {
         Some(Format::Yuva420p) => 4,
         Some(Format::Yuv420p) => 3,
@@ -93,7 +91,7 @@ fn frame_planes(format: c_int) -> usize {
 pub(crate) fn export_frame(
     set: &ExportSettings,
     img: &Frame<'_>,
-    format: c_int,
+    format: i32,
     out: &mut Handout<'_>,
 ) {
     let flags = set.anmf_flags as u8;
@@ -116,7 +114,7 @@ pub(crate) fn export_frame(
 pub(crate) fn export_own<'a>(
     set: &ExportSettings,
     img: Frame<'a>,
-    format: c_int,
+    format: i32,
     out: &mut Handout<'a>,
 ) {
     export_frame(set, &img, format, out);
@@ -130,13 +128,13 @@ fn export_external_rows(
     dsp: &YuvDsp,
     ext: &mut dyn RowSink,
     img: &Frame<'_>,
-    format: c_int,
+    format: i32,
     out: &mut Handout<'_>,
-    row_start: c_int,
-    row_end: c_int,
+    row_start: i32,
+    row_end: i32,
 ) -> Result<()> {
     let row = img.width as usize * format_bpp(format);
-    let pack = if img.format as c_int == format {
+    let pack = if img.format as i32 == format {
         None
     } else {
         format_packer(dsp, format)
@@ -171,17 +169,17 @@ pub(crate) fn export_external_planar_rows(
     set: &ExportSettings,
     ext: &mut dyn RowSink,
     img: &Frame<'_>,
-    format: c_int,
+    format: i32,
     out: &mut Handout<'_>,
-    row_start: c_int,
-    row_end: c_int,
+    row_start: i32,
+    row_end: i32,
 ) -> Result<()> {
     let planes = frame_planes(format);
 
     for p in 0..planes {
         let shift = u32::from(p == 1 || p == 2);
-        let w = wpd::image::ceil_rshift(img.width, shift) as usize;
-        let h = wpd::image::ceil_rshift(img.height, shift);
+        let w = crate::image::ceil_rshift(img.width, shift) as usize;
+        let h = crate::image::ceil_rshift(img.height, shift);
 
         if !ext.fits(p, w, h) {
             return Err(Error::BufferTooSmall);
@@ -190,9 +188,9 @@ pub(crate) fn export_external_planar_rows(
 
     for p in 0..planes {
         let shift = u32::from(p == 1 || p == 2);
-        let w = wpd::image::ceil_rshift(img.width, shift) as usize;
+        let w = crate::image::ceil_rshift(img.width, shift) as usize;
         let y0 = row_start >> shift;
-        let h = wpd::image::ceil_rshift(row_end, shift);
+        let h = crate::image::ceil_rshift(row_end, shift);
 
         for y in y0..h {
             ext.row(p, y, w).copy_from_slice(&img.row(p, y)[..w]);
@@ -208,7 +206,7 @@ fn export_external_planar(
     set: &ExportSettings,
     ext: &mut dyn RowSink,
     img: &Frame<'_>,
-    format: c_int,
+    format: i32,
     out: &mut Handout<'_>,
 ) -> Result<()> {
     let height = img.height;
@@ -280,7 +278,7 @@ pub fn export_packed<'a>(
 
     if !format_is_packed(format) {
         let img = if options.flip { img.flipped() } else { img };
-        let native = img.format as c_int;
+        let native = img.format as i32;
         let Some(ext) = ext else {
             export_own(set, img, native, out);
             return Ok(());
@@ -292,9 +290,9 @@ pub fn export_packed<'a>(
         return export_external_rows(set, dsp, ext, &img, native, out, 0, img.height);
     }
 
-    let route = if !format_is_packed(img.format as c_int) || format_bpp(format) == 2 {
+    let route = if !format_is_packed(img.format as i32) || format_bpp(format) == 2 {
         Route::Upsample
-    } else if img.format as c_int != format {
+    } else if img.format as i32 != format {
         match format_packer(dsp, format) {
             Some(pack) => Route::Pack(pack),
             None => {
@@ -390,7 +388,7 @@ pub fn export_still_packed<'a>(
     t: RowTargets<'a>,
     src: &Frame<'_>,
     out: &mut Handout<'a>,
-    upto: c_int,
+    upto: i32,
 ) -> Result<()> {
     let RowTargets {
         dsp,
@@ -435,9 +433,9 @@ fn still_packed_direct(
     options: &Options,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    first: c_int,
-    upto: c_int,
-) -> Result<c_int> {
+    first: i32,
+    upto: i32,
+) -> Result<i32> {
     let format = set.out_format;
     let layout = format_layout(format);
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
@@ -474,9 +472,9 @@ fn still_packed_2byte(
     argb: &mut Buffer,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    first: c_int,
-    upto: c_int,
-) -> Result<c_int> {
+    first: i32,
+    upto: i32,
+) -> Result<i32> {
     let format = set.out_format;
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
     let mut converted_from = first;
@@ -515,8 +513,8 @@ fn pack_2byte_rows(
     argb: &Frame<'_>,
     pack: RowFn,
     premultiply: fn(&mut [u8]),
-    from: c_int,
-    upto: c_int,
+    from: i32,
+    upto: i32,
 ) {
     let mut out = dst.frame_mut();
 
@@ -535,14 +533,14 @@ fn upsample_simple(
     dst: &mut Buffer,
     src: &Frame<'_>,
     layout: usize,
-    first: c_int,
-    upto: c_int,
+    first: i32,
+    upto: i32,
 ) {
     let width = src.width as usize;
     let planes = yuv_planes(src);
     let mut out = dst.frame_mut();
 
-    wpd::convert::yuv420_to_packed_simple(
+    crate::convert::yuv420_to_packed_simple(
         dsp,
         layout,
         &mut out.planes_mut()[0],
@@ -560,14 +558,14 @@ fn upsample_fancy(
     dst: &mut Buffer,
     src: &Frame<'_>,
     layout: usize,
-    first: c_int,
-    upto: c_int,
-) -> c_int {
+    first: i32,
+    upto: i32,
+) -> i32 {
     let (width, height) = (src.width as usize, src.height as usize);
     let planes = yuv_planes(src);
     let mut out = dst.frame_mut();
 
-    wpd::convert::yuv420_to_packed_rows(
+    crate::convert::yuv420_to_packed_rows(
         dsp,
         layout,
         &mut out.planes_mut()[0],
@@ -576,7 +574,7 @@ fn upsample_fancy(
         height,
         first as usize,
         upto as usize,
-    ) as c_int
+    ) as i32
 }
 
 /// Hands out rows `[0, upto)` of the still lossless frame, premultiplying and
@@ -590,7 +588,7 @@ pub fn export_still_lossless<'a>(
     t: RowTargets<'a>,
     img: &Frame<'a>,
     out: &mut Handout<'a>,
-    upto: c_int,
+    upto: i32,
 ) -> Result<()> {
     let RowTargets {
         dsp,
@@ -628,7 +626,7 @@ pub fn export_still_lossless<'a>(
     }
 
     if !format_is_packed(format) {
-        let native = img.format as c_int;
+        let native = img.format as i32;
         let Some(ext) = ext else {
             export_own(set, *img, native, out);
             finish();
@@ -663,7 +661,7 @@ pub fn export_still_lossless<'a>(
 
     let pack = format_packer(dsp, format);
 
-    if !set.premultiply && (pack.is_none() || img.format as c_int == format) {
+    if !set.premultiply && (pack.is_none() || img.format as i32 == format) {
         export_own(set, *img, format, out);
         finish();
         return Ok(());

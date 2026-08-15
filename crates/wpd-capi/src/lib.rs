@@ -14,16 +14,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::all)]
 
-pub mod anim;
 pub mod api;
 pub mod compat;
 pub mod container;
-pub mod convert;
 pub mod cpu;
 pub mod decoder;
 pub mod dsp;
-pub mod export;
 pub mod frame;
-pub mod lossy;
 pub mod options;
 pub mod rescale;

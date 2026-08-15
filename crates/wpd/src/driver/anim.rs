@@ -1,7 +1,7 @@
 //! The animation compositor's plumbing, as `src/anim.c` did it.
 //!
 //! The geometry — whether a frame stands on its own, and how it divides into
-//! blended and copied regions — is [`wpd::anim`]. What is here brings the
+//! blended and copied regions — is [`crate::anim`]. What is here brings the
 //! canvas into the format the next frame will be composited in, disposes what
 //! the frame before asked to be disposed, and walks the regions.
 //!
@@ -11,44 +11,42 @@
 //! memory — except in the one case where they are, which
 //! [`prepare_canvas`] moves aside by name.
 
-use std::ffi::c_int;
 use std::mem;
 
-use wpd::anim::{regions, Placement, Region};
-use wpd::error::{Error, Result};
-use wpd::image::Format;
+use crate::anim::{regions, Placement, Region};
+use crate::error::{Error, Result};
+use crate::image::Format;
 
-use wpd::blit::{self, Rect};
-use wpd::dsp::vp8l::Vp8lDsp;
+use crate::blit::{self, Rect};
+use crate::dsp::vp8l::Vp8lDsp;
 
-use crate::convert::{
+use super::convert::{
     convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
 };
-use crate::decoder::{
-    rl24, rl32, Source, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8, TAG_VP8L,
+use super::{
+    rl24, rl32, Decoder, Source, ALPHA_COMPRESSION_VP8L, ANIM_SUBFRAME, TAG_ALPH,
+    TAG_VP8, TAG_VP8L,
 };
-use wpd::dsp::yuv::YuvDsp;
-use wpd::picture::{Buffer, Frame};
-use wpd::rescale::premultiply_argb_row;
-
-const WPD_ANIM_SUBFRAME: c_int = 1;
+use crate::dsp::yuv::YuvDsp;
+use crate::picture::{Buffer, Frame};
+use crate::rescale::premultiply_argb_row;
 
 /// Everything the compositor asks the decoder about a frame's placement,
 /// gathered at the call.
 pub struct CPlacement {
-    pub canvas_width: c_int,
-    pub canvas_height: c_int,
-    pub pos_x: c_int,
-    pub pos_y: c_int,
-    pub anmf_flags: c_int,
-    pub frame_index: c_int,
+    pub canvas_width: i32,
+    pub canvas_height: i32,
+    pub pos_x: i32,
+    pub pos_y: i32,
+    pub anmf_flags: i32,
+    pub frame_index: i32,
     pub frame_has_alpha: bool,
     pub key_frame: bool,
-    pub prev_anmf_flags: c_int,
-    pub prev_width: c_int,
-    pub prev_height: c_int,
-    pub prev_pos_x: c_int,
-    pub prev_pos_y: c_int,
+    pub prev_anmf_flags: i32,
+    pub prev_width: i32,
+    pub prev_height: i32,
+    pub prev_pos_x: i32,
+    pub prev_pos_y: i32,
     pub prev_key_frame: bool,
     pub premultiply: bool,
     pub no_fancy_upsampling: bool,
@@ -119,10 +117,10 @@ fn paint(
 fn clear_rect(
     pl: &CPlacement,
     canvas: &mut Buffer,
-    pos_x: c_int,
-    pos_y: c_int,
-    width: c_int,
-    height: c_int,
+    pos_x: i32,
+    pos_y: i32,
+    width: i32,
+    height: i32,
 ) {
     let argb = canvas.format == Some(Format::Argb);
     let colour = if argb { pl.clear_argb } else { pl.clear_yuva };
@@ -207,7 +205,7 @@ fn prepare_canvas(
 
             convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
         }
-        if pl.prev_anmf_flags & wpd::container::ANMF_FLAG_DISPOSE as c_int != 0 {
+        if pl.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE as i32 != 0 {
             clear_rect(
                 pl,
                 canvas,
@@ -259,7 +257,7 @@ pub fn anim_composite(
     Ok(())
 }
 
-impl<'a> WPDDecoder<'a> {
+impl<'a> Decoder<'a> {
     /// The decoder's answers to what the compositor asks, gathered at the
     /// call. `key_frame` is the one field it does not know yet:
     /// [`Placement::is_key_frame`] decides it from the rest.
@@ -290,18 +288,15 @@ impl<'a> WPDDecoder<'a> {
     ///
     /// Returns the declared size, or nothing when the chunk is too short to
     /// carry one.
-    fn read_anmf_header(&mut self, header: &[u8]) -> Option<(c_int, c_int)> {
+    fn read_anmf_header(&mut self, header: &[u8]) -> Option<(i32, i32)> {
         if header.len() < 16 {
             return None;
         }
-        self.pos_x = rl24(header) as c_int * 2;
-        self.pos_y = rl24(&header[3..]) as c_int * 2;
-        self.frame_duration = rl24(&header[12..]) as c_int;
-        self.anmf_flags = header[15] as c_int;
-        Some((
-            rl24(&header[6..]) as c_int + 1,
-            rl24(&header[9..]) as c_int + 1,
-        ))
+        self.pos_x = rl24(header) as i32 * 2;
+        self.pos_y = rl24(&header[3..]) as i32 * 2;
+        self.frame_duration = rl24(&header[12..]) as i32;
+        self.anmf_flags = header[15] as i32;
+        Some((rl24(&header[6..]) as i32 + 1, rl24(&header[9..]) as i32 + 1))
     }
 
     /// Decodes one ANMF chunk and composites it onto the canvas.
@@ -318,7 +313,7 @@ impl<'a> WPDDecoder<'a> {
         if self.pos_x + declared_width > self.canvas_width
             || self.pos_y + declared_height > self.canvas_height
         {
-            wpd::log::error(&format!(
+            crate::log::error(&format!(
                 "Frame ({declared_width}x{declared_height} at pos {}x{}) does not \
                  fit into canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
@@ -358,10 +353,10 @@ impl<'a> WPDDecoder<'a> {
             match chunk_type {
                 TAG_ALPH => {
                     if payload_size == 0 {
-                        wpd::log::error("invalid ALPHA chunk size");
+                        crate::log::error("invalid ALPHA chunk size");
                         return Err(Error::InvalidData);
                     }
-                    let alpha_header = self.input.chunk(at, 1)[0] as c_int;
+                    let alpha_header = self.input.chunk(at, 1)[0] as i32;
 
                     self.alpha_data_offset = at + 1;
                     self.alpha_data_size = payload_size - 1;
@@ -370,7 +365,7 @@ impl<'a> WPDDecoder<'a> {
                     let compression = alpha_header & 0x03;
 
                     if compression > ALPHA_COMPRESSION_VP8L {
-                        wpd::log::warning("skipping unsupported ALPHA chunk");
+                        crate::log::warning("skipping unsupported ALPHA chunk");
                     } else {
                         self.has_alpha = true;
                         self.alpha_compression = compression;
@@ -393,7 +388,7 @@ impl<'a> WPDDecoder<'a> {
         }
 
         let Some(mut which) = sub else {
-            wpd::log::error("image data not found");
+            crate::log::error("image data not found");
             return Err(Error::InvalidData);
         };
         let (sub_width, sub_height, sub_format) = {
@@ -403,7 +398,7 @@ impl<'a> WPDDecoder<'a> {
         };
 
         if sub_width != declared_width || sub_height != declared_height {
-            wpd::log::warning(&format!(
+            crate::log::warning(&format!(
                 "ANMF declares {declared_width}x{declared_height} but the image is \
                  {sub_width}x{sub_height}"
             ));
@@ -411,7 +406,7 @@ impl<'a> WPDDecoder<'a> {
         if self.pos_x + sub_width > self.canvas_width
             || self.pos_y + sub_height > self.canvas_height
         {
-            wpd::log::error(&format!(
+            crate::log::error(&format!(
                 "Frame ({sub_width}x{sub_height} at pos {}x{}) does not fit into \
                  canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
@@ -448,7 +443,7 @@ impl<'a> WPDDecoder<'a> {
                 height,
                 ..
             } = self;
-            let src = crate::decoder::lossy_view(
+            let src = super::lossy_view(
                 vp8.as_deref(),
                 alpha_plane,
                 *has_alpha,
@@ -498,7 +493,7 @@ impl<'a> WPDDecoder<'a> {
         fed. Nothing above reads the canvas except the ARGB target rule, which
         wants a canvas to stay compatible with and correctly declines when there
         is none. Switching modes mid-animation is refused for that reason. */
-        if self.anim_mode != WPD_ANIM_SUBFRAME {
+        if self.anim_mode != ANIM_SUBFRAME {
             self.composite(&pl, which, target)?;
         }
 
@@ -537,14 +532,14 @@ impl<'a> WPDDecoder<'a> {
             ..
         } = self;
         let src = match which {
-            Source::Lossy => crate::decoder::lossy_view(
+            Source::Lossy => super::lossy_view(
                 vp8.as_deref(),
                 alpha_plane,
                 *has_alpha,
                 *width,
                 *height,
             ),
-            Source::Lossless => crate::decoder::lossless_view(vp8l, *lossless_out),
+            Source::Lossless => super::lossless_view(vp8l, *lossless_out),
             _ => converted.frame(),
         };
 

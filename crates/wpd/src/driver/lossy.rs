@@ -3,26 +3,24 @@
 //! Three things happen here that the VP8 decoder itself knows nothing about:
 //! the alpha plane a WebP file carries beside the luma, the planar view handed
 //! out for it, and the in-loop filter a scaled decode drops. The pixels are
-//! [`wpd::vp8`]; what is here is the WebP container's idea of a lossy frame.
+//! [`crate::vp8`]; what is here is the WebP container's idea of a lossy frame.
 //!
 //! The alpha plane is the decoder's own `Vec`, and the chunk it is decoded
 //! from is a slice of the input, so every call below destructures the decoder
 //! to take both at once. The C reached for each through the decoder pointer
 //! and the aliasing rule was the reader's to reconstruct.
 
-use std::ffi::c_int;
+use crate::error::{Error, Result, Status};
+use crate::picture::PlaneMut;
+use crate::vp8l::{AlphaDst, Target};
 
-use wpd::error::{Error, Result, Status};
-use wpd::picture::PlaneMut;
-use wpd::vp8l::{AlphaDst, Target};
+use super::convert::scaled_size;
+use super::{Decoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L};
 
-use crate::convert::scaled_size;
-use crate::decoder::{WPDDecoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L};
-
-const ALPHA_FILTER_NONE: c_int = 0;
-const ALPHA_FILTER_HORIZONTAL: c_int = 1;
-const ALPHA_FILTER_VERTICAL: c_int = 2;
-const ALPHA_FILTER_GRADIENT: c_int = 3;
+const ALPHA_FILTER_NONE: i32 = 0;
+const ALPHA_FILTER_HORIZONTAL: i32 = 1;
+const ALPHA_FILTER_VERTICAL: i32 = 2;
+const ALPHA_FILTER_GRADIENT: i32 = 3;
 
 /// Undoes the per-row prediction an ALPH chunk's filter applied.
 ///
@@ -32,7 +30,7 @@ fn alpha_inverse_prediction(
     plane: &mut PlaneMut<'_>,
     width: usize,
     height: i32,
-    mode: c_int,
+    mode: i32,
 ) {
     if width == 0 || height == 0 {
         return;
@@ -85,9 +83,9 @@ fn alpha_inverse_prediction(
     }
 }
 
-impl<'a> WPDDecoder<'a> {
+impl<'a> Decoder<'a> {
     /// What the last VP8 frame header declared.
-    fn vp8_size(&self) -> (c_int, c_int) {
+    fn vp8_size(&self) -> (i32, i32) {
         self.vp8
             .as_ref()
             .map_or((0, 0), |vp8| (vp8.width, vp8.height))

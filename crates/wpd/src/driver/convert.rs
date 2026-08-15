@@ -1,62 +1,58 @@
 //! Format policy, cropping, scaling and format conversion.
 //!
 //! The decision-making — which format packs how, what a crop resolves to, what
-//! a scale rounds to — is [`wpd::image`]; the row walking is [`wpd::convert`]
-//! and [`wpd::rescale`]. What is here is the picture-level plumbing: every
+//! a scale rounds to — is [`crate::image`]; the row walking is [`crate::convert`]
+//! and [`crate::rescale`]. What is here is the picture-level plumbing: every
 //! source is a borrowed [`Frame`] and every destination a [`Buffer`] the
 //! decoder owns, so a crop is a `window` and a flip a reading order rather
 //! than arithmetic on a pointer.
 
-use std::ffi::c_int;
+use super::ANIM_SUBFRAME;
+use crate::convert::YuvPlanes;
+use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
+use crate::error::{Error, Result};
+use crate::image::{self, ceil_rshift, Crop, Format};
+use crate::options::Options;
+use crate::picture::{Buffer, Frame};
+use crate::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
 
-use wpd::convert::YuvPlanes;
-use wpd::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
-use wpd::error::{Error, Result};
-use wpd::image::{self, ceil_rshift, Crop, Format};
-use wpd::options::Options;
-use wpd::picture::{Buffer, Frame};
-use wpd::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
-
-pub fn format_is_packed(format: c_int) -> bool {
+pub fn format_is_packed(format: i32) -> bool {
     Format::from_raw(format).is_some_and(Format::is_packed)
 }
 
-pub fn format_bpp(format: c_int) -> usize {
+pub fn format_bpp(format: i32) -> usize {
     Format::from_raw(format).map_or(4, Format::bpp)
 }
 
-pub fn format_is_premultiplied(format: c_int) -> bool {
+pub fn format_is_premultiplied(format: i32) -> bool {
     Format::from_raw(format).is_some_and(Format::is_premultiplied)
 }
 
-pub fn format_valid(format: c_int) -> bool {
+pub fn format_valid(format: i32) -> bool {
     Format::from_raw(format).is_some()
 }
 
-pub fn format_layout(format: c_int) -> usize {
+pub fn format_layout(format: i32) -> usize {
     Format::from_raw(format).map_or(LAYOUT_ARGB, Format::layout)
 }
 
-pub fn format_packer(dsp: &YuvDsp, format: c_int) -> Option<RowFn> {
+pub fn format_packer(dsp: &YuvDsp, format: i32) -> Option<RowFn> {
     dsp.packer(Format::from_raw(format)?)
 }
 
-pub fn format_premultiplier_4444(dsp: &YuvDsp, format: c_int) -> fn(&mut [u8]) {
+pub fn format_premultiplier_4444(dsp: &YuvDsp, format: i32) -> fn(&mut [u8]) {
     dsp.premultiplier_4444(Format::from_raw(format).unwrap_or(Format::Argb))
 }
 
-/// `WPD_ANIM_SUBFRAME` from `include/wpd.h`.
-const ANIM_SUBFRAME: c_int = 1;
-
-pub fn premultiply_after_pack(animation: bool, anim_mode: c_int) -> bool {
+pub fn premultiply_after_pack(animation: bool, anim_mode: i32) -> bool {
     !animation || anim_mode == ANIM_SUBFRAME
 }
 
 pub fn scaled_size(
     options: &Options,
-    src_width: c_int,
-    src_height: c_int,
-) -> Result<(c_int, c_int)> {
+    src_width: i32,
+    src_height: i32,
+) -> Result<(i32, i32)> {
     let (w, h) = options.scale.unwrap_or((0, 0));
 
     image::scaled_size(w, h, src_width, src_height).map_err(|_| Error::TooLarge)
@@ -90,8 +86,8 @@ fn scale_image(
     scratch: &mut Scratch,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    width: c_int,
-    height: c_int,
+    width: i32,
+    height: i32,
     chroma_full: bool,
     weight_luma: bool,
 ) -> Result<()> {
@@ -160,13 +156,13 @@ fn scale_image(
 
     if premult {
         for y in 0..height {
-            wpd::rescale::premultiply_argb_row(out.row(0, y), true);
+            crate::rescale::premultiply_argb_row(out.row(0, y), true);
         }
     } else if weight_luma {
         for y in 0..height {
             let (luma, alpha) = out.row_pair(0, 3, y);
 
-            wpd::rescale::multiply_row(luma, alpha, true);
+            crate::rescale::multiply_row(luma, alpha, true);
         }
     }
 
@@ -185,7 +181,7 @@ pub fn transform_image<'a>(
     scratch: &mut Scratch,
     scaled: &'a mut Buffer,
     src: Frame<'a>,
-    format: c_int,
+    format: i32,
 ) -> Result<Frame<'a>> {
     let view = crop_image(options, src)?;
 
@@ -231,7 +227,7 @@ pub fn convert_to_packed(
     dsp: &YuvDsp,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    format: c_int,
+    format: i32,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
 ) -> Result<()> {
@@ -259,7 +255,7 @@ pub fn convert_to_packed(
     let (w, h) = (width as usize, height as usize);
 
     if src.chroma_full {
-        wpd::convert::yuv444_to_packed(layout, plane, &planes, w, h);
+        crate::convert::yuv444_to_packed(layout, plane, &planes, w, h);
         if let (Some(a), Some(dispatch)) = (&planes.a, dsp.alpha_dispatcher(layout)) {
             for y in 0..height {
                 dispatch(plane.row_mut(y, 0, 4 * w), a.row(y, 0, w));
@@ -268,9 +264,9 @@ pub fn convert_to_packed(
         return Ok(());
     }
     if no_fancy_upsampling {
-        wpd::convert::yuv420_to_packed_simple(dsp, layout, plane, &planes, w, 0, h);
+        crate::convert::yuv420_to_packed_simple(dsp, layout, plane, &planes, w, 0, h);
     } else {
-        wpd::convert::yuv420_to_packed_rows(dsp, layout, plane, &planes, w, h, 0, h);
+        crate::convert::yuv420_to_packed_rows(dsp, layout, plane, &planes, w, h, 0, h);
     }
     Ok(())
 }
@@ -281,7 +277,7 @@ fn convert_to_packed_2byte(
     dsp: &YuvDsp,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    format: c_int,
+    format: i32,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
 ) -> Result<()> {
@@ -292,7 +288,7 @@ fn convert_to_packed_2byte(
             dsp,
             &mut temp,
             src,
-            Format::Argb as c_int,
+            Format::Argb as i32,
             no_fancy_upsampling,
             premultiply_packed,
         )?;
@@ -330,7 +326,7 @@ pub fn convert_to_argb(
         dsp,
         dst,
         src,
-        Format::Argb as c_int,
+        Format::Argb as i32,
         no_fancy_upsampling,
         false,
     )
@@ -341,8 +337,8 @@ pub fn ensure_yuva_rows(
     dst: &mut Buffer,
     src: &Frame<'_>,
     want_alpha: bool,
-    row_start: c_int,
-    row_end: c_int,
+    row_start: i32,
+    row_end: i32,
 ) -> Result<()> {
     let (width, height) = (src.width, src.height);
 
@@ -354,7 +350,7 @@ pub fn ensure_yuva_rows(
     let w = width as usize;
 
     if src.format == Format::Argb {
-        wpd::convert::argb_to_yuva(
+        crate::convert::argb_to_yuva(
             dsp,
             out.planes_mut(),
             &src.plane[0],

@@ -24,6 +24,7 @@ pub mod blit;
 pub mod container;
 pub mod convert;
 pub mod cpu;
+pub mod driver;
 pub mod dsp;
 pub mod error;
 pub mod handout;
