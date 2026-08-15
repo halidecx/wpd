@@ -52,6 +52,12 @@ pub const ANIM_SUBFRAME: i32 = 1;
 /// the failure instead, and whoever receives it calls [`Decoder::fail`].
 pub type Failure = (&'static str, Error);
 
+/// How a failure reads once it is written down: what was being done, and what
+/// went wrong with it.
+pub fn described((message, e): Failure) -> String {
+    format!("{message} ({})", e.message())
+}
+
 /// The decoder, with the lifetime of the file it was pointed at.
 ///
 /// Everything a decode builds up is owned here, and released by [`Drop`]
@@ -343,10 +349,10 @@ impl<'a> Decoder<'a> {
 
     /// Records a failure and hands it straight back, so that noting it and
     /// returning it are one expression.
-    pub fn fail(&mut self, message: &str, e: Error) -> Error {
+    pub fn fail(&mut self, message: &'static str, e: Error) -> Error {
         self.status = Some(e);
 
-        let text = format!("{message} ({})", e.message());
+        let text = described((message, e));
         let bytes = text.as_bytes();
         let len = bytes.len().min(ERROR_MAX - 1);
 
@@ -695,7 +701,7 @@ impl<'a> Decoder<'a> {
 
     /// No more input is coming, so a chunk list that stops short of what it
     /// promised, or that never carried an image, cannot be completed.
-    fn check_final_headers(&mut self, message: &str) -> Result<(), Error> {
+    fn check_final_headers(&mut self, message: &'static str) -> Result<(), Error> {
         let hs = self.scanned();
 
         if hs.truncated {

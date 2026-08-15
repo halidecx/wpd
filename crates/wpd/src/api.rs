@@ -12,20 +12,23 @@
 //!   promises the caller keeps the bytes alive for the decoder's whole life;
 //!   [`Decoder::open_borrowed`] makes that a lifetime.
 //!
-//! This module lives here rather than in the core crate because the driver it
-//! wraps does; it moves up with the driver. Nothing in it reaches through the
-//! C ABI — the calls are to this crate's own Rust functions, with the raw
-//! pointers confined to the one line each needs.
+//! A picture is a [`Handout`] and nothing else, so a row is a slice the
+//! compiler has bounded rather than a pointer and a stride that may run
+//! backwards. That is the whole difference between this and the C ABI: the
+//! negative stride the header promises exists only where a `WPDFrame` is
+//! built, and a flip here is the order the rows come out in.
 
-use std::ffi::CStr;
 use std::marker::PhantomData;
 
-use wpd::image::Format;
+use crate::driver;
+use crate::handout::Handout;
+use crate::image::Format;
+use crate::picture::Frame;
 
-use crate::decoder::WPDDecoder;
-use crate::frame::WPDFrame;
-
-pub use wpd::error::{Error, Result};
+pub use crate::container::Coding;
+pub use crate::error::{Error, Result};
+pub use crate::info::{FrameInfo, ImageInfo};
+pub use crate::options::Options;
 
 /// What an animation hands out: the composited canvas, or each sub-frame on
 /// its own at its own position.
@@ -36,9 +39,6 @@ pub enum Animation {
     Subframe,
 }
 
-/// How the image was coded, which a still declares before it is decoded.
-pub use wpd::container::Coding;
-
 /// Which metadata chunk to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metadata {
@@ -47,103 +47,73 @@ pub enum Metadata {
     Xmp,
 }
 
-pub use wpd::options::Options;
-
-/// What a file, and each of its frames, says about itself before any of it is
-/// decoded.
-pub use wpd::info::{FrameInfo, ImageInfo};
-
 /// One decoded picture, borrowed from the decoder that produced it.
 ///
 /// The next decode reuses this memory, which is why the borrow is held: the
 /// C ABI hands out the same pointers and can only ask the caller to be
 /// careful.
 pub struct Picture<'a> {
-    frame: WPDFrame,
-    decoder: PhantomData<&'a Decoder<'a>>,
+    out: Handout<'a>,
 }
 
-impl Picture<'_> {
+impl<'a> Picture<'a> {
+    /// The pixels, or nothing when the decode produced no picture, which is
+    /// what a partial frame with no finished rows has.
+    fn pixels(&self) -> Option<&Frame<'a>> {
+        self.out.frame()
+    }
+
     pub fn width(&self) -> i32 {
-        self.frame.width
+        self.out.width
     }
 
     pub fn height(&self) -> i32 {
-        self.frame.height
+        self.out.height
     }
 
-    pub fn format(&self) -> Option<Format> {
-        Format::from_raw(self.frame.format)
+    pub fn format(&self) -> Format {
+        self.out.format
     }
 
     /// How long this frame is shown, in milliseconds, or zero for a still.
     pub fn duration(&self) -> i32 {
-        self.frame.duration
+        self.out.duration
     }
 
     /// When this frame is shown, in milliseconds from the start.
     pub fn timestamp(&self) -> i64 {
-        self.frame.timestamp
+        self.out.timestamp
     }
 
-    /// Where a sub-frame lands on the canvas, in
-    /// [`Animation::Subframe`] mode.
+    /// Where a sub-frame lands on the canvas, in [`Animation::Subframe`] mode.
     pub fn position(&self) -> (i32, i32) {
-        (self.frame.pos_x, self.frame.pos_y)
+        (self.out.pos_x, self.out.pos_y)
     }
 
     pub fn has_alpha(&self) -> bool {
-        self.frame.has_alpha != 0
+        self.out.has_alpha
     }
 
     /// Whether the canvas is cleared to the background colour behind this
     /// frame before the next one is drawn.
     pub fn dispose_to_background(&self) -> bool {
-        self.frame.dispose == 1
+        self.out.dispose_to_background
     }
 
     /// Whether this frame is alpha-blended over what is already there, as
     /// opposed to replacing it.
     pub fn blend(&self) -> bool {
-        self.frame.blend == 0
+        self.out.blend
     }
 
     /// How many planes this picture's format hands out.
     pub fn planes(&self) -> usize {
-        match self.format() {
-            Some(Format::Yuva420p) => 4,
-            Some(Format::Yuv420p) => 3,
-            _ => 1,
-        }
-    }
-
-    fn row_len(&self, plane: usize) -> usize {
-        let format = self.format().unwrap_or(Format::Argb);
-
-        if self.planes() == 1 {
-            self.width() as usize * format.bpp()
-        } else {
-            let shift = u32::from(plane == 1 || plane == 2);
-
-            wpd::image::ceil_rshift(self.width(), shift) as usize
-        }
+        self.out.planes()
     }
 
     /// How many rows `plane` has, which the chroma planes halve.
     pub fn rows(&self, plane: usize) -> i32 {
-        if self.planes() == 1 {
-            self.height()
-        } else {
-            let shift = u32::from(plane == 1 || plane == 2);
-
-            wpd::image::ceil_rshift(self.height(), shift)
-        }
-    }
-
-    /// The distance between rows of `plane`, which is negative when the
-    /// picture was asked for flipped.
-    pub fn stride(&self, plane: usize) -> isize {
-        self.frame.stride[plane]
+        self.pixels().map_or(0, |img| img.rows(plane))
     }
 
     /// Row `y` of `plane`, top row first however the picture is stored.
@@ -151,23 +121,17 @@ impl Picture<'_> {
     /// # Panics
     ///
     /// If `plane` or `y` is outside the picture.
-    pub fn row(&self, plane: usize, y: i32) -> &[u8] {
+    pub fn row(&self, plane: usize, y: i32) -> &'a [u8] {
         assert!(plane < self.planes(), "no such plane");
-        assert!(y >= 0 && y < self.rows(plane), "no such row");
 
-        let stride = self.frame.stride[plane];
-        let at = y as isize * stride;
+        let img = self.pixels().expect("no pixels");
 
-        unsafe {
-            std::slice::from_raw_parts(
-                self.frame.data[plane].offset(at),
-                self.row_len(plane),
-            )
-        }
+        assert!(y >= 0 && y < img.rows(plane), "no such row");
+        img.row(plane, y)
     }
 
     /// Every row of `plane`, in order.
-    pub fn rows_of(&self, plane: usize) -> impl Iterator<Item = &[u8]> + '_ {
+    pub fn rows_of(&self, plane: usize) -> impl Iterator<Item = &'a [u8]> + '_ {
         (0..self.rows(plane)).map(move |y| self.row(plane, y))
     }
 }
@@ -175,10 +139,16 @@ impl Picture<'_> {
 /// A WebP decoder.
 ///
 /// The lifetime is the input's: it is `'static` for a decoder that owns its
-/// bytes, and the input's own for one opened with
-/// [`Decoder::open_borrowed`].
+/// bytes, and the input's own for one opened with [`Decoder::open_borrowed`].
 pub struct Decoder<'a> {
-    inner: Box<WPDDecoder<'a>>,
+    inner: Box<driver::Decoder<'a>>,
+    /// What a decode that failed while it was producing a picture was doing.
+    ///
+    /// The decoder cannot write this down itself: the picture it was asked
+    /// for borrows it, and the borrow outlives the call whether or not the
+    /// call succeeded. So the two entry points that hand out a picture keep
+    /// their own account, and [`Decoder::error`] prefers it.
+    failed: Option<String>,
     input: PhantomData<&'a [u8]>,
 }
 
@@ -190,69 +160,79 @@ impl Default for Decoder<'_> {
 
 impl<'a> Decoder<'a> {
     pub fn new() -> Self {
-        wpd::log::set_sink(crate::compat::forward_log);
-        wpd::cpu::init();
+        crate::cpu::init();
 
         Decoder {
-            inner: Box::new(WPDDecoder::new()),
+            inner: Box::new(driver::Decoder::new()),
+            failed: None,
             input: PhantomData,
         }
+    }
+
+    /// The decoder, with anything this side was keeping about the last
+    /// failure cleared: from here on its own account is the current one.
+    ///
+    /// Reaching the decoder through this is what keeps the two from
+    /// disagreeing about which failure was last.
+    fn driver(&mut self) -> &mut driver::Decoder<'a> {
+        self.failed = None;
+        &mut self.inner
     }
 
     /// The format frames come out in. Leaving it unset hands out whatever the
     /// file codes natively, which is planar for a lossy frame and ARGB for a
     /// lossless one.
     pub fn set_format(&mut self, format: Format) -> Result<()> {
-        self.inner.set_output_format(format as i32)
+        self.driver().set_output_format(format as i32)
     }
 
     pub fn set_animation(&mut self, mode: Animation) -> Result<()> {
-        self.inner.set_animation_mode(match mode {
-            Animation::Composited => 0,
-            Animation::Subframe => 1,
+        self.driver().set_animation_mode(match mode {
+            Animation::Composited => driver::ANIM_COMPOSITED,
+            Animation::Subframe => driver::ANIM_SUBFRAME,
         })
     }
 
     pub fn set_options(&mut self, options: Options) -> Result<()> {
-        self.inner.set_core_options(options)
+        self.driver().set_core_options(options)
     }
 
     /// Opens a file the decoder copies, so nothing has to outlive the call.
     pub fn open(&mut self, data: &[u8]) -> Result<()> {
-        self.inner.open(data)
+        self.driver().open(data)
     }
 
     /// Opens a file the decoder reads in place. The bytes must outlive the
     /// decoder, which is what the lifetime says.
     pub fn open_borrowed(&mut self, data: &'a [u8]) -> Result<()> {
-        self.inner.open_borrowed(data)
+        self.driver().open_borrowed(data)
     }
 
     /// Starts a stream the caller appends to as bytes arrive.
     pub fn open_stream(&mut self) -> Result<()> {
-        self.inner.open_stream()
+        self.driver().open_stream()
     }
 
     pub fn append(&mut self, chunk: &[u8]) -> Result<()> {
-        self.inner.append(chunk)
+        self.driver().append(chunk)
     }
 
     /// Replaces the stream's contents with a longer prefix of the same file,
     /// which is what a caller reading into a growing buffer has.
     pub fn update(&mut self, data: &'a [u8]) -> Result<()> {
-        self.inner.update(data)
+        self.driver().update(data)
     }
 
     pub fn end_of_stream(&mut self) -> Result<()> {
-        self.inner.end_of_stream()
+        self.driver().end_of_stream()
     }
 
     pub fn info(&mut self) -> Result<ImageInfo> {
-        self.inner.image_info()
+        self.driver().image_info()
     }
 
     pub fn frame_info(&mut self, index: i32) -> Result<FrameInfo> {
-        self.inner.frame_entry(index)
+        self.driver().frame_entry(index)
     }
 
     /// The named metadata chunk, or none when the file carries no such chunk.
@@ -263,13 +243,13 @@ impl<'a> Decoder<'a> {
             Metadata::Xmp => 4,
         };
 
-        self.inner.metadata(kind).ok().flatten()
+        self.driver().metadata(kind).ok().flatten()
     }
 
     /// Returns to the first frame. A stream that was appended to cannot be
     /// rewound, because the bytes it has read are gone.
     pub fn rewind(&mut self) -> Result<()> {
-        self.inner.rewind()
+        self.driver().rewind()
     }
 
     /// The next frame, or none when the file is finished or the stream has
@@ -277,15 +257,17 @@ impl<'a> Decoder<'a> {
     ///
     /// The picture borrows the decoder: the next call reuses its memory.
     pub fn next_frame(&mut self) -> Result<Option<Picture<'_>>> {
-        let mut frame = WPDFrame::zeroed();
+        let mut out = Handout::default();
 
-        if !self.inner.next_frame(&mut frame)? {
-            return Ok(None);
+        self.failed = None;
+        match self.inner.next_picture(&mut out) {
+            Ok(false) => Ok(None),
+            Ok(true) => Ok(Some(Picture { out })),
+            Err(failure) => {
+                self.failed = Some(driver::described(failure));
+                Err(failure.1)
+            }
         }
-        Ok(Some(Picture {
-            frame,
-            decoder: PhantomData,
-        }))
     }
 
     /// As much of the frame in progress as has been decoded, and how many of
@@ -294,41 +276,42 @@ impl<'a> Decoder<'a> {
     /// Rows past the count hold whatever the buffer held before; a caller that
     /// wants only finished pixels stops there.
     pub fn partial_frame(&mut self) -> Result<(Picture<'_>, i32)> {
-        let mut frame = WPDFrame::zeroed();
+        let mut out = Handout::default();
         let mut rows = 0;
 
-        self.inner.partial_frame(&mut frame, &mut rows)?;
-        Ok((
-            Picture {
-                frame,
-                decoder: PhantomData,
-            },
-            rows,
-        ))
+        self.failed = None;
+        match self.inner.partial_picture(&mut out, &mut rows) {
+            Ok(_) => Ok((Picture { out }, rows)),
+            Err(failure) => {
+                self.failed = Some(driver::described(failure));
+                Err(failure.1)
+            }
+        }
     }
 
     /// The last failure's message, which says more than the status does.
     pub fn error(&self) -> &str {
-        self.inner.error_message()
+        match &self.failed {
+            Some(message) => message,
+            None => self.inner.error_message(),
+        }
     }
 }
 
 /// The library's version, as `wpd_version_string` reports it.
 pub fn version() -> &'static str {
-    let s = unsafe { CStr::from_ptr(crate::compat::wpd_version_string()) };
-
-    s.to_str().unwrap_or("")
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Restricts which instruction sets the DSP tables dispatch to, which is what
 /// the test harnesses use to compare the assembly against the fallbacks.
 pub fn set_cpu_flags_mask(mask: u32) {
-    wpd::cpu::set_mask(mask);
+    crate::cpu::set_mask(mask);
 }
 
 /// What a file says about itself, without opening a decoder for it.
 pub fn info(data: &[u8]) -> Result<ImageInfo> {
-    let scanned = wpd::container::get_info(data)?;
+    let scanned = crate::container::get_info(data)?;
 
     Ok(ImageInfo {
         width: scanned.width,
@@ -371,7 +354,7 @@ mod tests {
             let picture = d.next_frame().unwrap().expect("a frame");
 
             assert_eq!(picture.width(), 1);
-            assert_eq!(picture.format(), Some(Format::Rgba));
+            assert_eq!(picture.format(), Format::Rgba);
             assert_eq!(picture.row(0, 0).len(), 4);
             assert_eq!(picture.rows_of(0).count(), 1);
         }

@@ -7,8 +7,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use wpd::api::{Animation, Decoder, Options};
 use wpd::image::Format;
-use wpd_capi::api::{Animation, Decoder, Options};
 
 fn corpus() -> Vec<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -58,7 +58,7 @@ fn the_corpus_decodes_in_every_packed_format() {
             let mut frames = 0;
 
             while let Some(picture) = d.next_frame().unwrap() {
-                assert_eq!(picture.format(), Some(format), "{}", path.display());
+                assert_eq!(picture.format(), format, "{}", path.display());
                 assert_eq!(picture.planes(), 1);
                 for row in picture.rows_of(0) {
                     assert_eq!(row.len(), picture.width() as usize * format.bpp());

@@ -11,8 +11,8 @@ mod output;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+use wpd::api::{self, Animation, Decoder, Metadata};
 use wpd::image::Format;
-use wpd_capi::api::{self, Animation, Decoder, Metadata};
 
 use output::{format_name, Muxer, Output, PIXEL_FORMATS};
 

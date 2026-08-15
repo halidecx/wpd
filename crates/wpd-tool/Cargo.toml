@@ -13,10 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 wpd = { path = "../wpd", default-features = false }
-wpd-capi = { path = "../wpd-capi", default-features = false }
 
 [features]
 default = ["asm"]
-asm = ["wpd/asm", "wpd-capi/asm"]
-trim_dsp = ["wpd/trim_dsp", "wpd-capi/trim_dsp"]
-force_rac32 = ["wpd/force_rac32", "wpd-capi/force_rac32"]
+asm = ["wpd/asm"]
+trim_dsp = ["wpd/trim_dsp"]
+force_rac32 = ["wpd/force_rac32"]

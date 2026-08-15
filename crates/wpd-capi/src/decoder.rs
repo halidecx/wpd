@@ -687,23 +687,6 @@ pub unsafe extern "C" fn wpd_decoder_status(decoder: *const WPDDecoderRaw) -> c_
     }
 }
 
-impl WPDDecoder<'_> {
-    /// The next frame, written into a struct this build owns. Returns whether
-    /// a picture came out.
-    pub(crate) fn next_frame(&mut self, frame: &mut WPDFrame) -> Result<bool, Error> {
-        unsafe { next_frame(self, frame) }
-    }
-
-    /// As [`Self::next_frame`], for the frame in progress.
-    pub(crate) fn partial_frame(
-        &mut self,
-        frame: &mut WPDFrame,
-        rows_valid: &mut c_int,
-    ) -> Result<(), Error> {
-        unsafe { partial_frame(self, frame, rows_valid) }
-    }
-}
-
 /// # Safety
 ///
 /// As [`wpd_decoder_status`]. The string belongs to the decoder and stays

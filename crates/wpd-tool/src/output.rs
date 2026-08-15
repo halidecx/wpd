@@ -3,9 +3,9 @@
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
+use wpd::api::{Coding, ImageInfo, Picture};
 use wpd::dsp::yuv::YuvDsp;
 use wpd::image::Format;
-use wpd_capi::api::{Coding, ImageInfo, Picture};
 
 use crate::md5::{hex, Md5};
 
@@ -33,7 +33,7 @@ pub struct Output {
     width: i32,
     height: i32,
     pub has_alpha: bool,
-    format: Option<Format>,
+    format: Format,
     yuvdsp: YuvDsp,
 }
 
@@ -56,11 +56,7 @@ pub const PIXEL_FORMATS: &[(&str, Format)] = &[
     ("bgrA4444", Format::Bgra4444Pre),
 ];
 
-pub fn format_name(format: Option<Format>) -> &'static str {
-    let Some(format) = format else {
-        return "unknown";
-    };
-
+pub fn format_name(format: Format) -> &'static str {
     PIXEL_FORMATS
         .iter()
         .find(|(_, f)| *f == format)
@@ -97,7 +93,7 @@ impl Output {
             width: 0,
             height: 0,
             has_alpha: false,
-            format: None,
+            format: Format::Argb,
             yuvdsp: YuvDsp::new(),
         };
 
@@ -147,7 +143,7 @@ impl Output {
             width: 0,
             height: 0,
             has_alpha: false,
-            format: None,
+            format: Format::Argb,
             yuvdsp: YuvDsp::new(),
         }
     }
@@ -321,7 +317,7 @@ impl Output {
                 let ppm = self.muxer == Muxer::Ppm;
                 let required = if ppm { Format::Rgb } else { Format::Rgba };
 
-                if frame.format() != Some(required) {
+                if frame.format() != required {
                     eprintln!(
                         "{} requires {} output",
                         if ppm { "ppm" } else { "pam" },
@@ -351,10 +347,7 @@ impl Output {
     fn write_y4m(&mut self, frame: &Picture<'_>) -> io::Result<()> {
         let format = frame.format();
 
-        if !matches!(
-            format,
-            Some(Format::Yuv420p) | Some(Format::Yuva420p) | Some(Format::Argb)
-        ) {
+        if !matches!(format, Format::Yuv420p | Format::Yuva420p | Format::Argb) {
             eprintln!("y4m requires yuv420p, yuva420p or argb output");
             return Err(io::Error::other("wrong format"));
         }
@@ -363,11 +356,11 @@ impl Output {
             self.height = frame.height();
             self.format = format;
 
-            let colour = if format == Some(Format::Yuva420p)
-                || (format == Some(Format::Argb) && self.has_alpha)
+            let colour = if format == Format::Yuva420p
+                || (format == Format::Argb && self.has_alpha)
             {
                 "444alpha"
-            } else if format == Some(Format::Argb) {
+            } else if format == Format::Argb {
                 "444"
             } else {
                 "420jpeg"
@@ -389,7 +382,7 @@ impl Output {
         self.frames += 1;
         self.write(b"FRAME\n")?;
 
-        if format == Some(Format::Argb) {
+        if format == Format::Argb {
             self.write_argb_444(frame)?;
             if self.has_alpha {
                 self.write_argb_alpha(frame)?;
@@ -399,7 +392,7 @@ impl Output {
 
         self.write_plane(frame, 0)?;
 
-        if format == Some(Format::Yuva420p) {
+        if format == Format::Yuva420p {
             self.write_chroma_444(frame, 1)?;
             self.write_chroma_444(frame, 2)?;
             self.write_plane(frame, 3)
@@ -412,7 +405,7 @@ impl Output {
     fn write_raw(&mut self, frame: &Picture<'_>, pixel_format: &str) -> io::Result<()> {
         let format = frame.format();
 
-        if format.is_some_and(Format::is_packed) {
+        if format.is_packed() {
             if pixel_format != format_name(format) {
                 eprintln!(
                     "cannot convert {} frame to {}",
@@ -437,7 +430,7 @@ impl Output {
             }
         };
 
-        if planes == 4 && format != Some(Format::Yuva420p) {
+        if planes == 4 && format != Format::Yuva420p {
             eprintln!("frame has no alpha plane");
             return Err(io::Error::other("no alpha plane"));
         }
