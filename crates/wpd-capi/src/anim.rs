@@ -21,10 +21,10 @@ use crate::decoder::{
     rl24, rl32, Subframe, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8,
     TAG_VP8L,
 };
-use crate::image::{image_alloc_argb, image_alloc_yuva, image_free, WebPImage};
 use crate::vp8::WPD_ERROR_INVALID_DATA;
 use crate::vp8l::{vp8l_decode_frame, VP8L_TARGET_ARGB};
 use wpd::dsp::yuv::YuvDsp;
+use wpd::picture::{Buffer, Frame, FrameMut};
 use wpd::rescale::premultiply_argb_row;
 
 const WPD_OK: c_int = 0;
@@ -58,12 +58,10 @@ pub struct CPlacement {
 pub struct CompositeTargets {
     pub ldsp: *const Vp8lDsp,
     pub ydsp: *const YuvDsp,
-    pub canvas: *mut WebPImage,
+    pub canvas: *mut Buffer,
 }
 
 const _: () = assert!(mem::size_of::<CPlacement>() == 16 * 4 + 8);
-const _: () =
-    assert!(mem::size_of::<CompositeTargets>() == 3 * mem::size_of::<*const ()>());
 
 impl CPlacement {
     fn geometry(&self) -> Placement {
@@ -108,7 +106,7 @@ pub unsafe extern "C" fn anim_is_key_frame(
 unsafe fn paint(
     pl: &CPlacement,
     ct: &CompositeTargets,
-    frame: *const WebPImage,
+    frame: &Frame<'_>,
     region: Region,
 ) {
     if region.w <= 0 || region.h <= 0 {
@@ -120,24 +118,24 @@ unsafe fn paint(
         w: region.w,
         h: region.h,
     };
-    let argb = unsafe { (*ct.canvas).format } == Format::Argb as c_int;
-    let src = unsafe { (*frame).frame() };
+    let argb = unsafe { (*ct.canvas).format } == Some(Format::Argb);
     let mut dst = unsafe { (*ct.canvas).frame_mut() };
     let (x, y) = (pl.pos_x, pl.pos_y);
+    let src = frame;
 
     match (argb, region.blend) {
         (true, true) => blit::blend_argb(
             unsafe { &*ct.ldsp },
             pl.premultiply != 0,
             &mut dst,
-            &src,
+            src,
             r,
             x,
             y,
         ),
-        (true, false) => blit::copy_argb(&mut dst, &src, r, x, y),
-        (false, true) => blit::blend_yuva(&mut dst, &src, r, x, y),
-        (false, false) => blit::copy_yuva(&mut dst, &src, r, x, y),
+        (true, false) => blit::copy_argb(&mut dst, src, r, x, y),
+        (false, true) => blit::blend_yuva(&mut dst, src, r, x, y),
+        (false, false) => blit::copy_yuva(&mut dst, src, r, x, y),
     }
 }
 
@@ -150,7 +148,7 @@ unsafe fn clear_rect(
     width: c_int,
     height: c_int,
 ) {
-    let argb = unsafe { (*ct.canvas).format } == Format::Argb as c_int;
+    let argb = unsafe { (*ct.canvas).format } == Some(Format::Argb);
     let colour = if argb { pl.clear_argb } else { pl.clear_yuva };
     let mut dst = unsafe { (*ct.canvas).frame_mut() };
 
@@ -174,11 +172,11 @@ unsafe fn clear_rect(
 unsafe fn reconcile_alpha(pl: &CPlacement, ct: &CompositeTargets) {
     let canvas = unsafe { &mut *ct.canvas };
 
-    if !canvas.data[0].is_null()
-        && canvas.format == Format::Argb as c_int
-        && canvas.premultiplied != pl.premultiply
+    if !canvas.is_empty()
+        && canvas.format == Some(Format::Argb)
+        && canvas.premultiplied != (pl.premultiply != 0)
     {
-        let mut view = unsafe { canvas.frame_mut() };
+        let mut view = canvas.frame_mut();
 
         for y in 0..view.height {
             let row = view.row(0, y);
@@ -190,71 +188,59 @@ unsafe fn reconcile_alpha(pl: &CPlacement, ct: &CompositeTargets) {
             }
         }
     }
-    canvas.premultiplied = pl.premultiply;
+    canvas.premultiplied = pl.premultiply != 0;
 }
 
 unsafe fn prepare_canvas(
     pl: &CPlacement,
     ct: &CompositeTargets,
-    frame: &WebPImage,
-    format: c_int,
+    frame: &Frame<'_>,
+    format: Format,
 ) -> c_int {
     let covers_canvas = pl.pos_x == 0
         && pl.pos_y == 0
         && frame.width == pl.canvas_width
         && frame.height == pl.canvas_height;
-    let (had_canvas, canvas_format) = {
-        let canvas = unsafe { &*ct.canvas };
+    let canvas = unsafe { &mut *ct.canvas };
 
-        (!canvas.data[0].is_null(), canvas.format)
-    };
-
-    if pl.key_frame != 0 && had_canvas && canvas_format != format {
-        unsafe { image_free(ct.canvas) };
+    if pl.key_frame != 0 && !canvas.is_empty() && canvas.format != Some(format) {
+        canvas.release();
     }
-    let fresh = unsafe { (*ct.canvas).data[0] }.is_null();
+
+    let fresh = canvas.is_empty();
 
     if fresh {
-        let ret = unsafe {
-            if format == Format::Argb as c_int {
-                image_alloc_argb(ct.canvas, pl.canvas_width, pl.canvas_height)
-            } else {
-                image_alloc_yuva(ct.canvas, pl.canvas_width, pl.canvas_height)
-            }
+        let alloc = if format == Format::Argb {
+            canvas.alloc_argb(pl.canvas_width, pl.canvas_height)
+        } else {
+            canvas.alloc_planar(pl.canvas_width, pl.canvas_height, true)
         };
 
-        if ret < 0 {
-            return ret;
+        if let Err(e) = alloc {
+            return crate::convert::alloc_status(e);
         }
-        unsafe { (*ct.canvas).premultiplied = pl.premultiply };
+        canvas.premultiplied = pl.premultiply != 0;
     }
     if fresh || pl.key_frame != 0 {
         if !covers_canvas {
-            let (w, h) = unsafe { ((*ct.canvas).width, (*ct.canvas).height) };
+            let (w, h) = (canvas.width, canvas.height);
 
             unsafe { clear_rect(pl, ct, 0, 0, w, h) };
         }
     } else {
-        if format == Format::Argb as c_int
-            && unsafe { (*ct.canvas).format } == Format::Yuva420p as c_int
-        {
+        if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
             /* The canvas is its own source here, so it is moved aside whole
             and the converted picture built into the slot it left. */
-            let mut yuva: WebPImage = unsafe { *ct.canvas };
-
-            unsafe {
-                *ct.canvas = mem::zeroed();
-            }
+            let yuva = mem::take(canvas);
             let ret = unsafe {
                 convert_to_argb(
                     &*ct.ydsp,
                     &mut *ct.canvas,
-                    &yuva,
+                    &yuva.frame(),
                     pl.no_fancy_upsampling != 0,
                 )
             };
 
-            unsafe { image_free(&mut yuva) };
             if ret < 0 {
                 return ret;
             }
@@ -281,15 +267,12 @@ unsafe fn prepare_canvas(
 ///
 /// Every pointer must be live, and `sub` must fit the canvas at the
 /// placement's position, which the caller checked against the ANMF header.
-#[no_mangle]
-pub unsafe extern "C" fn anim_composite(
-    pl: *const CPlacement,
-    ct: *const CompositeTargets,
-    sub: *const WebPImage,
-    target: c_int,
+pub unsafe fn anim_composite(
+    pl: &CPlacement,
+    ct: &CompositeTargets,
+    frame: &Frame<'_>,
+    target: Format,
 ) -> c_int {
-    let (pl, ct) = unsafe { (&*pl, &*ct) };
-    let frame = unsafe { &*sub };
     let ret = unsafe { prepare_canvas(pl, ct, frame, target) };
 
     if ret < 0 {
@@ -297,8 +280,8 @@ pub unsafe extern "C" fn anim_composite(
     }
     /* A frame coded without an alpha plane has nothing to blend with, and a
     planar canvas cannot split the 2x2 chroma block an overlap would land in. */
-    let has_alpha_plane = frame.format != Format::Yuv420p as c_int;
-    let chroma_aligned = unsafe { (*ct.canvas).format } != Format::Argb as c_int;
+    let has_alpha_plane = frame.format != Format::Yuv420p;
+    let chroma_aligned = unsafe { (*ct.canvas).format } != Some(Format::Argb);
     let mut out = [Region {
         x: 0,
         y: 0,
@@ -316,7 +299,7 @@ pub unsafe extern "C" fn anim_composite(
     );
 
     for region in &out[..n] {
-        unsafe { paint(pl, ct, sub, *region) };
+        unsafe { paint(pl, ct, frame, *region) };
     }
     WPD_OK
 }
@@ -348,18 +331,23 @@ impl WPDDecoder {
         }
     }
 
-    /// Where the named sub-frame image lives. The address is taken from the
-    /// decoder as a whole rather than through a borrow of one field, so it
-    /// stays usable while the others are written.
-    pub(crate) fn image_of(&mut self, which: Subframe) -> *mut WebPImage {
-        let this: *mut WPDDecoder = self;
+    /// The named sub-frame picture. Two of the three are views of memory a
+    /// codec owns; the third is the decoder's own conversion buffer.
+    pub(crate) fn frame_of(&self, which: Subframe) -> Frame<'_> {
+        match which {
+            Subframe::Lossy => unsafe { self.subframe.frame() },
+            Subframe::Argb => unsafe { self.argb.frame() },
+            Subframe::Converted => self.converted.frame(),
+        }
+    }
 
-        unsafe {
-            match which {
-                Subframe::Lossy => ptr::addr_of_mut!((*this).subframe),
-                Subframe::Argb => ptr::addr_of_mut!((*this).argb),
-                Subframe::Converted => ptr::addr_of_mut!((*this).converted),
-            }
+    /// As [`WPDDecoder::frame_of`], writable, which the per-frame premultiply
+    /// needs.
+    pub(crate) fn frame_mut_of(&mut self, which: Subframe) -> FrameMut<'_> {
+        match which {
+            Subframe::Lossy => unsafe { self.subframe.frame_mut() },
+            Subframe::Argb => unsafe { self.argb.frame_mut() },
+            Subframe::Converted => self.converted.frame_mut(),
         }
     }
 
@@ -480,7 +468,7 @@ impl WPDDecoder {
             return WPD_ERROR_INVALID_DATA;
         };
         let (sub_width, sub_height, sub_format) = {
-            let img = unsafe { &*self.image_of(which) };
+            let img = self.frame_of(which);
 
             (img.width, img.height, img.format)
         };
@@ -507,26 +495,26 @@ impl WPDDecoder {
         self.key_frame = unsafe { anim_is_key_frame(&pl, sub_width, sub_height) } != 0;
         pl.key_frame = c_int::from(self.key_frame);
 
-        let argb = Format::Argb as c_int;
-        let mut target = Format::Yuva420p as c_int;
+        let argb = Format::Argb;
+        let mut target = Format::Yuva420p;
 
         if sub_format == argb
             || format_is_packed(self.out_format)
             || (!self.key_frame
-                && !self.canvas.data[0].is_null()
-                && self.canvas.format == argb)
+                && !self.canvas.is_empty()
+                && self.canvas.format == Some(argb))
         {
             target = argb;
         }
 
         if target == argb && sub_format != argb {
             let this: *mut WPDDecoder = self;
-            let src = self.image_of(which);
+            let src = self.frame_of(which);
             let ret = unsafe {
                 convert_to_argb(
                     &(*this).ydsp,
                     &mut (*this).converted,
-                    &*src,
+                    &src,
                     self.options.no_fancy_upsampling != 0,
                 )
             };
@@ -547,9 +535,8 @@ impl WPDDecoder {
             && !(premultiply_after_pack(self.animation, self.anim_mode)
                 && format_bpp(self.out_format) == 2)
         {
-            let this: *mut WPDDecoder = self;
-            let img = unsafe { &mut *self.image_of(which) };
-            let mut view = unsafe { img.frame_mut() };
+            let this: *const WPDDecoder = self;
+            let mut view = self.frame_mut_of(which);
 
             for y in 0..view.height {
                 unsafe { ((*this).ydsp.premultiply_row)(view.row(0, y), true) };
@@ -565,7 +552,7 @@ impl WPDDecoder {
         is none. Switching modes mid-animation is refused for that reason. */
         if self.anim_mode != WPD_ANIM_SUBFRAME {
             let this: *mut WPDDecoder = self;
-            let src = self.image_of(which);
+            let src = self.frame_of(which);
             let ct = unsafe {
                 CompositeTargets {
                     ldsp: ptr::addr_of!((*this).ldsp),
@@ -573,7 +560,7 @@ impl WPDDecoder {
                     canvas: ptr::addr_of_mut!((*this).canvas),
                 }
             };
-            let ret = unsafe { anim_composite(&pl, &ct, src, target) };
+            let ret = unsafe { anim_composite(&pl, &ct, &src, target) };
 
             if ret < 0 {
                 return ret;

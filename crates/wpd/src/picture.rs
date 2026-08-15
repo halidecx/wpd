@@ -150,6 +150,12 @@ impl Buffer {
         Ok(())
     }
 
+    /// Gives one plane's memory back, which is how a four-plane allocation
+    /// becomes the three-plane picture an opaque frame hands out.
+    pub fn drop_plane(&mut self, p: usize) {
+        self.plane[p].release();
+    }
+
     /// A read-only view of the whole picture.
     pub fn frame(&self) -> Frame<'_> {
         Frame {

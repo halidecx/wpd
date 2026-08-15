@@ -29,7 +29,7 @@ use crate::export::{
     export_still_packed, frame_clear, frame_valid, ExportSettings, ExportTargets,
     WPDFrame, WPDOutputPlane,
 };
-use crate::image::{image_free, WebPImage};
+use crate::image::WebPImage;
 use crate::input::{
     input_append, input_at, input_borrow, input_compact, input_discarded, input_own,
     input_reset, input_size, InputBuffer,
@@ -44,6 +44,7 @@ use crate::vp8l::{
 };
 use wpd::dsp::vp8l::Vp8lDsp;
 use wpd::dsp::yuv::YuvDsp;
+use wpd::picture::{Buffer, Frame};
 use wpd::rescale::Scratch;
 
 pub const WPD_OK: c_int = 0;
@@ -162,17 +163,19 @@ pub struct WPDDecoder {
     pub(crate) height: c_int,
     pub(crate) lossless_has_alpha: bool,
 
-    /// Views of pictures the lossless decoder owns; never freed from here.
+    /// Views of pictures the two codecs own; never freed from here.
     pub(crate) argb: WebPImage,
     pub(crate) alpha_argb: WebPImage,
     pub(crate) lossless_frame: bool,
     pub(crate) subframe: WebPImage,
-    pub(crate) converted: WebPImage,
-    pub(crate) output: WebPImage,
-    pub(crate) transformed: WebPImage,
+
+    /// Plane memory the decoder owns, released when it drops.
+    pub(crate) converted: Buffer,
+    pub(crate) output: Buffer,
+    pub(crate) transformed: Buffer,
     pub(crate) rescale: Scratch,
 
-    pub(crate) canvas: WebPImage,
+    pub(crate) canvas: Buffer,
     pub(crate) subframe_out: Option<Subframe>,
     pub(crate) anim_mode: c_int,
     pub(crate) anmf_flags: c_int,
@@ -220,12 +223,6 @@ impl Drop for WPDDecoder {
     fn drop(&mut self) {
         if self.vp8_initialized {
             unsafe { vp8_decode_free(&mut self.codec) };
-        }
-        unsafe {
-            image_free(&mut self.canvas);
-            image_free(&mut self.converted);
-            image_free(&mut self.output);
-            image_free(&mut self.transformed);
         }
     }
 }
@@ -326,12 +323,12 @@ impl WPDDecoder {
             alpha_argb: WebPImage::empty(),
             lossless_frame: false,
             subframe: WebPImage::empty(),
-            converted: WebPImage::empty(),
-            output: WebPImage::empty(),
-            transformed: WebPImage::empty(),
+            converted: Buffer::default(),
+            output: Buffer::default(),
+            transformed: Buffer::default(),
             rescale: Scratch::default(),
 
-            canvas: WebPImage::empty(),
+            canvas: Buffer::default(),
             subframe_out: None,
             anim_mode: WPD_ANIM_COMPOSITED,
             anmf_flags: 0,
@@ -478,10 +475,8 @@ impl WPDDecoder {
     /// buffers the frames are decoded into are kept: they are sized on use and
     /// reused.
     fn anim_state_reset(&mut self) {
-        unsafe {
-            vp8l_reset(&mut *self.vp8l);
-            image_free(&mut self.canvas);
-        }
+        unsafe { vp8l_reset(&mut *self.vp8l) };
+        self.canvas.release();
         self.still_done = false;
         self.vp8_active = false;
         self.still_lossy = false;
@@ -516,12 +511,10 @@ impl WPDDecoder {
     fn reset(&mut self) {
         self.meta = [None, None, None];
         self.anim_state_reset();
-        unsafe {
-            vp8l_release(&mut *self.vp8l);
-            image_free(&mut self.converted);
-            image_free(&mut self.output);
-            image_free(&mut self.transformed);
-        }
+        unsafe { vp8l_release(&mut *self.vp8l) };
+        self.converted.release();
+        self.output.release();
+        self.transformed.release();
         self.subframe = WebPImage::empty();
         self.argb = WebPImage::empty();
         self.alpha_argb = WebPImage::empty();
@@ -1256,9 +1249,9 @@ impl WPDDecoder {
         let height = self.argb.height;
         let ret = unsafe {
             if transform {
-                export_packed(&set, &t, &mut self.argb, frame)
+                export_packed(&set, &t, self.argb.frame(), frame)
             } else {
-                export_still_lossless(&set, &t, &mut self.argb, frame, height)
+                export_still_lossless(&set, &t, &self.argb.frame(), frame, height)
             }
         };
 
@@ -1279,9 +1272,9 @@ impl WPDDecoder {
         let height = self.subframe.height;
         let ret = unsafe {
             if packed_only {
-                export_still_packed(&set, &t, &self.subframe, frame, height)
+                export_still_packed(&set, &t, &self.subframe.frame(), frame, height)
             } else {
-                export_packed(&set, &t, &mut self.subframe, frame)
+                export_packed(&set, &t, self.subframe.frame(), frame)
             }
         };
 
@@ -1335,7 +1328,7 @@ impl WPDDecoder {
             let set = self.export_settings();
             let t = self.export_targets();
 
-            unsafe { export_packed(&set, &t, &mut self.argb, frame) }
+            unsafe { export_packed(&set, &t, self.argb.frame(), frame) }
         } else {
             if hs.raw == Raw::AlphaAndLossy {
                 if hs.raw_alpha_size == 0 {
@@ -1368,7 +1361,7 @@ impl WPDDecoder {
             let set = self.export_settings();
             let t = self.export_targets();
 
-            unsafe { export_packed(&set, &t, &mut self.subframe, frame) }
+            unsafe { export_packed(&set, &t, self.subframe.frame(), frame) }
         };
 
         if ret < 0 {
@@ -1537,7 +1530,8 @@ pub unsafe extern "C" fn wpd_decoder_next_frame(
 
                 let set = decoder.export_settings();
                 let t = decoder.export_targets();
-                let ret = unsafe { export_packed(&set, &t, &mut decoder.argb, frame) };
+                let ret =
+                    unsafe { export_packed(&set, &t, decoder.argb.frame(), frame) };
 
                 if ret < 0 {
                     return decoder.set_error("cannot output frame", ret);
@@ -1564,22 +1558,12 @@ pub unsafe extern "C" fn wpd_decoder_next_frame(
                 }
                 let set = decoder.export_settings();
                 let t = decoder.export_targets();
-                let this: *mut WPDDecoder = decoder;
-                let img = if decoder.anim_mode == WPD_ANIM_SUBFRAME {
-                    match decoder.subframe_out {
-                        Some(Subframe::Lossy) => unsafe {
-                            ptr::addr_of_mut!((*this).subframe)
-                        },
-                        Some(Subframe::Argb) => unsafe {
-                            ptr::addr_of_mut!((*this).argb)
-                        },
-                        Some(Subframe::Converted) => unsafe {
-                            ptr::addr_of_mut!((*this).converted)
-                        },
-                        None => ptr::null_mut(),
+                let img = match (decoder.anim_mode, decoder.subframe_out) {
+                    (WPD_ANIM_SUBFRAME, Some(which)) => decoder.frame_of(which),
+                    (WPD_ANIM_SUBFRAME, None) => {
+                        Frame::packed(&[], 0, 0, 0, Format::Argb)
                     }
-                } else {
-                    unsafe { ptr::addr_of_mut!((*this).canvas) }
+                    _ => decoder.canvas.frame(),
                 };
                 let ret = unsafe { export_packed(&set, &t, img, frame) };
 
@@ -1643,7 +1627,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
             if rows < decoder.argb.height {
                 return WPD_OK;
             }
-            unsafe { export_packed(&set, &t, &mut decoder.argb, frame) }
+            unsafe { export_packed(&set, &t, decoder.argb.frame(), frame) }
         } else if decoder.still_lossy {
             let rows = if decoder.vp8_active {
                 unsafe { vp8_rows_finalized(&decoder.codec) }
@@ -1654,7 +1638,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
             if rows < decoder.subframe.height {
                 return WPD_OK;
             }
-            unsafe { export_packed(&set, &t, &mut decoder.subframe, frame) }
+            unsafe { export_packed(&set, &t, decoder.subframe.frame(), frame) }
         } else {
             return WPD_OK;
         };
@@ -1681,8 +1665,9 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
         } else {
             decoder.argb.height
         };
-        let ret =
-            unsafe { export_still_lossless(&set, &t, &mut decoder.argb, frame, upto) };
+        let ret = unsafe {
+            export_still_lossless(&set, &t, &decoder.argb.frame(), frame, upto)
+        };
 
         if ret < 0 {
             return decoder.set_error("cannot output frame", ret);
@@ -1720,7 +1705,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
         }
 
         let this: *mut WPDDecoder = decoder;
-        let mut plane = unsafe { ptr::addr_of!((*this).subframe) };
+        let mut plane = unsafe { (*this).subframe.frame() };
 
         if have != Format::Yuva420p as c_int && format != have {
             let want_alpha = format == Format::Yuva420p as c_int;
@@ -1728,7 +1713,7 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
                 crate::convert::ensure_yuva_rows(
                     &(*this).ydsp,
                     &mut (*this).output,
-                    &(*this).subframe,
+                    &plane,
                     want_alpha,
                     first,
                     rows,
@@ -1738,18 +1723,20 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
             if ret < 0 {
                 return decoder.set_error("cannot output frame", ret);
             }
-            plane = unsafe { ptr::addr_of!((*this).output) };
+            plane = unsafe { (*this).output.frame() };
         }
         if decoder.ext_active {
             let ret = unsafe {
-                export_external_planar_rows(&set, &t, plane, format, frame, first, rows)
+                export_external_planar_rows(
+                    &set, &t, &plane, format, frame, first, rows,
+                )
             };
 
             if ret < 0 {
                 return decoder.set_error("cannot output frame", ret);
             }
         } else {
-            unsafe { export_frame(&set, plane, format, frame) };
+            unsafe { export_frame(&set, &plane, format, frame) };
         }
         decoder.converted_rows = rows;
         decoder.converted_format = format;
@@ -1765,7 +1752,9 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
         rows -= 1;
     }
 
-    let ret = unsafe { export_still_packed(&set, &t, &decoder.subframe, frame, rows) };
+    let ret = unsafe {
+        export_still_packed(&set, &t, &decoder.subframe.frame(), frame, rows)
+    };
 
     if ret < 0 {
         return decoder.set_error("cannot output frame", ret);
