@@ -75,6 +75,29 @@ pub struct WPDFrame {
     pub has_alpha: c_int,
 }
 
+impl WPDFrame {
+    /// A zeroed frame of this build's revision, which is what the header's
+    /// `WPD_FRAME_INIT` produces.
+    pub(crate) fn zeroed() -> Self {
+        WPDFrame {
+            struct_size: mem::size_of::<WPDFrame>(),
+            data: [ptr::null(); 4],
+            stride: [0; 4],
+            width: 0,
+            height: 0,
+            format: 0,
+            duration: 0,
+            timestamp: 0,
+            private_data: ptr::null_mut(),
+            pos_x: 0,
+            pos_y: 0,
+            dispose: 0,
+            blend: 0,
+            has_alpha: 0,
+        }
+    }
+}
+
 /// `ExportSettings` from `src/export.h`.
 #[repr(C)]
 pub struct ExportSettings {

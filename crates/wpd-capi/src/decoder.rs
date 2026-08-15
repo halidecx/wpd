@@ -276,7 +276,7 @@ pub(crate) unsafe fn rl32(p: *const u8) -> u32 {
 }
 
 impl WPDDecoder {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         WPDDecoder {
             codec: WpdCodecContext {
                 priv_data: ptr::null_mut(),

@@ -15,6 +15,7 @@
 #![warn(clippy::all)]
 
 pub mod anim;
+pub mod api;
 pub mod compat;
 pub mod container;
 pub mod convert;

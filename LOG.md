@@ -1249,6 +1249,106 @@ _threads_ writing disjoint parts of one picture, which no amount of
 destructuring expresses. That difference is what makes a fully safe pipeline
 reachable here and not there, and it would go away the day wpd wants threads.
 
+### Phase 8e — the YUV DSP, the rescaler and the row drivers
+
+`convert` could not become safe code until the two things underneath it did, so
+all three moved together.
+
+`crates/wpd/src/dsp/yuv.rs` gained `YuvDsp`, a table of safe `fn` pointers with
+the same eighteen entries the C-ABI one has, and `crates/wpd/src/asm/yuv.rs` the
+assembly dispatch behind safe wrappers — one marker type per symbol and one
+generic wrapper per shape, laid out as `asm/vp8l.rs` is. One small thing worth
+knowing: `#[link_name]` takes a literal, not a `concat!`, so a
+`pack_syms!("ssse3")` macro does not work and every symbol is spelled out where
+it is bound. That turns out to be better anyway, because it keeps them
+greppable.
+
+`crates/wpd/src/rescale.rs` gained `Rescaler`, `Scratch` and the two plane
+drivers. The C carried its two accumulator rows as two pointers and swapped them
+per imported line; they are one `Scratch` allocation split in half here, with a
+flag saying which half is which. **Swapping two borrows of one slice is not
+something the borrow checker will hold still for, and it does not need to be** —
+the swap was only ever a way to name the older of two rows.
+
+`crates/wpd/src/convert.rs` is the row drivers: the fancy and point upsamplers,
+the 4:4:4 point converter and both directions between ARGB and planar.
+`wpd-capi`'s copies are gone rather than duplicated. `src/yuvdsp.h` and
+`src/rescaler.h` keep only what `tests/` and the tool call, and those entry
+points take no table any more — the one the core builds from the CPU flags in
+force is the one under test, and `checkasm` sets those flags before it asks.
+`checkasm` still reaches every kernel through `WPDYUVDSP`, which is what that
+table is for now.
+
+The picture type learned two things it needed. `FrameMut` carries `chroma_full`,
+so a picture whose U and V the rescaler has brought up to full size reports
+full-width chroma rows; and `PlaneMut` gained `row_pair_mut`, because the fancy
+upsampler writes an (odd, even) row pair of one plane at a time and
+`split_at_mut` on the plane is what proves the two rows disjoint.
+
+### Phase 8f — the decoder's pictures are `Buffer`s
+
+`WebPImage` was two things at once: an owner that held `alloc[p]` and freed it,
+and a description of memory one of the codecs owns. The four owned ones —
+`canvas`, `converted`, `output`, `transformed` — are `wpd::picture::Buffer` now,
+so their memory is released by `Drop` rather than by a sequence in
+`wpd_decoder_free` that a new field can be left out of. What is left of
+`WebPImage` is the view half, and its allocator is gone.
+
+That let the picture pipeline change shape, and this is the part worth keeping:
+
+- a crop is `Frame::window` rather than arithmetic on `data[p]`;
+- a flip is `Frame::flipped` — a reading order — rather than pointing at the
+  last row and negating `linesize[p]`;
+- `transform_image` returns the `Frame` to read from instead of writing a
+  pointer through an out-parameter;
+- and the negative stride the C ABI promises is built in exactly one place,
+  `export::handout`, on the way out.
+
+**One behaviour had to be re-derived rather than transcribed.** The C
+premultiplied in place through whatever pointer it was holding, which could in
+principle have been the source picture. It never is: `set.premultiply` is only
+set for a premultiplied output format, no picture the decoder holds is ever
+premultiplied, so a planar source has been through `convert_to_packed` and an
+ARGB one through the packer or through the copy the relabelling path makes for a
+still. Every path reaching there has written into `output`, and naming that
+buffer is what let the pass take a `FrameMut`. **Where the C mutated through a
+pointer whose provenance the reader has to reconstruct, work out which object it
+actually is and name it** — the answer is usually one object, and if it is not,
+the code was relying on something.
+
+### Phase 8g — the safe Rust API
+
+`crates/wpd-capi/src/api.rs` is the safe API, modelled on rav1d's
+`src/rust_api.rs`. Every entry point `include/wpd.h` declares is reachable
+without writing `unsafe`, and two things the C ABI can only ask for in prose are
+types here:
+
+- **A picture borrows the decoder that produced it.** `wpd_decoder_next_frame`
+  hands out pointers into memory the next call reuses; `Picture<'a>` holds the
+  borrow, so asking for the next frame while the previous one is alive does not
+  compile.
+- **Opening without a copy borrows the input.** `wpd_decoder_open_borrowed`
+  promises the caller keeps the bytes alive for the decoder's whole life;
+  `Decoder<'a>::open_borrowed` makes that a lifetime.
+
+`Picture::row(plane, y)` hands out a slice rather than a pointer and a stride,
+and it applies the flip, so a caller never sees the negative stride at all.
+
+It lives in `wpd-capi` rather than the core crate because the driver it wraps
+does, and it moves up with the driver. `crates/wpd-capi/tests/api.rs` drives it
+over the whole corpus: every packed format, planar chroma, sub-frame mode, a
+stream fed in 97-byte pieces against a whole-file decode, and a flip against its
+unflipped twin.
+
+**What is left of the driver port.** `anim`, `lossy`, `export` and `decoder`
+still hold raw pointers where they reach across their own fields — 557 uses of
+`unsafe` in `wpd-capi`, against 785 when Phase 8c started, and none at all in
+`convert`. The remaining ones are the same shape: a `*mut WPDDecoder` taken so
+that two fields can be written at once. Destructuring the decoder at the call,
+the way `FrameMut::planes_mut` destructures the plane array, is what removes
+them, and it is what has to happen before the driver can move into `crates/wpd`
+and the API with it.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor
