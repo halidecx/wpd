@@ -290,11 +290,14 @@ pub type WPDDecoderRaw = WPDDecoder<'static>;
 /// What the core's failures are called at the ABI.
 pub(crate) fn status(e: wpd::error::Error) -> c_int {
     match e {
+        wpd::error::Error::InvalidArgument => WPD_ERR_INVALID_ARG,
         wpd::error::Error::InvalidData => WPD_ERR_BITSTREAM,
         wpd::error::Error::NoMemory => WPD_ERR_NO_MEMORY,
         wpd::error::Error::TooLarge => WPD_ERR_TOO_LARGE,
         wpd::error::Error::Truncated => WPD_ERR_TRUNCATED,
         wpd::error::Error::NotWebp => WPD_ERR_NOT_WEBP,
+        wpd::error::Error::Unsupported => WPD_ERR_UNSUPPORTED,
+        wpd::error::Error::BufferTooSmall => WPD_ERR_BUFFER_TOO_SMALL,
     }
 }
 
@@ -2342,4 +2345,28 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
         drop(unsafe { Box::from_raw(owner.cast::<WPDFrameOwner>()) });
     }
     unsafe { frame_clear(frame) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ABI's table of descriptions and the core's are written out
+    /// separately, because one is NUL-terminated and the other is not. This is
+    /// what says they still describe the same failures.
+    #[test]
+    fn every_core_failure_crosses_the_abi_under_its_own_name() {
+        for e in [
+            wpd::error::Error::InvalidArgument,
+            wpd::error::Error::InvalidData,
+            wpd::error::Error::NoMemory,
+            wpd::error::Error::TooLarge,
+            wpd::error::Error::Truncated,
+            wpd::error::Error::NotWebp,
+            wpd::error::Error::Unsupported,
+            wpd::error::Error::BufferTooSmall,
+        ] {
+            assert_eq!(status_text(status(e)), e.message(), "{e:?}");
+        }
+    }
 }

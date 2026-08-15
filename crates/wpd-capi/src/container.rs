@@ -17,8 +17,10 @@ const WPD_ERR_INVALID_ARG: c_int = -1;
 const WPD_ERR_NOT_WEBP: c_int = -2;
 const WPD_ERR_BITSTREAM: c_int = -3;
 const WPD_ERR_TRUNCATED: c_int = -4;
+const WPD_ERR_UNSUPPORTED: c_int = -5;
 const WPD_ERR_NO_MEMORY: c_int = -6;
 const WPD_ERR_TOO_LARGE: c_int = -7;
+const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
 
 /// `WPDImageInfo` from `include/wpd.h`.
 #[repr(C)]
@@ -62,11 +64,14 @@ impl WPDImageInfo {
 
 pub(crate) fn status(e: Error) -> c_int {
     match e {
+        Error::InvalidArgument => WPD_ERR_INVALID_ARG,
         Error::InvalidData => WPD_ERR_BITSTREAM,
         Error::NoMemory => WPD_ERR_NO_MEMORY,
         Error::TooLarge => WPD_ERR_TOO_LARGE,
         Error::Truncated => WPD_ERR_TRUNCATED,
         Error::NotWebp => WPD_ERR_NOT_WEBP,
+        Error::Unsupported => WPD_ERR_UNSUPPORTED,
+        Error::BufferTooSmall => WPD_ERR_BUFFER_TOO_SMALL,
     }
 }
 
