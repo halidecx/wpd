@@ -1453,6 +1453,119 @@ derives are needed: the impls for primitives are in the crate proper and
 `[u32]: IntoBytes` is a blanket impl, so `zerocopy-derive` and its `syn` never
 enter the tree. `cargo tree -p wpd -e normal` is two lines.
 
+### Phase 8i — the driver moves into the core
+
+The decode had stopped touching a caller's pointer at the end of Phase 8h, but
+it still lived in the crate that does. Getting it out took three things that
+were each worth having on their own, and then the move was a file rename.
+
+**The core error type had to name every failure the ABI has.**
+`wpd::error::Error` had five cases; `WPDStatus` has eight. The other three —
+invalid argument, unsupported, buffer too small — existed only as `WPD_ERR_*`
+constants inside the shim, so a driver function that could fail one of those
+three ways had no core type to say so with. That is the whole reason the driver
+still returned `c_int`. Naming them, and giving `Error` the same one-line
+descriptions `wpd_status_string` hands out, turned roughly 250 `-> c_int`
+returns into `Result<_, Error>` and the three-valued ones — a lossy or lossless
+step that may want more of the chunk — into `Result<bool, _>`. `set_error`
+became `fail()`, which records the failure and hands it back, so noting it and
+returning it are one expression.
+
+`status_from_internal` went with them. It mapped `-EINVAL` and clamped anything
+unrecognised to a bitstream error; nothing has raised a raw errno since the
+allocators became Rust, and a range clamp cannot fire on a Rust enum. The safe
+API's own error enum went too — it existed to name the eight statuses coming
+back across the ABI, which the core type now names itself.
+
+**What a file says about itself had to be a value.** `wpd_decoder_get_info` and
+`wpd_decoder_frame_info` filled the caller's versioned struct from inside the
+driver, so the driver could not answer either question without one.
+`wpd::info::ImageInfo` and `FrameInfo` are the answers; filling `WPDImageInfo`
+and `WPDFrameInfo` is a shim function beside the entry point that has one. The
+versioning stays where the version is: the `struct_size` check and the
+clear-before-fill happen in the shim, in the order the C did them, so asking for
+a frame that is not there still leaves a zeroed struct behind rather than the
+previous frame's.
+
+**One trap, caught by clicheck on every still in the corpus.** The ANMF flags
+read zero for _blended_, so a `bool` named `blend` defaults to `true`. The C
+zeroed its struct and got the right answer for free; a derived `Default` on the
+Rust type gets the opposite one. `FrameInfo` writes its default out by hand and
+a test holds it against the container's own `Blend` and `Dispose`.
+
+**The output buffer had to become a destination, not a struct of pointers.**
+`wpd_decoder_set_output_buffer` let a caller supply the memory, and the decoder
+kept it — four pointers, four lengths, four strides and a flag saying whether
+they meant anything, which every export then consulted. The decoder now holds
+`Option<Box<dyn RowSink>>` and nothing else. The flag is gone: the destination
+and the choice are one value, so the exports match on it instead of asking a
+`bool` that could disagree with it.
+
+Which buffer is which became the shim's question. The decoder cannot tell one
+sink from another, so `set_sink` takes every call as a change and drops the rows
+already converted; the shim compares the planes and declines to call it when
+they are the same, which is what keeps a repeated partial-frame request from
+redoing work. `wpd_decoder_set_options` lost its other half the same way — the
+`struct_size` and flag-encoding checks are the C struct's, so they sit beside
+the entry point.
+
+**Then the move.** `WPDDecoderOptions`, `WPDFrame` and the caller's output
+planes left `convert.rs` and `export.rs` for `options.rs` and `frame.rs`, which
+took the last `unsafe` out of the four modules that decode and made them movable
+as whole files rather than splittable ones. `decoder.rs` split by top-level
+item: the walk over a file, the compositor, the lossy frame's alpha plane, the
+format policy and the export are `wpd::driver`, and what stayed behind is what
+`include/wpd.h` declares and nothing else.
+
+Two things had to be named before it would go. The three numbers the decoder
+keeps that happen to be the ABI's — `FORMAT_NONE` and the two animation modes —
+are the driver's own constants now, with a line saying which `WPD_*` each is;
+`convert.rs` and `anim.rs` had each grown a private copy of `WPD_ANIM_SUBFRAME`.
+And a failure that cannot record itself is a named type: a picture borrows the
+decoder that produced it, so a decode that fails part way is still lending the
+decoder out when it wants to write the message. It travels back as a
+`driver::Failure` and whoever receives it calls `fail()`.
+
+`WPDDecoder` is now the decoder plus the planes a caller supplied, and derefs to
+the decoder for everything else. Those planes are the one thing the ABI needs
+and the decoder does not: it writes rows through a sink built over them and
+never learns what they are, but a `WPDFrame` has to name them.
+
+**The safe API moved with it, onto the handout.** `wpd::api` was reaching
+through the C ABI to get where it was going: a `Picture` was a `WPDFrame`, so a
+row was a pointer and a stride put back together with `from_raw_parts`. A
+`Picture` is a `Handout` now — which is what the decode already produces — and
+the safe API contains no `unsafe` at all. `wpd-tool` no longer depends on the C
+ABI crate.
+
+`Picture::format` returns a `Format` rather than an `Option`, because a handout
+always has one and the `Option` only existed to decode a `c_int` back.
+`Picture::stride` is gone: a flip is the order rows come out in, so there is no
+honest signed stride to report — the negative one the header promises is built
+where a `WPDFrame` is and nowhere else.
+
+**The one thing that did not follow.** A decode that fails part way cannot write
+down what it was doing, and in the safe API it cannot be handed back either. The
+C ABI shim gets away with `Err((message, e)) => Err(decoder.fail(message, e))`
+because its success path returns only a status: the borrow is dead on the
+failing path and the compiler can see it. `api::next_frame` returns a
+`Picture<'_>` on success, which ties the borrow to the caller's region, and a
+caller region covers every point in the function — so the failing path cannot
+reborrow the decoder either. This is the well-known NLL limitation, not
+something a different arrangement of the same call fixes.
+
+So the two entry points that hand out a picture keep their own message, in a
+field disjoint from the one the borrow is on, and `error()` prefers it. Reaching
+the driver from anywhere else goes through one accessor that clears it, which is
+what stops the two disagreeing about which failure was last — the alternative
+was a line at the top of fourteen methods that a fifteenth would forget.
+
+**Where the `unsafe` is now.** The core is 11 mentions outside `asm/`, all of
+them doc comments and attributes: zero blocks, with the driver and the safe API
+inside `#![forbid(unsafe_code)]`. `wpd-capi` is 229 across 3,530 lines, against
+286 at the end of Phase 8h and 785 when Phase 8c started, and every one of them
+is now within reach of a pointer the header handed over.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor
