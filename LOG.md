@@ -1415,9 +1415,15 @@ Neither is visible against the C baseline alone — `bench.sh` and `cmpbench.sh`
 compare against `d241ef8`, which is four commits and a whole phase away, so a 9%
 difference there says nothing about the change in hand. Building the previous
 commit in a `git worktree` and benchmarking against _that_ is what separated
-"this phase regressed the small files" from "the small files have been 9% off
-the C since the driver became Rust." The first was true mid-phase and is fixed;
-the second is true and predates it.
+"this phase regressed the small files" from "the small files are off the C
+baseline for some older reason." The first was true mid-phase and is fixed.
+
+The second was written down here as "9% off the C since the driver became Rust,"
+and that was wrong: the gap is `libstd` starting, not the decoder, and the
+section below of that name has the measurements. The worktree comparison was the
+right tool and it did its job; the mistake was assuming that whatever it did not
+explain was a decode-speed gap, without splitting the fixed cost from the
+per-decode one.
 
 **The lossless canvas, and the crate's first dependency.** The canvas is a
 `Vec<u32>` — the pixel loops want words — and everything downstream of it wants
@@ -1565,6 +1571,46 @@ them doc comments and attributes: zero blocks, with the driver and the safe API
 inside `#![forbid(unsafe_code)]`. `wpd-capi` is 229 across 3,530 lines, against
 286 at the end of Phase 8h and 785 when Phase 8c started, and every one of them
 is now within reach of a pointer the header handed over.
+
+## The small-file gap is `libstd` starting, not the decoder
+
+`cmpbench.sh` reports the C baseline ahead on the small hand-written lossless
+files, and tightly enough to look real: `huffman_simple_single` at 1.18 ± 0.06
+in the C's favour, `huffman_long_codes` at 1.16 ± 0.03. Phase 8h recorded that
+as a decode-speed gap inherited from the driver becoming Rust. It is not one.
+
+Splitting the repeat count is what shows it. `wpd --repeat N` builds a fresh
+decoder per iteration, so the difference between one iteration and ninety-six is
+the per-decode cost and what is left is the cost of starting:
+
+```
+             --repeat 1     --repeat 96
+old            167.1 µs       308.6 µs
+new            235.7 µs       294.9 µs
+```
+
+That is 1.49 µs per decode for the C and 0.62 µs for the Rust — the current
+decoder is about 2.4x faster on this file — against a fixed 69 µs the Rust
+binary pays before it decodes anything. At `--repeat 48` the whole run is a few
+hundred microseconds, so the fixed cost is most of what is being measured.
+
+Run each binary with no arguments at all, so that it prints its usage and exits,
+and the same 69 µs is still there: 147.9 µs against 216.9 µs. A Rust program
+whose entire body is `std::process::exit(2)`, compiled `-O` on the same machine,
+costs 214.5 µs. wpd's own startup is about two microseconds on top of the
+`libstd` floor.
+
+So there is nothing to optimise here, and there never was. The binary is 921 KB
+against 387 KB and links `libgcc_s` on top of libc, which is the shape of the
+cost; none of it is reachable from this codebase.
+
+**What to do with it.** Treat any benchmark whose total runtime is under about a
+millisecond as measuring process startup unless the repeat count has been varied
+to prove otherwise. Two points are enough — the slope is the decode and the
+intercept is everything else. The real-content numbers were never in doubt and
+are the ones to quote: 1.10x on `a_lossy`, 1.06x on `lossless` and 1.01x on
+`lossy`, all against the C baseline, and 1.08x against libwebp on
+`simplelf-lossy`.
 
 ## Measuring the fallbacks needs two no-asm builds
 
