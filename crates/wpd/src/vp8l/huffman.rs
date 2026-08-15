@@ -220,7 +220,11 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
     let sorted = &mut sorted[..num_symbols];
 
     /* Sparse length lists are the common case, so step over whole zero runs
-    instead of testing every symbol. */
+    instead of testing every symbol. Eight is the stride, measured: thirty-two
+    is 3% better on a file that is all long codes and 3% worse on an animation
+    of small frames, whose lists are short enough that the wider stride rarely
+    fires. Writing the test as `iter().all()` instead of a word compare is
+    worse than both — it compiles to a byte loop, not a vector op. */
     let mut symbol = 0;
     while symbol + 8 <= lengths.len() {
         let run: [u8; 8] = lengths[symbol..symbol + 8].try_into().unwrap();
@@ -258,6 +262,8 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
     /* Every offset has to have advanced to where the next length started, or
     the histogram described a different list from the one just sorted. */
     let mut seen = 0usize;
+
+    #[allow(clippy::needless_range_loop)]
     for len in 1..=MAX_CODE_LENGTH {
         seen += p.count[len] as usize;
         if offset[len] != seen {

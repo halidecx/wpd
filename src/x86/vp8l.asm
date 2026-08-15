@@ -10,6 +10,21 @@ pw_256: times 16 dw 256
 bcast_alpha: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
              db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
 
+; A pixel is [A, R, G, B] in memory order, so a 16-bit lane pair is
+; (R:A, B:G): the two channels the cross-colour transform writes sit in the
+; high byte of a lane, and the green it predicts them from in the low byte of
+; the second. Both masks move a source byte into a lane's high half and zero
+; everything else, which is what lets pmulhw's >> 16 absorb the transform's
+; >> 5 and leaves the product's low byte already in place for paddb.
+;
+; ct_green: green into both lanes' high halves.
+ct_green: db -1, 2, -1, 2, -1, 6, -1, 6, -1, 10, -1, 10, -1, 14, -1, 14
+          db -1, 2, -1, 2, -1, 6, -1, 6, -1, 10, -1, 10, -1, 14, -1, 14
+; ct_red: the freshly corrected red into the high half of the lane that holds
+; blue, and zero into the other, so one multiply does the second stage.
+ct_red:   db -1, -1, -1, 1, -1, -1, -1, 5, -1, -1, -1, 9, -1, -1, -1, 13
+          db -1, -1, -1, 1, -1, -1, -1, 5, -1, -1, -1, 9, -1, -1, -1, 13
+
 ; blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
 blend_scale:
     dd 0
@@ -706,3 +721,109 @@ INIT_XMM ssse3
 BLEND_ROW_ARGB_PREMULT
 INIT_YMM avx2
 BLEND_ROW_ARGB_PREMULT
+
+; ff_color_row(uint32_t *dst, const uint32_t *src, int n, uint32_t mult)
+;
+; Undoes the cross-colour transform over one tile's worth of a row:
+;
+;   red  += (green_to_red  * (int8_t)green) >> 5
+;   blue += (green_to_blue * (int8_t)green) >> 5
+;   blue += (red_to_blue   * (int8_t)red')  >> 5
+;
+; 'mult' packs the three signed multipliers at bytes 3, 2 and 1. Scaling each
+; by 8 up front turns pmulhw's >> 16 into the >> 5 the transform asks for,
+; because the shuffles leave the colour byte in a lane's high half — that is,
+; already multiplied by 256.
+%macro COLOR_ROW 0
+cglobal color_row, 4, 6, 6, dst, src, n, mult
+    mov        r4d, multd
+    sar        r4d, 24                 ; green_to_red, sign-extended
+    shl        r4d, 3
+    and        r4d, 0xffff
+    mov        r5d, multd
+    shl        r5d, 8
+    sar        r5d, 24                 ; green_to_blue
+    shl        r5d, 3
+    shl        r5d, 16
+    or         r4d, r5d
+    movd       xm3, r4d
+    mov        r5d, multd
+    shl        r5d, 16
+    sar        r5d, 24                 ; red_to_blue
+    shl        r5d, 3
+    shl        r5d, 16                 ; only the lane that holds blue
+    movd       xm4, r5d
+%if mmsize == 32
+    vpbroadcastd m3, xm3
+    vpbroadcastd m4, xm4
+%else
+    pshufd     m3, m3, 0
+    pshufd     m4, m4, 0
+%endif
+    mova       m1, [ct_green]
+    mova       m2, [ct_red]
+    sub        nd, mmsize / 4
+    jl         .tail
+.loop:
+    movu       m0, [srcq]
+    pshufb     m5, m0, m1
+    pmulhw     m5, m5, m3
+    psllw      m5, m5, 8
+    paddb      m0, m0, m5
+    pshufb     m5, m0, m2
+    pmulhw     m5, m5, m4
+    psllw      m5, m5, 8
+    paddb      m0, m0, m5
+    movu       [dstq], m0
+    add        srcq, mmsize
+    add        dstq, mmsize
+    sub        nd, mmsize / 4
+    jge        .loop
+.tail:
+    add        nd, mmsize / 4
+    jz         .end
+%if mmsize == 32
+    ; A colour-transform tile can be as narrow as four pixels, so the whole
+    ; call lands here; going one pixel at a time would spend eight vector ops
+    ; on each of them.
+    cmp        nd, 4
+    jl         .tail1
+    movu       xm0, [srcq]
+    pshufb     xm5, xm0, xm1
+    pmulhw     xm5, xm5, xm3
+    psllw      xm5, xm5, 8
+    paddb      xm0, xm0, xm5
+    pshufb     xm5, xm0, xm2
+    pmulhw     xm5, xm5, xm4
+    psllw      xm5, xm5, 8
+    paddb      xm0, xm0, xm5
+    movu       [dstq], xm0
+    add        srcq, 16
+    add        dstq, 16
+    sub        nd, 4
+    jz         .end
+.tail1:
+%endif
+.tail_loop:
+    movd       xm0, [srcq]
+    pshufb     xm5, xm0, xm1
+    pmulhw     xm5, xm5, xm3
+    psllw      xm5, xm5, 8
+    paddb      xm0, xm0, xm5
+    pshufb     xm5, xm0, xm2
+    pmulhw     xm5, xm5, xm4
+    psllw      xm5, xm5, 8
+    paddb      xm0, xm0, xm5
+    movd       [dstq], xm0
+    add        srcq, 4
+    add        dstq, 4
+    dec        nd
+    jg         .tail_loop
+.end:
+    RET
+%endmacro
+
+INIT_XMM ssse3
+COLOR_ROW
+INIT_YMM avx2
+COLOR_ROW

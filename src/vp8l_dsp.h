@@ -19,6 +19,11 @@ typedef struct WPDLosslessDSP {
     /* The same, for rows whose alpha is already multiplied in. */
     void (*blend_row_argb_premult)(uint8_t *dst, const uint8_t *src,
                                    int num_pixels);
+    /* Undoes the cross-colour transform over one tile of a row. 'mult' packs
+       the tile's three signed multipliers at bytes three, two and one; dst may
+       alias src, and every caller has them equal. */
+    void (*color_row)(uint32_t *dst, const uint32_t *src, int num_pixels,
+                      uint32_t mult);
 } WPDLosslessDSP;
 
 void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp);

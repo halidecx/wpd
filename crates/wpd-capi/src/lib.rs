@@ -12,6 +12,7 @@
 //! tables. See `LOG.md`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(clippy::all)]
 
 pub mod anim;
 pub mod compat;

@@ -174,6 +174,42 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
     }
 }
 
+static void check_color_row(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, src, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst0, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst1, [BUF_PIXELS]);
+    declare_func(void, uint32_t *, const uint32_t *, int, uint32_t);
+
+    if (check_func(dsp->color_row, "color_row")) {
+        for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+            const int n = lengths[i];
+            /* Every multiplier is signed, so the sign of each of the three has
+               to be exercised; a random word covers all eight combinations
+               over the length list. */
+            const uint32_t mult = (uint32_t)rnd();
+
+            for (int x = 0; x < BUF_PIXELS; x++) {
+                src[x]  = (uint32_t)rnd();
+                dst0[x] = dst1[x] = (uint32_t)rnd();
+            }
+
+            call_ref(dst0, src, n, mult);
+            call_new(dst1, src, n, mult);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+
+            /* dst may alias src, which is how the decoder calls it. */
+            memcpy(dst0, src, sizeof(dst0));
+            memcpy(dst1, src, sizeof(dst1));
+            call_ref(dst0, dst0, n, mult);
+            call_new(dst1, dst1, n, mult);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+        }
+        bench_new(dst1, src, MAX_PIXELS, 0x00204060u);
+    }
+}
+
 void checkasm_check_lossless(void) {
     WPDLosslessDSP dsp;
 
@@ -188,4 +224,6 @@ void checkasm_check_lossless(void) {
     report("blend_row_argb");
     check_blend_row_argb_premult(&dsp);
     report("blend_row_argb_premult");
+    check_color_row(&dsp);
+    report("color_row");
 }

@@ -275,6 +275,38 @@ pub fn blend_row_argb_premult(dst: &mut [u8], src: &[u8]) {
 }
 
 /// Replaces each pixel by `palette[green]`, in place, on a `u32` picture.
+/// The product of two `i8`s fits an `i16` exactly, and saying so is what lets
+/// the row loop vectorise on 16-bit lanes instead of widening to 32. The
+/// multiplier is sign-extended by the caller, once per tile rather than once
+/// per pixel.
+#[inline(always)]
+fn color_delta(pred: i16, color: u8) -> u8 {
+    (pred.wrapping_mul(i16::from(color as i8)) >> 5) as u8
+}
+
+/// Undoes the cross-colour transform over one tile's worth of a row, which
+/// predicts red from green and blue from both.
+///
+/// `mult` packs the three signed multipliers the tile carries, at bytes three,
+/// two and one; a pixel is `[A, R, G, B]` in the same byte order.
+pub fn color_row(row: &mut [u32], mult: u32) {
+    let cp = mult.to_ne_bytes();
+    let green_to_red = i16::from(cp[3] as i8);
+    let green_to_blue = i16::from(cp[2] as i8);
+    let red_to_blue = i16::from(cp[1] as i8);
+
+    for px in row {
+        let mut b = px.to_ne_bytes();
+
+        b[1] = b[1].wrapping_add(color_delta(green_to_red, b[2]));
+        b[3] = b[3].wrapping_add(
+            color_delta(green_to_blue, b[2])
+                .wrapping_add(color_delta(red_to_blue, b[1])),
+        );
+        *px = u32::from_ne_bytes(b);
+    }
+}
+
 pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
     let palette = &palette[..256];
 
@@ -297,6 +329,7 @@ pub type PredAddFn = fn(plane: &mut [u32], out: usize, up: usize, n: usize);
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
     pub map_color32: fn(&mut [u32], &[u32]),
+    pub color_row: fn(&mut [u32], u32),
 }
 
 fn plane_pred_0(plane: &mut [u32], out: usize, _up: usize, n: usize) {
@@ -363,6 +396,7 @@ impl Vp8lDsp {
                 plane_pred_13,
             ],
             map_color32: map_color32_pixels,
+            color_row,
         }
     }
 

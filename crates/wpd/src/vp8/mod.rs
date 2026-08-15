@@ -688,6 +688,10 @@ impl Decoder {
             luma_ctx = 0;
         }
 
+        /* The indices address three things at once — the two contexts and
+        the block at 4 * y + x — so an iterator over any one of them would put
+        the other two back as indexing anyway. */
+        #[allow(clippy::needless_range_loop)]
         for y in 0..4 {
             for x in 0..4 {
                 let nnz_pred = i32::from(l_nnz[y]) + i32::from(t_nnz[x]);

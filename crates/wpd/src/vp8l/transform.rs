@@ -6,8 +6,8 @@
 //! allocation for that to be an ordinary index — see [`super`].
 //!
 //! Three of the four are per-pixel byte arithmetic on the `[A, R, G, B]` a
-//! `u32` holds; only the predictor goes through the DSP table, because only it
-//! has assembly.
+//! `u32` holds; the predictor and the cross-colour transform go through the
+//! DSP table, because those are the two with assembly.
 
 use super::AlphaDst;
 use crate::dsp::vp8l::Vp8lDsp;
@@ -92,19 +92,11 @@ pub fn predictor_rows(
     Ok(())
 }
 
-/// The product of two `i8`s fits an `i16` exactly, and saying so is what lets
-/// the row loop vectorise on 16-bit lanes instead of widening to 32. The
-/// multiplier is sign-extended by the caller, once per tile rather than once
-/// per pixel.
-#[inline(always)]
-fn color_delta(pred: i16, color: u8) -> u8 {
-    (pred.wrapping_mul(i16::from(color as i8)) >> 5) as u8
-}
-
 /// Undoes the cross-colour transform, which predicts red from green and blue
 /// from both.
 #[allow(clippy::too_many_arguments)]
 pub fn color_rows(
+    dsp: &Vp8lDsp,
     plane: &mut [u32],
     base: usize,
     stride: usize,
@@ -124,25 +116,13 @@ pub fn color_rows(
         let mut x = 0usize;
 
         while x < width {
-            let cp = mult[mult_row + (x >> tile_bits)].to_ne_bytes();
-            let green_to_red = i16::from(cp[3] as i8);
-            let green_to_blue = i16::from(cp[2] as i8);
-            let red_to_blue = i16::from(cp[1] as i8);
+            let cp = mult[mult_row + (x >> tile_bits)];
             let mut x_end = (x & !tile_mask) + tile_size;
 
             if x_end > width {
                 x_end = width;
             }
-            for px in &mut plane[row + x..row + x_end] {
-                let mut b = px.to_ne_bytes();
-
-                b[1] = b[1].wrapping_add(color_delta(green_to_red, b[2]));
-                b[3] = b[3].wrapping_add(
-                    color_delta(green_to_blue, b[2])
-                        .wrapping_add(color_delta(red_to_blue, b[1])),
-                );
-                *px = u32::from_ne_bytes(b);
-            }
+            (dsp.color_row)(&mut plane[row + x..row + x_end], cp);
             x = x_end;
         }
         row += stride;
@@ -231,12 +211,15 @@ pub fn color_indexing_rows(
     }
 }
 
+/// How many groups a row is expanded in at a time. Small enough that the
+/// scratch stays in L1 and costs nothing to keep on the stack.
+const BLOCK: usize = 128;
+
 /// Rewrites rows whose pixels each pack `PPB` palette indices.
 ///
 /// The expansion table is built per group rather than per index, so a whole
 /// group is one copy; it is indexed by a whole byte, which puts the lookup
-/// unconditionally in bounds. Each row is resliced once, so the group offsets
-/// are checked against a length they are already known to fit in.
+/// unconditionally in bounds.
 fn expand_palette_rows<const PPB: usize>(
     plane: &mut [u32],
     base: usize,
@@ -261,6 +244,8 @@ fn expand_palette_rows<const PPB: usize>(
     let full = width / PPB;
     let tail = width - full * PPB;
 
+    let mut idx = [0u8; BLOCK];
+
     for y in (0..height as usize).rev() {
         let dst = base + y * dst_stride;
         let src = base + y * src_stride;
@@ -273,11 +258,27 @@ fn expand_palette_rows<const PPB: usize>(
             row[off + full * PPB..][..tail].copy_from_slice(&expand[index][..tail]);
         }
 
-        for b in (0..full).rev() {
-            let index = usize::from(row[b].to_ne_bytes()[2]);
-            let group = expand[index];
+        /* The indices of a block are lifted out before it is written, which is
+        what lets the write walk forwards over a slice taken once. Writing them
+        in place instead costs two bounds checks per group that no amount of
+        rearranging persuades LLVM to drop, because the relation between `off`,
+        `full` and the row length is not one it can see. */
+        let mut b = full;
 
-            row[off + b * PPB..][..PPB].copy_from_slice(&group);
+        while b > 0 {
+            let n = b.min(BLOCK);
+            let start = b - n;
+
+            for (slot, px) in idx[..n].iter_mut().zip(&row[start..b]) {
+                *slot = px.to_ne_bytes()[2];
+            }
+
+            let out = &mut row[off + start * PPB..][..n * PPB];
+
+            for (group, &i) in out.chunks_exact_mut(PPB).zip(&idx[..n]) {
+                group.copy_from_slice(&expand[usize::from(i)]);
+            }
+            b = start;
         }
     }
 }
@@ -294,45 +295,75 @@ pub fn color_indexing_alpha(
     size_reduction: u32,
     dst: AlphaDst<'_>,
 ) {
-    let AlphaDst { data, stride } = dst;
     let mut palette = [0u8; 256];
 
     for (slot, &entry) in palette.iter_mut().zip(pal) {
         *slot = entry.to_ne_bytes()[2];
     }
 
+    if size_reduction > 0 {
+        match 1usize << size_reduction {
+            2 => expand_alpha_rows::<2>(src, src_stride, width, height, &palette, dst),
+            4 => expand_alpha_rows::<4>(src, src_stride, width, height, &palette, dst),
+            _ => expand_alpha_rows::<8>(src, src_stride, width, height, &palette, dst),
+        }
+        return;
+    }
+
+    let AlphaDst { data, stride } = dst;
+
     for y in 0..height as usize {
         let row = &src[y * src_stride..];
         let out = &mut data[y * stride..][..width];
 
-        if size_reduction == 0 {
-            for (o, px) in out.iter_mut().zip(row) {
-                *o = palette[usize::from(px.to_ne_bytes()[2])];
-            }
-            continue;
+        for (o, px) in out.iter_mut().zip(row) {
+            *o = palette[usize::from(px.to_ne_bytes()[2])];
         }
+    }
+}
 
-        let pixel_bits = 8 >> size_reduction;
-        let ppb = 1usize << size_reduction;
-        let bit_mask = (1u32 << pixel_bits) - 1;
-        let full = width / ppb;
-        let tail = width - full * ppb;
+/// The packed-palette case of [`color_indexing_alpha`], specialised on the
+/// group size the way [`expand_palette_rows`] is.
+///
+/// Without the specialisation the group size, the shift and the mask are all
+/// runtime values, which costs a variable-count shift per pixel and a
+/// `chunks_exact_mut` whose stride the compiler cannot fold. Expanding a whole
+/// group in one table lookup makes the inner loop a fixed-width copy.
+fn expand_alpha_rows<const PPB: usize>(
+    src: &[u32],
+    src_stride: usize,
+    width: usize,
+    height: i32,
+    palette: &[u8; 256],
+    dst: AlphaDst<'_>,
+) {
+    let AlphaDst { data, stride } = dst;
+    let pixel_bits = 8 / PPB as u32;
+    let bit_mask = (1u32 << pixel_bits) - 1;
+    let expand: [[u8; PPB]; 256] = core::array::from_fn(|i| {
+        let mut packed = i as u32;
 
-        for (group, &px) in out.chunks_exact_mut(ppb).zip(row) {
-            let mut packed = u32::from(px.to_ne_bytes()[2]);
+        core::array::from_fn(|_| {
+            let entry = palette[(packed & bit_mask) as usize];
 
-            for o in group {
-                *o = palette[(packed & bit_mask) as usize];
-                packed >>= pixel_bits;
-            }
+            packed >>= pixel_bits;
+            entry
+        })
+    });
+    let full = width / PPB;
+    let tail = width - full * PPB;
+
+    for y in 0..height as usize {
+        let row = &src[y * src_stride..];
+        let out = &mut data[y * stride..][..width];
+
+        for (group, &px) in out.chunks_exact_mut(PPB).zip(row) {
+            group.copy_from_slice(&expand[usize::from(px.to_ne_bytes()[2])]);
         }
         if tail != 0 {
-            let mut packed = u32::from(row[full].to_ne_bytes()[2]);
+            let index = usize::from(row[full].to_ne_bytes()[2]);
 
-            for o in &mut out[full * ppb..] {
-                *o = palette[(packed & bit_mask) as usize];
-                packed >>= pixel_bits;
-            }
+            out[full * PPB..].copy_from_slice(&expand[index][..tail]);
         }
     }
 }

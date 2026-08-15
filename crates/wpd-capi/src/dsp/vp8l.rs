@@ -14,6 +14,7 @@ use wpd::dsp::vp8l as k;
 pub type PredAddFn = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
 pub type RowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MapColorFn = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
+pub type ColorRowFn = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 
 pub const PRED_COUNT: usize = 14;
 
@@ -24,6 +25,7 @@ pub struct WPDLosslessDSP {
     pub map_color32: MapColorFn,
     pub blend_row_argb: RowFn,
     pub blend_row_argb_premult: RowFn,
+    pub color_row: ColorRowFn,
 }
 
 unsafe extern "C" fn pred_add_0_c(
@@ -128,6 +130,21 @@ unsafe extern "C" fn map_color32_c(
     }
 }
 
+/// The kernel works in place, and every caller passes the same pointer twice;
+/// a distinct destination is copied first so checkasm can still compare the
+/// two forms.
+unsafe extern "C" fn color_row_c(dst: *mut u32, src: *const u32, n: c_int, mult: u32) {
+    let n = n as usize;
+    unsafe {
+        let row = slice::from_raw_parts_mut(dst, n);
+
+        if dst.cast_const() != src {
+            row.copy_from_slice(slice::from_raw_parts(src, n));
+        }
+        k::color_row(row, mult);
+    }
+}
+
 unsafe extern "C" fn blend_row_argb_c(dst: *mut u8, src: *const u8, n: c_int) {
     let n = 4 * n as usize;
     unsafe {
@@ -176,6 +193,8 @@ mod asm {
         );
         pub fn ff_blend_row_argb_avx2(dst: *mut u8, src: *const u8, n: c_int);
         pub fn ff_blend_row_argb_premult_ssse3(dst: *mut u8, src: *const u8, n: c_int);
+        pub fn ff_color_row_ssse3(dst: *mut u32, src: *const u32, n: c_int, mult: u32);
+        pub fn ff_color_row_avx2(dst: *mut u32, src: *const u32, n: c_int, mult: u32);
         pub fn ff_blend_row_argb_premult_avx2(dst: *mut u8, src: *const u8, n: c_int);
     }
 
@@ -184,6 +203,7 @@ mod asm {
 
         if flags.contains(wpd::cpu::CpuFlags::SSSE3) {
             dsp.blend_row_argb_premult = ff_blend_row_argb_premult_ssse3;
+            dsp.color_row = ff_color_row_ssse3;
         }
 
         if flags.contains(wpd::cpu::CpuFlags::AVX2) {
@@ -207,6 +227,7 @@ mod asm {
             dsp.map_color32 = ff_map_color32_avx2;
             dsp.blend_row_argb = ff_blend_row_argb_avx2;
             dsp.blend_row_argb_premult = ff_blend_row_argb_premult_avx2;
+            dsp.color_row = ff_color_row_avx2;
         }
     }
 }
@@ -293,6 +314,7 @@ impl WPDLosslessDSP {
             map_color32: map_color32_c,
             blend_row_argb: blend_row_argb_c,
             blend_row_argb_premult: blend_row_argb_premult_c,
+            color_row: color_row_c,
         };
 
         #[cfg(all(

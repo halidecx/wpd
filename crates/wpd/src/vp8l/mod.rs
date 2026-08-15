@@ -559,6 +559,7 @@ impl Decoder {
             .try_reserve(ARENA_CHUNK)
             .map_err(|_| Error::NoMemory)?;
 
+        #[allow(clippy::needless_range_loop)]
         for i in 0..nb_groups {
             for j in 0..HUFFMAN_CODES_PER_META_CODE {
                 let extra = if j == HUFF_IDX_GREEN && cache_bits > 0 {
@@ -829,6 +830,7 @@ impl Decoder {
 
     fn apply_color(&mut self, target: Target) {
         let Decoder {
+            dsp,
             image,
             argb,
             alpha_argb,
@@ -842,6 +844,7 @@ impl Decoder {
         let mult = &image[ROLE_COLOR];
 
         transform::color_rows(
+            dsp,
             &mut pic.data,
             0,
             pic.stride,
@@ -1112,6 +1115,7 @@ impl Decoder {
                     let mult = &image[ROLE_COLOR];
 
                     transform::color_rows(
+                        dsp,
                         &mut out.data,
                         base,
                         stride,

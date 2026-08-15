@@ -19,6 +19,7 @@ use std::ffi::c_int;
 
 pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
 pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
+pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 
 pub use super::vp8::Raw;
 
@@ -50,6 +51,22 @@ macro_rules! raw_map_color {
         impl Raw for $marker {
             type Sig = MapColorRaw;
             const F: MapColorRaw = $inner;
+        }
+    };
+}
+
+macro_rules! raw_color_row {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        extern "C" {
+            #[link_name = $sym]
+            fn $inner(_: *mut u32, _: *const u32, _: c_int, _: u32);
+        }
+
+        pub struct $marker;
+
+        impl Raw for $marker {
+            type Sig = ColorRowRaw;
+            const F: ColorRowRaw = $inner;
         }
     };
 }
@@ -87,6 +104,16 @@ fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
     }
 }
 
+/// The kernel is in place at every call site, and the length is the count, so
+/// there is no region to check beyond what the slice already says.
+fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
+    unsafe {
+        let p = row.as_mut_ptr();
+
+        (T::F)(p, p.cast_const(), row.len() as c_int, mult)
+    }
+}
+
 /// The fourteen predictors of one instruction set, in table order.
 macro_rules! pred_table {
     ($set:ident) => {
@@ -119,6 +146,12 @@ macro_rules! preds {
 mod arch {
     use super::*;
 
+    pub mod ssse3 {
+        use super::*;
+
+        raw_color_row!(ColorRow, color_row, "ff_color_row_ssse3");
+    }
+
     pub mod avx2 {
         use super::*;
 
@@ -140,12 +173,17 @@ mod arch {
         }
 
         raw_map_color!(MapColor, map_color, "ff_map_color32_avx2");
+        raw_color_row!(ColorRow, color_row, "ff_color_row_avx2");
     }
 
     pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
+        if flags.contains(CpuFlags::SSSE3) {
+            dsp.color_row = color_row::<ssse3::ColorRow>;
+        }
         if flags.contains(CpuFlags::AVX2) {
             dsp.pred_add = pred_table!(avx2);
             dsp.map_color32 = map_color32::<avx2::MapColor>;
+            dsp.color_row = color_row::<avx2::ColorRow>;
         }
     }
 }

@@ -125,6 +125,12 @@ proven-bound indexing for the pixel loops, where it pays.
   surviving `core::panicking` references; a bounds check that LLVM did not
   remove shows up there.
 
+- **A tail is not a detail.** A kernel whose caller's natural batch is smaller
+  than one vector spends its whole life in the tail. The cross-colour transform
+  is called per tile, a tile can be four pixels, and the AVX2 kernel's one-pixel
+  tail was costing more than the vector loop saved. Check what `n` actually is
+  at the call sites before deciding the tail can be scalar.
+
 - **A pointer into your own struct is a borrow you cannot express — name the
   field instead.** The C decoder kept two `WebPImage *` that pointed at its own
   members. One was always the same member, so it became a `bool`; the other was
@@ -1044,6 +1050,96 @@ files where decoding actually dominates the process — `lossy`, `lossless`,
 `anim_yuva` — 1.01, 1.01 and 1.00. The small files show the Rust binary's larger
 start-up cost, which is 70 us on a 400 us process and has been there since Phase
 1; that is why these comparisons are phase against phase.
+
+### Phase 8a — the tuning pass
+
+Four changes, three of them in safe Rust. Every file in the corpus that does a
+measurable amount of decoding is now at or ahead of the preserved C baseline
+`d241ef8`.
+
+**The cross-colour transform got assembly, and it was the biggest single win.**
+`color_row` in SSSE3 and AVX2, 4.7x and 10.6x the scalar in checkasm, worth 6%
+of `lossless.webp` end to end — it was 7.8% of that decode and is now 1.2%. The
+trick is the pixel layout. A pixel is `[A, R, G, B]`, so a 16-bit lane pair is
+`(R:A, B:G)`: the two channels the transform writes sit in a lane's _high_ byte
+and the green it predicts them from in the low byte of the other. One `pshufb`
+puts green into both lanes' high halves, and `pmulhw`'s `>> 16` then absorbs the
+transform's `>> 5` for nothing, because a byte in a lane's high half is already
+multiplied by 256. That is eight instructions per vector against libwebp's ten,
+and no final mask, because each delta lands only on the byte it belongs to
+rather than having to be cleaned off the two it does not.
+
+**A four-pixel step in the AVX2 tail was worth as much as the kernel.** A
+colour-transform tile can be four pixels wide, so on `predict_topright` every
+call fell straight into the one-pixel tail and spent eight vector ops on each
+pixel — 6.5% of the file, with the main loop not even appearing in the profile.
+Adding an xmm step ahead of the scalar tail took that file from 3% behind the C
+baseline to level. Worth remembering that a kernel's tail is not a detail when
+the caller's natural batch is smaller than a vector.
+
+**Two bounds checks around three instructions of work.** The packed-palette
+expansion's inner loop was twelve instructions, six of them the two range checks
+on `row[off + b * PPB..][..PPB]`. LLVM cannot drop them: the relation between
+`off`, `full` and the row length that makes the write in bounds is not one it
+can see, and no rearrangement of the indexing persuades it. Lifting each block's
+indices into a small stack scratch first removes the aliasing between source and
+destination, which lets the write walk forwards over a slice taken once per
+block. 12% on `palette4bpp_rgb`, from 1.11x behind the baseline to level — **and
+no assembly**, on the file that had looked most like the one wanting a gather.
+
+**The alpha palette path was never specialised.** `expand_palette_rows` got the
+const-generic group size in Phase 3; `color_indexing_alpha`, which does the same
+job into a byte plane rather than an ARGB one, did not. It ran a variable-count
+shift per pixel and a `chunks_exact_mut` whose stride the compiler could not
+fold. The same fix — a per-group expansion table and a const `PPB` — took
+`a_lossy` from 56.5ms to 47.2ms, from 6% behind the C baseline to 13% ahead.
+This had been on the register since Phase 3 as "a_lossy 1.05x slower" and the
+reason turned out to be a transform that simply never got the treatment its twin
+did.
+
+**One measurement that went the other way, kept because it will look obvious
+again.** Widening the sparse zero-run skip in `analyze` from eight bytes to
+thirty-two looks free: the alphabets run to a couple of thousand entries. It is
+3% better on `huffman_long_codes` and 3% worse on `transparent_over`, whose
+lists are short enough that the wide stride rarely fires, and eight wins on
+both. Reverted, with the numbers in the comment. Writing the same test as
+`run.iter().all(|&b| b == 0)` is worse than either stride: `objdump` showed zero
+vector instructions in the function, because that compiles to a byte loop with
+an early exit rather than the word compare the explicit `u64` gives.
+
+**Where it lands**, pinned to one core against `d241ef8`, at a repeat high
+enough that decoding dominates:
+
+| file                      | vs C baseline |
+| ------------------------- | ------------- |
+| huffman_simple_forms      | 2.19x faster  |
+| huffman_long_codes        | 1.50x faster  |
+| dispose_bg_fullframe      | 1.20x faster  |
+| a_lossy                   | 1.13x faster  |
+| transforms_before_palette | 1.08x faster  |
+| anim_yuv                  | 1.08x faster  |
+| lossless                  | 1.07x faster  |
+| palette2bpp_rgb           | 1.06x faster  |
+| anim_yuva                 | 1.05x faster  |
+| palette4bpp_rgb           | level         |
+| predict_topright          | level         |
+| lossy                     | 1.01x faster  |
+| durations                 | 1.01x slower  |
+| anim_rgb                  | 1.01x slower  |
+| overlap_inside            | 1.02x slower  |
+| odd_frames                | 1.03x slower  |
+| transparent_over          | 1.04x slower  |
+
+What is left is 1-4% on animations of very small frames, where building a prefix
+code per frame is a third of the decode and the picture itself is a few thousand
+pixels. Against libwebp the whole corpus is between 1.02x and 2.54x faster.
+
+**Two things to be careful of when reading numbers on this corpus.** The Rust
+binary starts about 70us slower than the C one, which is invisible on
+`lossless.webp` and is the whole difference on `transparent_over` at a low
+repeat: at `--repeat 60` that file reads as 1.09x slower and at `--repeat 3000`
+as 1.04x. And `--repeat` interacts with which build allocates when, so a file
+that inverts as the repeat grows is measuring start-up, not decoding.
 
 ## Measuring the fallbacks needs two no-asm builds
 
