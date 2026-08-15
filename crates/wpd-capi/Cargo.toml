@@ -25,6 +25,3 @@ default = ["asm"]
 asm = ["wpd/asm"]
 trim_dsp = ["wpd/trim_dsp"]
 force_rac32 = ["wpd/force_rac32"]
-
-[build-dependencies]
-cc = "1"

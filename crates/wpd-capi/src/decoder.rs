@@ -24,7 +24,6 @@ use crate::convert::{
     format_bpp, format_is_packed, format_is_premultiplied, format_valid,
     options_transform, WPDDecoderOptions,
 };
-use crate::dsp::vp8l::WPDLosslessDSP;
 use crate::dsp::yuv::WPDYUVDSP;
 use crate::export::{
     export_external_planar_rows, export_frame, export_packed, export_still_lossless,
@@ -44,6 +43,7 @@ use crate::vp8l::{
     vp8l_set_canvas, vp8l_still_active, vp8l_still_frame, vp8l_still_peek,
     vp8l_still_rows_out, vp8l_still_step, vp8l_width, VP8L_TARGET_ARGB,
 };
+use wpd::dsp::vp8l::Vp8lDsp;
 
 pub const WPD_OK: c_int = 0;
 pub const WPD_ERR_INVALID_ARG: c_int = -1;
@@ -126,7 +126,7 @@ pub(crate) enum Subframe {
 pub struct WPDDecoder {
     pub(crate) codec: WpdCodecContext,
     pub(crate) vp8_initialized: bool,
-    pub(crate) ldsp: WPDLosslessDSP,
+    pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: WPDYUVDSP,
     pub(crate) out_format: c_int,
     pub(crate) premultiply: c_int,
@@ -288,7 +288,7 @@ impl WPDDecoder {
                 bypass_filtering: 0,
             },
             vp8_initialized: false,
-            ldsp: WPDLosslessDSP::new(),
+            ldsp: Vp8lDsp::new(),
             ydsp: WPDYUVDSP::new(),
             out_format: WPD_PIX_FMT_NONE,
             premultiply: 0,

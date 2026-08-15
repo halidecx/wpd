@@ -91,7 +91,6 @@ dependencies = [
 name = "wpd-capi"
 version = "0.1.0"
 dependencies = [
- "cc",
  "wpd",
 ]
 

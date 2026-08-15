@@ -6,7 +6,7 @@
 //! [`wpd::vp8`]; what is here is the WebP container's idea of a lossy frame.
 
 use std::ffi::{c_int, c_uint};
-use std::ptr;
+use std::{ptr, slice};
 
 use wpd::image::Format;
 
@@ -142,16 +142,19 @@ impl WPDDecoder {
                 return ret;
             }
             if direct == 0 {
+                let argb = unsafe { self.alpha_argb.frame() };
+                let width = self.width as usize;
+
                 for y in 0..self.height {
-                    unsafe {
-                        (self.ldsp.extract_green)(
+                    let src = argb.plane[0].row(y, 0, width * 4);
+                    let dst = unsafe {
+                        slice::from_raw_parts_mut(
                             out.data[3].offset(y as isize * out.linesize[3] as isize),
-                            self.alpha_argb.data[0].offset(
-                                y as isize * self.alpha_argb.linesize[0] as isize,
-                            ),
-                            self.width,
-                        );
-                    }
+                            width,
+                        )
+                    };
+
+                    (self.ldsp.extract_green)(dst, src);
                 }
             }
         }

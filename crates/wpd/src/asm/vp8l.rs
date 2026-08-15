@@ -20,6 +20,7 @@ use std::ffi::c_int;
 pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
 pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
+pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 
 pub use super::vp8::Raw;
 
@@ -71,6 +72,22 @@ macro_rules! raw_color_row {
     };
 }
 
+macro_rules! raw_blend_row {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        extern "C" {
+            #[link_name = $sym]
+            fn $inner(_: *mut u8, _: *const u8, _: c_int);
+        }
+
+        pub struct $marker;
+
+        impl Raw for $marker {
+            type Sig = BlendRowRaw;
+            const F: BlendRowRaw = $inner;
+        }
+    };
+}
+
 /// `UP` is false for the two predictors that run on the first row of a picture,
 /// where there is no row above and the caller passes no offset for one.
 fn pred_add<T: Raw<Sig = PredAddRaw>, const UP: bool>(
@@ -114,6 +131,21 @@ fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
     }
 }
 
+/// The kernel reads and writes whole pixels, so the shorter of the two rows
+/// bounds the run — which is what the scalar `zip` does too.
+fn blend_row<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len()) / 4;
+
+    unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
+}
+
+/// Green comes out one byte per four, so the destination bounds the run.
+fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
+    let n = dst.len().min(src.len() / 4);
+
+    unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
+}
+
 /// The fourteen predictors of one instruction set, in table order.
 macro_rules! pred_table {
     ($set:ident) => {
@@ -150,6 +182,11 @@ mod arch {
         use super::*;
 
         raw_color_row!(ColorRow, color_row, "ff_color_row_ssse3");
+        raw_blend_row!(
+            BlendPremult,
+            blend_premult,
+            "ff_blend_row_argb_premult_ssse3"
+        );
     }
 
     pub mod avx2 {
@@ -174,16 +211,27 @@ mod arch {
 
         raw_map_color!(MapColor, map_color, "ff_map_color32_avx2");
         raw_color_row!(ColorRow, color_row, "ff_color_row_avx2");
+        raw_blend_row!(ExtractGreen, extract_green, "ff_extract_green_avx2");
+        raw_blend_row!(Blend, blend, "ff_blend_row_argb_avx2");
+        raw_blend_row!(
+            BlendPremult,
+            blend_premult,
+            "ff_blend_row_argb_premult_avx2"
+        );
     }
 
     pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
         if flags.contains(CpuFlags::SSSE3) {
             dsp.color_row = color_row::<ssse3::ColorRow>;
+            dsp.blend_row_argb_premult = blend_row::<ssse3::BlendPremult>;
         }
         if flags.contains(CpuFlags::AVX2) {
             dsp.pred_add = pred_table!(avx2);
             dsp.map_color32 = map_color32::<avx2::MapColor>;
             dsp.color_row = color_row::<avx2::ColorRow>;
+            dsp.extract_green = extract_green::<avx2::ExtractGreen>;
+            dsp.blend_row_argb = blend_row::<avx2::Blend>;
+            dsp.blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
         }
     }
 }
@@ -213,6 +261,13 @@ mod arch {
         }
 
         raw_map_color!(MapColor, map_color, "ff_map_color32_neon");
+        raw_blend_row!(ExtractGreen, extract_green, "ff_extract_green_neon");
+        raw_blend_row!(Blend, blend, "ff_blend_row_argb_neon");
+        raw_blend_row!(
+            BlendPremult,
+            blend_premult,
+            "ff_blend_row_argb_premult_neon"
+        );
     }
 
     pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
@@ -221,6 +276,9 @@ mod arch {
         }
         dsp.pred_add = pred_table!(neon);
         dsp.map_color32 = map_color32::<neon::MapColor>;
+        dsp.extract_green = extract_green::<neon::ExtractGreen>;
+        dsp.blend_row_argb = blend_row::<neon::Blend>;
+        dsp.blend_row_argb_premult = blend_row::<neon::BlendPremult>;
     }
 }
 

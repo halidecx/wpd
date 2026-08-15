@@ -204,12 +204,29 @@ impl<'a> PlaneRef<'a> {
         }
     }
 
+    /// A plane whose memory the caller holds, which is how a codec's picture
+    /// and the C ABI shim's images get in.
+    pub fn borrowed(data: &'a [u8], stride: usize) -> Self {
+        PlaneRef {
+            data,
+            stride,
+            origin: 0,
+        }
+    }
+
     pub fn stride(&self) -> usize {
         self.stride
     }
 
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// `len` bytes of row `y`, starting `from` bytes in.
+    pub fn row(&self, y: i32, from: usize, len: usize) -> &'a [u8] {
+        let at = self.origin + y as usize * self.stride + from;
+
+        &self.data[at..at + len]
     }
 }
 
@@ -229,8 +246,29 @@ impl<'a> PlaneMut<'a> {
         }
     }
 
+    /// As [`PlaneRef::borrowed`].
+    pub fn borrowed(data: &'a mut [u8], stride: usize) -> Self {
+        PlaneMut {
+            data,
+            stride,
+            origin: 0,
+        }
+    }
+
     pub fn stride(&self) -> usize {
         self.stride
+    }
+
+    pub fn row(&self, y: i32, from: usize, len: usize) -> &[u8] {
+        let at = self.origin + y as usize * self.stride + from;
+
+        &self.data[at..at + len]
+    }
+
+    pub fn row_mut(&mut self, y: i32, from: usize, len: usize) -> &mut [u8] {
+        let at = self.origin + y as usize * self.stride + from;
+
+        &mut self.data[at..at + len]
     }
 }
 
@@ -249,6 +287,24 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
+    /// A picture whose four planes the caller already holds.
+    pub fn borrowed(
+        plane: [PlaneRef<'a>; 4],
+        width: i32,
+        height: i32,
+        format: Format,
+    ) -> Self {
+        Frame {
+            plane,
+            width,
+            height,
+            format,
+            chroma_full: false,
+            premultiplied: false,
+            flip: false,
+        }
+    }
+
     /// A picture made of one packed plane the caller already holds.
     pub fn packed(
         data: &'a [u8],
@@ -354,7 +410,31 @@ pub struct FrameMut<'a> {
     pub format: Format,
 }
 
-impl FrameMut<'_> {
+impl<'a> FrameMut<'a> {
+    /// A picture whose four planes the caller already holds.
+    pub fn borrowed(
+        plane: [PlaneMut<'a>; 4],
+        width: i32,
+        height: i32,
+        format: Format,
+    ) -> Self {
+        FrameMut {
+            plane,
+            width,
+            height,
+            format,
+        }
+    }
+
+    /// The four planes, each separately borrowed.
+    ///
+    /// They are four allocations, so destructuring the array is what lets a
+    /// kernel write two of them while reading a third — which the chroma
+    /// blend needs and no per-plane accessor can express.
+    pub fn planes_mut(&mut self) -> &mut [PlaneMut<'a>; 4] {
+        &mut self.plane
+    }
+
     pub fn row_len(&self, p: usize) -> usize {
         if planes_of(self.format) == 1 {
             self.width as usize * self.format.bpp()

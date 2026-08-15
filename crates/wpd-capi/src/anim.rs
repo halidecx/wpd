@@ -9,18 +9,18 @@ use std::ffi::{c_int, c_uint};
 use std::{mem, ptr};
 
 use wpd::anim::{regions, Placement, Region};
-use wpd::image::{ceil_rshift, Format};
+use wpd::image::Format;
 
-use crate::convert::{blend_argb_region, convert_to_argb, copy_argb_region, SubRect};
+use wpd::blit::{self, Rect};
+use wpd::dsp::vp8l::Vp8lDsp;
+
 use crate::convert::{
-    blend_yuva_region, copy_yuva_region, format_bpp, format_is_packed,
-    premultiply_after_pack,
+    convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
 };
 use crate::decoder::{
     rl24, rl32, Subframe, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8,
     TAG_VP8L,
 };
-use crate::dsp::vp8l::WPDLosslessDSP;
 use crate::dsp::yuv::WPDYUVDSP;
 use crate::image::{image_alloc_argb, image_alloc_yuva, image_free, WebPImage};
 use crate::rescale::wpd_premultiply_argb_row;
@@ -56,7 +56,7 @@ pub struct CPlacement {
 /// `CompositeTargets` from `src/anim.h`.
 #[repr(C)]
 pub struct CompositeTargets {
-    pub ldsp: *const WPDLosslessDSP,
+    pub ldsp: *const Vp8lDsp,
     pub ydsp: *const WPDYUVDSP,
     pub canvas: *mut WebPImage,
 }
@@ -114,34 +114,34 @@ unsafe fn paint(
     if region.w <= 0 || region.h <= 0 {
         return;
     }
-    let r = SubRect {
+    let r = Rect {
         x: region.x,
         y: region.y,
         w: region.w,
         h: region.h,
     };
     let argb = unsafe { (*ct.canvas).format } == Format::Argb as c_int;
+    let src = unsafe { (*frame).frame() };
+    let mut dst = unsafe { (*ct.canvas).frame_mut() };
+    let (x, y) = (pl.pos_x, pl.pos_y);
 
-    unsafe {
-        match (argb, region.blend) {
-            (true, true) => blend_argb_region(
-                ct.ldsp,
-                pl.premultiply,
-                ct.canvas,
-                frame,
-                r,
-                pl.pos_x,
-                pl.pos_y,
-            ),
-            (true, false) => copy_argb_region(ct.canvas, frame, r, pl.pos_x, pl.pos_y),
-            (false, true) => blend_yuva_region(ct.canvas, frame, r, pl.pos_x, pl.pos_y),
-            (false, false) => copy_yuva_region(ct.canvas, frame, r, pl.pos_x, pl.pos_y),
-        }
+    match (argb, region.blend) {
+        (true, true) => blit::blend_argb(
+            unsafe { &*ct.ldsp },
+            pl.premultiply != 0,
+            &mut dst,
+            &src,
+            r,
+            x,
+            y,
+        ),
+        (true, false) => blit::copy_argb(&mut dst, &src, r, x, y),
+        (false, true) => blit::blend_yuva(&mut dst, &src, r, x, y),
+        (false, false) => blit::copy_yuva(&mut dst, &src, r, x, y),
     }
 }
 
-/// Fills a rectangle of the canvas with the background colour, in whichever of
-/// the two canvas formats is in use.
+/// Fills a rectangle of the canvas with the background colour.
 unsafe fn clear_rect(
     pl: &CPlacement,
     ct: &CompositeTargets,
@@ -150,30 +150,21 @@ unsafe fn clear_rect(
     width: c_int,
     height: c_int,
 ) {
-    let canvas = unsafe { &*ct.canvas };
+    let argb = unsafe { (*ct.canvas).format } == Format::Argb as c_int;
+    let colour = if argb { pl.clear_argb } else { pl.clear_yuva };
+    let mut dst = unsafe { (*ct.canvas).frame_mut() };
 
-    if canvas.format == Format::Argb as c_int {
-        for y in 0..height {
-            let row =
-                unsafe { canvas.row_mut(0, pos_y + y, (pos_x + width) as usize * 4) };
-
-            for px in row[pos_x as usize * 4..].chunks_exact_mut(4) {
-                px.copy_from_slice(&pl.clear_argb);
-            }
-        }
-        return;
-    }
-    for comp in 0..4 {
-        let shift = u32::from(comp == 1 || comp == 2);
-        let from = (pos_x >> shift) as usize;
-        let len = ceil_rshift(width, shift) as usize;
-
-        for y in 0..ceil_rshift(height, shift) {
-            let row = unsafe { canvas.row_mut(comp, (pos_y >> shift) + y, from + len) };
-
-            row[from..].fill(pl.clear_yuva[comp]);
-        }
-    }
+    blit::clear(
+        &mut dst,
+        argb,
+        colour,
+        Rect {
+            x: pos_x,
+            y: pos_y,
+            w: width,
+            h: height,
+        },
+    );
 }
 
 /// The canvas holds whichever alpha convention the output format asked for

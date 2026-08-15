@@ -14,6 +14,7 @@ use std::{ptr, slice};
 
 use wpd::error::Error;
 use wpd::image::{plane_size, Format};
+use wpd::picture::{Frame, FrameMut, PlaneMut, PlaneRef};
 
 use crate::vp8::{WPD_ENOMEM, WPD_ERROR_TOO_LARGE};
 
@@ -345,6 +346,72 @@ pub unsafe extern "C" fn image_scratch_grow(
 }
 
 impl WebPImage {
+    /// How many bytes of plane `p` the picture's geometry covers.
+    fn extent(&self, p: usize) -> usize {
+        let planar = matches!(
+            self.format(),
+            Some(Format::Yuv420p) | Some(Format::Yuva420p)
+        );
+        let shift = u32::from(planar && (p == 1 || p == 2));
+        let row = if planar {
+            wpd::image::ceil_rshift(self.width, shift) as usize
+        } else {
+            self.width as usize * self.format().map_or(4, Format::bpp)
+        };
+        let rows = wpd::image::ceil_rshift(self.height, shift) as usize;
+
+        if rows == 0 || row == 0 {
+            return 0;
+        }
+        (rows - 1) * self.linesize[p].unsigned_abs() as usize + row
+    }
+
+    /// A safe view of the picture.
+    ///
+    /// # Safety
+    ///
+    /// The planes must be as the allocator recorded them. A flipped image has
+    /// no view: a negative `linesize` is something the C ABI produces on the
+    /// way out, never something the decoder reads through.
+    pub(crate) unsafe fn frame(&self) -> Frame<'_> {
+        let plane = core::array::from_fn(|p| {
+            if self.data[p].is_null() || self.linesize[p] <= 0 {
+                return PlaneRef::borrowed(&[], 0);
+            }
+            let bytes = unsafe { slice::from_raw_parts(self.data[p], self.extent(p)) };
+
+            PlaneRef::borrowed(bytes, self.linesize[p] as usize)
+        });
+
+        Frame::borrowed(
+            plane,
+            self.width,
+            self.height,
+            self.format().unwrap_or(Format::Argb),
+        )
+    }
+
+    /// As [`WebPImage::frame`], writable.
+    ///
+    /// # Safety
+    ///
+    /// As [`WebPImage::frame`], and nothing else may be looking at the planes.
+    pub(crate) unsafe fn frame_mut(&mut self) -> FrameMut<'_> {
+        let (width, height) = (self.width, self.height);
+        let format = self.format().unwrap_or(Format::Argb);
+        let extent: [usize; 4] = core::array::from_fn(|p| self.extent(p));
+        let plane = core::array::from_fn(|p| {
+            if self.data[p].is_null() || self.linesize[p] <= 0 {
+                return PlaneMut::borrowed(&mut [], 0);
+            }
+            let bytes = unsafe { slice::from_raw_parts_mut(self.data[p], extent[p]) };
+
+            PlaneMut::borrowed(bytes, self.linesize[p] as usize)
+        });
+
+        FrameMut::borrowed(plane, width, height, format)
+    }
+
     /// An image that owns nothing and describes nothing, which is what a
     /// zeroed C struct was.
     pub(crate) fn empty() -> Self {

@@ -330,6 +330,12 @@ pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
     pub map_color32: fn(&mut [u32], &[u32]),
     pub color_row: fn(&mut [u32], u32),
+    /// Writes each pixel's green channel out as a byte.
+    pub extract_green: fn(&mut [u8], &[u8]),
+    /// Alpha-blends one ARGB row of `src` over `dst`.
+    pub blend_row_argb: fn(&mut [u8], &[u8]),
+    /// The same, for rows whose alpha is already multiplied in.
+    pub blend_row_argb_premult: fn(&mut [u8], &[u8]),
 }
 
 fn plane_pred_0(plane: &mut [u32], out: usize, _up: usize, n: usize) {
@@ -397,6 +403,9 @@ impl Vp8lDsp {
             ],
             map_color32: map_color32_pixels,
             color_row,
+            extract_green,
+            blend_row_argb,
+            blend_row_argb_premult,
         }
     }
 

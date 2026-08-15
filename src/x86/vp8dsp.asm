@@ -4,9 +4,8 @@ SECTION_RODATA
 
 pw_20091: times 8 dw 20091
 pw_17734: times 8 dw 17734
-
-cextern_naked wpd_pw_3
-cextern_naked wpd_pw_4
+pw_3:     times 8 dw 3
+pw_4:     times 8 dw 4
 
 SECTION .text
 
@@ -35,7 +34,7 @@ cglobal vp8_idct_dc_add, 3, 3, 6, dst, block, stride
     movd       m0, [blockq]
     pxor       m1, m1
 
-    paddw      m0, [wpd_pw_4]
+    paddw      m0, [pw_4]
     movd [blockq], m1
     DEFINE_ARGS dst1, dst2, stride
     lea     dst2q, [dst1q+strideq*2]
@@ -84,7 +83,7 @@ cglobal vp8_idct_dc_add4y, 3, 3, 6, dst, block, stride
     punpckldq m0, m1
     pxor      m1, m1
 
-    paddw     m0, [wpd_pw_4]
+    paddw     m0, [pw_4]
     movd [blockq+32*0], m1
     movd [blockq+32*1], m1
     movd [blockq+32*2], m1
@@ -122,7 +121,7 @@ cglobal vp8_idct_dc_add4uv, 3, 3, 7, dst, block, stride
     punpckldq m0, m1
     pxor      m1, m1
 
-    paddw     m0, [wpd_pw_4]
+    paddw     m0, [pw_4]
     movd [blockq+32*0], m1
     movd [blockq+32*1], m1
     movd [blockq+32*2], m1
@@ -213,7 +212,7 @@ cglobal vp8_idct_add, 3, 3, 8, dst, block, stride
 
     VP8_IDCT_TRANSFORM4x4_1D 0, 1, 2, 3, 4, 5
     TRANSPOSE4x4W_LO         m0, m1, m2, m3
-    paddw        m0, [wpd_pw_4]
+    paddw        m0, [pw_4]
     VP8_IDCT_TRANSFORM4x4_1D 0, 1, 2, 3, 4, 5
 
     punpcklwd    m0, m1
@@ -260,7 +259,7 @@ cglobal vp8_luma_dc_wht, 2, 2, 5, block, dc1
     mova   [dc1q+16], m4
     HADAMARD4_1D  0, 1, 2, 3
     TRANSPOSE4x4W_LO m0, m1, m2, m3
-    paddw         m0, [wpd_pw_3]
+    paddw         m0, [pw_3]
     HADAMARD4_1D  0, 1, 2, 3
     psraw         m0, 3
     psraw         m1, 3

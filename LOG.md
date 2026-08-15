@@ -1213,6 +1213,42 @@ about 5,000 lines and some 500 uses of `unsafe` — from pointer walking to this
 type. When that lands, `scripts/miri.sh` covers a whole decode rather than the
 kernels alone, which is the real reason to want it.
 
+### Phase 8d — no C at all, and the compositor's kernels move
+
+**The library compiles no C.** `src/x86/wpd_simd_constants.c` held seven
+constant vectors the assembly read through `cextern_naked`; they are now
+ordinary `SECTION_RODATA` labels in the three `.asm` files that use them, which
+is how dav1d has always done it and removes a cross-language symbol as well as a
+translation unit. `crates/wpd-capi`'s build script no longer invokes a C
+compiler at all and has dropped the `cc` build-dependency — what is left of it
+is thirty lines that pass the aarch64 extension probes through from
+`crates/wpd`. The one remaining use of `cc` in the tree assembles `.S` files and
+compiles probe snippets, which is exactly what rav1d's build script uses it for.
+
+Two things to check when moving constants into assembly, both of which decided
+where they went: every use is a sixteen-byte load (`mova` inside `INIT_XMM`, or
+an explicit `vbroadcasti128`), so sixteen-byte definitions are enough; and
+`vp8_intrapred.asm` has an eight-byte entry in its rodata, so the new ones need
+an `alignb 16` rather than trusting the section's alignment.
+
+**The compositor's kernels are the first of the driver to move.** The four
+region blitters and the canvas clear are now `crates/wpd/src/blit.rs`, safe code
+under `forbid(unsafe_code)`, with `crates/wpd-capi` bridging its `WebPImage`
+into a `Frame` or `FrameMut` to call them. `blend_row_argb`,
+`blend_row_argb_premult` and `extract_green` gained entries in the core
+`Vp8lDsp` table with their assembly dispatch, and `WPDDecoder` now holds that
+table rather than the C-ABI one — which is left for `checkasm` alone, its only
+remaining caller.
+
+**`FrameMut::planes_mut` earned its keep immediately.** The chroma blend writes
+U and V while reading the alpha plane of the same picture. Destructuring the
+plane array — `let [_, u, v, alpha] = dst.planes_mut()` — proves those three
+disjoint for free. This is the case rav1d needs `DisjointMut` for, and the
+reason wpd does not is that wpd is single-threaded: rav1d's problem is two
+_threads_ writing disjoint parts of one picture, which no amount of
+destructuring expresses. That difference is what makes a fully safe pipeline
+reachable here and not there, and it would go away the day wpd wants threads.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor
