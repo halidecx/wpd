@@ -2,12 +2,12 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
-use std::slice;
 
-use wpd_capi::dsp::yuv::wpd_argb_to_yuv444;
+use wpd::dsp::yuv::YuvDsp;
+use wpd::image::Format;
+use wpd_capi::api::{Coding, ImageInfo, Picture};
 
 use crate::md5::{hex, Md5};
-use crate::sys::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Muxer {
@@ -33,29 +33,34 @@ pub struct Output {
     width: i32,
     height: i32,
     pub has_alpha: bool,
-    format: WPDPixelFormat,
+    format: Option<Format>,
+    yuvdsp: YuvDsp,
 }
 
-pub const PIXEL_FORMATS: &[(&str, WPDPixelFormat)] = &[
-    ("yuv420p", WPD_PIX_FMT_YUV420P),
-    ("yuva420p", WPD_PIX_FMT_YUVA420P),
-    ("argb", WPD_PIX_FMT_ARGB),
-    ("rgba", WPD_PIX_FMT_RGBA),
-    ("bgra", WPD_PIX_FMT_BGRA),
-    ("rgb", WPD_PIX_FMT_RGB),
-    ("bgr", WPD_PIX_FMT_BGR),
-    ("Argb", WPD_PIX_FMT_ARGB_PRE),
-    ("rgbA", WPD_PIX_FMT_RGBA_PRE),
-    ("bgrA", WPD_PIX_FMT_BGRA_PRE),
-    ("rgb565", WPD_PIX_FMT_RGB565),
-    ("rgba4444", WPD_PIX_FMT_RGBA4444),
-    ("rgbA4444", WPD_PIX_FMT_RGBA4444_PRE),
-    ("bgr565", WPD_PIX_FMT_BGR565),
-    ("bgra4444", WPD_PIX_FMT_BGRA4444),
-    ("bgrA4444", WPD_PIX_FMT_BGRA4444_PRE),
+pub const PIXEL_FORMATS: &[(&str, Format)] = &[
+    ("yuv420p", Format::Yuv420p),
+    ("yuva420p", Format::Yuva420p),
+    ("argb", Format::Argb),
+    ("rgba", Format::Rgba),
+    ("bgra", Format::Bgra),
+    ("rgb", Format::Rgb),
+    ("bgr", Format::Bgr),
+    ("Argb", Format::ArgbPre),
+    ("rgbA", Format::RgbaPre),
+    ("bgrA", Format::BgraPre),
+    ("rgb565", Format::Rgb565),
+    ("rgba4444", Format::Rgba4444),
+    ("rgbA4444", Format::Rgba4444Pre),
+    ("bgr565", Format::Bgr565),
+    ("bgra4444", Format::Bgra4444),
+    ("bgrA4444", Format::Bgra4444Pre),
 ];
 
-pub fn format_name(format: WPDPixelFormat) -> &'static str {
+pub fn format_name(format: Option<Format>) -> &'static str {
+    let Some(format) = format else {
+        return "unknown";
+    };
+
     PIXEL_FORMATS
         .iter()
         .find(|(_, f)| *f == format)
@@ -92,7 +97,8 @@ impl Output {
             width: 0,
             height: 0,
             has_alpha: false,
-            format: WPD_PIX_FMT_NONE,
+            format: None,
+            yuvdsp: YuvDsp::new(),
         };
 
         if chosen == "md5" {
@@ -141,7 +147,8 @@ impl Output {
             width: 0,
             height: 0,
             has_alpha: false,
-            format: WPD_PIX_FMT_NONE,
+            format: None,
+            yuvdsp: YuvDsp::new(),
         }
     }
 
@@ -182,34 +189,35 @@ impl Output {
     /// pixel format, and disagreeing with an explicit `-f` is an error.
     pub fn select_format(
         &mut self,
-        info: &WPDImageInfo,
+        info: &ImageInfo,
         pixel_format: &mut Option<&'static str>,
-        format: &mut WPDPixelFormat,
+        format: &mut Option<Format>,
     ) -> Result<(), ()> {
         let (required_name, required) = match self.muxer {
-            Muxer::Ppm => ("rgb", WPD_PIX_FMT_RGB),
-            Muxer::Pam => ("rgba", WPD_PIX_FMT_RGBA),
+            Muxer::Ppm => ("rgb", Format::Rgb),
+            Muxer::Pam => ("rgba", Format::Rgba),
             Muxer::Y4m => {
-                if info.coding == WPD_CODING_LOSSLESS && *format == WPD_PIX_FMT_NONE {
-                    self.has_alpha = info.has_alpha != 0;
-                    ("argb", WPD_PIX_FMT_ARGB)
-                } else if *format == WPD_PIX_FMT_YUV420P
-                    || *format == WPD_PIX_FMT_YUVA420P
-                {
+                if info.coding == Coding::Lossless && format.is_none() {
+                    self.has_alpha = info.has_alpha;
+                    ("argb", Format::Argb)
+                } else if matches!(
+                    *format,
+                    Some(Format::Yuv420p) | Some(Format::Yuva420p)
+                ) {
                     return Ok(());
-                } else if *format != WPD_PIX_FMT_NONE {
+                } else if format.is_some() {
                     eprintln!("y4m requires yuv420p or yuva420p output");
                     return Err(());
-                } else if info.has_alpha != 0 {
-                    ("yuva420p", WPD_PIX_FMT_YUVA420P)
+                } else if info.has_alpha {
+                    ("yuva420p", Format::Yuva420p)
                 } else {
-                    ("yuv420p", WPD_PIX_FMT_YUV420P)
+                    ("yuv420p", Format::Yuv420p)
                 }
             }
             Muxer::Raw => return Ok(()),
         };
 
-        if *format != WPD_PIX_FMT_NONE && *format != required {
+        if format.is_some_and(|f| f != required) {
             eprintln!(
                 "{} requires {} output",
                 if self.muxer == Muxer::Ppm {
@@ -222,21 +230,14 @@ impl Output {
             return Err(());
         }
         *pixel_format = Some(required_name);
-        *format = required;
+        *format = Some(required);
         Ok(())
     }
 
-    fn write_plane(
-        &mut self,
-        data: *const u8,
-        stride: isize,
-        width: i32,
-        height: i32,
-    ) -> io::Result<()> {
-        for y in 0..height as isize {
-            let row = unsafe {
-                slice::from_raw_parts(data.offset(y * stride), width as usize)
-            };
+    /// Every row of one plane, its natural width.
+    fn write_plane(&mut self, frame: &Picture<'_>, plane: usize) -> io::Result<()> {
+        for y in 0..frame.rows(plane) {
+            let row = frame.row(plane, y);
 
             self.write(row)?;
         }
@@ -247,20 +248,13 @@ impl Output {
     /// 444alpha layout wants.
     fn write_chroma_444(
         &mut self,
-        data: *const u8,
-        stride: isize,
-        width: i32,
-        height: i32,
+        frame: &Picture<'_>,
+        plane: usize,
     ) -> io::Result<()> {
-        let mut row = vec![0u8; width as usize];
+        let mut row = vec![0u8; frame.width() as usize];
 
-        for y in 0..height {
-            let src = unsafe {
-                slice::from_raw_parts(
-                    data.offset((y / 2) as isize * stride),
-                    (width as usize).div_ceil(2),
-                )
-            };
+        for y in 0..frame.height() {
+            let src = frame.row(plane, y / 2);
 
             for (x, o) in row.iter_mut().enumerate() {
                 *o = src[x / 2];
@@ -270,40 +264,32 @@ impl Output {
         Ok(())
     }
 
-    fn write_argb_444(&mut self, frame: &WPDFrame) -> io::Result<()> {
-        let pixels = frame.width as usize * frame.height as usize;
+    fn write_argb_444(&mut self, frame: &Picture<'_>) -> io::Result<()> {
+        let width = frame.width() as usize;
+        let pixels = width * frame.height() as usize;
         let mut y = vec![0u8; pixels];
         let mut u = vec![0u8; pixels];
         let mut v = vec![0u8; pixels];
 
-        unsafe {
-            wpd_argb_to_yuv444(
-                y.as_mut_ptr(),
-                frame.width as isize,
-                u.as_mut_ptr(),
-                v.as_mut_ptr(),
-                frame.width as isize,
-                frame.data[0],
-                frame.stride[0],
-                frame.width,
-                frame.height,
-            )
-        };
+        /* The kernel makes all three planes at once and y4m wants them one
+        after another, so the whole image is converted before anything is
+        written. */
+        for row in 0..frame.height() as usize {
+            let at = row * width;
+            let [y, u, v] = [&mut y, &mut u, &mut v].map(|p| &mut p[at..at + width]);
+
+            (self.yuvdsp.argb_to_yuv444)(y, u, v, frame.row(0, row as i32));
+        }
         self.write(&y)?;
         self.write(&u)?;
         self.write(&v)
     }
 
-    fn write_argb_alpha(&mut self, frame: &WPDFrame) -> io::Result<()> {
-        let mut row = vec![0u8; frame.width as usize];
+    fn write_argb_alpha(&mut self, frame: &Picture<'_>) -> io::Result<()> {
+        let mut row = vec![0u8; frame.width() as usize];
 
-        for y in 0..frame.height as isize {
-            let src = unsafe {
-                slice::from_raw_parts(
-                    frame.data[0].offset(y * frame.stride[0]),
-                    4 * frame.width as usize,
-                )
-            };
+        for y in 0..frame.height() {
+            let src = frame.row(0, y);
 
             for (x, o) in row.iter_mut().enumerate() {
                 *o = src[4 * x];
@@ -315,17 +301,17 @@ impl Output {
 
     pub fn write_frame(
         &mut self,
-        frame: &WPDFrame,
+        frame: &Picture<'_>,
         pixel_format: Option<&str>,
     ) -> Result<(), ()> {
-        let pixel_format = pixel_format.unwrap_or_else(|| format_name(frame.format));
+        let pixel_format = pixel_format.unwrap_or_else(|| format_name(frame.format()));
 
         self.write_frame_inner(frame, pixel_format).map_err(|_| ())
     }
 
     fn write_frame_inner(
         &mut self,
-        frame: &WPDFrame,
+        frame: &Picture<'_>,
         pixel_format: &str,
     ) -> io::Result<()> {
         let fail = |msg: String| io::Error::other(msg);
@@ -333,13 +319,9 @@ impl Output {
         match self.muxer {
             Muxer::Ppm | Muxer::Pam => {
                 let ppm = self.muxer == Muxer::Ppm;
-                let required = if ppm {
-                    WPD_PIX_FMT_RGB
-                } else {
-                    WPD_PIX_FMT_RGBA
-                };
+                let required = if ppm { Format::Rgb } else { Format::Rgba };
 
-                if frame.format != required {
+                if frame.format() != Some(required) {
                     eprintln!(
                         "{} requires {} output",
                         if ppm { "ppm" } else { "pam" },
@@ -348,59 +330,58 @@ impl Output {
                     return Err(fail("wrong format".into()));
                 }
                 let header = if ppm {
-                    format!("P6\n{} {}\n255\n", frame.width, frame.height)
+                    format!("P6\n{} {}\n255\n", frame.width(), frame.height())
                 } else {
                     format!(
                         "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\n\
                          TUPLTYPE RGB_ALPHA\nENDHDR\n",
-                        frame.width, frame.height
+                        frame.width(),
+                        frame.height()
                     )
                 };
 
                 self.write(header.as_bytes())?;
-                self.write_plane(
-                    frame.data[0],
-                    frame.stride[0],
-                    frame.width * if ppm { 3 } else { 4 },
-                    frame.height,
-                )
+                self.write_plane(frame, 0)
             }
             Muxer::Y4m => self.write_y4m(frame),
             Muxer::Raw => self.write_raw(frame, pixel_format),
         }
     }
 
-    fn write_y4m(&mut self, frame: &WPDFrame) -> io::Result<()> {
-        if frame.format != WPD_PIX_FMT_YUV420P
-            && frame.format != WPD_PIX_FMT_YUVA420P
-            && frame.format != WPD_PIX_FMT_ARGB
-        {
+    fn write_y4m(&mut self, frame: &Picture<'_>) -> io::Result<()> {
+        let format = frame.format();
+
+        if !matches!(
+            format,
+            Some(Format::Yuv420p) | Some(Format::Yuva420p) | Some(Format::Argb)
+        ) {
             eprintln!("y4m requires yuv420p, yuva420p or argb output");
             return Err(io::Error::other("wrong format"));
         }
         if self.frames == 0 {
-            self.width = frame.width;
-            self.height = frame.height;
-            self.format = frame.format;
+            self.width = frame.width();
+            self.height = frame.height();
+            self.format = format;
 
-            let colour = if frame.format == WPD_PIX_FMT_YUVA420P
-                || (frame.format == WPD_PIX_FMT_ARGB && self.has_alpha)
+            let colour = if format == Some(Format::Yuva420p)
+                || (format == Some(Format::Argb) && self.has_alpha)
             {
                 "444alpha"
-            } else if frame.format == WPD_PIX_FMT_ARGB {
+            } else if format == Some(Format::Argb) {
                 "444"
             } else {
                 "420jpeg"
             };
             let header = format!(
                 "YUV4MPEG2 W{} H{} F0:0 Ip A0:0 C{colour}\n",
-                frame.width, frame.height
+                frame.width(),
+                frame.height()
             );
 
             self.write(header.as_bytes())?;
-        } else if frame.width != self.width
-            || frame.height != self.height
-            || frame.format != self.format
+        } else if frame.width() != self.width
+            || frame.height() != self.height
+            || format != self.format
         {
             eprintln!("y4m frames must have one size and format");
             return Err(io::Error::other("size or format changed"));
@@ -408,7 +389,7 @@ impl Output {
         self.frames += 1;
         self.write(b"FRAME\n")?;
 
-        if frame.format == WPD_PIX_FMT_ARGB {
+        if format == Some(Format::Argb) {
             self.write_argb_444(frame)?;
             if self.has_alpha {
                 self.write_argb_alpha(frame)?;
@@ -416,58 +397,31 @@ impl Output {
             return Ok(());
         }
 
-        self.write_plane(frame.data[0], frame.stride[0], frame.width, frame.height)?;
+        self.write_plane(frame, 0)?;
 
-        if frame.format == WPD_PIX_FMT_YUVA420P {
-            self.write_chroma_444(
-                frame.data[1],
-                frame.stride[1],
-                frame.width,
-                frame.height,
-            )?;
-            self.write_chroma_444(
-                frame.data[2],
-                frame.stride[2],
-                frame.width,
-                frame.height,
-            )?;
-            self.write_plane(frame.data[3], frame.stride[3], frame.width, frame.height)
+        if format == Some(Format::Yuva420p) {
+            self.write_chroma_444(frame, 1)?;
+            self.write_chroma_444(frame, 2)?;
+            self.write_plane(frame, 3)
         } else {
-            let cw = (frame.width + 1) / 2;
-            let ch = (frame.height + 1) / 2;
-
-            self.write_plane(frame.data[1], frame.stride[1], cw, ch)?;
-            self.write_plane(frame.data[2], frame.stride[2], cw, ch)
+            self.write_plane(frame, 1)?;
+            self.write_plane(frame, 2)
         }
     }
 
-    fn write_raw(&mut self, frame: &WPDFrame, pixel_format: &str) -> io::Result<()> {
-        if frame.format >= WPD_PIX_FMT_ARGB {
-            let bpp = match frame.format {
-                WPD_PIX_FMT_RGB | WPD_PIX_FMT_BGR => 3,
-                WPD_PIX_FMT_RGB565
-                | WPD_PIX_FMT_RGBA4444
-                | WPD_PIX_FMT_RGBA4444_PRE
-                | WPD_PIX_FMT_BGR565
-                | WPD_PIX_FMT_BGRA4444
-                | WPD_PIX_FMT_BGRA4444_PRE => 2,
-                _ => 4,
-            };
+    fn write_raw(&mut self, frame: &Picture<'_>, pixel_format: &str) -> io::Result<()> {
+        let format = frame.format();
 
-            if pixel_format != format_name(frame.format) {
+        if format.is_some_and(Format::is_packed) {
+            if pixel_format != format_name(format) {
                 eprintln!(
                     "cannot convert {} frame to {}",
-                    format_name(frame.format),
+                    format_name(format),
                     pixel_format
                 );
                 return Err(io::Error::other("wrong format"));
             }
-            return self.write_plane(
-                frame.data[0],
-                frame.stride[0],
-                frame.width * bpp,
-                frame.height,
-            );
+            return self.write_plane(frame, 0);
         }
 
         let planes = match pixel_format {
@@ -476,31 +430,19 @@ impl Output {
             _ => {
                 eprintln!(
                     "cannot convert {} frame to {}",
-                    format_name(frame.format),
+                    format_name(format),
                     pixel_format
                 );
                 return Err(io::Error::other("wrong format"));
             }
         };
 
-        if planes == 4 && frame.format != WPD_PIX_FMT_YUVA420P {
+        if planes == 4 && format != Some(Format::Yuva420p) {
             eprintln!("frame has no alpha plane");
             return Err(io::Error::other("no alpha plane"));
         }
         for p in 0..planes {
-            let chroma = p == 1 || p == 2;
-            let width = if chroma {
-                (frame.width + 1) / 2
-            } else {
-                frame.width
-            };
-            let height = if chroma {
-                (frame.height + 1) / 2
-            } else {
-                frame.height
-            };
-
-            self.write_plane(frame.data[p], frame.stride[p], width, height)?;
+            self.write_plane(frame, p)?;
         }
         Ok(())
     }

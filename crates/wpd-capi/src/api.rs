@@ -104,6 +104,24 @@ pub enum Animation {
     Subframe,
 }
 
+/// How the image was coded, which a still declares before it is decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coding {
+    Unknown,
+    Lossy,
+    Lossless,
+}
+
+impl Coding {
+    pub fn name(self) -> &'static str {
+        match self {
+            Coding::Unknown => "unknown",
+            Coding::Lossy => "lossy",
+            Coding::Lossless => "lossless",
+        }
+    }
+}
+
 /// Which metadata chunk to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metadata {
@@ -160,7 +178,7 @@ pub struct ImageInfo {
     pub frame_count: i32,
     pub loop_count: i32,
     pub background_argb: u32,
-    pub lossless: bool,
+    pub coding: Coding,
 }
 
 impl ImageInfo {
@@ -173,7 +191,11 @@ impl ImageInfo {
             frame_count: c.frame_count,
             loop_count: c.loop_count,
             background_argb: c.background_argb,
-            lossless: c.coding == 2,
+            coding: match c.coding {
+                1 => Coding::Lossy,
+                2 => Coding::Lossless,
+                _ => Coding::Unknown,
+            },
         }
     }
 }
@@ -237,6 +259,18 @@ impl Picture<'_> {
         self.frame.has_alpha != 0
     }
 
+    /// Whether the canvas is cleared to the background colour behind this
+    /// frame before the next one is drawn.
+    pub fn dispose_to_background(&self) -> bool {
+        self.frame.dispose == 1
+    }
+
+    /// Whether this frame is alpha-blended over what is already there, as
+    /// opposed to replacing it.
+    pub fn blend(&self) -> bool {
+        self.frame.blend == 0
+    }
+
     /// How many planes this picture's format hands out.
     pub fn planes(&self) -> usize {
         match self.format() {
@@ -258,7 +292,8 @@ impl Picture<'_> {
         }
     }
 
-    fn rows(&self, plane: usize) -> i32 {
+    /// How many rows `plane` has, which the chroma planes halve.
+    pub fn rows(&self, plane: usize) -> i32 {
         if self.planes() == 1 {
             self.height()
         } else {

@@ -110,8 +110,4 @@ void wpd_yuv420_to_packed(int layout, uint8_t *dst, ptrdiff_t dst_stride,
                           ptrdiff_t uv_stride, const uint8_t *a,
                           ptrdiff_t a_stride, int width, int height);
 
-void wpd_argb_to_yuv444(uint8_t *y, ptrdiff_t y_stride, uint8_t *u, uint8_t *v,
-                        ptrdiff_t uv_stride, const uint8_t *argb,
-                        ptrdiff_t argb_stride, int width, int height);
-
 #endif

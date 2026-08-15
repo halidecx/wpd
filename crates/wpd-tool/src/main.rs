@@ -7,13 +7,14 @@
 
 mod md5;
 mod output;
-mod sys;
 
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+use wpd::image::Format;
+use wpd_capi::api::{self, Animation, Decoder, Metadata};
+
 use output::{format_name, Muxer, Output, PIXEL_FORMATS};
-use sys::*;
 
 const VCS_VERSION: &str = env!("WPD_VCS_VERSION");
 
@@ -70,7 +71,7 @@ fn cpu_masks() -> Vec<(&'static str, u32)> {
 fn print_banner() {
     eprintln!(
         "wpd by Halide Compression, LLC | {} | {VCS_VERSION}",
-        unsafe { cstr(wpd_version_string()) }
+        api::version()
     );
 }
 
@@ -135,14 +136,14 @@ fn parse_repeat(value: &str) -> Option<i32> {
         .map(|v| v as i32)
 }
 
-fn parse_format(value: &str) -> Option<(Option<&'static str>, WPDPixelFormat)> {
+fn parse_format(value: &str) -> Option<(Option<&'static str>, Option<Format>)> {
     if value == "auto" {
-        return Some((None, WPD_PIX_FMT_NONE));
+        return Some((None, None));
     }
     PIXEL_FORMATS
         .iter()
         .find(|(name, _)| *name == value)
-        .map(|(name, format)| (Some(*name), *format))
+        .map(|(name, format)| (Some(*name), Some(*format)))
 }
 
 /// `strtoul(value, &end, 0)`: decimal, or `0x`-prefixed hex, or octal.
@@ -206,7 +207,7 @@ struct Options {
     muxer: Option<String>,
     verify: Option<String>,
     pixel_format: Option<&'static str>,
-    out_format: WPDPixelFormat,
+    out_format: Option<Format>,
     positional: Vec<String>,
 }
 
@@ -223,7 +224,6 @@ fn parse_args(argv: &[String]) -> Parsed {
     let mut o = Options {
         repeat: 1,
         loops: 1,
-        out_format: WPD_PIX_FMT_NONE,
         ..Default::default()
     };
     let mut i = 1;
@@ -306,7 +306,7 @@ fn parse_args(argv: &[String]) -> Parsed {
                 "cpumask" => match parse_cpumask(&value!()) {
                     Some(mask) => {
                         warn_baseline_cpumask(mask);
-                        unsafe { wpd_set_cpu_flags_mask(mask) };
+                        api::set_cpu_flags_mask(mask);
                     }
                     None => return Parsed::Bad(BAD_CPUMASK),
                 },
@@ -392,28 +392,28 @@ struct DecodeContext<'a> {
     frames: i32,
 }
 
-fn print_image_info(decoder: *mut WPDDecoder, printed: &mut bool) {
-    const CODINGS: [&str; 3] = ["unknown", "lossy", "lossless"];
-    let mut image = WPDImageInfo::default();
+fn print_image_info(decoder: &Decoder<'_>, printed: &mut bool) {
+    let Ok(image) = decoder.info() else {
+        return;
+    };
 
-    if *printed || unsafe { wpd_decoder_get_info(decoder, &mut image) } != WPD_OK {
+    if *printed {
         return;
     }
     *printed = true;
     println!("canvas: {}x{}", image.width, image.height);
-    println!("coding: {}", CODINGS[image.coding as usize]);
-    println!("alpha: {}", image.has_alpha);
-    println!("animation: {}", image.is_animation);
+    println!("coding: {}", image.coding.name());
+    println!("alpha: {}", i32::from(image.has_alpha));
+    println!("animation: {}", i32::from(image.is_animation));
     println!("frames: {}", image.frame_count);
     println!("loops: {}", image.loop_count);
     println!("background: 0x{:08x}", image.background_argb);
 
     for i in 0.. {
-        let mut entry = WPDFrameInfo::default();
-
-        if unsafe { wpd_decoder_frame_info(decoder, i, &mut entry) } != WPD_OK {
+        let Ok(entry) = decoder.frame_info(i) else {
             break;
-        }
+        };
+
         println!(
             "table {}: {}x{} at {},{} duration {} dispose {} blend {} \
              alpha {} complete {}",
@@ -423,59 +423,56 @@ fn print_image_info(decoder: *mut WPDDecoder, printed: &mut bool) {
             entry.pos_x,
             entry.pos_y,
             entry.duration,
-            entry.dispose,
-            entry.blend,
-            entry.has_alpha,
-            entry.complete
+            i32::from(entry.dispose_to_background),
+            i32::from(!entry.blend),
+            i32::from(entry.has_alpha),
+            i32::from(entry.complete)
         );
     }
 }
 
-fn print_metadata(decoder: *mut WPDDecoder) {
-    const KINDS: [(i32, &str); 3] = [
-        (WPD_METADATA_ICCP, "iccp"),
-        (WPD_METADATA_EXIF, "exif"),
-        (WPD_METADATA_XMP, "xmp"),
+fn print_metadata(decoder: &Decoder<'_>) {
+    const KINDS: [(Metadata, &str); 3] = [
+        (Metadata::Iccp, "iccp"),
+        (Metadata::Exif, "exif"),
+        (Metadata::Xmp, "xmp"),
     ];
 
     for (which, name) in KINDS {
-        let mut data = std::ptr::null();
-        let mut size = 0usize;
-
-        if unsafe { wpd_decoder_metadata(decoder, which, &mut data, &mut size) }
-            == WPD_OK
-            && size != 0
-        {
-            println!("{name}: {size} bytes");
+        if let Some(data) = decoder.metadata(which) {
+            println!("{name}: {} bytes", data.len());
         }
     }
 }
 
 /// Pulls every frame currently available. Returns 0 when the decoder has
 /// nothing more for now, or negative on error.
-fn drain_frames(decoder: *mut WPDDecoder, ctx: &mut DecodeContext) -> i32 {
+fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
     loop {
-        let mut frame = WPDFrame::default();
-        let ret = unsafe { wpd_decoder_next_frame(decoder, &mut frame) };
+        let Ok(next) = decoder.next_frame() else {
+            return -1;
+        };
+        let Some(frame) = next else {
+            return 0;
+        };
 
-        if ret <= 0 {
-            return ret;
-        }
         if ctx.info {
+            let (pos_x, pos_y) = frame.position();
+
             println!(
                 "frame {}: {}x{} {} duration {} timestamp {} at {},{} \
                  dispose {} blend {} alpha {}",
                 ctx.frames,
-                frame.width,
-                frame.height,
-                format_name(frame.format),
-                frame.duration,
-                frame.timestamp,
-                frame.pos_x,
-                frame.pos_y,
-                frame.dispose,
-                frame.blend,
-                frame.has_alpha
+                frame.width(),
+                frame.height(),
+                format_name(frame.format()),
+                frame.duration(),
+                frame.timestamp(),
+                pos_x,
+                pos_y,
+                i32::from(frame.dispose_to_background()),
+                i32::from(!frame.blend()),
+                i32::from(frame.has_alpha())
             );
         }
         if let Some(sink) = ctx.sink.as_deref_mut() {
@@ -488,7 +485,7 @@ fn drain_frames(decoder: *mut WPDDecoder, ctx: &mut DecodeContext) -> i32 {
 }
 
 fn decode_stream(
-    decoder: *mut WPDDecoder,
+    decoder: &mut Decoder<'_>,
     data: &[u8],
     chunk: usize,
     ctx: &mut DecodeContext,
@@ -496,31 +493,26 @@ fn decode_stream(
 ) -> i32 {
     let mut last_rows = 0;
 
-    if unsafe { wpd_decoder_open_stream(decoder) } < 0 {
+    if decoder.open_stream().is_err() {
         return -1;
     }
     for part in data.chunks(chunk) {
-        if unsafe { wpd_decoder_append(decoder, part.as_ptr(), part.len()) } < 0 {
+        if decoder.append(part).is_err() {
             return -1;
         }
         if drain_frames(decoder, ctx) < 0 {
             return -1;
         }
         if ctx.info {
-            let mut partial = WPDFrame::default();
-            let mut rows = 0;
-
-            if unsafe { wpd_decoder_partial_frame(decoder, &mut partial, &mut rows) }
-                == WPD_OK
-                && rows > 0
-                && rows != last_rows
-            {
-                println!("partial: {} of {} rows", rows, partial.height);
-                last_rows = rows;
+            if let Ok((partial, rows)) = decoder.partial_frame() {
+                if rows > 0 && rows != last_rows {
+                    println!("partial: {} of {} rows", rows, partial.height());
+                    last_rows = rows;
+                }
             }
         }
     }
-    if unsafe { wpd_decoder_end_of_stream(decoder) } < 0 {
+    if decoder.end_of_stream().is_err() {
         return -1;
     }
     if ctx.info {
@@ -529,43 +521,26 @@ fn decode_stream(
     drain_frames(decoder, ctx)
 }
 
-/// Owns the decoder handle so that every early return frees it.
-struct Decoder(*mut WPDDecoder);
+/// Builds a decoder with the output format and animation mode the options ask
+/// for.
+fn new_decoder(
+    out_format: Option<Format>,
+    pixel_format: Option<&str>,
+    subframe: bool,
+) -> Option<Decoder<'static>> {
+    let mut decoder = Decoder::new();
 
-impl Drop for Decoder {
-    fn drop(&mut self) {
-        unsafe { wpd_decoder_free(self.0) };
-    }
-}
-
-impl Decoder {
-    fn create(
-        out_format: WPDPixelFormat,
-        pixel_format: Option<&str>,
-        subframe: bool,
-    ) -> Option<Self> {
-        let handle = unsafe { wpd_decoder_create() };
-
-        if handle.is_null() {
-            eprintln!("out of memory");
-            return None;
-        }
-        let decoder = Self(handle);
-
-        if out_format != WPD_PIX_FMT_NONE
-            && unsafe { wpd_decoder_set_output_format(handle, out_format) } < 0
-        {
+    if let Some(format) = out_format {
+        if decoder.set_format(format).is_err() {
             eprintln!("cannot select {} output", pixel_format.unwrap_or("auto"));
             return None;
         }
-        if subframe
-            && unsafe { wpd_decoder_set_animation_mode(handle, WPD_ANIM_SUBFRAME) } < 0
-        {
-            eprintln!("cannot select sub-frame output");
-            return None;
-        }
-        Some(decoder)
     }
+    if subframe && decoder.set_animation(Animation::Subframe).is_err() {
+        eprintln!("cannot select sub-frame output");
+        return None;
+    }
+    Some(decoder)
 }
 
 fn read_file(name: &str) -> std::io::Result<Vec<u8>> {
@@ -689,12 +664,11 @@ fn run(
     let mut out_format = opts.out_format;
 
     if opened && output.muxer != Muxer::Raw {
-        let mut image = WPDImageInfo::default();
-
-        if unsafe { wpd_get_info(data.as_ptr(), data.len(), &mut image) } < 0 {
+        let Ok(image) = api::info(&data) else {
             eprintln!("{input_name}: cannot read image header");
             return ExitCode::FAILURE;
-        }
+        };
+
         if output
             .select_format(&image, &mut pixel_format, &mut out_format)
             .is_err()
@@ -719,8 +693,7 @@ fn run(
             frames: 0,
         };
 
-        let Some(mut decoder) =
-            Decoder::create(out_format, pixel_format, opts.subframe)
+        let Some(mut decoder) = new_decoder(out_format, pixel_format, opts.subframe)
         else {
             return ExitCode::FAILURE;
         };
@@ -731,7 +704,7 @@ fn run(
             for loop_index in 0..opts.loops {
                 if loop_index > 0 {
                     let Some(next) =
-                        Decoder::create(out_format, pixel_format, opts.subframe)
+                        new_decoder(out_format, pixel_format, opts.subframe)
                     else {
                         return ExitCode::FAILURE;
                     };
@@ -741,7 +714,7 @@ fn run(
                     ctx.frames = 0;
                 }
                 ret = decode_stream(
-                    decoder.0,
+                    &mut decoder,
                     &data,
                     opts.stream,
                     &mut ctx,
@@ -751,34 +724,32 @@ fn run(
                     break;
                 }
             }
-        } else if unsafe { wpd_decoder_open(decoder.0, data.as_ptr(), data.len()) } < 0
-        {
+        } else if decoder.open(&data).is_err() {
             ret = -1;
         } else {
             if ctx.info {
-                print_image_info(decoder.0, &mut info_printed);
+                print_image_info(&decoder, &mut info_printed);
             }
-            ret = drain_frames(decoder.0, &mut ctx);
+            ret = drain_frames(&mut decoder, &mut ctx);
+
             let mut loop_index = 1;
 
             while loop_index < opts.loops && ret >= 0 {
                 ctx.sink = None;
                 ctx.frames = 0;
-                ret = unsafe { wpd_decoder_rewind(decoder.0) };
+                ret = if decoder.rewind().is_err() { -1 } else { 0 };
                 if ret >= 0 {
-                    ret = drain_frames(decoder.0, &mut ctx);
+                    ret = drain_frames(&mut decoder, &mut ctx);
                 }
                 loop_index += 1;
             }
         }
         if ctx.info && ret >= 0 {
-            print_metadata(decoder.0);
+            print_metadata(&decoder);
         }
         frames = ctx.frames;
         if ret < 0 {
-            eprintln!("{input_name}: {}", unsafe {
-                cstr(wpd_decoder_error(decoder.0))
-            });
+            eprintln!("{input_name}: {}", decoder.error());
             return ExitCode::FAILURE;
         }
     }

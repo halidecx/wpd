@@ -1340,6 +1340,18 @@ over the whole corpus: every packed format, planar chroma, sub-frame mode, a
 stream fed in 97-byte pieces against a whole-file decode, and a flip against its
 unflipped twin.
 
+**`crates/wpd-tool` went through it and dropped `sys.rs`.** The tool is now free
+of `unsafe` in all three of its files, and `src/yuvdsp.h` lost
+`wpd_argb_to_yuv444`, which existed for the tool's `y4m` writer and has no
+caller left. `clicheck.sh` compares 794 invocations of the tool against the C
+baseline byte for byte, which is what makes a migration like this checkable at
+all: the `--info` output prints C `int`s, so the API's `bool`s have to be turned
+back into `0` and `1` at the print, and `blend` inverts — `WPD_BLEND_ALPHA` is
+zero. Both would have been silent without that gate.
+
+The C ABI is not left untested by the move: `tests/api.c` is 3,558 lines and 521
+calls covering every entry point `include/wpd.h` declares.
+
 **What is left of the driver port.** `anim`, `lossy`, `export` and `decoder`
 still hold raw pointers where they reach across their own fields — 557 uses of
 `unsafe` in `wpd-capi`, against 785 when Phase 8c started, and none at all in
