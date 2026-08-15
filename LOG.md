@@ -1141,6 +1141,42 @@ repeat: at `--repeat 60` that file reads as 1.09x slower and at `--repeat 3000`
 as 1.04x. And `--repeat` interacts with which build allocates when, so a file
 that inverts as the repeat grows is measuring start-up, not decoding.
 
+### Phase 8b — the tooling the port had been deferring
+
+Three gates that had been listed as Phase 8 work since Phase 1, all of which
+need a nightly toolchain, and all of which now exist as scripts.
+
+**`scripts/rustsan.sh` is the one that mattered.** When the last C went, so did
+what ASan could see: `sanitize.sh` instruments the test harnesses, and the
+decoder only benefits through the intercepted allocator. `-Zsanitizer=address`
+plus `-Zbuild-std` gets an instrumented standard library and an instrumented
+decoder, so every load and store is checked again. The script decodes the whole
+corpus in nine output formats in both feature configurations and compares each
+result against the reference build — 378 decodes each way, and it found nothing.
+That is the answer to the honest caveat Phase 7b had to put in the README.
+
+**miri runs the core crate's tests**, necessarily with `--no-default-features`,
+because it cannot execute hand-written assembly. What it proves is that the safe
+fallbacks — the ones checkasm compares the assembly against — are free of
+undefined behaviour, and with them the slice arithmetic every kernel shares.
+79/79, in about a minute. Its value will grow considerably once the driver moves
+into the core crate and a whole decode can run under it.
+
+**`cargo fuzz` drives the three parsers** — the RIFF walk, the lossless decoder
+and the lossy one — through both their one-shot and their resumable entry
+points. This asks a different question from `scripts/fuzz.sh`, which mutates
+real files and looks for memory errors: here the failure mode being hunted is a
+panic on damaged input, which is a denial of service the C did not have and the
+saturating-read discipline of Phase 4 exists to prevent. Twenty seconds a target
+found nothing; the corpora are kept out of the tree.
+
+**A gate that was only half on.** `stylecheck.sh` ran clippy with
+`--all-features`, and the no-asm build compiles different code: the dispatch
+tables and the mode indices that give them their layout have no user without the
+assembly, so seventeen warnings lived there unseen. It now runs both
+configurations, and the no-asm one is the configuration the safety claim rests
+on.
+
 ## Measuring the fallbacks needs two no-asm builds
 
 The first fallback numbers this port produced were wrong by more than a factor

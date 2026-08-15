@@ -44,3 +44,9 @@ subprojects/.wraplock
 
 .agents/
 .codex/
+
+# cargo-fuzz keeps its corpora and crash inputs here; they are generated.
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/target

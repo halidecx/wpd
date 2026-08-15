@@ -157,12 +157,26 @@ in bytes while having to decode identically.
 
 `./scripts/sanitize.sh` runs the ordinary suite under the same two sanitizers,
 once with the assembly enabled and once without. The decoder is Rust, so what
-ASan instruments here is the C test harnesses; the decoder benefits through the
+ASan instruments there is the C test harnesses; the decoder benefits through the
 intercepted allocator, which still catches a heap overrun that crosses a
-redzone, and not through instrumented loads and stores. The no-asm run is the
-one where a bug in a hand-written kernel cannot hide behind the kernel itself,
-and the asm run is the only one with a checkasm target. Instrumenting the Rust
-proper needs a nightly toolchain and is not wired up yet.
+redzone, and not through instrumented loads and stores.
+
+`./scripts/rustsan.sh` closes that gap. It needs a nightly toolchain, because
+both `-Zsanitizer=address` and the `-Zbuild-std` that gets an instrumented
+standard library are unstable, and it decodes the whole corpus in every output
+format with every load and store the decoder makes checked, in both feature
+configurations. The no-asm run is the one where a bad index in a fallback has
+nowhere to hide; the asm run exercises the real dispatch.
+
+`./scripts/miri.sh` runs the core crate's tests under miri, which reports
+undefined behaviour the compiler is otherwise entitled to assume away. It builds
+with `--no-default-features`, since miri cannot execute the hand-written
+assembly.
+
+`cargo +nightly fuzz run container|vp8l|vp8` drives the parsers in the safe core
+under coverage-guided fuzzing. That is a different question from what
+`scripts/fuzz.sh` asks: this one is looking for a panic on damaged input, which
+is a denial of service the C did not have, rather than for a memory error.
 
 The boolean coder has a 64-bit implementation and a 32-bit one, and every 64-bit
 build picks the former, so `./scripts/rac32.sh` runs the whole suite again

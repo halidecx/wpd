@@ -589,6 +589,7 @@ mod asm {
 /// `c` must point to a writable, aligned `VP8DSPContext`.
 #[no_mangle]
 pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
+    #[allow(unused_mut)]
     let mut table = VP8DSPContext {
         vp8_luma_dc_wht: luma_dc_wht_c,
         vp8_luma_dc_wht_dc: luma_dc_wht_dc_c,

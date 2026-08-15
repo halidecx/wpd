@@ -206,24 +206,42 @@ mod asm {
     }
 }
 
+/* The mode indices are the table's layout, so they are stated whether or not
+this build has an assembly entry that names one. */
+#[allow(dead_code)]
 /// `VP8Pred4x4Mode`.
 const VERT4: usize = 0;
+#[allow(dead_code)]
 const HOR4: usize = 1;
+#[allow(dead_code)]
 const DC4: usize = 2;
+#[allow(dead_code)]
 const DIAG_DOWN_LEFT: usize = 3;
+#[allow(dead_code)]
 const DIAG_DOWN_RIGHT: usize = 4;
+#[allow(dead_code)]
 const VERT_RIGHT: usize = 5;
+#[allow(dead_code)]
 const HOR_DOWN: usize = 6;
+#[allow(dead_code)]
 const VERT_LEFT: usize = 7;
+#[allow(dead_code)]
 const HOR_UP: usize = 8;
+#[allow(dead_code)]
 const TM4: usize = 9;
 
 /// `VP8Pred8x8Mode`.
+#[allow(dead_code)]
 const DC: usize = 0;
+#[allow(dead_code)]
 const HOR: usize = 1;
+#[allow(dead_code)]
 const VERT: usize = 2;
+#[allow(dead_code)]
 const PLANE: usize = 3;
+#[allow(dead_code)]
 const LEFT_DC: usize = 4;
+#[allow(dead_code)]
 const TOP_DC: usize = 5;
 #[allow(dead_code)]
 const DC_128: usize = 6;
@@ -235,6 +253,7 @@ const DC_128: usize = 6;
 /// `p` must point to a writable, aligned `VP8PredContext`.
 #[no_mangle]
 pub unsafe extern "C" fn ff_vp8_pred_init(p: *mut VP8PredContext) {
+    #[allow(unused_mut)]
     let mut table = VP8PredContext {
         pred4x4: [
             vertical_c,
