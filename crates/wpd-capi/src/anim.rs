@@ -5,20 +5,30 @@
 //! canvas into the format the next frame will be composited in, disposes what
 //! the frame before asked to be disposed, and walks the regions.
 
-use std::ffi::c_int;
-use std::mem;
+use std::ffi::{c_int, c_uint};
+use std::{mem, ptr};
 
 use wpd::anim::{regions, Placement, Region};
 use wpd::image::{ceil_rshift, Format};
 
 use crate::convert::{blend_argb_region, convert_to_argb, copy_argb_region, SubRect};
-use crate::convert::{blend_yuva_region, copy_yuva_region};
+use crate::convert::{
+    blend_yuva_region, copy_yuva_region, format_bpp, format_is_packed,
+    premultiply_after_pack,
+};
+use crate::decoder::{
+    rl24, rl32, Subframe, WPDDecoder, ALPHA_COMPRESSION_VP8L, TAG_ALPH, TAG_VP8,
+    TAG_VP8L,
+};
 use crate::dsp::vp8l::WPDLosslessDSP;
 use crate::dsp::yuv::WPDYUVDSP;
 use crate::image::{image_alloc_argb, image_alloc_yuva, image_free, WebPImage};
 use crate::rescale::wpd_premultiply_argb_row;
+use crate::vp8::WPD_ERROR_INVALID_DATA;
+use crate::vp8l::{vp8l_decode_frame, VP8L_TARGET_ARGB};
 
 const WPD_OK: c_int = 0;
+const WPD_ANIM_SUBFRAME: c_int = 1;
 
 /// `Placement` from `src/anim.h`.
 #[repr(C)]
@@ -315,4 +325,281 @@ pub unsafe extern "C" fn anim_composite(
         unsafe { paint(pl, ct, sub, *region) };
     }
     WPD_OK
+}
+
+impl WPDDecoder {
+    /// The decoder's answers to what the compositor asks, gathered at the
+    /// call. `key_frame` is the one field it does not know yet:
+    /// [`anim_is_key_frame`] decides it from the rest.
+    fn placement(&self) -> CPlacement {
+        CPlacement {
+            canvas_width: self.canvas_width,
+            canvas_height: self.canvas_height,
+            pos_x: self.pos_x,
+            pos_y: self.pos_y,
+            anmf_flags: self.anmf_flags,
+            frame_index: self.frame_index,
+            frame_has_alpha: c_int::from(self.frame_has_alpha),
+            key_frame: 0,
+            prev_anmf_flags: self.prev_anmf_flags,
+            prev_width: self.prev_width,
+            prev_height: self.prev_height,
+            prev_pos_x: self.prev_pos_x,
+            prev_pos_y: self.prev_pos_y,
+            prev_key_frame: c_int::from(self.prev_key_frame),
+            premultiply: self.premultiply,
+            no_fancy_upsampling: self.options.no_fancy_upsampling,
+            clear_argb: self.clear_argb,
+            clear_yuva: self.clear_yuva,
+        }
+    }
+
+    /// Where the named sub-frame image lives. The address is taken from the
+    /// decoder as a whole rather than through a borrow of one field, so it
+    /// stays usable while the others are written.
+    pub(crate) fn image_of(&mut self, which: Subframe) -> *mut WebPImage {
+        let this: *mut WPDDecoder = self;
+
+        unsafe {
+            match which {
+                Subframe::Lossy => ptr::addr_of_mut!((*this).subframe),
+                Subframe::Argb => ptr::addr_of_mut!((*this).argb),
+                Subframe::Converted => ptr::addr_of_mut!((*this).converted),
+            }
+        }
+    }
+
+    /// Decodes one ANMF chunk and composites it onto the canvas.
+    ///
+    /// # Safety
+    ///
+    /// `data` must be readable for `size` bytes and sit inside the buffered
+    /// window, which is where the alpha offset is measured from.
+    pub(crate) unsafe fn decode_anmf(&mut self, data: *const u8, size: usize) -> c_int {
+        if size < 16 {
+            return WPD_ERROR_INVALID_DATA;
+        }
+        let end = unsafe { data.add(size) };
+        let mut p = data;
+
+        unsafe {
+            self.pos_x = rl24(p) as c_int * 2;
+            self.pos_y = rl24(p.add(3)) as c_int * 2;
+            self.frame_duration = rl24(p.add(12)) as c_int;
+            self.anmf_flags = p.add(15).read() as c_int;
+        }
+        let declared_width = unsafe { rl24(p.add(6)) } as c_int + 1;
+        let declared_height = unsafe { rl24(p.add(9)) } as c_int + 1;
+
+        p = unsafe { p.add(16) };
+
+        if self.pos_x + declared_width > self.canvas_width
+            || self.pos_y + declared_height > self.canvas_height
+        {
+            wpd::log::error(&format!(
+                "Frame ({declared_width}x{declared_height} at pos {}x{}) does not \
+                 fit into canvas ({}x{})",
+                self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
+            ));
+            return WPD_ERROR_INVALID_DATA;
+        }
+
+        self.has_alpha = false;
+        self.width = 0;
+        self.height = 0;
+
+        let mut sub: Option<Subframe> = None;
+
+        while unsafe { end.offset_from(p) } >= 8 {
+            let chunk_type = unsafe { rl32(p) };
+            let payload_size = unsafe { rl32(p.add(4)) };
+
+            if payload_size == u32::MAX {
+                return WPD_ERROR_INVALID_DATA;
+            }
+            let padded_size = (payload_size + (payload_size & 1)) as usize;
+
+            p = unsafe { p.add(8) };
+            if (unsafe { end.offset_from(p) } as usize) < padded_size {
+                break;
+            }
+
+            match chunk_type {
+                TAG_ALPH => {
+                    if payload_size == 0 {
+                        wpd::log::error("invalid ALPHA chunk size");
+                        return WPD_ERROR_INVALID_DATA;
+                    }
+                    let alpha_header = unsafe { p.read() } as c_int;
+
+                    self.alpha_data_offset = self.stream_offset(unsafe { p.add(1) });
+                    self.alpha_data_size = payload_size as c_int - 1;
+
+                    let filter_m = (alpha_header >> 2) & 0x03;
+                    let compression = alpha_header & 0x03;
+
+                    if compression > ALPHA_COMPRESSION_VP8L {
+                        wpd::log::warning("skipping unsupported ALPHA chunk");
+                    } else {
+                        self.has_alpha = true;
+                        self.alpha_compression = compression;
+                        self.alpha_filter = filter_m;
+                    }
+                }
+                TAG_VP8 if sub.is_none() => {
+                    let ret = unsafe { self.vp8_lossy_decode_frame(p, payload_size) };
+
+                    if ret < 0 {
+                        return ret;
+                    }
+                    sub = Some(Subframe::Lossy);
+                    self.frame_has_alpha = self.has_alpha;
+                }
+                TAG_VP8L if sub.is_none() => {
+                    self.lossless_canvas_in();
+
+                    let ret = unsafe {
+                        vp8l_decode_frame(
+                            &mut *self.vp8l,
+                            VP8L_TARGET_ARGB,
+                            &mut self.argb,
+                            p,
+                            payload_size as c_uint,
+                            0,
+                        )
+                    };
+
+                    self.lossless_canvas_out();
+                    if ret < 0 {
+                        return ret;
+                    }
+                    sub = Some(Subframe::Argb);
+                    self.frame_has_alpha = self.lossless_has_alpha;
+                }
+                _ => {}
+            }
+            p = unsafe { p.add(padded_size) };
+        }
+
+        let Some(mut which) = sub else {
+            wpd::log::error("image data not found");
+            return WPD_ERROR_INVALID_DATA;
+        };
+        let (sub_width, sub_height, sub_format) = {
+            let img = unsafe { &*self.image_of(which) };
+
+            (img.width, img.height, img.format)
+        };
+
+        if sub_width != declared_width || sub_height != declared_height {
+            wpd::log::warning(&format!(
+                "ANMF declares {declared_width}x{declared_height} but the image is \
+                 {sub_width}x{sub_height}"
+            ));
+        }
+        if self.pos_x + sub_width > self.canvas_width
+            || self.pos_y + sub_height > self.canvas_height
+        {
+            wpd::log::error(&format!(
+                "Frame ({sub_width}x{sub_height} at pos {}x{}) does not fit into \
+                 canvas ({}x{})",
+                self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
+            ));
+            return WPD_ERROR_INVALID_DATA;
+        }
+
+        let mut pl = self.placement();
+
+        self.key_frame = unsafe { anim_is_key_frame(&pl, sub_width, sub_height) } != 0;
+        pl.key_frame = c_int::from(self.key_frame);
+
+        let argb = Format::Argb as c_int;
+        let mut target = Format::Yuva420p as c_int;
+
+        if sub_format == argb
+            || format_is_packed(self.out_format) != 0
+            || (!self.key_frame
+                && !self.canvas.data[0].is_null()
+                && self.canvas.format == argb)
+        {
+            target = argb;
+        }
+
+        if target == argb && sub_format != argb {
+            let this: *mut WPDDecoder = self;
+            let src = self.image_of(which);
+            let ret = unsafe {
+                convert_to_argb(
+                    ptr::addr_of!((*this).ydsp),
+                    ptr::addr_of_mut!((*this).converted),
+                    src,
+                    self.options.no_fancy_upsampling,
+                )
+            };
+
+            if ret < 0 {
+                return ret;
+            }
+            which = Subframe::Converted;
+        }
+
+        /* libwebp premultiplies each frame before compositing it, which is not
+        the same as premultiplying the finished canvas. Premultiplying only ever
+        goes with a packed output format, which forces the ARGB target above, so
+        'sub' is four-byte ARGB here whatever the frame coded as. A sub-frame
+        feeds no canvas, so a two-byte output premultiplies after the pack
+        instead, in the four-bit domain a still uses. */
+        if self.premultiply != 0
+            && !(premultiply_after_pack(c_int::from(self.animation), self.anim_mode)
+                != 0
+                && format_bpp(self.out_format) == 2)
+        {
+            let img = unsafe { &*self.image_of(which) };
+
+            for y in 0..img.height {
+                unsafe {
+                    (self.ydsp.premultiply_row)(
+                        img.data[0].offset(y as isize * img.linesize[0] as isize),
+                        1,
+                        img.width,
+                    );
+                }
+            }
+        }
+
+        self.subframe_out = Some(which);
+
+        /* Sub-frame mode owns no canvas, so it skips the allocation and the
+        blend altogether; the dispose latch below is bookkeeping the canvas never
+        fed. Nothing above reads the canvas except the ARGB target rule, which
+        wants a canvas to stay compatible with and correctly declines when there
+        is none. Switching modes mid-animation is refused for that reason. */
+        if self.anim_mode != WPD_ANIM_SUBFRAME {
+            let this: *mut WPDDecoder = self;
+            let src = self.image_of(which);
+            let ct = unsafe {
+                CompositeTargets {
+                    ldsp: ptr::addr_of!((*this).ldsp),
+                    ydsp: ptr::addr_of!((*this).ydsp),
+                    canvas: ptr::addr_of_mut!((*this).canvas),
+                }
+            };
+            let ret = unsafe { anim_composite(&pl, &ct, src, target) };
+
+            if ret < 0 {
+                return ret;
+            }
+        }
+
+        self.frame_timestamp += self.frame_duration as i64;
+        self.prev_anmf_flags = self.anmf_flags;
+        self.prev_width = sub_width;
+        self.prev_height = sub_height;
+        self.prev_pos_x = self.pos_x;
+        self.prev_pos_y = self.pos_y;
+        self.prev_key_frame = self.key_frame;
+        self.frame_index += 1;
+
+        WPD_OK
+    }
 }

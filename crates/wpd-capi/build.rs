@@ -1,19 +1,11 @@
-//! Compiles the C that has not been ported yet.
+//! Probes the target and compiles the constant tables the x86 assembly reads.
 //!
-//! This is transient. As modules move to `crates/wpd`, entries drop out of
-//! `C_SOURCES`; when the list is empty this build script goes away and the
-//! `cc` build-dependency with it.
+//! No decoder logic is built here any more: the port took the last of it. What
+//! is left is the configuration `crates/wpd`'s assembly needs and the one C
+//! translation unit that holds the SIMD constants.
 
 use std::path::PathBuf;
 use std::{env, fs};
-
-/// Still in C. Ported modules are removed from this list.
-const C_SOURCES: &[&str] = &[
-    "src/wpd_decoder.c",
-    "src/anim.c",
-    "src/lossy.c",
-    "src/wpd_compat.c",
-];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
@@ -89,10 +81,7 @@ fn main() {
         build.define("WPD_FORCE_RAC32", None);
     }
 
-    for f in C_SOURCES {
-        build.file(root.join(f));
-        println!("cargo:rerun-if-changed={}", root.join(f).display());
-    }
+    let mut c_files = 0;
 
     /* A header change reaches every translation unit that includes it, and a
     stale object from before a struct grew is a mismatch no test can see. */
@@ -108,6 +97,7 @@ fn main() {
         match arch.as_str() {
             "x86_64" | "x86" => {
                 build.file(root.join("src/x86/wpd_simd_constants.c"));
+                c_files += 1;
             }
             "aarch64" => {
                 build.include(root.join("src/aarch64"));
@@ -142,5 +132,9 @@ fn main() {
         }
     }
 
-    build.compile("wpd_c");
+    /* The port has taken every C source but the assembly's constant tables,
+    and those only exist on x86. Handing cc an empty file list is an error. */
+    if c_files > 0 {
+        build.compile("wpd_c");
+    }
 }

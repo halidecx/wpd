@@ -1,0 +1,2021 @@
+//! The public decoder, as declared by `include/wpd.h`.
+//!
+//! Everything else in this crate is a piece the decode is assembled from; this
+//! is the assembly. `WPDDecoder` is opaque to the caller, so unlike the
+//! structs the header declares it is a plain Rust type: the scanner, the two
+//! frame decoders and the input buffer are owned values, and releasing them is
+//! [`Drop`] rather than a sequence in `wpd_decoder_free` that a new field can
+//! be left out of.
+//!
+//! Two habits from the C are kept deliberately. Positions in the stream are
+//! offsets, never pointers, because appending to a stream may move or drop the
+//! bytes under them. And nothing reaches into the decoder from the modules it
+//! drives: what the export and the compositor need is gathered into a struct
+//! at the call, so neither can read a field that has moved on since.
+
+use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
+use std::{mem, ptr};
+
+use wpd::container::{Coding, Info, Raw, Scan, METADATA_NB};
+use wpd::image::Format;
+
+use crate::container::{info_clear, info_valid, WPDImageInfo};
+use crate::convert::{
+    format_bpp, format_is_packed, format_is_premultiplied, format_valid,
+    options_transform, WPDDecoderOptions,
+};
+use crate::dsp::vp8l::WPDLosslessDSP;
+use crate::dsp::yuv::WPDYUVDSP;
+use crate::export::{
+    export_external_planar_rows, export_frame, export_packed, export_still_lossless,
+    export_still_packed, frame_clear, frame_valid, ExportSettings, ExportTargets,
+    WPDFrame, WPDOutputPlane,
+};
+use crate::image::{image_free, image_scratch_free, RescaleScratch, WebPImage};
+use crate::input::{
+    input_append, input_at, input_borrow, input_compact, input_discarded, input_own,
+    input_reset, input_size, InputBuffer,
+};
+use crate::vp8::{
+    vp8_decode_free, vp8_rows_finalized, WpdCodecContext, WPD_ERROR_INVALID_DATA,
+};
+use crate::vp8l::{
+    self, vp8l_decode_frame, vp8l_has_alpha, vp8l_height, vp8l_release, vp8l_reset,
+    vp8l_set_canvas, vp8l_still_active, vp8l_still_frame, vp8l_still_peek,
+    vp8l_still_rows_out, vp8l_still_step, vp8l_width, VP8L_TARGET_ARGB,
+};
+
+pub const WPD_OK: c_int = 0;
+pub const WPD_ERR_INVALID_ARG: c_int = -1;
+pub const WPD_ERR_NOT_WEBP: c_int = -2;
+pub const WPD_ERR_BITSTREAM: c_int = -3;
+pub const WPD_ERR_TRUNCATED: c_int = -4;
+pub const WPD_ERR_UNSUPPORTED: c_int = -5;
+pub const WPD_ERR_NO_MEMORY: c_int = -6;
+pub const WPD_ERR_TOO_LARGE: c_int = -7;
+pub const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
+
+const WPD_PIX_FMT_NONE: c_int = -1;
+const WPD_ANIM_COMPOSITED: c_int = 0;
+const WPD_ANIM_SUBFRAME: c_int = 1;
+
+pub(crate) const ALPHA_COMPRESSION_NONE: c_int = 0;
+pub(crate) const ALPHA_COMPRESSION_VP8L: c_int = 1;
+
+/// A four-character chunk tag as it sits in the file, which is what `MKTAG`
+/// built.
+const fn mktag(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    a as u32 | (b as u32) << 8 | (c as u32) << 16 | (d as u32) << 24
+}
+
+pub(crate) const TAG_ALPH: u32 = mktag(b'A', b'L', b'P', b'H');
+pub(crate) const TAG_VP8: u32 = mktag(b'V', b'P', b'8', b' ');
+pub(crate) const TAG_VP8L: u32 = mktag(b'V', b'P', b'8', b'L');
+const TAG_ANMF: u32 = mktag(b'A', b'N', b'M', b'F');
+
+/// As long a failure message as the C's fixed buffer held.
+const ERROR_MAX: usize = 128;
+
+/// Black in the CCIR range the YUVA canvas is cleared to, which is what
+/// `RGB_TO_Y_CCIR(0, 0, 0)` and its two companions came to.
+const CLEAR_YUVA_BLACK: [u8; 4] = [16, 128, 128, 0];
+
+/// `WPDFrameInfo` from `include/wpd.h`.
+#[repr(C)]
+pub struct WPDFrameInfo {
+    pub struct_size: usize,
+    pub pos_x: c_int,
+    pub pos_y: c_int,
+    pub width: c_int,
+    pub height: c_int,
+    pub duration: c_int,
+    pub dispose: c_int,
+    pub blend: c_int,
+    pub has_alpha: c_int,
+    pub complete: c_int,
+}
+
+/// `WPDOutputBuffer` from `include/wpd.h`.
+#[repr(C)]
+pub struct WPDOutputBuffer {
+    pub struct_size: usize,
+    pub plane: [WPDOutputPlane; 4],
+}
+
+/// The oldest `WPDFrameInfo` this build accepts, and equally how much of the
+/// caller's struct it may touch. Appending a field leaves this where it is and
+/// adds a longer extent above it, the way the frame's does, so a caller
+/// compiled against the shorter struct keeps working.
+fn frame_info_v1() -> usize {
+    mem::offset_of!(WPDFrameInfo, complete) + mem::size_of::<c_int>()
+}
+
+fn output_buffer_v1() -> usize {
+    mem::offset_of!(WPDOutputBuffer, plane) + mem::size_of::<[WPDOutputPlane; 4]>()
+}
+
+/// Which of the three images a sub-frame decode finished with, so that the
+/// borrow `WPD_ANIM_SUBFRAME` hands out is named rather than pointed at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Subframe {
+    Lossy,
+    Argb,
+    Converted,
+}
+
+pub struct WPDDecoder {
+    pub(crate) codec: WpdCodecContext,
+    pub(crate) vp8_initialized: bool,
+    pub(crate) ldsp: WPDLosslessDSP,
+    pub(crate) ydsp: WPDYUVDSP,
+    pub(crate) out_format: c_int,
+    pub(crate) premultiply: c_int,
+    pub(crate) options: WPDDecoderOptions,
+
+    pub(crate) input: Box<InputBuffer>,
+    pub(crate) pos: usize,
+    pub(crate) end: usize,
+    pub(crate) scan: Box<Scan>,
+    pub(crate) animation: bool,
+    pub(crate) still_done: bool,
+    pub(crate) vp8_active: bool,
+    pub(crate) still_lossy: bool,
+    pub(crate) alpha_pending: bool,
+    pub(crate) converted_rows: c_int,
+    pub(crate) converted_format: c_int,
+    pub(crate) still_lossless: bool,
+    pub(crate) frame_index: c_int,
+    pub(crate) canvas_width: c_int,
+    pub(crate) canvas_height: c_int,
+
+    pub(crate) has_alpha: bool,
+    pub(crate) alpha_compression: c_int,
+    pub(crate) alpha_filter: c_int,
+    /// An offset, not a pointer: appending to a stream can move the bytes.
+    pub(crate) alpha_data_offset: usize,
+    pub(crate) alpha_data_size: c_int,
+    pub(crate) alpha_plane: Vec<u8>,
+
+    pub(crate) vp8l: Box<vp8l::Context>,
+    pub(crate) width: c_int,
+    pub(crate) height: c_int,
+    pub(crate) lossless_has_alpha: bool,
+
+    /// Views of pictures the lossless decoder owns; never freed from here.
+    pub(crate) argb: WebPImage,
+    pub(crate) alpha_argb: WebPImage,
+    pub(crate) lossless_frame: bool,
+    pub(crate) subframe: WebPImage,
+    pub(crate) converted: WebPImage,
+    pub(crate) output: WebPImage,
+    pub(crate) transformed: WebPImage,
+    pub(crate) rescale: RescaleScratch,
+
+    pub(crate) canvas: WebPImage,
+    pub(crate) subframe_out: Option<Subframe>,
+    pub(crate) anim_mode: c_int,
+    pub(crate) anmf_flags: c_int,
+    pub(crate) pos_x: c_int,
+    pub(crate) pos_y: c_int,
+    pub(crate) frame_has_alpha: bool,
+    pub(crate) key_frame: bool,
+    pub(crate) prev_anmf_flags: c_int,
+    pub(crate) prev_width: c_int,
+    pub(crate) prev_height: c_int,
+    pub(crate) prev_pos_x: c_int,
+    pub(crate) prev_pos_y: c_int,
+    pub(crate) prev_key_frame: bool,
+    pub(crate) clear_argb: [u8; 4],
+    pub(crate) clear_yuva: [u8; 4],
+
+    pub(crate) anim_loop_count: c_int,
+    pub(crate) anim_frame_count: c_int,
+    pub(crate) anim_background_argb: u32,
+    pub(crate) frame_duration: c_int,
+    pub(crate) frame_timestamp: i64,
+
+    pub(crate) info_has_alpha: bool,
+    pub(crate) info_coding: Coding,
+
+    pub(crate) meta: [Option<Vec<u8>>; METADATA_NB],
+
+    pub(crate) opened: bool,
+    pub(crate) streaming: bool,
+    pub(crate) eos: bool,
+    pub(crate) headers_valid: bool,
+    pub(crate) truncated: bool,
+    pub(crate) input_mode: u8,
+
+    pub(crate) ext: [WPDOutputPlane; 4],
+    pub(crate) ext_active: bool,
+
+    pub(crate) status: c_int,
+    /// A fixed buffer rather than a `String`: `wpd_decoder_error` hands out a
+    /// pointer into it, and the C's was good for the decoder's whole life.
+    pub(crate) error: [u8; ERROR_MAX],
+}
+
+impl Drop for WPDDecoder {
+    fn drop(&mut self) {
+        if self.vp8_initialized {
+            unsafe { vp8_decode_free(&mut self.codec) };
+        }
+        unsafe {
+            image_free(&mut self.canvas);
+            image_free(&mut self.converted);
+            image_free(&mut self.output);
+            image_free(&mut self.transformed);
+            image_scratch_free(&mut self.rescale);
+        }
+    }
+}
+
+/// Internal failures are either a `WPDStatus` or a negated errno.
+fn status_from_internal(code: c_int) -> c_int {
+    match code {
+        0 => WPD_OK,
+        WPD_ERROR_INVALID_DATA => WPD_ERR_BITSTREAM,
+        crate::vp8::WPD_ENOMEM => WPD_ERR_NO_MEMORY,
+        crate::vp8::WPD_ERROR_TOO_LARGE => WPD_ERR_TOO_LARGE,
+        /* -EINVAL, which the image allocators raise for a degenerate size. */
+        -22 => WPD_ERR_INVALID_ARG,
+        _ if (WPD_ERR_BUFFER_TOO_SMALL..=WPD_ERR_INVALID_ARG).contains(&code) => code,
+        _ => WPD_ERR_BITSTREAM,
+    }
+}
+
+fn status_string(status: c_int) -> &'static CStr {
+    match status {
+        WPD_OK => c"success",
+        WPD_ERR_INVALID_ARG => c"invalid argument",
+        WPD_ERR_NOT_WEBP => c"not a WebP file",
+        WPD_ERR_BITSTREAM => c"invalid bitstream",
+        WPD_ERR_TRUNCATED => c"truncated file",
+        WPD_ERR_UNSUPPORTED => c"unsupported feature",
+        WPD_ERR_NO_MEMORY => c"out of memory",
+        WPD_ERR_TOO_LARGE => c"image too large",
+        WPD_ERR_BUFFER_TOO_SMALL => c"output buffer too small",
+        _ => c"unknown error",
+    }
+}
+
+fn status_text(status: c_int) -> &'static str {
+    status_string(status).to_str().unwrap_or("unknown error")
+}
+
+#[no_mangle]
+pub extern "C" fn wpd_status_string(status: c_int) -> *const c_char {
+    status_string(status).as_ptr()
+}
+
+pub(crate) unsafe fn rl24(p: *const u8) -> u32 {
+    unsafe {
+        p.read() as u32 | (p.add(1).read() as u32) << 8 | (p.add(2).read() as u32) << 16
+    }
+}
+
+pub(crate) unsafe fn rl32(p: *const u8) -> u32 {
+    unsafe { rl24(p) | (p.add(3).read() as u32) << 24 }
+}
+
+impl WPDDecoder {
+    fn new() -> Self {
+        WPDDecoder {
+            codec: WpdCodecContext {
+                priv_data: ptr::null_mut(),
+                width: 0,
+                height: 0,
+                bypass_filtering: 0,
+            },
+            vp8_initialized: false,
+            ldsp: WPDLosslessDSP::new(),
+            ydsp: WPDYUVDSP::new(),
+            out_format: WPD_PIX_FMT_NONE,
+            premultiply: 0,
+            options: WPDDecoderOptions::new(),
+
+            input: Box::new(InputBuffer::new()),
+            pos: 0,
+            end: 0,
+            scan: Box::new(Scan::new()),
+            animation: false,
+            still_done: false,
+            vp8_active: false,
+            still_lossy: false,
+            alpha_pending: false,
+            converted_rows: 0,
+            converted_format: WPD_PIX_FMT_NONE,
+            still_lossless: false,
+            frame_index: 0,
+            canvas_width: 0,
+            canvas_height: 0,
+
+            has_alpha: false,
+            alpha_compression: ALPHA_COMPRESSION_NONE,
+            alpha_filter: 0,
+            alpha_data_offset: 0,
+            alpha_data_size: 0,
+            alpha_plane: Vec::new(),
+
+            vp8l: Box::new(vp8l::Context::new()),
+            width: 0,
+            height: 0,
+            lossless_has_alpha: false,
+
+            argb: WebPImage::empty(),
+            alpha_argb: WebPImage::empty(),
+            lossless_frame: false,
+            subframe: WebPImage::empty(),
+            converted: WebPImage::empty(),
+            output: WebPImage::empty(),
+            transformed: WebPImage::empty(),
+            rescale: RescaleScratch::empty(),
+
+            canvas: WebPImage::empty(),
+            subframe_out: None,
+            anim_mode: WPD_ANIM_COMPOSITED,
+            anmf_flags: 0,
+            pos_x: 0,
+            pos_y: 0,
+            frame_has_alpha: false,
+            key_frame: false,
+            prev_anmf_flags: 0,
+            prev_width: 0,
+            prev_height: 0,
+            prev_pos_x: 0,
+            prev_pos_y: 0,
+            prev_key_frame: false,
+            clear_argb: [0; 4],
+            clear_yuva: CLEAR_YUVA_BLACK,
+
+            anim_loop_count: 0,
+            anim_frame_count: 0,
+            anim_background_argb: 0,
+            frame_duration: 0,
+            frame_timestamp: 0,
+
+            info_has_alpha: false,
+            info_coding: Coding::Unknown,
+
+            meta: [None, None, None],
+
+            opened: false,
+            streaming: false,
+            eos: false,
+            headers_valid: false,
+            truncated: false,
+            input_mode: 0,
+
+            ext: [WPDOutputPlane::empty(); 4],
+            ext_active: false,
+
+            status: WPD_OK,
+            error: [0; ERROR_MAX],
+        }
+    }
+
+    fn set_error(&mut self, message: &str, code: c_int) -> c_int {
+        self.status = status_from_internal(code);
+
+        let text = format!("{message} ({})", status_text(self.status));
+        let bytes = text.as_bytes();
+        let len = bytes.len().min(ERROR_MAX - 1);
+
+        self.error = [0; ERROR_MAX];
+        self.error[..len].copy_from_slice(&bytes[..len]);
+        self.status
+    }
+
+    /// What the last scan found. Read back rather than copied out, so nothing
+    /// can be looking at an older answer than the scanner has.
+    pub(crate) fn scanned(&self) -> Info {
+        *self.scan.info()
+    }
+
+    pub(crate) fn file_at(&self, offset: usize) -> *const u8 {
+        unsafe { input_at(&*self.input, offset) }
+    }
+
+    /// Where `p`, which points into the buffered window, sits in the stream.
+    pub(crate) fn stream_offset(&self, p: *const u8) -> usize {
+        let base = unsafe { input_discarded(&*self.input) };
+
+        base + (p as usize - self.file_at(base) as usize)
+    }
+
+    pub(crate) fn update_canvas_size(&mut self, w: c_int, h: c_int) {
+        if self.width != 0 && self.width != w {
+            wpd::log::warning(&format!("Width mismatch. {} != {w}", self.width));
+        }
+        self.width = w;
+        if self.height != 0 && self.height != h {
+            wpd::log::warning(&format!("Height mismatch. {} != {h}", self.height));
+        }
+        self.height = h;
+    }
+
+    /* The canvas is negotiated between the container and the lossless module:
+    the container knows what the file declared, the module knows what the frame
+    header said, and either may be the first to learn it. */
+    pub(crate) fn lossless_canvas_in(&mut self) {
+        unsafe { vp8l_set_canvas(&mut *self.vp8l, self.width, self.height) };
+    }
+
+    pub(crate) fn lossless_canvas_out(&mut self) {
+        unsafe {
+            self.width = vp8l_width(&*self.vp8l);
+            self.height = vp8l_height(&*self.vp8l);
+            self.lossless_has_alpha = vp8l_has_alpha(&*self.vp8l) != 0;
+        }
+    }
+
+    /* The decoder's answers to the questions the export asks, gathered at the
+    call rather than reached for: the export owns no decoder state, so nothing
+    it sees can drift from what the frame was decoded as. */
+    pub(crate) fn export_settings(&self) -> ExportSettings {
+        ExportSettings {
+            out_format: self.out_format,
+            premultiply: self.premultiply,
+            animation: c_int::from(self.animation),
+            anim_mode: self.anim_mode,
+            ext_active: c_int::from(self.ext_active),
+            duration: self.frame_duration,
+            pos_x: self.pos_x,
+            pos_y: self.pos_y,
+            anmf_flags: self.anmf_flags,
+            /* An animation latches each sub-frame's alpha as it decodes it; a
+            still has only the one image, whose two decoders report it
+            separately. */
+            has_alpha: c_int::from(if self.animation {
+                self.frame_has_alpha
+            } else {
+                self.has_alpha || self.lossless_has_alpha
+            }),
+            timestamp: self.frame_timestamp - self.frame_duration as i64,
+        }
+    }
+
+    pub(crate) fn export_targets(&mut self) -> ExportTargets {
+        let this: *mut WPDDecoder = self;
+
+        unsafe {
+            ExportTargets {
+                dsp: ptr::addr_of!((*this).ydsp),
+                options: ptr::addr_of!((*this).options),
+                rescale: ptr::addr_of_mut!((*this).rescale),
+                transformed: ptr::addr_of_mut!((*this).transformed),
+                output: ptr::addr_of_mut!((*this).output),
+                converted: ptr::addr_of_mut!((*this).converted),
+                ext: ptr::addr_of!((*this).ext).cast(),
+                converted_rows: ptr::addr_of_mut!((*this).converted_rows),
+                converted_format: ptr::addr_of_mut!((*this).converted_format),
+            }
+        }
+    }
+
+    /// Everything a decode builds up as it walks the frames, which both
+    /// opening a new file and rewinding the current one have to put back. The
+    /// buffers the frames are decoded into are kept: they are sized on use and
+    /// reused.
+    fn anim_state_reset(&mut self) {
+        unsafe {
+            vp8l_reset(&mut *self.vp8l);
+            image_free(&mut self.canvas);
+        }
+        self.still_done = false;
+        self.vp8_active = false;
+        self.still_lossy = false;
+        self.alpha_pending = false;
+        self.converted_rows = 0;
+        self.converted_format = WPD_PIX_FMT_NONE;
+        self.still_lossless = false;
+        self.lossless_frame = false;
+        self.subframe_out = None;
+        self.frame_index = 0;
+        self.width = 0;
+        self.height = 0;
+        self.has_alpha = false;
+        self.lossless_has_alpha = false;
+        self.frame_has_alpha = false;
+        self.key_frame = false;
+        self.prev_key_frame = false;
+        self.anmf_flags = 0;
+        self.prev_anmf_flags = 0;
+        self.prev_width = 0;
+        self.prev_height = 0;
+        self.prev_pos_x = 0;
+        self.prev_pos_y = 0;
+        self.pos_x = 0;
+        self.pos_y = 0;
+        self.frame_duration = 0;
+        self.frame_timestamp = 0;
+    }
+
+    /// Clears everything derived from a file but keeps the input allocation,
+    /// which a stream grows across many calls.
+    fn reset(&mut self) {
+        self.meta = [None, None, None];
+        self.anim_state_reset();
+        unsafe {
+            vp8l_release(&mut *self.vp8l);
+            image_free(&mut self.converted);
+            image_free(&mut self.output);
+            image_free(&mut self.transformed);
+        }
+        self.subframe = WebPImage::empty();
+        self.argb = WebPImage::empty();
+        self.alpha_argb = WebPImage::empty();
+        unsafe { input_reset(&mut *self.input) };
+        self.scan.reset();
+        self.pos = 0;
+        self.end = 0;
+        self.opened = false;
+        self.streaming = false;
+        self.eos = false;
+        self.headers_valid = false;
+        self.truncated = false;
+        self.input_mode = 0;
+        self.animation = false;
+        self.canvas_width = 0;
+        self.canvas_height = 0;
+        self.anim_loop_count = 0;
+        self.anim_frame_count = 0;
+        self.anim_background_argb = 0;
+        self.clear_argb = [0; 4];
+        self.clear_yuva = CLEAR_YUVA_BLACK;
+        self.info_has_alpha = false;
+        self.info_coding = Coding::Unknown;
+        self.status = WPD_OK;
+        self.error = [0; ERROR_MAX];
+    }
+
+    /// Drops input the decoder can no longer look at. The chunk at `pos` is
+    /// kept whole: a VP8 chunk decoded row by row keeps range coders pointing
+    /// into it until the frame is done, and those are rebased on the next step.
+    fn file_compact(&mut self) {
+        let mut keep = self.pos;
+
+        if self.alpha_pending && self.alpha_data_offset < keep {
+            keep = self.alpha_data_offset;
+        }
+        unsafe { input_compact(&mut *self.input, keep) };
+    }
+
+    /// Takes a copy of each metadata chunk the scanner has reached, since the
+    /// buffer it sits in is dropped as the stream moves past it.
+    fn capture_metadata(&mut self) -> c_int {
+        let hs = self.scanned();
+        let (discarded, size) =
+            unsafe { (input_discarded(&*self.input), input_size(&*self.input)) };
+
+        for i in 0..METADATA_NB {
+            let offset = hs.meta_offset[i];
+            let bytes = hs.meta_size[i] as usize;
+
+            if offset == 0 || self.meta[i].is_some() {
+                continue;
+            }
+            if offset < discarded || offset > size || bytes > size - offset {
+                continue;
+            }
+            let mut copy = Vec::new();
+
+            if copy.try_reserve_exact(bytes).is_err() {
+                return WPD_ERR_NO_MEMORY;
+            }
+            copy.resize(bytes, 0);
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.file_at(offset),
+                    copy.as_mut_ptr(),
+                    bytes,
+                );
+            }
+            self.meta[i] = Some(copy);
+        }
+        WPD_OK
+    }
+
+    fn rescan_headers(&mut self) -> c_int {
+        let (at, base, size) = unsafe {
+            let base = input_discarded(&*self.input);
+
+            (input_at(&*self.input, base), base, input_size(&*self.input))
+        };
+        let status = unsafe {
+            crate::container::scan_headers(
+                &mut *self.scan,
+                at,
+                base,
+                size,
+                c_int::from(self.streaming),
+                1,
+            )
+        };
+        /* Read back whatever the walk reached, error or not: a stream whose
+        headers are merely incomplete keeps decoding from what has arrived. */
+        let meta = self.capture_metadata();
+
+        if status != WPD_OK {
+            return status;
+        }
+        if meta != WPD_OK {
+            return meta;
+        }
+        let hs = self.scanned();
+
+        self.end = hs.end;
+        self.canvas_width = hs.width;
+        self.canvas_height = hs.height;
+        self.animation = hs.animation;
+        self.anim_frame_count = hs.frame_count;
+        self.anim_loop_count = hs.loop_count;
+        self.anim_background_argb = hs.background_argb;
+        self.info_has_alpha = hs.has_alpha;
+        self.info_coding = hs.coding;
+        self.truncated = hs.truncated;
+        if !self.headers_valid {
+            self.pos = if hs.raw == Raw::No { 12 } else { 0 };
+            self.headers_valid = true;
+        }
+        WPD_OK
+    }
+
+    /// No more input is coming, so a chunk list that stops short of what it
+    /// promised, or that never carried an image, cannot be completed.
+    fn check_final_headers(&mut self, message: &str) -> c_int {
+        let hs = self.scanned();
+
+        if hs.truncated {
+            return self.set_error(message, WPD_ERR_TRUNCATED);
+        }
+        if hs.images == 0 && hs.frame_count == 0 {
+            return self.set_error("no image data found", WPD_ERR_BITSTREAM);
+        }
+        WPD_OK
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn wpd_decoder_create() -> *mut WPDDecoder {
+    wpd::log::set_sink(crate::compat::forward_log);
+    wpd::cpu::init();
+
+    Box::into_raw(Box::new(WPDDecoder::new()))
+}
+
+/// # Safety
+///
+/// `decoder` must come from [`wpd_decoder_create`] and not have been freed.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_free(decoder: *mut WPDDecoder) {
+    if !decoder.is_null() {
+        drop(unsafe { Box::from_raw(decoder) });
+    }
+}
+
+/// # Safety
+///
+/// `options`, when not null, must point to a `WPDDecoderOptions` of at least
+/// its own declared `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_set_options(
+    decoder: *mut WPDDecoder,
+    options: *const WPDDecoderOptions,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+    let Some(options) = (unsafe { options.as_ref() }) else {
+        return decoder.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
+    };
+
+    if options.struct_size < WPDDecoderOptions::v1() {
+        return decoder.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
+    }
+    let flag = |v: c_int| v == 0 || v == 1;
+
+    if !flag(options.bypass_filtering)
+        || !flag(options.no_fancy_upsampling)
+        || !flag(options.use_cropping)
+        || !flag(options.use_scaling)
+        || !flag(options.flip)
+        || (options.use_cropping != 0
+            && (options.crop_left < 0
+                || options.crop_top < 0
+                || options.crop_width <= 0
+                || options.crop_height <= 0))
+        || (options.use_scaling != 0
+            && (options.scaled_width < 0
+                || options.scaled_height < 0
+                || (options.scaled_width == 0 && options.scaled_height == 0)))
+    {
+        return decoder.set_error("invalid decoder options", WPD_ERR_INVALID_ARG);
+    }
+    if decoder.anim_mode == WPD_ANIM_SUBFRAME
+        && (options.use_cropping != 0 || options.use_scaling != 0 || options.flip != 0)
+    {
+        return decoder.set_error(
+            "cropping, scaling and flipping are defined against the canvas, \
+             which sub-frame mode does not produce",
+            WPD_ERR_INVALID_ARG,
+        );
+    }
+    decoder.options = options.copy();
+    decoder.codec.bypass_filtering = options.bypass_filtering;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
+    decoder: *mut WPDDecoder,
+    mode: c_int,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if mode != WPD_ANIM_COMPOSITED && mode != WPD_ANIM_SUBFRAME {
+        return decoder.set_error("invalid animation mode", WPD_ERR_INVALID_ARG);
+    }
+    if mode == WPD_ANIM_SUBFRAME && unsafe { options_transform(&decoder.options) } != 0
+    {
+        return decoder.set_error(
+            "sub-frame mode cannot be combined with cropping, scaling or flipping",
+            WPD_ERR_INVALID_ARG,
+        );
+    }
+    /* Sub-frame mode never builds the canvas the composited one carries from
+    frame to frame, so the two cannot be swapped part-way through an animation.
+    wpd_decoder_rewind() clears the frame index and reopens the choice. */
+    if mode != decoder.anim_mode && decoder.animation && decoder.frame_index != 0 {
+        return decoder.set_error(
+            "the animation mode cannot change mid-animation",
+            WPD_ERR_INVALID_ARG,
+        );
+    }
+    decoder.anim_mode = mode;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_set_output_format(
+    decoder: *mut WPDDecoder,
+    format: c_int,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if format != WPD_PIX_FMT_NONE && format_valid(format) == 0 {
+        return decoder.set_error("invalid output format", WPD_ERR_INVALID_ARG);
+    }
+    decoder.out_format = format;
+    decoder.premultiply = format_is_premultiplied(format);
+    WPD_OK
+}
+
+/// Rows already handed out live in whichever buffer was current at the time,
+/// so a new destination has to be filled from the top again.
+fn drop_converted_rows(decoder: &mut WPDDecoder) {
+    decoder.converted_rows = 0;
+    decoder.converted_format = WPD_PIX_FMT_NONE;
+}
+
+/// # Safety
+///
+/// `buffer`, when not null, must point to a `WPDOutputBuffer` of at least its
+/// own declared `struct_size` bytes, whose planes are as they were declared.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
+    decoder: *mut WPDDecoder,
+    buffer: *const WPDOutputBuffer,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+    let Some(buffer) = (unsafe { buffer.as_ref() }) else {
+        if decoder.ext_active {
+            drop_converted_rows(decoder);
+        }
+        decoder.ext_active = false;
+        decoder.ext = [WPDOutputPlane::empty(); 4];
+        return WPD_OK;
+    };
+
+    if buffer.struct_size < output_buffer_v1()
+        || buffer.plane[0].data.is_null()
+        || buffer.plane[0].stride == 0
+    {
+        return decoder.set_error("invalid output buffer", WPD_ERR_INVALID_ARG);
+    }
+    for plane in &buffer.plane {
+        if plane.data.is_null() != (plane.stride == 0) {
+            return decoder.set_error("invalid output buffer", WPD_ERR_INVALID_ARG);
+        }
+    }
+    if !decoder.ext_active || decoder.ext != buffer.plane {
+        drop_converted_rows(decoder);
+    }
+    decoder.ext = buffer.plane;
+    decoder.ext_active = true;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `data` must be readable for `size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_open(
+    decoder: *mut WPDDecoder,
+    data: *const u8,
+    size: usize,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if data.is_null() {
+        return decoder.set_error("invalid input data", WPD_ERR_INVALID_ARG);
+    }
+    decoder.reset();
+
+    let status = unsafe { input_own(&mut *decoder.input, data, size) };
+
+    if status != WPD_OK {
+        return decoder.set_error("cannot buffer input", status);
+    }
+    let status = decoder.rescan_headers();
+
+    if status != WPD_OK {
+        unsafe { input_reset(&mut *decoder.input) };
+        return decoder.set_error("cannot read headers", status);
+    }
+    let status = decoder.check_final_headers("file ends inside a chunk");
+
+    if status != WPD_OK {
+        unsafe { input_reset(&mut *decoder.input) };
+        decoder.headers_valid = false;
+        return status;
+    }
+    decoder.opened = true;
+    decoder.eos = true;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `data` must be readable for `size` bytes and stay unchanged until the
+/// decoder is reopened or freed, which is what the header asks of it.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_open_borrowed(
+    decoder: *mut WPDDecoder,
+    data: *const u8,
+    size: usize,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if data.is_null() {
+        return decoder.set_error("invalid input data", WPD_ERR_INVALID_ARG);
+    }
+    decoder.reset();
+    unsafe { input_borrow(&mut *decoder.input, data, size) };
+
+    let mut status = decoder.rescan_headers();
+
+    status = if status != WPD_OK {
+        decoder.set_error("cannot read headers", status)
+    } else {
+        decoder.check_final_headers("file ends inside a chunk")
+    };
+    if status != WPD_OK {
+        unsafe { input_reset(&mut *decoder.input) };
+        decoder.headers_valid = false;
+        return status;
+    }
+    decoder.opened = true;
+    decoder.eos = true;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_open_stream(decoder: *mut WPDDecoder) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    decoder.reset();
+    decoder.opened = true;
+    decoder.streaming = true;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `data` must be readable for `size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_append(
+    decoder: *mut WPDDecoder,
+    data: *const u8,
+    size: usize,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if data.is_null() {
+        return decoder.set_error("invalid input data", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.streaming || decoder.eos {
+        return decoder.set_error("not an open stream", WPD_ERR_INVALID_ARG);
+    }
+    if size == 0 {
+        return WPD_OK;
+    }
+    if decoder.input_mode == 2 {
+        return decoder.set_error("cannot mix append and update", WPD_ERR_INVALID_ARG);
+    }
+    decoder.input_mode = 1;
+
+    decoder.file_compact();
+
+    let status = unsafe { input_append(&mut *decoder.input, data, size) };
+
+    if status != WPD_OK {
+        return decoder.set_error("cannot buffer input", status);
+    }
+    let status = decoder.rescan_headers();
+
+    /* Headers that are merely incomplete are the normal state of a stream. */
+    if status == WPD_ERR_TRUNCATED {
+        return WPD_OK;
+    }
+    if status != WPD_OK {
+        return decoder.set_error("cannot read headers", status);
+    }
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `data` must be readable for `size` bytes and stay valid until the next
+/// update or the decoder is freed.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_update(
+    decoder: *mut WPDDecoder,
+    data: *const u8,
+    size: usize,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if data.is_null() {
+        return decoder.set_error("invalid input data", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.streaming || decoder.eos {
+        return decoder.set_error("not an open stream", WPD_ERR_INVALID_ARG);
+    }
+    if decoder.input_mode == 1 {
+        return decoder.set_error("cannot mix append and update", WPD_ERR_INVALID_ARG);
+    }
+    if size < unsafe { input_size(&*decoder.input) } {
+        return decoder.set_error("stream buffer shrank", WPD_ERR_INVALID_ARG);
+    }
+    decoder.input_mode = 2;
+    unsafe { input_borrow(&mut *decoder.input, data, size) };
+
+    let status = decoder.rescan_headers();
+
+    if status == WPD_ERR_TRUNCATED {
+        return WPD_OK;
+    }
+    if status != WPD_OK {
+        unsafe { input_reset(&mut *decoder.input) };
+        decoder.headers_valid = false;
+        return decoder.set_error("cannot read headers", status);
+    }
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_end_of_stream(decoder: *mut WPDDecoder) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if !decoder.streaming {
+        return decoder.set_error("not an open stream", WPD_ERR_INVALID_ARG);
+    }
+    decoder.eos = true;
+
+    let status = decoder.rescan_headers();
+
+    if status != WPD_OK {
+        return decoder.set_error("cannot read headers", status);
+    }
+    decoder.check_final_headers("stream ended early")
+}
+
+/// # Safety
+///
+/// `info`, when not null, must point to a `WPDImageInfo` of at least its own
+/// declared `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_get_info(
+    decoder: *const WPDDecoder,
+    info: *mut WPDImageInfo,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if unsafe { info_valid(info) } == 0 || !decoder.opened {
+        return decoder.set_error("invalid decoder state", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.headers_valid {
+        return decoder.set_error("headers incomplete", WPD_ERR_TRUNCATED);
+    }
+    unsafe { info_clear(info) };
+
+    let out = unsafe { &mut *info };
+
+    out.width = decoder.canvas_width;
+    out.height = decoder.canvas_height;
+    out.has_alpha = c_int::from(decoder.info_has_alpha);
+    out.is_animation = c_int::from(decoder.animation);
+    out.frame_count = decoder.anim_frame_count;
+    out.loop_count = decoder.anim_loop_count;
+    out.background_argb = decoder.anim_background_argb;
+    out.coding = match decoder.info_coding {
+        Coding::Unknown => 0,
+        Coding::Lossy => 1,
+        Coding::Lossless => 2,
+    };
+    out.metadata = decoder.scanned().metadata;
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_rewind(decoder: *mut WPDDecoder) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if !decoder.opened || !decoder.headers_valid {
+        return decoder.set_error("invalid decoder state", WPD_ERR_INVALID_ARG);
+    }
+    /* wpd_decoder_append() is free to drop bytes the decoder has moved past,
+    so the head of the file may simply no longer be there. */
+    if decoder.input_mode == 1 {
+        return decoder
+            .set_error("an appended stream cannot be rewound", WPD_ERR_UNSUPPORTED);
+    }
+    let raw = decoder.scanned().raw;
+
+    decoder.anim_state_reset();
+    decoder.pos = if raw == Raw::No { 12 } else { 0 };
+    decoder.status = WPD_OK;
+    decoder.error = [0; ERROR_MAX];
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `info`, when not null, must point to a `WPDFrameInfo` of at least its own
+/// declared `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_frame_info(
+    decoder: *const WPDDecoder,
+    index: c_int,
+    info: *mut WPDFrameInfo,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+    let valid =
+        unsafe { info.as_ref() }.is_some_and(|i| i.struct_size >= frame_info_v1());
+
+    if !valid || !decoder.opened {
+        return decoder.set_error("invalid decoder state", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.headers_valid {
+        return decoder.set_error("headers incomplete", WPD_ERR_TRUNCATED);
+    }
+    let head = mem::size_of::<usize>();
+
+    unsafe {
+        ptr::write_bytes(info.cast::<u8>().add(head), 0, frame_info_v1() - head);
+    }
+
+    let hs = decoder.scanned();
+    let out = unsafe { &mut *info };
+
+    /* A still image is one frame covering the whole canvas, which is what
+    libwebp's demuxer reports for it too. */
+    if !decoder.animation {
+        if index != 0 {
+            return decoder.set_error("no such frame", WPD_ERR_INVALID_ARG);
+        }
+        out.width = decoder.canvas_width;
+        out.height = decoder.canvas_height;
+        /* The image's own alpha, not the VP8X declaration WPDImageInfo
+        reports, so that this agrees with the frame decoding produces. */
+        out.has_alpha = c_int::from(hs.image_has_alpha);
+        out.complete = c_int::from(if hs.raw == Raw::No {
+            hs.images != 0
+        } else {
+            decoder.eos
+        });
+        return WPD_OK;
+    }
+
+    let Ok(index) = usize::try_from(index) else {
+        return decoder.set_error("no such frame", WPD_ERR_INVALID_ARG);
+    };
+    let Some(entry) = decoder.scan.frame(index).copied() else {
+        return decoder.set_error("no such frame", WPD_ERR_INVALID_ARG);
+    };
+    let out = unsafe { &mut *info };
+
+    out.pos_x = entry.pos_x;
+    out.pos_y = entry.pos_y;
+    out.width = entry.width;
+    out.height = entry.height;
+    out.duration = entry.duration;
+    out.dispose = entry.dispose as c_int;
+    out.blend = entry.blend as c_int;
+    out.has_alpha = c_int::from(entry.has_alpha);
+    out.complete = c_int::from(entry.complete);
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `data` and `size` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_metadata(
+    decoder: *const WPDDecoder,
+    which: c_int,
+    data: *mut *const u8,
+    size: *mut usize,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if data.is_null() || size.is_null() || !decoder.opened {
+        return decoder.set_error("invalid decoder state", WPD_ERR_INVALID_ARG);
+    }
+    if which <= 0 || which & (which - 1) != 0 || which >> METADATA_NB != 0 {
+        return decoder.set_error("invalid metadata type", WPD_ERR_INVALID_ARG);
+    }
+    let index = which.trailing_zeros() as usize;
+
+    unsafe {
+        match &decoder.meta[index] {
+            Some(bytes) => {
+                data.write(bytes.as_ptr());
+                size.write(bytes.len());
+            }
+            None => {
+                data.write(ptr::null());
+                size.write(0);
+            }
+        }
+    }
+    WPD_OK
+}
+
+impl WPDDecoder {
+    fn still_lossy_pending(&self, chunk_type: u32) -> bool {
+        chunk_type == TAG_VP8 && !self.animation && !self.still_done
+    }
+
+    fn still_lossless_pending(&self, chunk_type: u32) -> bool {
+        chunk_type == TAG_VP8L && !self.animation && !self.still_done
+    }
+
+    /// The resumable lossless path, plus the copies the container keeps of
+    /// what it left behind: which picture is being filled in, and whether
+    /// there is one.
+    fn lossless_step(
+        &mut self,
+        payload: *const u8,
+        avail: c_uint,
+        size: c_uint,
+        complete: c_int,
+    ) -> c_int {
+        self.lossless_canvas_in();
+
+        let ret =
+            unsafe { vp8l_still_step(&mut *self.vp8l, payload, avail, size, complete) };
+
+        self.lossless_canvas_out();
+        if ret >= 0 && (unsafe { vp8l_still_active(&*self.vp8l) } != 0 || ret == 1) {
+            self.still_lossless = true;
+            unsafe { vp8l_still_frame(&*self.vp8l, &mut self.argb) };
+            self.lossless_frame = true;
+        }
+        ret
+    }
+
+    fn lossless_peek(&mut self) -> c_int {
+        let ret = unsafe { vp8l_still_peek(&mut *self.vp8l) };
+
+        if ret >= 0 {
+            unsafe { vp8l_still_frame(&*self.vp8l, &mut self.argb) };
+            self.lossless_frame = true;
+        }
+        ret
+    }
+
+    fn emit_still_lossless(&mut self, frame: *mut WPDFrame) -> c_int {
+        let set = self.export_settings();
+        let t = self.export_targets();
+
+        self.still_done = true;
+
+        let transform = unsafe { options_transform(&self.options) } != 0;
+        let height = self.argb.height;
+        let ret = unsafe {
+            if transform {
+                export_packed(&set, &t, &mut self.argb, frame)
+            } else {
+                export_still_lossless(&set, &t, &mut self.argb, frame, height)
+            }
+        };
+
+        if ret < 0 {
+            return self.set_error("cannot output frame", ret);
+        }
+        1
+    }
+
+    fn emit_still_lossy(&mut self, frame: *mut WPDFrame) -> c_int {
+        let set = self.export_settings();
+        let t = self.export_targets();
+
+        self.still_done = true;
+
+        let packed_only = unsafe { options_transform(&self.options) } == 0
+            && format_is_packed(self.out_format) != 0;
+        let height = self.subframe.height;
+        let ret = unsafe {
+            if packed_only {
+                export_still_packed(&set, &t, &self.subframe, frame, height)
+            } else {
+                export_packed(&set, &t, &mut self.subframe, frame)
+            }
+        };
+
+        if ret < 0 {
+            return self.set_error("cannot output frame", ret);
+        }
+        1
+    }
+
+    /// A file with no RIFF wrapper: one image chunk, and for the lossy shape
+    /// possibly an ALPH chunk ahead of it.
+    fn decode_raw(&mut self, frame: *mut WPDFrame) -> c_int {
+        let hs = self.scanned();
+        let data = self.file_at(hs.raw_image_offset);
+
+        if !self.eos {
+            return 0;
+        }
+        if hs.truncated {
+            return self.set_error("raw image is truncated", WPD_ERR_TRUNCATED);
+        }
+        if hs.raw_image_size > c_int::MAX as usize {
+            return self.set_error("raw image is too large", WPD_ERR_TOO_LARGE);
+        }
+        self.width = 0;
+        self.height = 0;
+
+        let ret = if hs.raw == Raw::Lossless {
+            self.lossless_canvas_in();
+
+            let ret = unsafe {
+                vp8l_decode_frame(
+                    &mut *self.vp8l,
+                    VP8L_TARGET_ARGB,
+                    &mut self.argb,
+                    data,
+                    hs.raw_image_size as c_uint,
+                    0,
+                )
+            };
+
+            self.lossless_canvas_out();
+            if ret < 0 {
+                return self.set_error("VP8L decode failed", ret);
+            }
+            self.still_done = true;
+            self.still_lossless = true;
+            self.lossless_frame = true;
+            self.converted_rows = self.argb.height;
+
+            let set = self.export_settings();
+            let t = self.export_targets();
+
+            unsafe { export_packed(&set, &t, &mut self.argb, frame) }
+        } else {
+            if hs.raw == Raw::AlphaAndLossy {
+                if hs.raw_alpha_size == 0 {
+                    return self.set_error("invalid ALPHA chunk", WPD_ERR_BITSTREAM);
+                }
+                let header =
+                    unsafe { self.file_at(hs.raw_alpha_offset).read() } as c_int;
+
+                if header & 3 > ALPHA_COMPRESSION_VP8L {
+                    return self.set_error(
+                        "unsupported ALPHA compression",
+                        WPD_ERR_UNSUPPORTED,
+                    );
+                }
+                self.has_alpha = true;
+                self.alpha_compression = header & 3;
+                self.alpha_filter = header >> 2 & 3;
+                self.alpha_data_offset = hs.raw_alpha_offset + 1;
+                self.alpha_data_size = hs.raw_alpha_size as c_int - 1;
+            }
+            let ret = unsafe {
+                self.vp8_lossy_decode_frame(data, hs.raw_image_size as c_uint)
+            };
+
+            if ret < 0 {
+                return self.set_error("VP8 decode failed", ret);
+            }
+            self.still_done = true;
+
+            let set = self.export_settings();
+            let t = self.export_targets();
+
+            unsafe { export_packed(&set, &t, &mut self.subframe, frame) }
+        };
+
+        if ret < 0 {
+            return self.set_error("cannot output frame", ret);
+        }
+        1
+    }
+}
+
+/// # Safety
+///
+/// `frame` must point to a `WPDFrame` of at least its own declared
+/// `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_next_frame(
+    decoder: *mut WPDDecoder,
+    frame: *mut WPDFrame,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if !unsafe { frame_valid(frame) } {
+        return decoder.set_error("invalid frame", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.opened {
+        return decoder.set_error("no file opened", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.headers_valid {
+        if !decoder.eos {
+            return 0; /* the headers have not arrived yet */
+        }
+        return decoder.set_error("no image data found", WPD_ERR_TRUNCATED);
+    }
+    if decoder.scanned().raw != Raw::No {
+        return if decoder.still_done {
+            0
+        } else {
+            decoder.decode_raw(frame)
+        };
+    }
+
+    while decoder.pos + 8 <= decoder.end {
+        let chunk_pos = decoder.pos;
+        let chunk = decoder.file_at(chunk_pos);
+        let chunk_type = unsafe { rl32(chunk) };
+        let size = unsafe { rl32(chunk.add(4)) };
+        let payload = unsafe { chunk.add(8) };
+
+        if size == u32::MAX {
+            return decoder.set_error("invalid chunk size", WPD_ERROR_INVALID_DATA);
+        }
+        let padded_size = (size + (size & 1)) as usize;
+
+        if decoder.end - (decoder.pos + 8) < padded_size {
+            if !decoder.eos {
+                let avail = (decoder.end - (decoder.pos + 8)) as c_uint;
+
+                if decoder.still_lossy_pending(chunk_type) {
+                    let ret = unsafe { decoder.vp8_lossy_step(payload, avail, size) };
+
+                    if ret < 0 {
+                        return decoder.set_error("VP8 decode failed", ret);
+                    }
+                    if ret != 0 {
+                        return decoder.emit_still_lossy(frame);
+                    }
+                } else if decoder.still_lossless_pending(chunk_type) {
+                    let ret = decoder.lossless_step(payload, avail, size, 0);
+
+                    if ret < 0 {
+                        return decoder.set_error("VP8L decode failed", ret);
+                    }
+                    if ret != 0 {
+                        return decoder.emit_still_lossless(frame);
+                    }
+                }
+                return 0; /* the rest of this chunk has not arrived yet */
+            }
+            return decoder
+                .set_error("chunk runs past the end of the file", WPD_ERR_TRUNCATED);
+        }
+        decoder.pos += 8 + padded_size;
+
+        match chunk_type {
+            TAG_ALPH => {
+                if size == 0 {
+                    return decoder
+                        .set_error("invalid ALPHA chunk size", WPD_ERROR_INVALID_DATA);
+                }
+                let alpha_header = unsafe { payload.read() } as c_int;
+
+                decoder.alpha_data_offset = chunk_pos + 9;
+                decoder.alpha_pending = true;
+                decoder.alpha_data_size = size as c_int - 1;
+
+                let filter_m = (alpha_header >> 2) & 0x03;
+                let compression = alpha_header & 0x03;
+
+                if compression > ALPHA_COMPRESSION_VP8L {
+                    wpd::log::warning("skipping unsupported ALPHA chunk");
+                } else {
+                    decoder.has_alpha = true;
+                    decoder.alpha_compression = compression;
+                    decoder.alpha_filter = filter_m;
+                }
+            }
+            TAG_VP8 => {
+                if decoder.animation || decoder.still_done {
+                    continue;
+                }
+                let ret = if decoder.vp8_active {
+                    let ret = unsafe { decoder.vp8_lossy_step(payload, size, size) };
+
+                    if ret == 0 {
+                        WPD_ERROR_INVALID_DATA
+                    } else {
+                        ret
+                    }
+                } else {
+                    decoder.width = 0;
+                    decoder.height = 0;
+                    unsafe { decoder.vp8_lossy_decode_frame(payload, size) }
+                };
+
+                if ret < 0 {
+                    return decoder.set_error("VP8 decode failed", ret);
+                }
+                return decoder.emit_still_lossy(frame);
+            }
+            TAG_VP8L => {
+                if decoder.animation || decoder.still_done {
+                    continue;
+                }
+                if unsafe { vp8l_still_active(&*decoder.vp8l) } != 0 {
+                    let mut ret = decoder.lossless_step(payload, size, size, 1);
+
+                    if ret == 0 {
+                        ret = WPD_ERROR_INVALID_DATA;
+                    }
+                    if ret < 0 {
+                        return decoder.set_error("VP8L decode failed", ret);
+                    }
+                    return decoder.emit_still_lossless(frame);
+                }
+                decoder.width = 0;
+                decoder.height = 0;
+                decoder.lossless_canvas_in();
+
+                let ret = unsafe {
+                    vp8l_decode_frame(
+                        &mut *decoder.vp8l,
+                        VP8L_TARGET_ARGB,
+                        &mut decoder.argb,
+                        payload,
+                        size,
+                        0,
+                    )
+                };
+
+                decoder.lossless_canvas_out();
+                if ret < 0 {
+                    return decoder.set_error("VP8L decode failed", ret);
+                }
+                decoder.still_done = true;
+
+                let set = decoder.export_settings();
+                let t = decoder.export_targets();
+                let ret = unsafe { export_packed(&set, &t, &mut decoder.argb, frame) };
+
+                if ret < 0 {
+                    return decoder.set_error("cannot output frame", ret);
+                }
+                decoder.still_lossless = true;
+                decoder.lossless_frame = true;
+                decoder.converted_rows = decoder.argb.height;
+                return 1;
+            }
+            TAG_ANMF => {
+                if !decoder.animation
+                    || decoder.canvas_width == 0
+                    || decoder.canvas_height == 0
+                {
+                    return decoder.set_error(
+                        "ANMF chunk without animation header",
+                        WPD_ERROR_INVALID_DATA,
+                    );
+                }
+                let ret = unsafe { decoder.decode_anmf(payload, size as usize) };
+
+                if ret < 0 {
+                    return decoder.set_error("animation frame decode failed", ret);
+                }
+                let set = decoder.export_settings();
+                let t = decoder.export_targets();
+                let this: *mut WPDDecoder = decoder;
+                let img = if decoder.anim_mode == WPD_ANIM_SUBFRAME {
+                    match decoder.subframe_out {
+                        Some(Subframe::Lossy) => unsafe {
+                            ptr::addr_of_mut!((*this).subframe)
+                        },
+                        Some(Subframe::Argb) => unsafe {
+                            ptr::addr_of_mut!((*this).argb)
+                        },
+                        Some(Subframe::Converted) => unsafe {
+                            ptr::addr_of_mut!((*this).converted)
+                        },
+                        None => ptr::null_mut(),
+                    }
+                } else {
+                    unsafe { ptr::addr_of_mut!((*this).canvas) }
+                };
+                let ret = unsafe { export_packed(&set, &t, img, frame) };
+
+                if ret < 0 {
+                    return decoder.set_error("cannot output frame", ret);
+                }
+                return 1;
+            }
+            _ => {}
+        }
+    }
+
+    0
+}
+
+/// # Safety
+///
+/// `frame` must be as [`wpd_decoder_next_frame`] requires, and `rows_valid`,
+/// when not null, writable.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_partial_frame(
+    decoder: *mut WPDDecoder,
+    frame: *mut WPDFrame,
+    rows_valid: *mut c_int,
+) -> c_int {
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return WPD_ERR_INVALID_ARG;
+    };
+
+    if !unsafe { frame_valid(frame) } {
+        return decoder.set_error("invalid frame", WPD_ERR_INVALID_ARG);
+    }
+    if !decoder.opened {
+        return decoder.set_error("no file opened", WPD_ERR_INVALID_ARG);
+    }
+    let set = decoder.export_settings();
+    let t = decoder.export_targets();
+
+    unsafe { frame_clear(frame) };
+    if !rows_valid.is_null() {
+        unsafe { rows_valid.write(0) };
+    }
+
+    let still_active = unsafe { vp8l_still_active(&*decoder.vp8l) } != 0;
+
+    if unsafe { options_transform(&decoder.options) } != 0 {
+        let ret = if decoder.still_lossless {
+            if still_active {
+                let ret = decoder.lossless_peek();
+
+                if ret < 0 {
+                    return decoder.set_error("VP8L decode failed", ret);
+                }
+            }
+            let rows = if unsafe { vp8l_still_active(&*decoder.vp8l) } != 0 {
+                unsafe { vp8l_still_rows_out(&*decoder.vp8l) }
+            } else {
+                decoder.argb.height
+            };
+
+            if rows < decoder.argb.height {
+                return WPD_OK;
+            }
+            unsafe { export_packed(&set, &t, &mut decoder.argb, frame) }
+        } else if decoder.still_lossy {
+            let rows = if decoder.vp8_active {
+                unsafe { vp8_rows_finalized(&decoder.codec) }
+            } else {
+                decoder.subframe.height
+            };
+
+            if rows < decoder.subframe.height {
+                return WPD_OK;
+            }
+            unsafe { export_packed(&set, &t, &mut decoder.subframe, frame) }
+        } else {
+            return WPD_OK;
+        };
+
+        if ret < 0 {
+            return decoder.set_error("cannot output frame", ret);
+        }
+        if !rows_valid.is_null() {
+            unsafe { rows_valid.write((*frame).height) };
+        }
+        return WPD_OK;
+    }
+
+    if decoder.still_lossless {
+        if still_active {
+            let ret = decoder.lossless_peek();
+
+            if ret < 0 {
+                return decoder.set_error("VP8L decode failed", ret);
+            }
+        }
+        let upto = if unsafe { vp8l_still_active(&*decoder.vp8l) } != 0 {
+            unsafe { vp8l_still_rows_out(&*decoder.vp8l) }
+        } else {
+            decoder.argb.height
+        };
+        let ret =
+            unsafe { export_still_lossless(&set, &t, &mut decoder.argb, frame, upto) };
+
+        if ret < 0 {
+            return decoder.set_error("cannot output frame", ret);
+        }
+        if !rows_valid.is_null() {
+            unsafe { rows_valid.write(decoder.converted_rows) };
+        }
+        return WPD_OK;
+    }
+    if !decoder.still_lossy {
+        return WPD_OK;
+    }
+
+    let mut rows = if decoder.vp8_active {
+        unsafe { vp8_rows_finalized(&decoder.codec) }
+    } else {
+        decoder.subframe.height
+    };
+
+    if format_is_packed(decoder.out_format) == 0 {
+        let format = if decoder.out_format == WPD_PIX_FMT_NONE {
+            decoder.subframe.format
+        } else {
+            decoder.out_format
+        };
+        let have = decoder.subframe.format;
+        let first = if decoder.converted_format == format {
+            decoder.converted_rows
+        } else {
+            0
+        };
+
+        if rows < first {
+            rows = first;
+        }
+
+        let this: *mut WPDDecoder = decoder;
+        let mut plane = unsafe { ptr::addr_of!((*this).subframe) };
+
+        if have != Format::Yuva420p as c_int && format != have {
+            let want_alpha = c_int::from(format == Format::Yuva420p as c_int);
+            let ret = unsafe {
+                crate::convert::ensure_yuva_rows(
+                    ptr::addr_of!((*this).ydsp),
+                    ptr::addr_of_mut!((*this).output),
+                    ptr::addr_of!((*this).subframe),
+                    want_alpha,
+                    first,
+                    rows,
+                )
+            };
+
+            if ret < 0 {
+                return decoder.set_error("cannot output frame", ret);
+            }
+            plane = unsafe { ptr::addr_of!((*this).output) };
+        }
+        if decoder.ext_active {
+            let ret = unsafe {
+                export_external_planar_rows(&set, &t, plane, format, frame, first, rows)
+            };
+
+            if ret < 0 {
+                return decoder.set_error("cannot output frame", ret);
+            }
+        } else {
+            unsafe { export_frame(&set, plane, format, frame) };
+        }
+        decoder.converted_rows = rows;
+        decoder.converted_format = format;
+        if !rows_valid.is_null() {
+            unsafe { rows_valid.write(rows) };
+        }
+        return WPD_OK;
+    }
+
+    /* The fancy upsampler pairs a row with the one below it, so the last
+    finished row cannot be converted until the row after it exists. */
+    if rows != 0 && rows < decoder.subframe.height {
+        rows -= 1;
+    }
+
+    let ret = unsafe { export_still_packed(&set, &t, &decoder.subframe, frame, rows) };
+
+    if ret < 0 {
+        return decoder.set_error("cannot output frame", ret);
+    }
+    if !rows_valid.is_null() {
+        unsafe { rows_valid.write(decoder.converted_rows) };
+    }
+    WPD_OK
+}
+
+/// # Safety
+///
+/// `decoder` must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_status(decoder: *const WPDDecoder) -> c_int {
+    match unsafe { decoder.as_ref() } {
+        Some(decoder) => decoder.status,
+        None => WPD_ERR_INVALID_ARG,
+    }
+}
+
+/// # Safety
+///
+/// As [`wpd_decoder_status`]. The string belongs to the decoder and stays
+/// valid until its next failure.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decoder_error(
+    decoder: *const WPDDecoder,
+) -> *const c_char {
+    match unsafe { decoder.as_ref() } {
+        Some(decoder) if decoder.error[0] != 0 => decoder.error.as_ptr().cast(),
+        _ => c"unknown decoder error".as_ptr(),
+    }
+}
+
+/// The planes `wpd_decode` copies out, which is what the frame's format says
+/// it has.
+fn frame_planes(format: c_int) -> usize {
+    match Format::from_raw(format) {
+        Some(Format::Yuva420p) => 4,
+        Some(Format::Yuv420p) => 3,
+        _ => 1,
+    }
+}
+
+/// The memory behind a frame `wpd_decode` handed out, released by
+/// `wpd_frame_free`.
+struct WPDFrameOwner {
+    plane: [Vec<u8>; 4],
+}
+
+/// Runs a one-shot decode of `data` into `frame`, leaving the decoder for the
+/// caller to take what it needs out of.
+///
+/// # Safety
+///
+/// As [`wpd_decode`].
+unsafe fn decode_once(
+    data: *const u8,
+    size: usize,
+    format: c_int,
+    options: *const WPDDecoderOptions,
+    buffer: *const WPDOutputBuffer,
+    frame: *mut WPDFrame,
+) -> (*mut WPDDecoder, c_int) {
+    let decoder = wpd_decoder_create();
+
+    if decoder.is_null() {
+        return (ptr::null_mut(), WPD_ERR_NO_MEMORY);
+    }
+    let mut status = if options.is_null() {
+        WPD_OK
+    } else {
+        unsafe { wpd_decoder_set_options(decoder, options) }
+    };
+
+    if status == WPD_OK {
+        status = unsafe { wpd_decoder_set_output_format(decoder, format) };
+    }
+    if status == WPD_OK && !buffer.is_null() {
+        status = unsafe { wpd_decoder_set_output_buffer(decoder, buffer) };
+    }
+    if status == WPD_OK {
+        status = unsafe { wpd_decoder_open_borrowed(decoder, data, size) };
+    }
+    let ret = if status == WPD_OK {
+        unsafe { wpd_decoder_next_frame(decoder, frame) }
+    } else {
+        status
+    };
+
+    (decoder, ret)
+}
+
+/// # Safety
+///
+/// `data` must be readable for `size` bytes, and `frame` must point to a
+/// `WPDFrame` of at least its own declared `struct_size` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decode_into(
+    data: *const u8,
+    size: usize,
+    format: c_int,
+    options: *const WPDDecoderOptions,
+    buffer: *const WPDOutputBuffer,
+    frame: *mut WPDFrame,
+) -> c_int {
+    if data.is_null() || buffer.is_null() || !unsafe { frame_valid(frame) } {
+        return WPD_ERR_INVALID_ARG;
+    }
+    if !unsafe { (*frame).private_data }.is_null() {
+        unsafe { wpd_frame_free(frame) };
+    }
+    let (decoder, ret) =
+        unsafe { decode_once(data, size, format, options, buffer, frame) };
+
+    if decoder.is_null() {
+        return ret;
+    }
+    unsafe { wpd_decoder_free(decoder) };
+
+    match ret {
+        0 => WPD_ERR_BITSTREAM,
+        ret if ret < 0 => ret,
+        _ => WPD_OK,
+    }
+}
+
+/// # Safety
+///
+/// As [`wpd_decode_into`].
+#[no_mangle]
+pub unsafe extern "C" fn wpd_decode(
+    data: *const u8,
+    size: usize,
+    format: c_int,
+    options: *const WPDDecoderOptions,
+    frame: *mut WPDFrame,
+) -> c_int {
+    if data.is_null() || !unsafe { frame_valid(frame) } {
+        return WPD_ERR_INVALID_ARG;
+    }
+    if !unsafe { (*frame).private_data }.is_null() {
+        unsafe { wpd_frame_free(frame) };
+    }
+    let mut decoded = WPDFrame {
+        struct_size: mem::size_of::<WPDFrame>(),
+        data: [ptr::null(); 4],
+        stride: [0; 4],
+        width: 0,
+        height: 0,
+        format: WPD_PIX_FMT_NONE,
+        duration: 0,
+        timestamp: 0,
+        private_data: ptr::null_mut(),
+        pos_x: 0,
+        pos_y: 0,
+        dispose: 0,
+        blend: 0,
+        has_alpha: 0,
+    };
+    let (decoder, ret) =
+        unsafe { decode_once(data, size, format, options, ptr::null(), &mut decoded) };
+
+    if decoder.is_null() {
+        return ret;
+    }
+    if ret <= 0 {
+        unsafe { wpd_decoder_free(decoder) };
+        return if ret < 0 { ret } else { WPD_ERR_BITSTREAM };
+    }
+
+    let owner = Box::new(WPDFrameOwner {
+        plane: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+    });
+    let planes = frame_planes(decoded.format);
+
+    unsafe { frame_clear(frame) };
+    frame_copy(frame, &decoded);
+
+    let out = unsafe { &mut *frame };
+
+    out.private_data = Box::into_raw(owner).cast::<c_void>();
+
+    let owner = unsafe { &mut *out.private_data.cast::<WPDFrameOwner>() };
+    let mut status = WPD_OK;
+
+    for p in 0..planes {
+        let shift = u32::from(p == 1 || p == 2);
+        let w = if planes == 1 {
+            decoded.width as usize * format_bpp(decoded.format) as usize
+        } else {
+            wpd::image::ceil_rshift(decoded.width, shift) as usize
+        };
+        let h = wpd::image::ceil_rshift(decoded.height, shift) as usize;
+        let Some(bytes) = w.checked_mul(h) else {
+            status = WPD_ERR_TOO_LARGE;
+            break;
+        };
+
+        owner.plane[p] = vec![0u8; bytes];
+        for y in 0..h {
+            let src = unsafe { decoded.data[p].offset(y as isize * decoded.stride[p]) };
+
+            unsafe {
+                ptr::copy_nonoverlapping(src, owner.plane[p][y * w..].as_mut_ptr(), w);
+            }
+        }
+        out.data[p] = owner.plane[p].as_ptr();
+        out.stride[p] = w as isize;
+    }
+    unsafe { wpd_decoder_free(decoder) };
+
+    if status != WPD_OK {
+        unsafe { wpd_frame_free(frame) };
+        return status;
+    }
+    WPD_OK
+}
+
+/// Copies past `struct_size` rather than assigning: the caller's frame may be
+/// a newer, longer revision of the struct, and its own size has to survive.
+fn frame_copy(dst: *mut WPDFrame, src: &WPDFrame) {
+    let head = mem::size_of::<usize>();
+    let extent = unsafe { crate::export::frame_extent(dst) }
+        .min(unsafe { crate::export::frame_extent(src) });
+
+    unsafe {
+        ptr::copy_nonoverlapping(
+            (src as *const WPDFrame).cast::<u8>().add(head),
+            dst.cast::<u8>().add(head),
+            extent - head,
+        );
+    }
+}
+
+/// # Safety
+///
+/// `frame`, when not null, must be one [`wpd_decode`] filled in, or a frame
+/// that owns nothing.
+#[no_mangle]
+pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
+    if !unsafe { frame_valid(frame) } {
+        return;
+    }
+    let owner = unsafe { (*frame).private_data };
+
+    if !owner.is_null() {
+        drop(unsafe { Box::from_raw(owner.cast::<WPDFrameOwner>()) });
+    }
+    unsafe { frame_clear(frame) };
+}

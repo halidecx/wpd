@@ -50,6 +50,50 @@ pub struct WPDDecoderOptions {
     pub flip: c_int,
 }
 
+impl WPDDecoderOptions {
+    /// The oldest revision this build accepts, and equally how much of a
+    /// caller's struct it reads.
+    pub(crate) fn v1() -> usize {
+        std::mem::offset_of!(WPDDecoderOptions, flip) + std::mem::size_of::<c_int>()
+    }
+
+    pub(crate) fn new() -> Self {
+        WPDDecoderOptions {
+            struct_size: std::mem::size_of::<WPDDecoderOptions>(),
+            bypass_filtering: 0,
+            no_fancy_upsampling: 0,
+            use_cropping: 0,
+            crop_left: 0,
+            crop_top: 0,
+            crop_width: 0,
+            crop_height: 0,
+            use_scaling: 0,
+            scaled_width: 0,
+            scaled_height: 0,
+            flip: 0,
+        }
+    }
+
+    /// Field by field rather than whole: the caller's struct may be a shorter
+    /// revision than this one, and its `struct_size` is not ours to keep.
+    pub(crate) fn copy(&self) -> Self {
+        WPDDecoderOptions {
+            struct_size: std::mem::size_of::<WPDDecoderOptions>(),
+            bypass_filtering: self.bypass_filtering,
+            no_fancy_upsampling: self.no_fancy_upsampling,
+            use_cropping: self.use_cropping,
+            crop_left: self.crop_left,
+            crop_top: self.crop_top,
+            crop_width: self.crop_width,
+            crop_height: self.crop_height,
+            use_scaling: self.use_scaling,
+            scaled_width: self.scaled_width,
+            scaled_height: self.scaled_height,
+            flip: self.flip,
+        }
+    }
+}
+
 /// `SubRect` from `src/convert.h`.
 #[repr(C)]
 #[derive(Clone, Copy)]

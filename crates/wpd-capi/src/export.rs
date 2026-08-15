@@ -11,7 +11,7 @@
 //! interior padding and a field added on one side without the other changes
 //! the size — which the assertions below catch at compile time.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::{mem, ptr};
 
 use wpd::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
@@ -40,10 +40,21 @@ const WPD_BLEND_NONE: c_int = 1;
 
 /// `WPDOutputPlane` from `include/wpd.h`.
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct WPDOutputPlane {
     pub data: *mut u8,
     pub size: usize,
     pub stride: isize,
+}
+
+impl WPDOutputPlane {
+    pub(crate) fn empty() -> Self {
+        WPDOutputPlane {
+            data: ptr::null_mut(),
+            size: 0,
+            stride: 0,
+        }
+    }
 }
 
 /// `WPDFrame` from `include/wpd.h`.
@@ -57,7 +68,7 @@ pub struct WPDFrame {
     pub format: c_int,
     pub duration: c_int,
     pub timestamp: i64,
-    pub private_data: *mut core::ffi::c_void,
+    pub private_data: *mut c_void,
     pub pos_x: c_int,
     pub pos_y: c_int,
     pub dispose: c_int,
@@ -99,15 +110,51 @@ const _: () = assert!(mem::size_of::<ExportSettings>() == 10 * 4 + 8);
 const _: () =
     assert!(mem::size_of::<ExportTargets>() == 9 * mem::size_of::<*const ()>());
 
-extern "C" {
-    fn frame_clear(frame: *mut WPDFrame);
-    fn frame_extent(frame: *const WPDFrame) -> usize;
-}
-
 /// How far into `WPDFrame` the sub-frame placement fields start, which a
 /// caller compiled against an older revision has not made room for.
 fn has_alpha_extent() -> usize {
     mem::offset_of!(WPDFrame, has_alpha) + mem::size_of::<c_int>()
+}
+
+/// The oldest revision of `WPDFrame` this build accepts.
+pub(crate) fn private_data_extent() -> usize {
+    mem::offset_of!(WPDFrame, private_data) + mem::size_of::<*mut c_void>()
+}
+
+/// # Safety
+///
+/// `frame`, when not null, must point to a `WPDFrame` of at least its own
+/// declared `struct_size` bytes.
+pub(crate) unsafe fn frame_valid(frame: *const WPDFrame) -> bool {
+    unsafe { frame.as_ref() }.is_some_and(|f| f.struct_size >= private_data_extent())
+}
+
+/// How much of the caller's frame this build may touch: the newest revision of
+/// the struct it declares room for in full, capped at the newest this build
+/// knows about. A size landing between two revisions rounds down to the older
+/// one rather than writing part of a field pair the caller may not have.
+///
+/// # Safety
+///
+/// As [`frame_valid`], and the frame must not be null.
+pub(crate) unsafe fn frame_extent(frame: *const WPDFrame) -> usize {
+    if unsafe { (*frame).struct_size } >= has_alpha_extent() {
+        has_alpha_extent()
+    } else {
+        private_data_extent()
+    }
+}
+
+/// Zeroes everything past `struct_size`, which is the caller's and survives.
+///
+/// # Safety
+///
+/// As [`frame_extent`], and the frame must be writable.
+pub(crate) unsafe fn frame_clear(frame: *mut WPDFrame) {
+    let head = mem::size_of::<usize>();
+    let extent = unsafe { frame_extent(frame) };
+
+    unsafe { ptr::write_bytes(frame.cast::<u8>().add(head), 0, extent - head) };
 }
 
 impl ExportTargets {

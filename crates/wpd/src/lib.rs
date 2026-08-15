@@ -1,7 +1,7 @@
 //! wpd — a fast WebP decoder.
 //!
-//! This crate is the decoder core. It is being ported from C module by module;
-//! see `LOG.md` at the repository root for the current state.
+//! This crate is the decoder core, ported module by module from the C the
+//! project started as; see `LOG.md` at the repository root.
 //!
 //! # Memory safety
 //!

@@ -18,7 +18,7 @@ use std::{mem, ptr, slice};
 use wpd::container::{Blend, Coding, Dispose, Info, Raw, Scan, METADATA_NB};
 use wpd::error::Error;
 
-use crate::vp8::forward_log;
+use crate::compat::forward_log;
 
 const WPD_OK: c_int = 0;
 const WPD_ERR_INVALID_ARG: c_int = -1;

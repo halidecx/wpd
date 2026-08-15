@@ -149,8 +149,8 @@ lib_c_args += cpu_baseline_c_args
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
 
-# The library, the assembly, and whatever C has not been ported yet are built
-# by cargo; Meson keeps the C test harnesses, the tools and the testdata suite.
+# The library and the assembly are built by cargo; Meson keeps the C test
+# harnesses, the tools and the testdata suite.
 # Cargo tracks its own inputs far better than a file list here could, so the
 # target is always stale and cargo decides whether there is work to do.
 cargo = find_program('cargo')
@@ -173,10 +173,10 @@ cargo_profile = {
   'plain': 'release',
 }.get(get_option('buildtype'), 'release')
 
-# The C the port has not reached yet is compiled by cargo's build script, so
-# meson's sanitizer selection has to be handed across; the cc crate reads
+# The x86 assembly's constant tables are still compiled by cargo's build script,
+# so meson's sanitizer selection has to be handed across; the cc crate reads
 # CFLAGS. Rust's own sanitizer support needs nightly and is wired up in
-# scripts/sanitize.sh once there is Rust code to instrument.
+# scripts/sanitize.sh.
 cargo_env = environment()
 if get_option('b_sanitize') != 'none'
   cargo_env.append('CFLAGS', '-fsanitize=' + get_option('b_sanitize'),

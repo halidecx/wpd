@@ -268,6 +268,43 @@ mod asm {
     }
 }
 
+impl WPDLosslessDSP {
+    /// The best implementation the running CPU allows.
+    pub(crate) fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = WPDLosslessDSP {
+            pred_add: [
+                pred_add_0_c,
+                pred_add_1_c,
+                pred_add_2_c,
+                pred_add_3_c,
+                pred_add_4_c,
+                pred_add_5_c,
+                pred_add_6_c,
+                pred_add_7_c,
+                pred_add_8_c,
+                pred_add_9_c,
+                pred_add_10_c,
+                pred_add_11_c,
+                pred_add_12_c,
+                pred_add_13_c,
+            ],
+            extract_green: extract_green_c,
+            map_color32: map_color32_c,
+            blend_row_argb: blend_row_argb_c,
+            blend_row_argb_premult: blend_row_argb_premult_c,
+        };
+
+        #[cfg(all(
+            feature = "asm",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        asm::init(&mut table);
+
+        table
+    }
+}
+
 /// Fills in `dsp` with the best implementation the running CPU allows.
 ///
 /// # Safety
@@ -275,34 +312,5 @@ mod asm {
 /// `dsp` must point to a writable, aligned `WPDLosslessDSP`.
 #[no_mangle]
 pub unsafe extern "C" fn wpd_vp8l_dsp_init(dsp: *mut WPDLosslessDSP) {
-    let mut table = WPDLosslessDSP {
-        pred_add: [
-            pred_add_0_c,
-            pred_add_1_c,
-            pred_add_2_c,
-            pred_add_3_c,
-            pred_add_4_c,
-            pred_add_5_c,
-            pred_add_6_c,
-            pred_add_7_c,
-            pred_add_8_c,
-            pred_add_9_c,
-            pred_add_10_c,
-            pred_add_11_c,
-            pred_add_12_c,
-            pred_add_13_c,
-        ],
-        extract_green: extract_green_c,
-        map_color32: map_color32_c,
-        blend_row_argb: blend_row_argb_c,
-        blend_row_argb_premult: blend_row_argb_premult_c,
-    };
-
-    #[cfg(all(
-        feature = "asm",
-        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    asm::init(&mut table);
-
-    unsafe { dsp.write(table) }
+    unsafe { dsp.write(WPDLosslessDSP::new()) }
 }

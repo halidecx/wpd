@@ -38,6 +38,16 @@ pub struct InputBuffer {
 }
 
 impl InputBuffer {
+    pub(crate) fn new() -> Self {
+        InputBuffer {
+            at: ptr::null(),
+            alloc: ptr::null_mut(),
+            capacity: 0,
+            window: Window::default(),
+            borrowed: false,
+        }
+    }
+
     /// The owned allocation as a slice of its capacity.
     ///
     /// # Safety
@@ -74,15 +84,18 @@ impl InputBuffer {
     }
 }
 
+impl Drop for InputBuffer {
+    fn drop(&mut self) {
+        if !self.alloc.is_null() {
+            unsafe { alloc::dealloc(self.alloc, layout(self.capacity)) };
+            self.alloc = ptr::null_mut();
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn input_alloc() -> *mut InputBuffer {
-    Box::into_raw(Box::new(InputBuffer {
-        at: ptr::null(),
-        alloc: ptr::null_mut(),
-        capacity: 0,
-        window: Window::default(),
-        borrowed: false,
-    }))
+    Box::into_raw(Box::new(InputBuffer::new()))
 }
 
 /// # Safety
@@ -97,13 +110,7 @@ pub unsafe extern "C" fn input_free(input: *mut *mut InputBuffer) {
         if p.is_null() {
             return;
         }
-        let mut boxed = Box::from_raw(p);
-
-        if !boxed.alloc.is_null() {
-            alloc::dealloc(boxed.alloc, layout(boxed.capacity));
-            boxed.alloc = ptr::null_mut();
-        }
-        drop(boxed);
+        drop(Box::from_raw(p));
         *input = ptr::null_mut();
     }
 }

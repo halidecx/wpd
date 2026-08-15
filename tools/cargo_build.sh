@@ -1,7 +1,7 @@
 #!/bin/bash -eu
 # Builds the library with cargo and stages the artifacts where Meson expects
 # them. Meson owns the C test harnesses and the testdata suite; cargo owns the
-# library, the assembly, and whatever C has not been ported yet.
+# library and the assembly.
 #
 # NAME distinguishes configurations that must coexist in one build directory:
 # checkasm needs a copy built without trim_dsp, so that the fallbacks it

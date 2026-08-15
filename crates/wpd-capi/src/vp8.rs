@@ -6,11 +6,12 @@
 //! given and rebuilds a slice per call. The core never holds a borrow it did
 //! not receive as an argument, which is what lets the decoder be safe code.
 
-use std::ffi::{c_char, c_int, c_void, CString};
+use std::ffi::{c_int, c_void};
 use std::{ptr, slice};
 
-use wpd::log::Level;
 use wpd::vp8::{Decoder, Error, Status};
+
+use crate::compat::forward_log;
 
 pub const VP8_NEED_MORE: c_int = 1;
 
@@ -27,6 +28,16 @@ pub struct WpdFrame {
     pub linesize: [c_int; 3],
 }
 
+impl WpdFrame {
+    pub(crate) fn empty() -> Self {
+        WpdFrame {
+            data: [ptr::null_mut(); 3],
+            allocation: [ptr::null_mut(); 3],
+            linesize: [0; 3],
+        }
+    }
+}
+
 #[repr(C)]
 pub struct WpdCodecContext {
     pub priv_data: *mut c_void,
@@ -39,22 +50,6 @@ pub struct WpdCodecContext {
 pub struct WpdPacket {
     pub data: *const u8,
     pub size: c_int,
-}
-
-extern "C" {
-    fn wpd_log(context: *mut c_void, level: c_int, format: *const c_char, ...);
-}
-
-pub(crate) fn forward_log(level: Level, message: &str) {
-    let Ok(message) = CString::new(message) else {
-        return;
-    };
-    let level = match level {
-        Level::Error => 0,
-        Level::Warning => 1,
-    };
-
-    unsafe { wpd_log(ptr::null_mut(), level, c"%s".as_ptr(), message.as_ptr()) };
 }
 
 pub(crate) fn status(e: Error) -> c_int {

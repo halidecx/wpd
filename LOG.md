@@ -125,6 +125,13 @@ proven-bound indexing for the pixel loops, where it pays.
   surviving `core::panicking` references; a bounds check that LLVM did not
   remove shows up there.
 
+- **A pointer into your own struct is a borrow you cannot express — name the
+  field instead.** The C decoder kept two `WebPImage *` that pointed at its own
+  members. One was always the same member, so it became a `bool`; the other was
+  one of three, so it became a three-variant enum. Every use of a self-pointer
+  has to argue that nothing wrote that field in between; a name has nothing to
+  argue about, and the match arm costs nothing.
+
 ## Perf risk register
 
 Spots where a safe formulation might cost speed and assembly does not cover.
@@ -873,6 +880,14 @@ to a workaround here. Everything else is within 2% of Phase 4.
 The export port itself is perf-neutral: measured against the tree just before
 it, every file is within 2% and `palette4bpp_rgb` is 3% faster.
 
+**What `sanitize.sh` covers changed, and the README now says so.** ASan
+instruments compiler-generated code, and there is no longer any decoder C for it
+to instrument — only the harnesses in `tests/`. The decoder still benefits
+through the intercepted allocator, so a heap overrun that crosses a redzone is
+caught, but not through instrumented loads and stores the way it was. Nothing
+regressed; what changed is what a clean run proves. Instrumenting the Rust
+proper needs a nightly toolchain and is Phase 8 work.
+
 Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
 five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
 `rac32.sh` 186/186, `md5check.sh` bit-exact against the C baseline `d241ef8`,
@@ -959,6 +974,76 @@ Four C files are left, and they move together: `wpd_decoder.c` holds the public
 API, `lossy.c` and `anim.c`'s `decode_anmf` both take a `WPDDecoder *`, and
 `wpd_compat.c` cannot go until they do, because `wpd_log` is variadic and stable
 Rust cannot define a C-variadic function.
+
+### Phase 7b — the decoder itself, and the last of the C
+
+`wpd_decoder.c`, `lossy.c`, `anim.c` and `wpd_compat.c` are gone. `src/` now
+holds the DSP headers `tests/checkasm` includes and one translation unit of x86
+SIMD constants; there is no C decoder left to compile.
+
+**This is the one step the refactor-then-port rhythm did not fit, and it is
+worth saying why.** Every earlier module was narrowed in C first — made opaque,
+or given a scalars-and-pointers pair of structs — and proved green on its own
+before the implementation moved. That works when the thing being narrowed is
+smaller than the interface around it. Here it was the other way round:
+`vp8_lossy_step` and `decode_anmf` each read or write about fifteen `WPDDecoder`
+fields, including the ones the canvas negotiation mutates from both sides, so
+the "narrow struct" would have been the decoder with a different name. The
+refactor commit would have been pure ceremony and would still have left the
+whole port in the commit after it. So `WPDDecoder` became a Rust struct and the
+two drivers came with it, in one step.
+
+**Two self-referential pointers became names.** `lossless_frame` was a
+`WebPImage *` that was assigned `&decoder->argb` at all four of its call sites,
+so it is a `bool`. `subframe_out` pointed at whichever of `subframe`, `argb` and
+`converted` the frame finished in, so it is an `enum Subframe` with three
+variants. Neither change was made for tidiness: a raw pointer into your own
+struct is a borrow the language cannot check, and every use of it has to argue
+that nothing else touched that field in between. Naming the field instead costs
+one match arm and removes the argument.
+
+**Ownership became `Drop`.** The C's `wpd_decoder_free` was a fifteen-line
+sequence, and a field added without a line added to it leaked silently. The
+scanner, both frame decoders and the input buffer are now owned values, the
+metadata copies and the alpha plane are `Vec`s, and the four images and the
+rescaler scratch are the only things `Drop` still has to release by hand —
+because they are C-shaped views that double as owners, which is the same reason
+`WebPImage` could not be made opaque in Phase 5.
+
+**`wpd_decoder_error` had to stay a fixed array.** The obvious Rust is a
+`CString` field, and it is worse: the C's `char[128]` only changed its
+_contents_ on the next failure, where a replaced `CString` frees the buffer the
+caller is still holding a pointer to. Safer-looking Rust that is less safe at
+the ABI, and the only reason to notice is asking what the returned pointer's
+lifetime actually is.
+
+**`wpd_log` did not need porting, it needed deleting.** It was the last variadic
+in the tree and the stated reason `wpd_compat.c` had to go last, since stable
+Rust cannot define a C-variadic function. But the only remaining caller was the
+Rust log sink, which was formatting a message and passing it through `"%s"`. Cut
+the C out and the variadic goes with it. Two behaviours that were invisible in
+its signature had to come across, though, because `clicheck.sh` compares the
+tool's stderr byte for byte: it stripped trailing newlines and truncated at 511
+bytes, and several call sites still pass a message ending in `\n`.
+
+**Non-nullable function pointers cannot be zeroed.** `WPDYUVDSP` and
+`WPDLosslessDSP` are tables of bare `extern "C" fn`, so a `calloc`-shaped
+construction of the decoder — `mem::zeroed` and then fix the fields up — is
+instant undefined behaviour, not merely ugly. Both tables gained a `new()`
+returning a value, and `wpd_decoder_create` is a plain struct literal.
+
+Gates: `meson test` 186/186, `clicheck.sh` 794/794, `testdata.sh` 183/183 across
+five configurations, `animcheck.sh` (42 files x 8 formats, 27 animations),
+`rac32.sh` 186/186, `md5check.sh` bit-exact against the C baseline `d241ef8`,
+`sanitize.sh` 186 and 185 with no ASan or UBSan report, `fuzz.sh` 300 trials per
+file, `cargo test -p wpd` 79/79, clippy clean.
+
+Perf, Phase 7a against Phase 7b in one build directory: every file within 1-2%,
+which is the noise floor at these sizes. Against the C baseline on the three
+files where decoding actually dominates the process — `lossy`, `lossless`,
+`anim_yuva` — 1.01, 1.01 and 1.00. The small files show the Rust binary's larger
+start-up cost, which is 70 us on a 400 us process and has been there since Phase
+1; that is why these comparisons are phase against phase.
 
 ## Measuring the fallbacks needs two no-asm builds
 

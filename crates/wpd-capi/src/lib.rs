@@ -6,20 +6,24 @@
 //! slices per call, which is what confines the lifetime hazard the C ABI
 //! cannot express to one place.
 //!
-//! While the port is in progress the entry points are still implemented in C,
-//! compiled by this crate's build script. They move up into safe Rust module
-//! by module; see `LOG.md`.
+//! Every entry point `include/wpd.h` declares is implemented here. The port is
+//! complete: no decoder logic is compiled from C any more, and what is left of
+//! the build script is the target probing and the x86 assembly's constant
+//! tables. See `LOG.md`.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod anim;
+pub mod compat;
 pub mod container;
 pub mod convert;
 pub mod cpu;
+pub mod decoder;
 pub mod dsp;
 pub mod export;
 pub mod image;
 pub mod input;
+pub mod lossy;
 pub mod rescale;
 pub mod vp8;
 pub mod vp8l;

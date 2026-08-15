@@ -45,6 +45,17 @@ pub struct RescaleScratch {
     pub row_size: usize,
 }
 
+impl RescaleScratch {
+    pub(crate) fn empty() -> Self {
+        RescaleScratch {
+            work: ptr::null_mut(),
+            work_size: 0,
+            row: ptr::null_mut(),
+            row_size: 0,
+        }
+    }
+}
+
 fn layout(size: usize) -> Layout {
     Layout::from_size_align(size, ALIGN)
         .expect("a plane size that already fits in a usize")
@@ -334,6 +345,22 @@ pub unsafe extern "C" fn image_scratch_grow(
 }
 
 impl WebPImage {
+    /// An image that owns nothing and describes nothing, which is what a
+    /// zeroed C struct was.
+    pub(crate) fn empty() -> Self {
+        WebPImage {
+            chroma_full: 0,
+            premultiplied: 0,
+            data: [ptr::null_mut(); 4],
+            alloc: [ptr::null_mut(); 4],
+            alloc_size: [0; 4],
+            linesize: [0; 4],
+            width: 0,
+            height: 0,
+            format: 0,
+        }
+    }
+
     pub(crate) fn format(&self) -> Option<Format> {
         Format::from_raw(self.format)
     }

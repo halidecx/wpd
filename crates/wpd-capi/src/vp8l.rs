@@ -17,41 +17,17 @@ use std::{ptr, slice};
 use wpd::error::Status;
 use wpd::vp8l::{AlphaDst, Decoder, Picture, Target};
 
-use crate::vp8::{forward_log, status, WPD_ERROR_INVALID_DATA};
+use crate::compat::forward_log;
+use crate::image::WebPImage;
+use crate::vp8::{status, WPD_ERROR_INVALID_DATA};
 
 pub const VP8L_NEED_MORE: c_int = 1;
 
+/// `enum VP8LTarget` from `src/vp8l.h`.
+pub const VP8L_TARGET_ARGB: c_int = 0;
+pub const VP8L_TARGET_ALPHA: c_int = 1;
+
 const WPD_PIX_FMT_ARGB: c_int = 2;
-
-/// `WebPImage` from `src/image.h`. Only the ARGB fields are ever filled in.
-#[repr(C)]
-pub struct WebPImage {
-    pub chroma_full: c_int,
-    pub premultiplied: c_int,
-    pub data: [*mut u8; 4],
-    pub alloc: [*mut u8; 4],
-    pub alloc_size: [usize; 4],
-    pub linesize: [c_int; 4],
-    pub width: c_int,
-    pub height: c_int,
-    pub format: c_int,
-}
-
-impl WebPImage {
-    fn empty() -> Self {
-        Self {
-            chroma_full: 0,
-            premultiplied: 0,
-            data: [ptr::null_mut(); 4],
-            alloc: [ptr::null_mut(); 4],
-            alloc_size: [0; 4],
-            linesize: [0; 4],
-            width: 0,
-            height: 0,
-            format: 0,
-        }
-    }
-}
 
 /// The decoder plus the alpha plane it was last pointed at.
 pub struct Context {
@@ -95,16 +71,22 @@ unsafe fn chunk<'a>(data: *const u8, size: c_uint) -> &'a [u8] {
     unsafe { slice::from_raw_parts(data, size as usize) }
 }
 
+impl Context {
+    pub(crate) fn new() -> Self {
+        wpd::log::set_sink(forward_log);
+        wpd::cpu::init();
+
+        Context {
+            decoder: Decoder::new(),
+            alpha_dst: ptr::null_mut(),
+            alpha_stride: 0,
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn vp8l_alloc() -> *mut Context {
-    wpd::log::set_sink(forward_log);
-    wpd::cpu::init();
-
-    Box::into_raw(Box::new(Context {
-        decoder: Decoder::new(),
-        alpha_dst: ptr::null_mut(),
-        alpha_stride: 0,
-    }))
+    Box::into_raw(Box::new(Context::new()))
 }
 
 /// # Safety

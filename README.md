@@ -14,10 +14,9 @@ meson compile -C build
 Meson drives the build and owns the tools and test harnesses; the library itself
 is built by cargo, which also assembles the hand-written assembly. A Rust
 toolchain and `nasm` (on x86) are therefore build requirements. The decoder is
-being ported from C to Rust module by module — see [LOG.md](LOG.md) for the
-current state — and both languages are compiled into the one `libwpd.a` that
-everything links against, so the build and the public C ABI do not change as the
-port proceeds.
+written in Rust and hand-written assembly, ported from the C the project started
+as — see [LOG.md](LOG.md) — and it keeps the same public C ABI, declared by the
+single header `include/wpd.h`.
 
 The decoder executable is written to `build/wpd`. It reads a WebP file and
 writes decoded frames:
@@ -63,7 +62,8 @@ build/wpd --verify "$expected_md5" input.webp
 ```
 
 Architecture-specific assembly is enabled automatically. Use
-`meson setup build -Denable_asm=false` for a portable C-only build.
+`meson setup build -Denable_asm=false` for a portable build with the safe Rust
+fallbacks alone.
 
 ## Library
 
@@ -156,10 +156,13 @@ from a decode, and `huffman_simple_duplicate` and `huffman_simple_single` differ
 in bytes while having to decode identically.
 
 `./scripts/sanitize.sh` runs the ordinary suite under the same two sanitizers,
-once with the assembly enabled and once without. Both are needed: ASan sees
-compiler-generated code only, so an overrun inside a hand-written kernel shows
-up in the C build alone, while the assembly build is the one that sanitizes the
-real dispatch and the only one with a checkasm target.
+once with the assembly enabled and once without. The decoder is Rust, so what
+ASan instruments here is the C test harnesses; the decoder benefits through the
+intercepted allocator, which still catches a heap overrun that crosses a
+redzone, and not through instrumented loads and stores. The no-asm run is the
+one where a bug in a hand-written kernel cannot hide behind the kernel itself,
+and the asm run is the only one with a checkasm target. Instrumenting the Rust
+proper needs a nightly toolchain and is not wired up yet.
 
 The boolean coder has a 64-bit implementation and a 32-bit one, and every 64-bit
 build picks the former, so `./scripts/rac32.sh` runs the whole suite again

@@ -555,6 +555,46 @@ mod asm {
     }
 }
 
+impl WPDYUVDSP {
+    /// The best implementation the running CPU allows.
+    pub(crate) fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut table = WPDYUVDSP {
+            upsample_block: [
+                upsample_block_argb_c,
+                upsample_block_rgba_c,
+                upsample_block_bgra_c,
+                upsample_block_rgb_c,
+                upsample_block_bgr_c,
+            ],
+            dispatch_alpha_first: dispatch_alpha_first_c,
+            dispatch_alpha_last: dispatch_alpha_last_c,
+            pack_rgba: pack_rgba_c,
+            pack_bgra: pack_bgra_c,
+            pack_rgb: pack_rgb_c,
+            pack_bgr: pack_bgr_c,
+            pack_rgb565: pack_rgb565_c,
+            pack_rgba4444: pack_rgba4444_c,
+            pack_bgr565: pack_bgr565_c,
+            pack_bgra4444: pack_bgra4444_c,
+            premultiply_row: premultiply_row_c,
+            premultiply_row_4444: premultiply_row_4444_c,
+            premultiply_row_4444_swap: premultiply_row_4444_swap_c,
+            argb_to_y: argb_to_y_c,
+            argb_to_yuv444: argb_to_yuv444_c,
+            argb_to_uv: argb_to_uv_c,
+        };
+
+        #[cfg(all(
+            feature = "asm",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        asm::init(&mut table);
+
+        table
+    }
+}
+
 /// Fills in `dsp` with the best implementation the running CPU allows.
 ///
 /// # Safety
@@ -562,39 +602,7 @@ mod asm {
 /// `dsp` must point to a writable, aligned `WPDYUVDSP`.
 #[no_mangle]
 pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
-    let mut table = WPDYUVDSP {
-        upsample_block: [
-            upsample_block_argb_c,
-            upsample_block_rgba_c,
-            upsample_block_bgra_c,
-            upsample_block_rgb_c,
-            upsample_block_bgr_c,
-        ],
-        dispatch_alpha_first: dispatch_alpha_first_c,
-        dispatch_alpha_last: dispatch_alpha_last_c,
-        pack_rgba: pack_rgba_c,
-        pack_bgra: pack_bgra_c,
-        pack_rgb: pack_rgb_c,
-        pack_bgr: pack_bgr_c,
-        pack_rgb565: pack_rgb565_c,
-        pack_rgba4444: pack_rgba4444_c,
-        pack_bgr565: pack_bgr565_c,
-        pack_bgra4444: pack_bgra4444_c,
-        premultiply_row: premultiply_row_c,
-        premultiply_row_4444: premultiply_row_4444_c,
-        premultiply_row_4444_swap: premultiply_row_4444_swap_c,
-        argb_to_y: argb_to_y_c,
-        argb_to_yuv444: argb_to_yuv444_c,
-        argb_to_uv: argb_to_uv_c,
-    };
-
-    #[cfg(all(
-        feature = "asm",
-        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    asm::init(&mut table);
-
-    unsafe { dsp.write(table) }
+    unsafe { dsp.write(WPDYUVDSP::new()) }
 }
 
 /// One output row pair of the fancy upsampler.
