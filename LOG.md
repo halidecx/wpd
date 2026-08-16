@@ -1691,15 +1691,20 @@ The 1.4 MB the canvas took becomes 180 KB of palette indices, which is
 `reduced_width * height` — the palette packs eight-bit alpha into two bits per
 pixel here, so the index image is half the width of the plane it expands into.
 
-**What this cost in coverage.** The two paths it replaces — `extract_green` out
-of a full canvas, and the 32-bit `apply_color_indexing_alpha` — are now reached
-by no file in the corpus. The first was already unreached before this change;
-the second was what all three alpha files used. Both still decode bit-exactly,
-checked against the C baseline on files made for it:
-`cwebp -alpha_method 1
--alpha_q 100` over a horizontal alpha gradient produces
-an ALPH with no palette at all, and over a radial one produces a palette with a
-colour cache. Neither is in `wpd-test-data` yet.
+**What this cost in coverage, and what pays it back.** The two paths it replaces
+— `extract_green` out of a full canvas, and the 32-bit
+`apply_color_indexing_alpha` — were left reached by no file in the corpus. The
+first was already unreached before this change; the second was what all three
+alpha files used.
+
+Which shape an ALPH comes out as is a property of the alpha content rather than
+an encoder flag, which is what `mk_alpha_fallbacks.py` in `wpd-test-data` exists
+to pin down. At `cwebp -alpha_method 1 -alpha_q 100`, a horizontal alpha ramp
+produces an ALPH with no palette transform at all, and a radial falloff produces
+a palette _with_ a colour cache; below quality 100, and at `-alpha_method 0`,
+both come back as shapes the eight-bit path handles. The two files are
+`a_lossy_gradient` and `a_lossy_cached`, and they are in the testdata suite at
+all ten formats, which takes it from 186 tests to 226.
 
 ## The small-file gap is `libstd` starting, not the decoder
 
