@@ -247,12 +247,28 @@ foreach s : wpd_symbols
   undefined_args += '-Wl,-u,' + symbol_prefix + s
 endforeach
 
+# The export list already says the header's symbols are the only ones that
+# leave, and `-u` names the same list, which is exactly the root set a
+# dead-strip wants: anything the public API cannot reach goes. rustc emits one
+# section per function, so what it drops is whole functions -- half the
+# library, most of it std's, none of it ours. Release only, and only if the
+# linker takes the flag, so a toolchain without one still gets a library.
+if cargo_profile == 'release'
+  if host_machine.system() == 'darwin'
+    gc_args = cc.get_supported_link_arguments('-Wl,-dead_strip')
+  else
+    gc_args = cc.get_supported_link_arguments('-Wl,--gc-sections')
+  endif
+else
+  gc_args = []
+endif
+
 # Meson owns the versioned names, the soname or install_name, and the symlinks
 # that go with them, which is the one part of this that differs per platform.
 libwpd_shared = shared_library(
   'wpd',
   files('src/shared_stub.c'),
-  link_args: undefined_args + [
+  link_args: undefined_args + gc_args + [
     export_flag + meson.current_build_dir() / 'wpd.exports',
     meson.current_build_dir() / 'libwpd.a',
   ],

@@ -1706,6 +1706,81 @@ both come back as shapes the eight-bit path handles. The two files are
 `a_lossy_gradient` and `a_lossy_cached`, and they are in the testdata suite at
 all ten formats, which takes it from 186 tests to 226.
 
+## Four fifths of the static library was never code
+
+`libwpd.a` was 23.9 MB against the C's 466 KB, and `libwpd.so` 5.7 MB against
+364 KB. Almost none of that was the decoder.
+
+Two sections explain it, and neither is anything a C consumer reads:
+
+```
+                       .a          .so
+DWARF               8.9 MB       3.9 MB    rustc's prebuilt std ships with it
+.llvmbc            14.0 MB           —     `lto = "fat"` embeds every crate's
+                                           bitcode beside the code made from it
+```
+
+The bitcode is the surprise. Cargo's release profile already sets
+`strip = "debuginfo"` when `debug` is off, which is why the `wpd` binary had no
+DWARF while the shared library — linked by `cc` out of the archive, not by cargo
+— kept all of it. Nothing strips `.llvmbc`, because for an rlib it is the point;
+for a staticlib handed to a C linker it is dead weight. One `strip` pass over
+the archive takes both out:
+
+```
+libwpd.a    23,954,642 -> 4,730,554
+```
+
+The shared library then gets a second cut for free. Meson links it out of that
+archive, and its export list already says the header's twenty-eight symbols are
+the only ones that leave, while `-u` names the same list on the link line —
+which is exactly the root set a dead-strip wants. rustc emits one section per
+function, so what goes is whole functions:
+
+```
+libwpd.so    5,746,608 -> 1,828,256 (slim archive) -> 908,744 (+ dead-strip)
+```
+
+The flag is `--gc-sections`, `-dead_strip` on Mach-O, and it is asked for only
+in release and only if the linker takes it, so a toolchain with neither still
+produces a library — just a larger one.
+
+Exports are byte-identical, the 226-test suite passes, and 8,800 damaged-input
+decodes driven through the stripped shared library by `tests/fuzz.c` are clean —
+which is the check that matters, since dead-stripping a library whose error
+paths are reached only from inside is exactly where this would go wrong.
+
+**What is left is `std`, and mostly one subtree of it.** Attributing the 1.04 MB
+of symbols in the shared library by crate:
+
+```
+wpd + wpd_capi + ABI + asm    358 KB   the decoder
+std + core + alloc            510 KB
+gimli, addr2line, object,     152 KB   the backtrace symbolizer
+  miniz_oxide, rustc_demangle,
+  memchr, adler2
+```
+
+That last group is reachable only from the default panic hook —
+`panic = "abort"` stops the unwinding, not the printing, and the hook drags in
+DWARF parsing, zlib inflate, symbol demangling and `env::var` to read
+`RUST_BACKTRACE`. It is the whole of the remaining gap to the C that is not
+`std` itself.
+
+Removing it needs a `std` built without it. Measured, with nightly:
+
+```
+RUSTFLAGS="-Zunstable-options -Cpanic=immediate-abort" \
+  cargo +nightly build -Zbuild-std=std,panic_abort
+
+libwpd.a     4,730,554 -> 3,660,722
+libwpd.so      908,744 ->   458,856     1.26x the C, from 15.8x
+```
+
+That is a real 49% off the shared library, and it costs a nightly toolchain, a
+`std` rebuild in every CI job, and any panic message at all. Worth having as an
+opt-in for whoever is packaging; not worth making the build require nightly.
+
 ## The small-file gap is `libstd` starting, not the decoder
 
 `cmpbench.sh` reports the C baseline ahead on the small hand-written lossless
