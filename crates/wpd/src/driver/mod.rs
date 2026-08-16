@@ -221,8 +221,11 @@ pub(crate) fn lossy_view<'a>(
     let mut plane = [PlaneRef::borrowed(&[], 0); 4];
 
     if let Some(vp8) = vp8 {
-        for (p, out) in vp8.picture.planes.iter().zip(plane.iter_mut()) {
-            *out = PlaneRef::borrowed(&p.data[p.origin.min(p.data.len())..], p.stride);
+        for (p, out) in plane.iter_mut().enumerate().take(3) {
+            let g = vp8.picture.planes[p];
+            let data = vp8.picture.plane(p);
+
+            *out = PlaneRef::borrowed(&data[g.origin.min(data.len())..], g.stride);
         }
     }
 

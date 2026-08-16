@@ -5,12 +5,13 @@
 //!
 //! Two things are shaped differently from the C.
 //!
-//! The picture is one flat `Vec<u8>` per plane, addressed by offset. The
-//! decoder deliberately reads and writes outside the visible frame — the left
-//! border column at `dst[-1]`, the row above the first macroblock, the four
-//! samples above and to the right of a subblock — and in the C those are
-//! negative indices off an interior pointer. Against a flat allocation they are
-//! ordinary indices, which is what lets the whole macroblock loop be safe code.
+//! The picture is one flat `Vec<u8>` holding all three planes, each addressed
+//! by offset into its own slice of it. The decoder deliberately reads and
+//! writes outside the visible frame — the left border column at `dst[-1]`, the
+//! row above the first macroblock, the four samples above and to the right of a
+//! subblock — and in the C those are negative indices off an interior pointer.
+//! Against a flat allocation they are ordinary indices, which is what lets the
+//! whole macroblock loop be safe code.
 //!
 //! The range coders hold offsets rather than pointers, so
 //! `wpd_vp56_save_offsets` and `wpd_vp56_restore_offsets` have no counterpart
@@ -48,46 +49,64 @@ fn rl24(b: &[u8]) -> u32 {
     u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16
 }
 
-/// One plane, with the padding the assembly and the border logic rely on.
+/// The three planes of the picture being decoded, split out of its one
+/// allocation for the length of a frame.
+type Planes<'a> = [&'a mut [u8]; 3];
+
+/// Moves eight bytes between the saved macroblock border and a plane, in
+/// whichever direction `swap` asks for. `WPD_SWAP64`/`WPD_COPY64` in the C.
 ///
-/// `origin` is the offset of the visible top-left sample; every access the
-/// decoder makes is expressed relative to it.
-#[derive(Default)]
+/// The border and the plane arrive already borrowed, because the caller has
+/// split all three planes out of the one allocation and would otherwise pay
+/// for that split once per call rather than once per macroblock.
+#[inline(always)]
+fn xchg8(
+    border: &mut [[u8; 32]],
+    tb: usize,
+    to: usize,
+    data: &mut [u8],
+    po: usize,
+    swap: bool,
+) {
+    let saved: [u8; 8] = border[tb][to..to + 8].try_into().unwrap();
+
+    if swap {
+        let old: [u8; 8] = data[po..po + 8].try_into().unwrap();
+
+        border[tb][to..to + 8].copy_from_slice(&old);
+    }
+    data[po..po + 8].copy_from_slice(&saved);
+}
+
+/// Where one plane sits inside the picture's allocation, with the padding the
+/// assembly and the border logic rely on.
+///
+/// `origin` is the offset of the visible top-left sample *within the plane's
+/// own slice*; every access the decoder makes is expressed relative to it.
+/// Keeping the planes at separate slices rather than at offsets into one is
+/// what leaves every bounds check as tight as it was when each plane had its
+/// own `Vec`: a kernel that walks off the end of the luma still trips an
+/// assertion instead of scribbling on the chroma.
+#[derive(Clone, Copy, Default)]
 pub struct Plane {
-    pub data: Vec<u8>,
     pub stride: usize,
     pub origin: usize,
+    /// Offset of the plane inside [`Picture::data`], and how far it runs.
+    base: usize,
+    len: usize,
 }
 
 impl Plane {
-    fn alloc(width: usize, height: usize) -> Result<Self> {
-        let mut stride = (width + PLANE_COL_PAD + ALIGN - 1) & !(ALIGN - 1);
+    /// The stride a plane of `width` samples is allocated at.
+    fn stride_for(width: usize) -> usize {
+        let stride = (width + PLANE_COL_PAD + ALIGN - 1) & !(ALIGN - 1);
 
         // Strides that are a multiple of 1024 alias in L1/L2; pad them.
         if stride % 1024 == 0 {
-            stride += ALIGN;
+            stride + ALIGN
+        } else {
+            stride
         }
-
-        let size = (height + 2 * PLANE_ROW_PAD)
-            .checked_mul(stride)
-            .and_then(|n| n.checked_add(2 * ALIGN))
-            .ok_or(Error::TooLarge)?;
-        let mut data = Vec::new();
-
-        data.try_reserve_exact(size).map_err(|_| Error::NoMemory)?;
-        data.resize(size, 0);
-
-        // Vec only promises byte alignment, and the C handed the assembly a
-        // 64-byte aligned row start. Casting the pointer to an integer to find
-        // the padding needed is not a dereference, so this stays safe.
-        let pad = data.as_ptr() as usize % ALIGN;
-        let pad = (ALIGN - pad) % ALIGN;
-
-        Ok(Self {
-            data,
-            stride,
-            origin: pad + PLANE_ROW_PAD * stride + PLANE_COL_PAD,
-        })
     }
 
     /// The offset of the sample at `(x, y)` in the visible frame.
@@ -97,27 +116,91 @@ impl Plane {
     }
 }
 
+/// The three planes of a decoded frame, in one allocation.
+///
+/// The C asked the allocator three times per frame and gave all three back
+/// when the frame size changed. Doing it once, and keeping the block when the
+/// next frame fits in it, is what the sizes make natural — the three planes
+/// are always allocated and freed together, and their sum sits either side of
+/// glibc's mmap threshold, so an animation that reallocates per sub-frame pays
+/// an mmap and a munmap for every frame. Each plane still ends up 64-byte
+/// aligned, because every plane's extent is rounded up to that.
 #[derive(Default)]
 pub struct Picture {
+    data: Vec<u8>,
     pub planes: [Plane; 3],
+    /// Whether [`Self::planes`] describes the frame about to be decoded.
+    ready: bool,
 }
 
 impl Picture {
-    fn alloc(width: usize, height: usize) -> Result<Self> {
+    /// Lays the three planes out for a `width` by `height` frame and clears
+    /// them, reusing the block when what is there is already big enough.
+    fn alloc(&mut self, width: usize, height: usize) -> Result<()> {
         let cw = width.div_ceil(2);
         let ch = height.div_ceil(2);
+        let mut planes = [Plane::default(); 3];
+        // Room to bring the first plane up to a 64-byte boundary.
+        let mut total = ALIGN;
 
-        Ok(Self {
-            planes: [
-                Plane::alloc(width, height)?,
-                Plane::alloc(cw, ch)?,
-                Plane::alloc(cw, ch)?,
-            ],
-        })
+        for (p, &(w, h)) in [(width, height), (cw, ch), (cw, ch)].iter().enumerate() {
+            let stride = Plane::stride_for(w);
+            let len = (h + 2 * PLANE_ROW_PAD)
+                .checked_mul(stride)
+                .and_then(|n| n.checked_add(2 * ALIGN))
+                .and_then(|n| n.checked_next_multiple_of(ALIGN))
+                .ok_or(Error::TooLarge)?;
+
+            planes[p] = Plane {
+                stride,
+                origin: PLANE_ROW_PAD * stride + PLANE_COL_PAD,
+                base: total,
+                len,
+            };
+            total = total.checked_add(len).ok_or(Error::TooLarge)?;
+        }
+
+        if self.data.len() < total {
+            /* Growing already zeroes what it adds, and dropping what was there
+            first means it zeroes the whole buffer exactly once. */
+            self.data.clear();
+            self.data
+                .try_reserve_exact(total)
+                .map_err(|_| Error::NoMemory)?;
+            self.data.resize(total, 0);
+        } else {
+            self.data[..total].fill(0);
+        }
+
+        // Vec only promises byte alignment, and the C handed the assembly a
+        // 64-byte aligned row start. Casting the pointer to an integer to find
+        // the padding needed is not a dereference, so this stays safe.
+        let pad = self.data.as_ptr() as usize % ALIGN;
+        let pad = (ALIGN - pad) % ALIGN;
+
+        for plane in &mut planes {
+            plane.base = plane.base - ALIGN + pad;
+        }
+        self.planes = planes;
+        self.ready = true;
+        Ok(())
+    }
+
+    /// Drops the layout without giving the memory back, which is what a frame
+    /// size change does: the next frame lays itself out over the same block.
+    fn invalidate(&mut self) {
+        self.planes = [Plane::default(); 3];
+        self.ready = false;
     }
 
     fn allocated(&self) -> bool {
-        !self.planes[0].data.is_empty()
+        self.ready
+    }
+
+    /// Plane `p`'s own slice, which its offsets are relative to.
+    #[inline(always)]
+    pub fn plane(&self, p: usize) -> &[u8] {
+        &self.data[self.planes[p].base..][..self.planes[p].len]
     }
 }
 
@@ -327,7 +410,7 @@ impl Decoder {
         self.mb_width = (width as usize).div_ceil(16);
         self.mb_height = (height as usize).div_ceil(16);
 
-        self.picture = Picture::default();
+        self.picture.invalidate();
         self.filter_strength = vec![FilterStrength::default(); self.mb_width];
         self.intra4x4_pred_mode_top = vec![0; self.mb_width * 4];
         self.top_nnz = vec![[0; 9]; self.mb_width];
@@ -747,42 +830,33 @@ impl Decoder {
     }
 
     #[inline(always)]
-    fn backup_mb_border(&mut self, mb_x: usize, off: [usize; 3], simple: bool) {
+    fn backup_mb_border(
+        &mut self,
+        planes: &Planes<'_>,
+        mb_x: usize,
+        off: [usize; 3],
+        simple: bool,
+    ) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
-        let src = self.picture.planes[0].data[off[0] + 15 * ls..off[0] + 15 * ls + 16]
-            .to_owned();
+        let border = &mut self.top_border[mb_x + 1];
 
-        self.top_border[mb_x + 1][..16].copy_from_slice(&src);
+        border[..16].copy_from_slice(&planes[0][off[0] + 15 * ls..][..16]);
         if !simple {
             for (i, p) in [1usize, 2].into_iter().enumerate() {
                 let from = off[p] + 7 * uvls;
-                let src = self.picture.planes[p].data[from..from + 8].to_owned();
 
-                self.top_border[mb_x + 1][16 + 8 * i..24 + 8 * i].copy_from_slice(&src);
+                border[16 + 8 * i..24 + 8 * i]
+                    .copy_from_slice(&planes[p][from..from + 8]);
             }
         }
-    }
-
-    /// Moves eight bytes between the saved macroblock border and the plane, in
-    /// whichever direction `swap` asks for. `WPD_SWAP64`/`WPD_COPY64` in the C.
-    #[inline(always)]
-    fn xchg8(&mut self, tb: usize, to: usize, plane: usize, po: usize, swap: bool) {
-        let border: [u8; 8] = self.top_border[tb][to..to + 8].try_into().unwrap();
-        let data = &mut self.picture.planes[plane].data;
-
-        if swap {
-            let old: [u8; 8] = data[po..po + 8].try_into().unwrap();
-
-            self.top_border[tb][to..to + 8].copy_from_slice(&old);
-        }
-        data[po..po + 8].copy_from_slice(&border);
     }
 
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
     fn xchg_mb_border(
         &mut self,
+        planes: &mut Planes<'_>,
         mb_x: usize,
         mb_y: usize,
         off: [usize; 3],
@@ -796,25 +870,29 @@ impl Decoder {
         let cr = off[2] - uvls;
         let this = mb_x + 1;
         let prev = mb_x;
+        let last = mb_x == self.mb_width - 1;
+        let border = &mut self.top_border;
+        let [luma, cbp, crp] = planes;
 
-        self.xchg8(prev, 8, 0, y - 8, swap);
-        self.xchg8(this, 0, 0, y, swap);
-        self.xchg8(this, 8, 0, y + 8, true);
-        if mb_x < self.mb_width - 1 {
-            self.xchg8(this + 1, 0, 0, y + 16, true);
+        xchg8(border, prev, 8, luma, y - 8, swap);
+        xchg8(border, this, 0, luma, y, swap);
+        xchg8(border, this, 8, luma, y + 8, true);
+        if !last {
+            xchg8(border, this + 1, 0, luma, y + 16, true);
         }
 
         if !simple || mb_y == 0 {
-            self.xchg8(prev, 16, 1, cb - 8, swap);
-            self.xchg8(prev, 24, 2, cr - 8, swap);
-            self.xchg8(this, 16, 1, cb, true);
-            self.xchg8(this, 24, 2, cr, true);
+            xchg8(border, prev, 16, cbp, cb - 8, swap);
+            xchg8(border, prev, 24, crp, cr - 8, swap);
+            xchg8(border, this, 16, cbp, cb, true);
+            xchg8(border, this, 24, crp, cr, true);
         }
     }
 
     #[inline(always)]
     fn intra_predict(
         &mut self,
+        planes: &mut Planes<'_>,
         mb: &Macroblock,
         off: [usize; 3],
         mb_x: usize,
@@ -825,29 +903,29 @@ impl Decoder {
         let simple = self.filter.simple;
 
         if self.deblock_filter || mb_y == 0 {
-            self.xchg_mb_border(mb_x, mb_y, off, simple, true);
+            self.xchg_mb_border(planes, mb_x, mb_y, off, simple, true);
         }
 
         if mb.mode < MODE_I4 {
             let mode = check_intra_pred8x8_mode(mb.mode, mb_x, mb_y);
 
-            (self.pred.pred16x16[mode])(&mut self.picture.planes[0].data, off[0], ls);
+            (self.pred.pred16x16[mode])(planes[0], off[0], ls);
         } else {
-            // The four samples above and to the right of the macroblock, which
-            // the last column of macroblocks has to fabricate.
-            let tr_right: [u8; 4] = if mb_x == self.mb_width - 1 {
-                [self.picture.planes[0].data[off[0] - ls + 15]; 4]
-            } else {
-                self.picture.planes[0].data[off[0] - ls + 16..off[0] - ls + 20]
-                    .try_into()
-                    .unwrap()
-            };
+            let last = mb_x == self.mb_width - 1;
 
             if mb.skip {
                 self.non_zero_count_cache[..4].fill([0; 4]);
             }
 
             let mut ptr = off[0];
+            let luma = &mut *planes[0];
+            // The four samples above and to the right of the macroblock, which
+            // the last column of macroblocks has to fabricate.
+            let tr_right: [u8; 4] = if last {
+                [luma[off[0] - ls + 15]; 4]
+            } else {
+                luma[off[0] - ls + 16..off[0] - ls + 20].try_into().unwrap()
+            };
 
             for y in 0..4 {
                 for x in 0..4 {
@@ -856,16 +934,11 @@ impl Decoder {
                     } else {
                         let at = ptr + 4 + 4 * x - ls;
 
-                        self.picture.planes[0].data[at..at + 4].try_into().unwrap()
+                        luma[at..at + 4].try_into().unwrap()
                     };
                     let mode = self.intra4x4_pred_mode_mb[4 * y + x] as usize;
 
-                    (self.pred.pred4x4[mode])(
-                        &mut self.picture.planes[0].data,
-                        ptr + 4 * x,
-                        ls,
-                        &topright,
-                    );
+                    (self.pred.pred4x4[mode])(luma, ptr + 4 * x, ls, &topright);
 
                     let nnz = self.non_zero_count_cache[y][x];
 
@@ -877,7 +950,7 @@ impl Decoder {
                             self.dsp.idct_add
                         };
 
-                        f(&mut self.picture.planes[0].data, ptr + 4 * x, ls, block);
+                        f(luma, ptr + 4 * x, ls, block);
                     }
                 }
                 ptr += 4 * ls;
@@ -886,21 +959,22 @@ impl Decoder {
 
         let mode = check_intra_pred8x8_mode(self.chroma_pred_mode, mb_x, mb_y);
 
-        (self.pred.pred8x8[mode])(&mut self.picture.planes[1].data, off[1], uvls);
-        (self.pred.pred8x8[mode])(&mut self.picture.planes[2].data, off[2], uvls);
+        (self.pred.pred8x8[mode])(planes[1], off[1], uvls);
+        (self.pred.pred8x8[mode])(planes[2], off[2], uvls);
 
         if self.deblock_filter || mb_y == 0 {
-            self.xchg_mb_border(mb_x, mb_y, off, simple, false);
+            self.xchg_mb_border(planes, mb_x, mb_y, off, simple, false);
         }
     }
 
     #[inline(always)]
-    fn idct_mb(&mut self, mb: &Macroblock, off: [usize; 3]) {
+    fn idct_mb(&mut self, planes: &mut Planes<'_>, mb: &Macroblock, off: [usize; 3]) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
 
         if mb.mode != MODE_I4 {
             let mut y_dst = off[0];
+            let luma = &mut *planes[0];
 
             for y in 0..4 {
                 let mut nnz4 = u32::from_le_bytes(self.non_zero_count_cache[y]);
@@ -912,14 +986,14 @@ impl Decoder {
 
                             if n == 1 {
                                 (self.dsp.idct_dc_add)(
-                                    &mut self.picture.planes[0].data,
+                                    luma,
                                     y_dst + 4 * x,
                                     ls,
                                     &mut self.block.0[4 * y + x],
                                 );
                             } else if n > 1 {
                                 (self.dsp.idct_add)(
-                                    &mut self.picture.planes[0].data,
+                                    luma,
                                     y_dst + 4 * x,
                                     ls,
                                     &mut self.block.0[4 * y + x],
@@ -934,12 +1008,7 @@ impl Decoder {
                         let block: &mut [[i16; 16]; 4] =
                             (&mut self.block.0[4 * y..4 * y + 4]).try_into().unwrap();
 
-                        (self.dsp.idct_dc_add4y)(
-                            &mut self.picture.planes[0].data,
-                            y_dst,
-                            ls,
-                            block,
-                        );
+                        (self.dsp.idct_dc_add4y)(luma, y_dst, ls, block);
                     }
                 }
                 y_dst += 4 * ls;
@@ -953,6 +1022,7 @@ impl Decoder {
                 continue;
             }
             let mut ch_dst = off[1 + ch];
+            let chroma = &mut *planes[1 + ch];
 
             if nnz4 & !0x0101_0101 != 0 {
                 'plane: for y in 0..2 {
@@ -961,19 +1031,9 @@ impl Decoder {
                         let block = &mut self.block.0[4 * (4 + ch) + (y << 1) + x];
 
                         if n == 1 {
-                            (self.dsp.idct_dc_add)(
-                                &mut self.picture.planes[1 + ch].data,
-                                ch_dst + 4 * x,
-                                uvls,
-                                block,
-                            );
+                            (self.dsp.idct_dc_add)(chroma, ch_dst + 4 * x, uvls, block);
                         } else if n > 1 {
-                            (self.dsp.idct_add)(
-                                &mut self.picture.planes[1 + ch].data,
-                                ch_dst + 4 * x,
-                                uvls,
-                                block,
-                            );
+                            (self.dsp.idct_add)(chroma, ch_dst + 4 * x, uvls, block);
                         }
                         nnz4 >>= 8;
                         if nnz4 == 0 {
@@ -987,12 +1047,7 @@ impl Decoder {
                 let block: &mut [[i16; 16]; 4] =
                     (&mut self.block.0[base..base + 4]).try_into().unwrap();
 
-                (self.dsp.idct_dc_add4uv)(
-                    &mut self.picture.planes[1 + ch].data,
-                    ch_dst,
-                    uvls,
-                    block,
-                );
+                (self.dsp.idct_dc_add4uv)(chroma, ch_dst, uvls, block);
             }
         }
     }
@@ -1037,6 +1092,7 @@ impl Decoder {
     #[inline(always)]
     fn filter_mb(
         &mut self,
+        planes: &mut Planes<'_>,
         off: [usize; 3],
         f: FilterStrength,
         mb_x: usize,
@@ -1061,10 +1117,7 @@ impl Decoder {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
         let inner = f.inner_filter;
-        let (y, uv) = self.picture.planes.split_at_mut(1);
-        let y = &mut y[0].data;
-        let (u, v) = uv.split_at_mut(1);
-        let (u, v) = (&mut u[0].data, &mut v[0].data);
+        let [y, u, v] = planes;
 
         if mb_x != 0 && inner {
             (self.dsp.h_loop_filter16y_mb)(
@@ -1186,6 +1239,7 @@ impl Decoder {
     #[inline(always)]
     fn filter_mb_simple(
         &mut self,
+        luma: &mut [u8],
         off: usize,
         f: FilterStrength,
         mb_x: usize,
@@ -1202,7 +1256,7 @@ impl Decoder {
         let mbedge_lim = bedge_lim + 4;
         let ls = self.linesize();
         let inner = f.inner_filter;
-        let y = &mut self.picture.planes[0].data;
+        let y = luma;
 
         // The fused filter reads dst[-2..13], so it needs a macroblock to the
         // left.
@@ -1234,7 +1288,7 @@ impl Decoder {
         }
     }
 
-    fn filter_mb_row(&mut self, mb_y: usize) {
+    fn filter_mb_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
         let mut off = [
             self.picture.planes[0].at(0, 16 * mb_y),
             self.picture.planes[1].at(0, 8 * mb_y),
@@ -1242,25 +1296,22 @@ impl Decoder {
         ];
 
         for mb_x in 0..self.mb_width {
-            self.backup_mb_border(mb_x, off, false);
-            self.filter_mb(off, self.filter_strength[mb_x], mb_x, mb_y);
+            self.backup_mb_border(planes, mb_x, off, false);
+            self.filter_mb(planes, off, self.filter_strength[mb_x], mb_x, mb_y);
             off[0] += 16;
             off[1] += 8;
             off[2] += 8;
         }
     }
 
-    fn filter_mb_row_simple(&mut self, mb_y: usize) {
+    fn filter_mb_row_simple(&mut self, luma: &mut [u8], mb_y: usize) {
+        let ls = self.linesize();
         let mut off = self.picture.planes[0].at(0, 16 * mb_y);
 
         for mb_x in 0..self.mb_width {
-            let ls = self.linesize();
-            let src: [u8; 16] = self.picture.planes[0].data[off + 15 * ls..][..16]
-                .try_into()
-                .unwrap();
-
-            self.top_border[mb_x + 1][..16].copy_from_slice(&src);
-            self.filter_mb_simple(off, self.filter_strength[mb_x], mb_x, mb_y);
+            self.top_border[mb_x + 1][..16]
+                .copy_from_slice(&luma[off + 15 * ls..][..16]);
+            self.filter_mb_simple(luma, off, self.filter_strength[mb_x], mb_x, mb_y);
             off += 16;
         }
     }
@@ -1312,7 +1363,8 @@ impl Decoder {
         }
 
         if !self.picture.allocated() {
-            self.picture = Picture::alloc(self.width as usize, self.height as usize)
+            self.picture
+                .alloc(self.width as usize, self.height as usize)
                 .inspect_err(|_| crate::log::error("Frame allocation failed"))?;
         }
 
@@ -1358,7 +1410,35 @@ impl Decoder {
         Ok(())
     }
 
+    /// Splits the picture into its three planes and runs the macroblock loop
+    /// over them.
+    ///
+    /// The buffer is moved out of the decoder for the duration, which is what
+    /// lets the split happen once per frame rather than once per access: the
+    /// slices borrow a local, so every helper below still takes `&mut self`.
+    /// The geometry stays behind, so `linesize` and friends keep working.
     fn decode_rows_tmpl(&mut self, chunk: &[u8], resumable: bool) -> Result<Status> {
+        let mut data = std::mem::take(&mut self.picture.data);
+        let ret = self.decode_rows_planes(&mut data, chunk, resumable);
+
+        self.picture.data = data;
+        ret
+    }
+
+    fn decode_rows_planes(
+        &mut self,
+        data: &mut [u8],
+        chunk: &[u8],
+        resumable: bool,
+    ) -> Result<Status> {
+        let g = self.picture.planes;
+        let (head, third) = data.split_at_mut(g[2].base);
+        let (first, second) = head.split_at_mut(g[1].base);
+        let planes = &mut [
+            &mut first[g[0].base..][..g[0].len],
+            &mut second[..g[1].len],
+            &mut third[..g[2].len],
+        ];
         let start_row = if resumable { self.mb_y } else { 0 };
 
         for mb_y in start_row..self.mb_height {
@@ -1385,13 +1465,12 @@ impl Decoder {
                 self.left_nnz = [0; 9];
                 self.intra4x4_pred_mode_left = [pred::DC_PRED as u8; 4];
 
-                for (i, (plane, &at)) in
-                    self.picture.planes.iter_mut().zip(&off).enumerate()
-                {
+                for (i, &at) in off.iter().enumerate() {
                     let rows = if i == 0 { 16 } else { 8 };
+                    let stride = g[i].stride;
 
                     for y in 0..rows {
-                        plane.data[at + y * plane.stride - 1] = 129;
+                        planes[i][at + y * stride - 1] = 129;
                     }
                 }
                 if mb_y == 1 {
@@ -1428,10 +1507,10 @@ impl Decoder {
                     }
                 }
 
-                self.intra_predict(&mb, off, mb_x, mb_y);
+                self.intra_predict(planes, &mb, off, mb_x, mb_y);
 
                 if !mb.skip {
-                    self.idct_mb(&mb, off);
+                    self.idct_mb(planes, &mb, off);
                 } else {
                     self.left_nnz[..8].fill(0);
                     self.top_nnz[mb_x][..8].fill(0);
@@ -1453,9 +1532,9 @@ impl Decoder {
 
             if self.deblock_filter {
                 if self.filter.simple {
-                    self.filter_mb_row_simple(mb_y);
+                    self.filter_mb_row_simple(planes[0], mb_y);
                 } else {
-                    self.filter_mb_row(mb_y);
+                    self.filter_mb_row(planes, mb_y);
                 }
             }
 
@@ -1606,29 +1685,79 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plane_starts_aligned_and_has_room_for_its_borders() {
-        let p = Plane::alloc(17, 9).unwrap();
+    fn every_plane_starts_aligned_and_has_room_for_its_borders() {
+        let mut pic = Picture::default();
 
-        assert_eq!(
-            (p.data.as_ptr() as usize + p.origin - PLANE_COL_PAD) % ALIGN,
-            0
-        );
-        assert!(p.origin >= PLANE_ROW_PAD * p.stride + PLANE_COL_PAD);
-        assert!(p.data.len() >= p.at(0, 8) + 32 * p.stride);
+        pic.alloc(17, 9).unwrap();
+
+        for p in 0..3 {
+            let g = pic.planes[p];
+            let data = pic.plane(p);
+            let rows = if p == 0 { 9 } else { 5 };
+
+            assert_eq!(
+                (data.as_ptr() as usize + g.origin - PLANE_COL_PAD) % ALIGN,
+                0
+            );
+            assert!(g.origin >= PLANE_ROW_PAD * g.stride + PLANE_COL_PAD);
+            assert!(data.len() >= g.at(0, rows - 1) + 32 * g.stride);
+        }
+    }
+
+    /// One allocation, three disjoint plane slices: what plane `p` hands out
+    /// must not reach into plane `p + 1`.
+    #[test]
+    fn the_planes_do_not_overlap() {
+        let mut pic = Picture::default();
+
+        pic.alloc(64, 64).unwrap();
+
+        for p in 0..2 {
+            let end = pic.planes[p].base + pic.planes[p].len;
+
+            assert!(end <= pic.planes[p + 1].base);
+        }
+        assert!(pic.planes[2].base + pic.planes[2].len <= pic.data.len());
+    }
+
+    /// A frame that shrinks reuses the block, and must not be handed the
+    /// previous frame's samples with it.
+    #[test]
+    fn laying_the_planes_out_again_starts_from_zero() {
+        let mut pic = Picture::default();
+
+        pic.alloc(64, 64).unwrap();
+
+        let was = pic.data.as_ptr() as usize;
+
+        for p in 0..3 {
+            let g = pic.planes[p];
+
+            pic.data[g.base + g.at(0, 0)] = 0xff;
+        }
+        pic.invalidate();
+        assert!(!pic.allocated());
+        pic.alloc(32, 32).unwrap();
+        assert_eq!(pic.data.as_ptr() as usize, was, "the block was replaced");
+        for p in 0..3 {
+            assert_eq!(pic.plane(p)[pic.planes[p].at(0, 0)], 0);
+        }
     }
 
     #[test]
     fn a_stride_never_lands_on_a_cache_way_boundary() {
         for width in [960, 1984, 4032] {
-            assert_ne!(Plane::alloc(width, 4).unwrap().stride % 1024, 0);
+            assert_ne!(Plane::stride_for(width) % 1024, 0);
         }
     }
 
     #[test]
     fn the_chroma_planes_round_an_odd_size_up() {
-        let p = Picture::alloc(17, 9).unwrap();
+        let mut p = Picture::default();
 
-        assert!(p.planes[1].data.len() >= p.planes[1].at(8, 4));
+        p.alloc(17, 9).unwrap();
+
+        assert!(p.plane(1).len() >= p.planes[1].at(8, 4));
         assert_eq!(p.planes[1].stride, p.planes[2].stride);
     }
 
