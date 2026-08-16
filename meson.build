@@ -189,32 +189,92 @@ soversion = meson.project_version()
 
 libwpd_artifacts = custom_target(
   'libwpd',
-  output: ['libwpd.a', 'libwpd.so.' + soversion],
+  output: ['libwpd.a'],
   command: [
     files('tools/cargo_build.sh'),
     source_root,
     meson.current_build_dir(),
     'wpd',
     cargo_profile,
-    soversion,
     cargo_features,
   ],
   env: cargo_env,
   build_always_stale: true,
   build_by_default: true,
   install: true,
-  install_dir: [get_option('libdir'), get_option('libdir')],
+  install_dir: get_option('libdir'),
 )
 libwpd = libwpd_artifacts[0]
+
+# A Rust cdylib exports only the Rust symbols it was told to, which is nothing
+# while the entry points are still C, so the shared library is linked out of
+# the archive cargo staged. Nothing in it refers to the archive, so each entry
+# point has to be named on the link line to be pulled in, and the export list
+# then hides everything the archive brought along with them. src/shared_stub.c
+# is empty and exists only because a Meson target needs a source of its own.
+wpd_symbols = []
+foreach line : public_header.split('\n')
+  if line.startswith('WPD_API ')
+    wpd_symbols += line.split('(')[0].strip().split(' ')[-1].split('*')[-1]
+  endif
+endforeach
+if wpd_symbols.length() == 0
+  error('no WPD_API symbols found in include/wpd.h')
+endif
+
+if host_machine.system() == 'darwin'
+  export_format = 'macho'
+  symbol_prefix = '_'
+  export_flag = '-Wl,-exported_symbols_list,'
+else
+  export_format = 'elf'
+  symbol_prefix = ''
+  export_flag = '-Wl,--version-script='
+endif
+
+wpd_exports = configure_file(
+  output: 'wpd.exports',
+  command: [
+    files('tools/gen_exports.sh'),
+    source_root / 'include/wpd.h',
+    export_format,
+  ],
+  capture: true,
+)
+
+undefined_args = []
+foreach s : wpd_symbols
+  undefined_args += '-Wl,-u,' + symbol_prefix + s
+endforeach
+
+# Meson owns the versioned names, the soname or install_name, and the symlinks
+# that go with them, which is the one part of this that differs per platform.
+libwpd_shared = shared_library(
+  'wpd',
+  files('src/shared_stub.c'),
+  link_args: undefined_args + [
+    export_flag + meson.current_build_dir() / 'wpd.exports',
+    meson.current_build_dir() / 'libwpd.a',
+  ],
+  link_depends: [libwpd_artifacts, wpd_exports],
+  dependencies: [
+    cc.find_library('m', required: false),
+    dependency('threads', required: false),
+    cc.find_library('dl', required: false),
+  ],
+  version: soversion,
+  soversion: soversion.split('.')[0],
+  install: true,
+)
 
 install_headers('include/wpd.h')
 
 import('pkgconfig').generate(
+  libwpd_shared,
   name: 'wpd',
   filebase: 'wpd',
   description: 'A fast WebP decoder',
   version: meson.project_version(),
-  libraries: ['-L${libdir}', '-lwpd'],
 )
 
 wpd_dep = declare_dependency(
@@ -394,7 +454,6 @@ if asm_enabled and checkasm_dep.found()
       meson.current_build_dir(),
       'wpd_checkasm',
       cargo_profile,
-      soversion,
       checkasm_features,
     ],
     env: cargo_env,

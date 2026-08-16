@@ -362,6 +362,7 @@ fn lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(p: &mut [u8], o: usize, s: usize, e: i
     unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e) }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
     p: &mut [u8],
     o: usize,

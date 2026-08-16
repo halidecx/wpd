@@ -56,6 +56,7 @@ macro_rules! raw_map_color {
     };
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 macro_rules! raw_color_row {
     ($marker:ident, $inner:ident, $sym:literal) => {
         extern "C" {
@@ -123,6 +124,7 @@ fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
 
 /// The kernel is in place at every call site, and the length is the count, so
 /// there is no region to check beyond what the slice already says.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
     unsafe {
         let p = row.as_mut_ptr();
