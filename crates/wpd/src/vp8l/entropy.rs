@@ -211,7 +211,10 @@ fn cache_fill(
 /// than it is long is one `copy_from_slice`; a run of one pixel is a `fill`;
 /// anything else advances in `dist`-sized steps, each of which reads only
 /// what earlier steps have already finished writing.
-fn copy_block(pixels: &mut [u32], pos: usize, dist: usize, length: usize) {
+///
+/// The element type is a parameter because an alpha chunk's pixels are one
+/// byte, not four; see [`decode_alpha_pixels`].
+fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
 
@@ -470,6 +473,129 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
     }
     st.rows_done = y;
     Ok(Status::Done)
+}
+
+/// What an alpha chunk's pixel loop needs, which is less than [`Args`]: no
+/// colour cache, no red, blue or alpha tree, and no suspending.
+pub struct AlphaArgs<'a, 'e> {
+    pub gb: &'a mut BitReader,
+    pub buf: &'a [u8],
+    /// Exactly `width * height` bytes, one palette index each.
+    pub pixels: &'a mut [u8],
+    pub width: usize,
+    pub groups: &'a [HTreeGroup],
+    pub arena: &'a [u32],
+    pub entropy: Option<Entropy<'e>>,
+}
+
+/// The pixel loop for an alpha chunk that carries nothing but a palette.
+///
+/// Everything an ALPH image says lives in the green channel, and the caller has
+/// checked that the other three trees hold one symbol each — so the loop reads
+/// only green, and one byte per pixel is the whole picture. That is a quarter
+/// of the memory the ARGB canvas took, and it is the buffer the palette is
+/// looked up out of, so the canvas is never allocated and the pass that
+/// extracted green from it is gone. `DecodeAlphaData` in libwebp.
+pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
+    let AlphaArgs {
+        gb,
+        buf,
+        pixels,
+        width,
+        groups,
+        arena,
+        entropy,
+    } = args;
+
+    let total = pixels.len();
+    let multi_group = groups.len() > 1;
+    let huff_bits = match (&entropy, multi_group) {
+        (Some(e), true) => e.bits,
+        _ => 0,
+    };
+    let huff_mask: i32 = if huff_bits != 0 {
+        (1 << huff_bits) - 1
+    } else {
+        !0
+    };
+
+    let group_at = |x: i32, y: i32| -> usize {
+        match &entropy {
+            Some(e) if huff_bits != 0 => {
+                let off = (y >> e.bits) as usize * e.stride + (x >> e.bits) as usize;
+                let b = e.data[off].to_ne_bytes();
+
+                usize::from(b[1]) << 8 | usize::from(b[2])
+            }
+            _ => 0,
+        }
+    };
+
+    let mut pos = 0usize;
+    let mut x = 0i32;
+    let mut y = 0i32;
+    let mut trees = resolve(&groups[0], arena);
+
+    while pos < total {
+        if gb.is_eos(buf) {
+            return Err(Error::InvalidData);
+        }
+        if x & huff_mask == 0 {
+            trees = resolve(&groups[group_at(x, y)], arena);
+        }
+        gb.fill(buf);
+
+        let v = trees[HUFF_IDX_GREEN].read(gb);
+
+        if v < NUM_LITERAL_CODES {
+            pixels[pos] = v as u8;
+            pos += 1;
+            x += 1;
+            if x == width as i32 {
+                x = 0;
+                y += 1;
+            }
+        } else if v < NUM_LITERAL_CODES + NUM_LENGTH_CODES {
+            let prefix = v - NUM_LITERAL_CODES;
+            let length = extend(gb, buf, prefix);
+            let prefix = trees[HUFF_IDX_DIST].read(gb);
+
+            gb.fill(buf);
+            if prefix > 39 {
+                crate::log::error(&format!("distance prefix code too large: {prefix}"));
+                return Err(Error::InvalidData);
+            }
+
+            let coded = extend(gb, buf, prefix);
+            let distance = if coded <= NUM_SHORT_DISTANCES {
+                let [xi, yi] = LZ77_DISTANCE_OFFSETS[coded as usize - 1];
+
+                (i32::from(xi) + i32::from(yi) * width as i32).max(1) as usize
+            } else {
+                (coded - NUM_SHORT_DISTANCES) as usize
+            };
+            let length = length as usize;
+
+            if distance > pos || length > total - pos {
+                return Err(Error::InvalidData);
+            }
+
+            copy_block(pixels, pos, distance, length);
+            pos += length;
+            x += length as i32;
+            while x >= width as i32 {
+                x -= width as i32;
+                y += 1;
+            }
+            if multi_group && x & huff_mask != 0 {
+                trees = resolve(&groups[group_at(x, y)], arena);
+            }
+        } else {
+            crate::log::error("color cache not found");
+            return Err(Error::InvalidData);
+        }
+    }
+    Ok(())
 }
 
 /// The length or distance a prefix code stands for: the four shortest are the

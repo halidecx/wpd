@@ -284,6 +284,9 @@ pub struct Decoder {
     argb: Picture,
     alpha_argb: Picture,
     out: Picture,
+    /// One palette index per byte, which is all an eight-bit alpha decode
+    /// needs; see [`Self::decode_alpha_8b`].
+    indices: Vec<u8>,
     /// Which picture the resumable path is filling in, once it has one.
     staged: bool,
     /// The row above the batch, as the predictor transform left it, plus the
@@ -324,6 +327,7 @@ impl Decoder {
             argb: Picture::default(),
             alpha_argb: Picture::default(),
             out: Picture::default(),
+            indices: Vec::new(),
             staged: false,
             scratch: Vec::new(),
             sorted: Vec::new(),
@@ -361,6 +365,7 @@ impl Decoder {
         self.argb.release();
         self.alpha_argb.release();
         self.out.release();
+        self.indices = Vec::new();
         self.scratch = Vec::new();
         self.sorted = Vec::new();
         self.lengths = Vec::new();
@@ -592,23 +597,20 @@ impl Decoder {
         w: i32,
         h: i32,
     ) -> Result<()> {
-        self.read_image_header(role, target, buf, w, h)?;
+        self.picture_mut(role, target).alloc(w, h)?;
+        self.read_image_header(role, buf)?;
         self.decode_pixels(role, target, buf, false)?;
         Ok(())
     }
 
     /// The prefix codes one entropy-coded image is written with, and the
     /// sub-image saying which of them applies where.
-    fn read_image_header(
-        &mut self,
-        role: usize,
-        target: Target,
-        buf: &[u8],
-        w: i32,
-        h: i32,
-    ) -> Result<()> {
-        self.picture_mut(role, target).alloc(w, h)?;
-
+    ///
+    /// The picture is allocated by the caller rather than here, because whether
+    /// one is needed at all depends on what this reads: an alpha chunk whose
+    /// prefix codes turn out to be trivial never wants the ARGB canvas. See
+    /// [`Self::decode_alpha_8b`].
+    fn read_image_header(&mut self, role: usize, buf: &[u8]) -> Result<()> {
         let cache_bits = if self.gb.bit(buf) != 0 {
             let bits = self.gb.bits(buf, 4);
 
@@ -793,12 +795,13 @@ impl Decoder {
         })
     }
 
+    /// Reads everything up to the pixels and returns the size the picture the
+    /// caller is about to allocate has to be.
     fn read_frame_header(
         &mut self,
-        target: Target,
         buf: &[u8],
         is_alpha_chunk: bool,
-    ) -> Result<()> {
+    ) -> Result<(i32, i32)> {
         self.gb = BitReader::new(buf);
 
         let (w, h) = if is_alpha_chunk {
@@ -856,7 +859,24 @@ impl Decoder {
             }
         }
 
-        self.read_image_header(ROLE_ARGB, target, buf, w, h)
+        self.read_image_header(ROLE_ARGB, buf)?;
+        Ok((w, h))
+    }
+
+    /// Whether the frame just read is one an eight-bit decode can take.
+    ///
+    /// A palette and nothing else, no colour cache, and every meta prefix code
+    /// carrying a single symbol for red, blue and alpha — so the pixel loop
+    /// would read the green tree and put the other three back unchanged.
+    /// `Is8bOptimizable` in libwebp, whose conditions these are.
+    fn alpha_is_8b(&self) -> bool {
+        self.nb_transforms == 1
+            && self.transforms[0] == Transform::ColorIndexing
+            && self.image[ROLE_ARGB].color_cache_bits == 0
+            && self.image[ROLE_ARGB]
+                .groups
+                .iter()
+                .all(|hg| hg.trivial_literal)
     }
 
     /// Decodes a whole frame in one call.
@@ -869,22 +889,93 @@ impl Decoder {
     ) -> Result<()> {
         self.alpha_dst_used = false;
 
-        let mut ret = self
-            .read_frame_header(target, buf, is_alpha_chunk)
-            .and_then(|()| self.decode_pixels(ROLE_ARGB, target, buf, false))
-            .map(|_| ());
+        let ret = self.decode_frame_inner(target, buf, is_alpha_chunk, alpha_dst);
 
-        if ret.is_ok() {
-            ret = self.apply_transforms(target, alpha_dst);
+        if self.alpha_dst_used {
+            /* Nothing reads the canvas once the plane is out, and the one an
+            earlier frame left behind is not this frame's picture. */
+            self.alpha_argb.release();
+        } else {
+            let pic = self.picture_mut(ROLE_ARGB, target);
+
+            pic.stride = pic.width.max(0) as usize;
         }
-
-        let pic = self.picture_mut(ROLE_ARGB, target);
-
-        pic.stride = pic.width.max(0) as usize;
         for img in &mut self.image {
             img.clear();
         }
         ret
+    }
+
+    fn decode_frame_inner(
+        &mut self,
+        target: Target,
+        buf: &[u8],
+        is_alpha_chunk: bool,
+        alpha_dst: Option<AlphaDst<'_>>,
+    ) -> Result<()> {
+        let (w, h) = self.read_frame_header(buf, is_alpha_chunk)?;
+        let alpha_dst = match alpha_dst {
+            Some(dst) if self.alpha_is_8b() => {
+                return self.decode_alpha_8b(buf, dst);
+            }
+            dst => dst,
+        };
+
+        self.picture_mut(ROLE_ARGB, target).alloc(w, h)?;
+        self.decode_pixels(ROLE_ARGB, target, buf, false)?;
+        self.apply_transforms(target, alpha_dst)
+    }
+
+    /// The eight-bit alpha decode: one palette index per byte, then the palette
+    /// looked up straight into the caller's plane.
+    ///
+    /// This is the whole point of [`Self::alpha_is_8b`]. The four-byte canvas
+    /// is never allocated — for a 600 by 600 frame that is 1.4 MB the decoder
+    /// does not hold at its peak — and the pass that pulled green back out of
+    /// it is gone with it.
+    fn decode_alpha_8b(&mut self, buf: &[u8], dst: AlphaDst<'_>) -> Result<()> {
+        let width = self.reduced_width.max(0) as usize;
+        let height = self.height;
+        let total = width * height.max(0) as usize;
+
+        grow(&mut self.indices, total, 0u8)?;
+
+        {
+            let Decoder {
+                gb, image, indices, ..
+            } = self;
+            let (head, tail) = image.split_at_mut(ROLE_ENTROPY);
+            let ent = &tail[0];
+
+            entropy::decode_alpha_pixels(entropy::AlphaArgs {
+                gb,
+                buf,
+                pixels: &mut indices[..total],
+                width,
+                groups: &head[ROLE_ARGB].groups,
+                arena: &head[ROLE_ARGB].arena,
+                entropy: (ent.size_reduction > 0).then(|| entropy::Entropy {
+                    data: &ent.storage.data,
+                    stride: ent.storage.stride,
+                    bits: ent.size_reduction,
+                }),
+            })?;
+        }
+
+        let pal = &self.image[ROLE_PALETTE];
+
+        transform::color_indexing_alpha(
+            &self.indices[..total],
+            width,
+            self.width.max(0) as usize,
+            height,
+            &pal.storage.data[..pal.storage.width as usize],
+            pal.size_reduction,
+            dst,
+        );
+        self.reduced_width = self.width;
+        self.alpha_dst_used = true;
+        Ok(())
     }
 
     fn apply_transforms(
@@ -1090,7 +1181,9 @@ impl Decoder {
             self.width = 0;
             self.height = 0;
 
-            let mut ret = self.read_frame_header(Target::Argb, payload, false);
+            let mut ret = self
+                .read_frame_header(payload, false)
+                .and_then(|(w, h)| self.argb.alloc(w, h));
 
             if ret.is_ok() && self.gb.is_eos(payload) {
                 ret = Err(Error::InvalidData);

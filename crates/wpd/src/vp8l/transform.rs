@@ -283,11 +283,34 @@ fn expand_palette_rows<const PPB: usize>(
     }
 }
 
+/// The palette index a source pixel carries, which is its green channel.
+///
+/// An alpha chunk decoded through the ARGB canvas holds one index per `u32`;
+/// one decoded eight bits wide holds it as the byte it is. Naming the two the
+/// same way is what lets the expansion below serve both.
+pub trait Indexed: Copy {
+    fn palette_index(self) -> usize;
+}
+
+impl Indexed for u32 {
+    #[inline(always)]
+    fn palette_index(self) -> usize {
+        usize::from(self.to_ne_bytes()[2])
+    }
+}
+
+impl Indexed for u8 {
+    #[inline(always)]
+    fn palette_index(self) -> usize {
+        usize::from(self)
+    }
+}
+
 /// The palette transform when the picture is an alpha plane and nothing else
 /// was applied to it, so the green channel can be looked up straight into the
 /// caller's plane instead of being expanded to ARGB first.
-pub fn color_indexing_alpha(
-    src: &[u32],
+pub fn color_indexing_alpha<T: Indexed>(
+    src: &[T],
     src_stride: usize,
     width: usize,
     height: i32,
@@ -303,9 +326,15 @@ pub fn color_indexing_alpha(
 
     if size_reduction > 0 {
         match 1usize << size_reduction {
-            2 => expand_alpha_rows::<2>(src, src_stride, width, height, &palette, dst),
-            4 => expand_alpha_rows::<4>(src, src_stride, width, height, &palette, dst),
-            _ => expand_alpha_rows::<8>(src, src_stride, width, height, &palette, dst),
+            2 => {
+                expand_alpha_rows::<2, T>(src, src_stride, width, height, &palette, dst)
+            }
+            4 => {
+                expand_alpha_rows::<4, T>(src, src_stride, width, height, &palette, dst)
+            }
+            _ => {
+                expand_alpha_rows::<8, T>(src, src_stride, width, height, &palette, dst)
+            }
         }
         return;
     }
@@ -316,8 +345,8 @@ pub fn color_indexing_alpha(
         let row = &src[y * src_stride..];
         let out = &mut data[y * stride..][..width];
 
-        for (o, px) in out.iter_mut().zip(row) {
-            *o = palette[usize::from(px.to_ne_bytes()[2])];
+        for (o, &px) in out.iter_mut().zip(row) {
+            *o = palette[px.palette_index()];
         }
     }
 }
@@ -329,8 +358,8 @@ pub fn color_indexing_alpha(
 /// runtime values, which costs a variable-count shift per pixel and a
 /// `chunks_exact_mut` whose stride the compiler cannot fold. Expanding a whole
 /// group in one table lookup makes the inner loop a fixed-width copy.
-fn expand_alpha_rows<const PPB: usize>(
-    src: &[u32],
+fn expand_alpha_rows<const PPB: usize, T: Indexed>(
+    src: &[T],
     src_stride: usize,
     width: usize,
     height: i32,
@@ -358,10 +387,10 @@ fn expand_alpha_rows<const PPB: usize>(
         let out = &mut data[y * stride..][..width];
 
         for (group, &px) in out.chunks_exact_mut(PPB).zip(row) {
-            group.copy_from_slice(&expand[usize::from(px.to_ne_bytes()[2])]);
+            group.copy_from_slice(&expand[px.palette_index()]);
         }
         if tail != 0 {
-            let index = usize::from(row[full].to_ne_bytes()[2]);
+            let index = row[full].palette_index();
 
             out[full * PPB..].copy_from_slice(&expand[index][..tail]);
         }

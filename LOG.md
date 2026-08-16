@@ -1628,7 +1628,78 @@ one-byte plane instead of through a four-byte canvas. The machinery is half
 there — `AlphaDst` exists, and the colour-indexing transform already writes
 through it when it is the only transform — but the general pixel loop writes
 ARGB words. That would remove the buffer rather than free it early, and take the
-extract-green pass with it.
+extract-green pass with it. **Done**, in the two sections below.
+
+## One allocation per picture, kept across frames
+
+The VP8 picture was three `Vec`s, one per plane, allocated and freed together on
+every frame whose size differed from the last. It is now one block with three
+offsets, laid out so each plane still starts on a 64-byte boundary.
+
+Two things about it were not obvious.
+
+**Handing the planes out costs more than making them.** The planes are still
+three disjoint slices, because merging them into one addressed by absolute
+offset would let a kernel that walks off the luma reach the chroma instead of
+tripping the assertion in the assembly wrapper. But `&mut data[base..][..len]`
+is two bounds checks against values loaded from the geometry, and the macroblock
+loop asks for a plane about twenty-five times per macroblock — in
+`backup_mb_border`, twice in `xchg_mb_border`, in the prediction, the IDCT and
+the loop filter. That is 1.6% of the instruction count on every lossy input,
+which no amount of `#[inline(always)]` removes, because the compiler cannot
+prove the geometry has not changed between two calls.
+
+The fix is to split once per frame and thread the three slices through. The
+obstacle is that the slices borrow `self.picture`, so nothing taking `&mut self`
+can be called while they are alive. `std::mem::take` on the _buffer only_ — the
+geometry stays in the struct, so `linesize()` keeps working — moves the borrow
+to a local and the whole macroblock loop is free again. Net against the previous
+commit: 0.9% fewer instructions on `lossy`, 1.4% on `a_lossy`.
+
+**Reuse is what the animations needed, and one allocation is what made it
+necessary.** Their sub-frames differ in size, so each one reallocated. Three
+chunks of 120 KB and 45 KB apiece sit under glibc's 128 KB mmap threshold and
+come off the heap; their 215 KB sum does not, so the merge alone turned every
+sub-frame into an mmap and a munmap — `anim_yuva` lost 3%, all of it system
+time, with the instruction count flat. Keeping the block and laying the planes
+out over it again removes both that and the allocation the C was doing.
+
+## The eight-bit alpha decode
+
+An ALPH chunk is a lossless image whose green channel is the alpha plane, and
+libwebp decodes the common shape of one straight into a byte per pixel rather
+than into an ARGB canvas. The conditions are `Is8bOptimizable`'s: a palette and
+no other transform, no colour cache, and every meta prefix code carrying a
+single symbol for red, blue and alpha, so the pixel loop would read the green
+tree and write the other three back unchanged. Every alpha-carrying file in the
+corpus meets them — `a_lossy`, `odd_a_lossy`, and all fourteen frames of
+`anim_yuva`.
+
+The loop itself is a plain specialisation of the pixel loop: green only, no
+cache codes, no suspending, and `copy_block` made generic over the element type
+so the backward reference is the same three cases on bytes. What it needed from
+the module was for the canvas allocation to move: `read_image_header` allocated
+the picture before reading the prefix codes that decide whether one is wanted at
+all. Allocating in the caller instead is a two-line change and the still path
+takes it too.
+
+    a_lossy peak heap    2,691,456 -> 1,429,904 bytes
+    anim_yuva            1,722,992 -> 1,410,888
+    a_lossy wall clock   1.07x
+
+The 1.4 MB the canvas took becomes 180 KB of palette indices, which is
+`reduced_width * height` — the palette packs eight-bit alpha into two bits per
+pixel here, so the index image is half the width of the plane it expands into.
+
+**What this cost in coverage.** The two paths it replaces — `extract_green` out
+of a full canvas, and the 32-bit `apply_color_indexing_alpha` — are now reached
+by no file in the corpus. The first was already unreached before this change;
+the second was what all three alpha files used. Both still decode bit-exactly,
+checked against the C baseline on files made for it:
+`cwebp -alpha_method 1
+-alpha_q 100` over a horizontal alpha gradient produces
+an ALPH with no palette at all, and over a radial one produces a palette with a
+colour cache. Neither is in `wpd-test-data` yet.
 
 ## The small-file gap is `libstd` starting, not the decoder
 
