@@ -1418,6 +1418,14 @@ impl Decoder {
     /// slices borrow a local, so every helper below still takes `&mut self`.
     /// The geometry stays behind, so `linesize` and friends keep working.
     fn decode_rows_tmpl(&mut self, chunk: &[u8], resumable: bool) -> Result<Status> {
+        /* `frame_init` lays the planes out, and until it has said `Done` there
+        is nowhere for a row to go: the offsets are all zero, so even the left
+        border column ahead of the first sample is off the front of the plane.
+        The driver waits for it; a caller of the module need not. */
+        if !self.picture.allocated() {
+            return Err(Error::InvalidData);
+        }
+
         let mut data = std::mem::take(&mut self.picture.data);
         let ret = self.decode_rows_planes(&mut data, chunk, resumable);
 
@@ -1783,5 +1791,32 @@ mod tests {
             check_intra_pred8x8_mode(pred::PLANE_PRED8X8, 0, 0),
             pred::PLANE_PRED8X8
         );
+    }
+
+    /// A 16 x 16 keyframe header, enough for `frame_init` to want more of the
+    /// chunk than the fuzzer hands it.
+    const SHORT: &[u8] = &[
+        0xd0, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x10, 0x04, 0x9d, 0x01, 0x2a, 0x00,
+        0x01, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x99, 0x00, 0x0a, 0x00, 0x00, 0x0a, 0x0a,
+    ];
+
+    /// `frame_init` lays the planes out, so a caller that decodes rows without
+    /// waiting for it to finish has none: the left border column sits one
+    /// sample ahead of the first, which is off the front of a plane whose
+    /// offsets are still zero.
+    #[test]
+    fn rows_cannot_be_decoded_before_the_planes_exist() {
+        let mut dec = Decoder::new();
+        let split = SHORT.len() / 2;
+
+        assert_eq!(
+            dec.frame_init(&SHORT[..split], split, SHORT.len()),
+            Ok(Status::NeedMore)
+        );
+        assert_eq!(dec.decode_rows(&SHORT[..split]), Err(Error::InvalidData));
+
+        dec.extend(SHORT, SHORT.len());
+        assert_eq!(dec.decode_rows(SHORT), Err(Error::InvalidData));
     }
 }
