@@ -2020,3 +2020,42 @@ checked. Both bugs were a caller-ordering rule that only the driver knew: the
 picture must be laid out before rows go in it, and there is nothing to peek at
 before a header has been read. Each is now one branch in the module that owns
 the state, rather than a rule the driver was keeping on its behalf.
+
+## What the C decoder left behind
+
+The port removed every C file that decoded anything. What it did not remove was
+the scaffolding around them, because each piece was still reachable from a
+header the C test harnesses include — reachable, but not read.
+
+Three shapes of it, and each needed a different question to find.
+
+**Declarations whose definitions left.** `src/aarch64/vp8dsp.h` and
+`src/arm/vp8dsp.h` existed to declare the NEON entry points for the C dispatch
+through a macro; nothing has included either file since that dispatch became
+Rust. Grepping for the file name found apparent users, all of them matching the
+basename `vp8dsp.h` instead — the answer only came out right when the search was
+for the path and for `VP8_LF`, whose sole remaining use was the other macros in
+the same file.
+
+**Utilities whose callers left.** Of the twenty-six things `wpd_util.h` carried,
+three are still called, both by checkasm. The rest were the decoder's byte
+readers, swaps and error codes.
+
+**Build probes whose readers left.** `WPD_HAVE_GETAUXVAL`, the aarch64
+`.arch_extension` probes and the ARMv6T2 pair were computed by meson and read by
+nobody. The rule that makes this predictable: **meson assembles nothing.**
+cargo's build script does, so a define that only a `.S` file reads must be set
+in `crates/wpd/build.rs`, and it is. A meson `-D` reaches the C harnesses and
+`src/shared_stub.c`, which is empty. So any define in `lib_c_args` that no `.c`
+or `.h` mentions is dead by construction.
+
+**How it was checked.** Behaviour is the gate, not the build succeeding:
+`clicheck.sh` and `md5check.sh` against a binary built from the commit before, 0
+of 826 invocations differing and every hash equal, plus the 28 exported symbols
+compared name for name. A header the compiler no longer needs cannot change what
+the decoder does, and that is the claim worth testing.
+
+**A caution for the ARM paths.** aarch64 and 32-bit ARM were verified by
+inspection and by the absence of any consumer, not by a compile: neither
+toolchain is available here. The x86-64 no-asm, clang and `force_rac32` builds
+were all run.
