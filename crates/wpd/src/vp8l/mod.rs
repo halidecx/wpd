@@ -1463,12 +1463,26 @@ mod tests {
         0xff, 0xff, 0xff, 0xff, 0x40, 0x3e, 0x3e, 0x3e, 0x2f, 0x03,
     ];
 
+    /// Both tests below decode [`WIDE`], and the gap between the image and the
+    /// canvas is the whole point of it: the image has to be larger than the
+    /// canvas can hold for the row copy to run off the end, so there is no
+    /// small input that reproduces either bug. Seventy million pixels is a
+    /// fraction of a second compiled and hours interpreted, so miri sits these
+    /// two out — the paths they cover are pointer-free either way.
+    fn too_big_for_miri() -> bool {
+        cfg!(miri)
+    }
+
     /// The rows a previous image reached, and the width they were reached at,
     /// must not survive into the next one: a `still_peek` before the header of
     /// the second has been read would otherwise transform the first's progress
     /// through the second's canvas.
     #[test]
     fn a_reset_forgets_how_far_the_last_image_got() {
+        if too_big_for_miri() {
+            return;
+        }
+
         let mut dec = Decoder::new();
 
         dec.set_canvas(39, 16);
@@ -1491,6 +1505,10 @@ mod tests {
     /// clearing the ground underneath it.
     #[test]
     fn peeking_with_no_image_in_progress_does_nothing() {
+        if too_big_for_miri() {
+            return;
+        }
+
         let mut dec = Decoder::new();
 
         dec.set_canvas(39, 16);
@@ -1506,6 +1524,10 @@ mod tests {
     /// nothing and the second step still completes.
     #[test]
     fn peeking_before_a_frame_header_does_nothing() {
+        if too_big_for_miri() {
+            return;
+        }
+
         let mut dec = Decoder::new();
 
         dec.set_canvas(39, 16);
