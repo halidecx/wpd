@@ -353,6 +353,12 @@ impl Decoder {
         self.width = 0;
         self.height = 0;
         self.has_alpha = false;
+        /* How far the last image got, and how wide its rows were. `still_step`
+        clears these when it activates, so a decode that reaches the pixel loop
+        never reads a previous image's; one that stops before it would. */
+        self.resume = Resume::default();
+        self.rows_out = 0;
+        self.reduced_width = 0;
     }
 
     /// [`Self::reset`], and the decode buffers too, for when the file is closed
@@ -1242,7 +1248,15 @@ impl Decoder {
     /// Switches the in-progress image over to handing rows out as they finish,
     /// which needs somewhere to put them: backward references keep reading the
     /// untransformed pixels for as long as the image is being decoded.
+    ///
+    /// Does nothing when no image is in progress. Until a frame header has been
+    /// read there are no rows to hand out and no dimensions to size the staging
+    /// picture by — only the canvas, which is what the container promised
+    /// rather than what the image turns out to be.
     pub fn still_peek(&mut self) -> Result<()> {
+        if !self.active {
+            return Ok(());
+        }
         if !self.peeked {
             self.still_alloc()?;
             self.peeked = true;
@@ -1435,4 +1449,77 @@ fn predict_batch(
         y1,
         Some(base),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 6706 x 10809 frame header, which is what the fuzzer found: a canvas
+    /// far smaller than the image, so a row copied at the frame's width runs
+    /// off the end of a staging picture sized by the canvas.
+    const WIDE: &[u8] = &[
+        0x2f, 0x31, 0x1a, 0x8e, 0x1a, 0x8e, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0x40, 0x3e, 0x3e, 0x3e, 0x2f, 0x03,
+    ];
+
+    /// The rows a previous image reached, and the width they were reached at,
+    /// must not survive into the next one: a `still_peek` before the header of
+    /// the second has been read would otherwise transform the first's progress
+    /// through the second's canvas.
+    #[test]
+    fn a_reset_forgets_how_far_the_last_image_got() {
+        let mut dec = Decoder::new();
+
+        dec.set_canvas(39, 16);
+        dec.decode_frame(Target::Argb, WIDE, false, None).unwrap();
+
+        dec.reset();
+        dec.set_canvas(39, 16);
+
+        assert_eq!(dec.resume.rows_done, 0);
+        assert_eq!(dec.rows_out, 0);
+        assert_eq!(dec.reduced_width, 0);
+    }
+
+    /// Peeking is what a caller does between two steps; with no image in
+    /// progress there is nothing to hand out, and the canvas is not the size of
+    /// whatever was decoded last.
+    ///
+    /// The decode is not reset first, so the width it finished at is still
+    /// there to be read: this is the guard on its own, not [`Decoder::reset`]
+    /// clearing the ground underneath it.
+    #[test]
+    fn peeking_with_no_image_in_progress_does_nothing() {
+        let mut dec = Decoder::new();
+
+        dec.set_canvas(39, 16);
+        dec.decode_frame(Target::Argb, WIDE, false, None).unwrap();
+        dec.set_canvas(39, 16);
+
+        assert!(!dec.still_active());
+        dec.still_peek().unwrap();
+    }
+
+    /// The same guard from the other side: a step that stops short of the
+    /// header has not activated either, so the peek between the two does
+    /// nothing and the second step still completes.
+    #[test]
+    fn peeking_before_a_frame_header_does_nothing() {
+        let mut dec = Decoder::new();
+
+        dec.set_canvas(39, 16);
+
+        /* Short of the sixteen bytes `still_step` wants before it will read a
+        header, so it returns without activating. */
+        assert_eq!(
+            dec.still_step(&WIDE[..11], WIDE.len(), false),
+            Ok(Status::NeedMore)
+        );
+        assert!(!dec.still_active());
+
+        dec.still_peek().unwrap();
+
+        assert_eq!(dec.still_step(WIDE, WIDE.len(), true), Ok(Status::Done));
+    }
 }
