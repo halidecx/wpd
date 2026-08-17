@@ -9,9 +9,6 @@ use std::{env, fs};
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../..")
-        .canonicalize()
-        .unwrap()
 }
 
 /// Whether `snippet` compiles for the target. Mirrors meson's `cc.compiles()`,

@@ -85,8 +85,8 @@ if asm_enabled
 
     # src/cpu.h starts detection from the compile-time baseline, and the ARMv6
     # asm is only assembled when the target has it. The extension probes the
-    # assembly itself needs are cargo's, in crates/wpd/build.rs, since cargo is
-    # what assembles it.
+    # assembly itself needs are cargo's, in build.rs, since cargo is what
+    # assembles it.
     if cc.compiles(
       '''#if !defined(__ARM_ARCH) || __ARM_ARCH < 6
          #error no ARMv6 on this target

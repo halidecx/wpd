@@ -20,7 +20,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 
 [dependencies.wpd]
-path = "../crates/wpd"
+path = ".."
 default-features = false
 
 [profile.release]

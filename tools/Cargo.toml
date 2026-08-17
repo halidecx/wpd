@@ -6,13 +6,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# The C here belongs to the libwebp oracle and the getopt shim, which Meson
+# builds; neither is part of the tool.
+exclude = ["*.c", "*.h", "*.sh", "compat/"]
 
 [[bin]]
 name = "wpd"
-path = "src/main.rs"
+path = "wpd.rs"
 
 [dependencies]
-wpd = { path = "../wpd", default-features = false }
+wpd = { path = "..", default-features = false }
 
 [features]
 default = ["asm"]

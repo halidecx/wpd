@@ -9,7 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
-        .join("../..")
+        .join("..")
         .canonicalize()
         .unwrap();
 

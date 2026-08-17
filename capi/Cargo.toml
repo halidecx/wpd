@@ -9,8 +9,8 @@ repository.workspace = true
 
 [lib]
 # Renamed from the historical libwpd because the archive now also ships as an
-# rlib, which crates/wpd already claims that name for; tools/cargo_build.sh
-# stages it back to libwpd.a for C consumers.
+# rlib, which the root `wpd` crate already claims that name for;
+# tools/cargo_build.sh stages it back to libwpd.a for C consumers.
 name = "wpd_capi"
 # The shared library is linked from this archive by tools/cargo_build.sh, so
 # that its export list comes from include/wpd.h rather than from whichever
@@ -18,7 +18,7 @@ name = "wpd_capi"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-wpd = { path = "../wpd", default-features = false }
+wpd = { path = "..", default-features = false }
 
 [features]
 default = ["asm"]

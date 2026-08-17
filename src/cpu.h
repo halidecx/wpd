@@ -35,7 +35,7 @@
 #include "src/x86/cpu.h"
 #endif
 
-/* Implemented in Rust; see crates/wpd/src/cpu.rs. */
+/* Implemented in Rust; see src/cpu.rs. */
 void     wpd_init_cpu(void);
 void     wpd_set_cpu_flags_mask(unsigned mask);
 unsigned wpd_get_cpu_flags_raw(void);
