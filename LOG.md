@@ -1983,3 +1983,40 @@ General rule for the rest of the port: **derive each Tier A signature from the
 call sites, not from the C prototype.** The prototypes are uniformly more
 permissive than the code, and the gap is where both unsoundness and unnecessary
 copies hide.
+
+## A fuzz target that reaches the driver
+
+The three original targets all enter below the driver. `container` walks the
+RIFF and never decodes a pixel; `vp8` and `vp8l` are handed a chunk directly, in
+states the driver would have refused to produce. That is a useful place to fuzz
+— it is where the bit readers are — but it answers a narrower question than it
+looks like it does, and for a while the answer was being read as the wider one.
+
+Coverage-guided runs on the two codec targets turn up panics: a slice range in
+`vp8l::transform_rows` and a subtract overflow in `vp8::decode_rows_planes`,
+each from under forty bytes. Both are real, and both are fixed above. Neither is
+reachable through the C ABI, the CLI or the safe API, because the driver
+sequences the calls that get there — it waits for `frame_init` to say `Done`
+before it decodes rows, and it guards `still_peek` behind `still_active`.
+
+**The gap that made this hard to judge is that nothing fuzzed the composition.**
+`scripts/fuzz.sh` drives whole files end to end but mutates at random, which
+does not get past a header check often enough to matter. So `e2e` drives a whole
+file through `wpd::api` — one-shot and streaming, in every output format, with
+the format taken from the first byte so a mutation can move between them. Seeded
+with the corpus it adds about fifteen hundred units and finds nothing, which is
+the null result that made "a defect in the module's API" a different claim from
+"a denial of service in the decoder".
+
+**What to take from it.** A panic found below the driver is a real defect in a
+`pub` module and worth fixing — the modules are public, and
+`forbid(unsafe_code)` makes a panic the worst thing that can happen rather than
+the second worst. But its severity is whatever the driver's sequencing allows,
+and the only way to know that is a target that goes through the driver. Seed it
+with the corpus; a mutation does not find a decodable file on its own.
+
+The fixes are also a reminder that the invariant belongs where it can be
+checked. Both bugs were a caller-ordering rule that only the driver knew: the
+picture must be laid out before rows go in it, and there is nothing to peek at
+before a header has been read. Each is now one branch in the module that owns
+the state, rather than a rule the driver was keeping on its behalf.
