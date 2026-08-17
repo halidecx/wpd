@@ -19,6 +19,7 @@
 //! built, and a flip here is the order the rows come out in.
 
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 
 use crate::driver;
 use crate::handout::Handout;
@@ -152,6 +153,81 @@ pub struct Decoder<'a> {
     input: PhantomData<&'a [u8]>,
 }
 
+pub struct UpdatedDecoder<'d, 'a> {
+    decoder: &'d mut Decoder<'a>,
+}
+
+impl<'a> Deref for UpdatedDecoder<'_, 'a> {
+    type Target = Decoder<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        self.decoder
+    }
+}
+
+impl DerefMut for UpdatedDecoder<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.decoder
+    }
+}
+
+impl<'d, 'a> UpdatedDecoder<'d, 'a> {
+    pub fn into_buffer(self) -> Result<UpdateBuffer<'d, 'a>> {
+        let data = self.decoder.driver().take_update_buffer()?;
+
+        Ok(UpdateBuffer {
+            decoder: Some(self.decoder),
+            data: Some(data),
+        })
+    }
+}
+
+pub struct UpdateBuffer<'d, 'a> {
+    decoder: Option<&'d mut Decoder<'a>>,
+    data: Option<Vec<u8>>,
+}
+
+impl Deref for UpdateBuffer<'_, '_> {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        self.data.as_ref().expect("update buffer is attached")
+    }
+}
+
+impl DerefMut for UpdateBuffer<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.data.as_mut().expect("update buffer is attached")
+    }
+}
+
+impl<'d, 'a> UpdateBuffer<'d, 'a> {
+    pub fn update(mut self) -> Result<UpdatedDecoder<'d, 'a>> {
+        let data = self.data.take().expect("update buffer is attached");
+        let decoder = self.decoder.take().expect("update decoder is attached");
+
+        if let Err(e) = decoder.driver().update_owned(data) {
+            decoder.driver().open_stream()?;
+            return Err(e);
+        }
+        Ok(UpdatedDecoder { decoder })
+    }
+}
+
+impl Drop for UpdateBuffer<'_, '_> {
+    fn drop(&mut self) {
+        let Some(data) = self.data.take() else {
+            return;
+        };
+        let Some(decoder) = self.decoder.take() else {
+            return;
+        };
+        if decoder.driver().update_owned(data).is_err() {
+            let _ = decoder.driver().open_stream();
+        }
+    }
+}
+
 impl Default for Decoder<'_> {
     fn default() -> Self {
         Self::new()
@@ -217,10 +293,13 @@ impl<'a> Decoder<'a> {
         self.driver().append(chunk)
     }
 
-    /// Replaces the stream's contents with a longer prefix of the same file,
-    /// which is what a caller reading into a growing buffer has.
-    pub fn update(&mut self, data: &'a [u8]) -> Result<()> {
-        self.driver().update(data)
+    /// Takes a longer prefix of the same file without copying it. Call
+    /// [`UpdatedDecoder::into_buffer`], extend that buffer and call
+    /// [`UpdateBuffer::update`] to supply the next prefix; dropping the buffer
+    /// also reattaches it before releasing the decoder.
+    pub fn update(&mut self, data: Vec<u8>) -> Result<UpdatedDecoder<'_, 'a>> {
+        self.driver().update_owned(data)?;
+        Ok(UpdatedDecoder { decoder: self })
     }
 
     pub fn end_of_stream(&mut self) -> Result<()> {
@@ -392,6 +471,48 @@ mod tests {
         d.append(&ONE_PIXEL[..12]).unwrap();
         assert!(d.next_frame().unwrap().is_none());
         d.append(&ONE_PIXEL[12..]).unwrap();
+        d.end_of_stream().unwrap();
+        assert!(d.next_frame().unwrap().is_some());
+    }
+
+    #[test]
+    fn an_updated_stream_reuses_the_callers_growing_buffer() {
+        let mut d = Decoder::new();
+        let mut data = Vec::with_capacity(ONE_PIXEL.len());
+
+        data.extend_from_slice(&ONE_PIXEL[..12]);
+        let allocation = data.as_ptr();
+
+        d.open_stream().unwrap();
+        let mut updated = d.update(data).unwrap();
+
+        assert!(updated.info().is_err());
+
+        let mut data = updated.into_buffer().unwrap();
+
+        assert_eq!(data.as_ptr(), allocation);
+        data.extend_from_slice(&ONE_PIXEL[12..]);
+        assert_eq!(data.as_ptr(), allocation);
+
+        let mut updated = data.update().unwrap();
+
+        updated.end_of_stream().unwrap();
+        assert!(updated.next_frame().unwrap().is_some());
+    }
+
+    #[test]
+    fn dropping_an_update_buffer_reattaches_it() {
+        let mut d = Decoder::new();
+
+        d.open_stream().unwrap();
+        let updated = d.update(ONE_PIXEL[..12].to_vec()).unwrap();
+
+        {
+            let mut data = updated.into_buffer().unwrap();
+
+            data.extend_from_slice(&ONE_PIXEL[12..]);
+        }
+
         d.end_of_stream().unwrap();
         assert!(d.next_frame().unwrap().is_some());
     }

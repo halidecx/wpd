@@ -448,7 +448,7 @@ pub fn read_normal_code(
         let max = 2 + br.bits(buf, bits) as usize;
 
         if max > alphabet_size {
-            crate::log::error(&format!(
+            crate::log::error_args(format_args!(
                 "max symbol {max} > alphabet size {alphabet_size}"
             ));
             return Err(Error::InvalidData);
@@ -508,7 +508,7 @@ pub fn read_normal_code(
         };
 
         if symbol + repeat > alphabet_size {
-            crate::log::error(&format!(
+            crate::log::error_args(format_args!(
                 "invalid symbol {symbol} + repeat {repeat} > alphabet size \
                  {alphabet_size}"
             ));

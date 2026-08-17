@@ -88,7 +88,7 @@ pub(crate) fn info_clear(info: &mut WPDImageInfo) {
 /// # Safety
 ///
 /// `data` must be readable for `size` bytes, and `info` writable as
-/// [`info_clear`] requires.
+/// `info_clear` requires.
 #[no_mangle]
 pub unsafe extern "C" fn wpd_get_info(
     data: *const u8,

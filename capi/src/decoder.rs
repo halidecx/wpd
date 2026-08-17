@@ -12,7 +12,7 @@
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ops::{Deref, DerefMut};
-use std::{mem, ptr, slice};
+use std::{alloc, mem, ptr, slice};
 
 use wpd::container::Coding;
 use wpd::driver::convert::format_bpp;
@@ -32,7 +32,7 @@ use crate::options::WPDDecoderOptions;
 /// `wpd_decoder_open_borrowed` and `wpd_decoder_update` promise the caller's
 /// bytes will outlive the decode; the C ABI cannot say so, so
 /// [`WPDDecoderRaw`] is what crosses it and the promise is checked nowhere.
-/// The safe API in [`crate::api`] hands out a real `'a` instead.
+/// The safe API in [`wpd::api`] hands out a real `'a` instead.
 pub struct WPDDecoder<'a> {
     decoder: Decoder<'a>,
     /// The planes `wpd_decoder_set_output_buffer` named, kept beside the sink
@@ -62,6 +62,23 @@ impl<'a> Deref for WPDDecoder<'a> {
 impl<'a> DerefMut for WPDDecoder<'a> {
     fn deref_mut(&mut self) -> &mut Decoder<'a> {
         &mut self.decoder
+    }
+}
+
+fn try_box<T>(value: T) -> Result<Box<T>, Error> {
+    let layout = alloc::Layout::new::<T>();
+
+    if layout.size() == 0 {
+        return Ok(Box::new(value));
+    }
+    let raw = unsafe { alloc::alloc(layout) }.cast::<T>();
+
+    if raw.is_null() {
+        return Err(Error::NoMemory);
+    }
+    unsafe {
+        raw.write(value);
+        Ok(Box::from_raw(raw))
     }
 }
 
@@ -178,7 +195,7 @@ pub extern "C" fn wpd_decoder_create() -> *mut WPDDecoderRaw {
     wpd::log::set_sink(crate::compat::forward_log);
     wpd::cpu::init();
 
-    Box::into_raw(Box::new(WPDDecoder::new()))
+    try_box(WPDDecoder::new()).map_or(ptr::null_mut(), Box::into_raw)
 }
 
 /// # Safety
@@ -239,8 +256,10 @@ unsafe fn set_output_buffer(
     what lets a caller ask for a partial frame repeatedly without redoing the
     ones it has. */
     if !decoder.has_sink() || decoder.planes != buffer.plane {
+        let sink = try_box(External(buffer.plane))?;
+
         decoder.planes = buffer.plane;
-        decoder.set_sink(Some(Box::new(External(buffer.plane))));
+        decoder.set_sink(Some(sink));
     }
     Ok(())
 }
@@ -840,9 +859,15 @@ pub unsafe extern "C" fn wpd_decode(
         return if ret < 0 { ret } else { WPD_ERR_BITSTREAM };
     }
 
-    let owner = Box::new(WPDFrameOwner {
+    let owner = match try_box(WPDFrameOwner {
         plane: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-    });
+    }) {
+        Ok(owner) => owner,
+        Err(e) => {
+            unsafe { wpd_decoder_free(decoder) };
+            return status(e);
+        }
+    };
     let planes = frame_planes(decoded.format);
 
     unsafe { frame_clear(frame) };
@@ -868,7 +893,11 @@ pub unsafe extern "C" fn wpd_decode(
             break;
         };
 
-        owner.plane[p] = vec![0u8; bytes];
+        if owner.plane[p].try_reserve_exact(bytes).is_err() {
+            status = WPD_ERR_NO_MEMORY;
+            break;
+        }
+        owner.plane[p].resize(bytes, 0);
         for y in 0..h {
             let src = unsafe { decoded.data[p].offset(y as isize * decoded.stride[p]) };
 

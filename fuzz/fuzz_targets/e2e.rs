@@ -13,12 +13,28 @@ use libfuzzer_sys::fuzz_target;
 use wpd::api::Decoder;
 use wpd::image::Format;
 
-const FORMATS: [Format; 4] =
-    [Format::Argb, Format::Rgba, Format::Yuv420p, Format::Yuva420p];
+const FORMATS: [Format; 16] = [
+    Format::Yuv420p,
+    Format::Yuva420p,
+    Format::Argb,
+    Format::Rgba,
+    Format::Bgra,
+    Format::Rgb,
+    Format::Bgr,
+    Format::ArgbPre,
+    Format::RgbaPre,
+    Format::BgraPre,
+    Format::Rgb565,
+    Format::Rgba4444,
+    Format::Rgba4444Pre,
+    Format::Bgr565,
+    Format::Bgra4444,
+    Format::Bgra4444Pre,
+];
 
 /// Enough frames to pass the end of any corpus animation, so the exhausted
 /// path is reached rather than only the frames a file has.
-const FRAMES: usize = 8;
+const FRAMES: usize = 16;
 
 fuzz_target!(|data: &[u8]| {
     let Some(&first) = data.first() else {

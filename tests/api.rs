@@ -1,8 +1,8 @@
 //! The safe API against the real corpus.
 //!
-//! `wpd-test-data` is not checked in, so every test here is a no-op without
-//! it; what it is for is the shapes the unit tests cannot reach — animations,
-//! alpha, every packed output format, and a decode fed a byte at a time.
+//! `wpd-test-data` supplies the shapes the unit tests cannot reach —
+//! animations, alpha, every packed output format, and a decode fed a byte at
+//! a time.
 
 use std::fs;
 use std::path::PathBuf;
@@ -19,21 +19,17 @@ fn corpus() -> Vec<PathBuf> {
     }
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../wpd-test-data")
-        .canonicalize();
-    let Ok(dir) = dir else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
+        .join("wpd-test-data")
+        .canonicalize()
+        .expect("wpd-test-data is missing");
+    let entries = fs::read_dir(dir).expect("cannot read wpd-test-data");
     let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
+        .map(|e| e.expect("cannot read a wpd-test-data entry").path())
         .filter(|p| p.extension().is_some_and(|e| e == "webp"))
         .collect();
 
     files.sort();
+    assert!(!files.is_empty(), "wpd-test-data contains no WebP files");
     files
 }
 
@@ -57,9 +53,8 @@ fn the_corpus_decodes_in_every_packed_format() {
             let mut d = Decoder::new();
 
             d.set_format(format).unwrap();
-            if d.open(&bytes).is_err() {
-                continue;
-            }
+            d.open(&bytes)
+                .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
 
             let info = d.info().unwrap();
             let mut frames = 0;
@@ -86,9 +81,8 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
         let mut d = Decoder::new();
 
         d.set_format(Format::Yuva420p).unwrap();
-        if d.open(&bytes).is_err() {
-            continue;
-        }
+        d.open(&bytes)
+            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
         while let Some(picture) = d.next_frame().unwrap() {
             assert_eq!(picture.planes(), 4);
             assert_eq!(picture.rows_of(0).count(), picture.height() as usize);
@@ -114,9 +108,9 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
         let mut whole = Decoder::new();
 
         whole.set_format(Format::Rgba).unwrap();
-        if whole.open(&bytes).is_err() {
-            continue;
-        }
+        whole
+            .open(&bytes)
+            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
 
         let mut streamed = Decoder::new();
 
@@ -156,9 +150,8 @@ fn sub_frame_mode_reports_a_position() {
 
         d.set_format(Format::Argb).unwrap();
         d.set_animation(Animation::Subframe).unwrap();
-        if d.open(&bytes).is_err() {
-            continue;
-        }
+        d.open(&bytes)
+            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
 
         let info = d.info().unwrap();
 
@@ -180,9 +173,9 @@ fn flipping_reverses_the_rows() {
         let mut plain = Decoder::new();
 
         plain.set_format(Format::Rgba).unwrap();
-        if plain.open(&bytes).is_err() {
-            continue;
-        }
+        plain
+            .open(&bytes)
+            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
 
         let mut flipped = Decoder::new();
 

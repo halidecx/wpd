@@ -75,7 +75,7 @@ pub fn predictor_rows(
             let mut x_end = (x & !tile_mask) + tile_size;
 
             if mode > 13 {
-                crate::log::error(&format!("invalid predictor mode: {mode}"));
+                crate::log::error_args(format_args!("invalid predictor mode: {mode}"));
                 return Err(Error::InvalidData);
             }
             if x_end > width {

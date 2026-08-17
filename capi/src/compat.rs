@@ -7,7 +7,7 @@
 //! the header only promises that installing one before decoding is safe, not
 //! that no other thread is decoding while it happens.
 
-use std::ffi::{c_char, c_int, c_uint, c_void, CString};
+use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::{mem, ptr};
 
@@ -93,13 +93,16 @@ pub(crate) fn forward_log(level: Level, message: &str) {
     while let [head @ .., b'\n'] = bytes {
         bytes = head;
     }
-    let Ok(text) = CString::new(bytes) else {
+    if bytes.contains(&0) {
         return;
-    };
+    }
+    let mut text = [0; MESSAGE_MAX + 1];
+
+    text[..bytes.len()].copy_from_slice(bytes);
     let level = match level {
         Level::Error => 0,
         Level::Warning => 1,
     };
 
-    unsafe { callback(opaque, level, text.as_ptr()) };
+    unsafe { callback(opaque, level, text.as_ptr().cast()) };
 }

@@ -195,6 +195,19 @@ impl<'a> Input<'a> {
         };
     }
 
+    pub fn replace_owned(&mut self, data: Vec<u8>) {
+        self.borrowed = None;
+        self.window = Window {
+            size: data.len(),
+            discarded: 0,
+        };
+        self.owned = data;
+    }
+
+    pub fn take_owned(&mut self) -> Vec<u8> {
+        core::mem::take(&mut self.owned)
+    }
+
     pub fn append(&mut self, data: &[u8]) -> Result<()> {
         self.reserve(data.len())?;
 

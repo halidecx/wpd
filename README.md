@@ -176,6 +176,9 @@ output has separate Y, U, V and optional A, indexed by `planes()`.
 
 `open_stream`, `append` and `end_of_stream` decode a file that is still
 arriving, and `partial_frame` hands out the rows of the frame in progress.
+`update` takes ownership of a cumulative `Vec` without copying it. Call
+`UpdatedDecoder::into_buffer`, extend the returned `UpdateBuffer`, and call
+`UpdateBuffer::update` to resume decoding from the same allocation.
 
 Default features build the assembly, which is the one place the crate has
 `unsafe`. `default-features = false` drops it for the safe scalar fallbacks, and

@@ -320,7 +320,9 @@ impl Scan {
         }
         if self.nb_frames >= MAX_FRAMES {
             if !self.frames_capped {
-                log::warning(&format!("frame table capped at {MAX_FRAMES} entries\n"));
+                log::warning_args(format_args!(
+                    "frame table capped at {MAX_FRAMES} entries\n"
+                ));
             }
             self.frames_capped = true;
             return Ok(());

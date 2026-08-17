@@ -149,7 +149,7 @@ Each gets a measurement at the phase that ports it.
 | 2 | `copy_block32` overlapping LZ77 copy                         | clear   |
 | 3 | `huff_read_symbol` table indexing                            | clear   |
 | 4 | VP56 range coder refill near the buffer end                  | clear   |
-| 5 | yuvdsp row glue under `--no-default-features`                | not yet |
+| 5 | yuvdsp row glue under `--no-default-features`                | clear   |
 | 6 | `Vec` zeroing vs `calloc` on large canvases                  | costs   |
 | 7 | Cross-language calls where the C inlined `vp56rac`/bitreader | avoided |
 | 8 | DSP wrapper call per kernel invocation, Tier A vs raw symbol | clear   |

@@ -70,7 +70,7 @@ pub fn described((message, e): Failure) -> String {
 pub struct Decoder<'a> {
     /// Built on the first lossy frame, as the C's `vp8_decode_init` was: a
     /// file with no VP8 chunk in it never pays for the lossy decoder.
-    pub(crate) vp8: Option<Box<crate::vp8::Decoder>>,
+    pub(crate) vp8: Vec<crate::vp8::Decoder>,
     pub(crate) bypass_filtering: bool,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
@@ -81,7 +81,7 @@ pub struct Decoder<'a> {
     pub(crate) input: Input<'a>,
     pub(crate) pos: usize,
     pub(crate) end: usize,
-    pub(crate) scan: Box<Scan>,
+    pub(crate) scan: Scan,
     pub(crate) animation: bool,
     pub(crate) still_done: bool,
     pub(crate) vp8_active: bool,
@@ -266,7 +266,7 @@ impl Default for Decoder<'_> {
 impl<'a> Decoder<'a> {
     pub fn new() -> Self {
         Decoder {
-            vp8: None,
+            vp8: Vec::new(),
             bypass_filtering: false,
             ldsp: Vp8lDsp::new(),
             ydsp: YuvDsp::new(),
@@ -277,7 +277,7 @@ impl<'a> Decoder<'a> {
             input: Input::new(),
             pos: 0,
             end: 0,
-            scan: Box::new(Scan::new()),
+            scan: Scan::new(),
             animation: false,
             still_done: false,
             vp8_active: false,
@@ -384,7 +384,7 @@ impl<'a> Decoder<'a> {
     pub(crate) fn frame_of(&self, which: Source) -> Frame<'_> {
         match which {
             Source::Lossy => lossy_view(
-                self.vp8.as_deref(),
+                self.vp8.first(),
                 &self.alpha_plane,
                 self.has_alpha,
                 self.width,
@@ -399,11 +399,17 @@ impl<'a> Decoder<'a> {
 
     pub(crate) fn update_canvas_size(&mut self, w: i32, h: i32) {
         if self.width != 0 && self.width != w {
-            crate::log::warning(&format!("Width mismatch. {} != {w}", self.width));
+            crate::log::warning_args(format_args!(
+                "Width mismatch. {} != {w}",
+                self.width
+            ));
         }
         self.width = w;
         if self.height != 0 && self.height != h {
-            crate::log::warning(&format!("Height mismatch. {} != {h}", self.height));
+            crate::log::warning_args(format_args!(
+                "Height mismatch. {} != {h}",
+                self.height
+            ));
         }
         self.height = h;
     }
@@ -499,7 +505,7 @@ impl<'a> Decoder<'a> {
         } = self;
         let img = match which {
             Source::Lossy => {
-                lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
+                lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
             }
             Source::Lossless => lossless_view(vp8l, *lossless_out),
             Source::Converted => converted.frame(),
@@ -543,7 +549,7 @@ impl<'a> Decoder<'a> {
         } = self;
         let img = match which {
             Source::Lossy => {
-                lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
+                lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
             }
             Source::Lossless => lossless_view(vp8l, *lossless_out),
             _ => Frame::packed(&[], 0, 0, 0, Format::Argb),
@@ -808,6 +814,38 @@ impl<'a> Decoder<'a> {
                 Err(self.fail("cannot read headers", e))
             }
         }
+    }
+
+    pub fn update_owned(&mut self, data: Vec<u8>) -> Result<(), Error> {
+        if !self.streaming || self.eos {
+            return Err(self.fail("not an open stream", Error::InvalidArgument));
+        }
+        if self.input_mode == 1 {
+            return Err(
+                self.fail("cannot mix append and update", Error::InvalidArgument)
+            );
+        }
+        if data.len() < self.input.size() {
+            return Err(self.fail("stream buffer shrank", Error::InvalidArgument));
+        }
+        self.input_mode = 2;
+        self.input.replace_owned(data);
+
+        match self.rescan_headers() {
+            Err(Error::Truncated) | Ok(()) => Ok(()),
+            Err(e) => {
+                self.input.reset();
+                self.headers_valid = false;
+                Err(self.fail("cannot read headers", e))
+            }
+        }
+    }
+
+    pub fn take_update_buffer(&mut self) -> Result<Vec<u8>, Error> {
+        if !self.streaming || self.eos || self.input_mode != 2 {
+            return Err(self.fail("not an updated stream", Error::InvalidArgument));
+        }
+        Ok(self.input.take_owned())
     }
 
     pub fn end_of_stream(&mut self) -> Result<(), Error> {
@@ -1365,7 +1403,7 @@ impl Decoder<'_> {
             }
         }
         fn lossy_rows(d: &Decoder<'_>) -> i32 {
-            match (d.vp8_active, d.vp8.as_deref()) {
+            match (d.vp8_active, d.vp8.first()) {
                 (true, Some(vp8)) => vp8.rows_finalized(),
                 (true, None) => 0,
                 (false, _) => d.height,
@@ -1440,13 +1478,8 @@ impl Decoder<'_> {
                     height,
                     ..
                 } = &mut *decoder;
-                let src = lossy_view(
-                    vp8.as_deref(),
-                    alpha_plane,
-                    *has_alpha,
-                    *width,
-                    *height,
-                );
+                let src =
+                    lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height);
                 ensure_yuva_rows(ydsp, output, &src, want_alpha, first, rows)
                     .map_err(|e| ("cannot output frame", e))?;
             }
@@ -1468,7 +1501,7 @@ impl Decoder<'_> {
                 let plane = if planar {
                     output.frame()
                 } else {
-                    lossy_view(vp8.as_deref(), alpha_plane, *has_alpha, *width, *height)
+                    lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
                 };
 
                 match sink.as_deref_mut() {

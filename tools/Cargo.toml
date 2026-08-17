@@ -13,6 +13,7 @@ exclude = ["*.c", "*.h", "*.sh", "compat/"]
 [[bin]]
 name = "wpd"
 path = "wpd.rs"
+doc = false
 
 [dependencies]
 wpd = { path = "..", default-features = false }

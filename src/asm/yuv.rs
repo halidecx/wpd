@@ -8,9 +8,9 @@
 //!
 //! Every kernel here walks whole pixels of one row, so the run length is what
 //! the shorter of the two slices allows and there is nothing to assert beyond
-//! that — with two exceptions. [`upsample_block`] is told its block count and
+//! that — with two exceptions. `upsample_block` is told its block count and
 //! reads a fixed extent from it, so the extents are checked; and
-//! [`argb_to_uv`] reads a second row at `stride`, which the slice must reach.
+//! `argb_to_uv` reads a second row at `stride`, which the slice must reach.
 
 use std::ffi::c_int;
 

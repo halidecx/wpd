@@ -405,16 +405,41 @@ impl Decoder {
             return Ok(());
         }
 
+        let mb_width = (width as usize).div_ceil(16);
+        let mb_height = (height as usize).div_ceil(16);
+        let mut filter_strength = Vec::new();
+        let mut intra4x4_pred_mode_top = Vec::new();
+        let mut top_nnz = Vec::new();
+        let mut top_border = Vec::new();
+
+        filter_strength
+            .try_reserve_exact(mb_width)
+            .map_err(|_| Error::NoMemory)?;
+        intra4x4_pred_mode_top
+            .try_reserve_exact(mb_width * 4)
+            .map_err(|_| Error::NoMemory)?;
+        top_nnz
+            .try_reserve_exact(mb_width)
+            .map_err(|_| Error::NoMemory)?;
+        top_border
+            .try_reserve_exact(mb_width + 1)
+            .map_err(|_| Error::NoMemory)?;
+
+        filter_strength.resize(mb_width, FilterStrength::default());
+        intra4x4_pred_mode_top.resize(mb_width * 4, 0);
+        top_nnz.resize(mb_width, [0; 9]);
+        top_border.resize(mb_width + 1, [0; 32]);
+
         self.width = width;
         self.height = height;
-        self.mb_width = (width as usize).div_ceil(16);
-        self.mb_height = (height as usize).div_ceil(16);
+        self.mb_width = mb_width;
+        self.mb_height = mb_height;
 
         self.picture.invalidate();
-        self.filter_strength = vec![FilterStrength::default(); self.mb_width];
-        self.intra4x4_pred_mode_top = vec![0; self.mb_width * 4];
-        self.top_nnz = vec![[0; 9]; self.mb_width];
-        self.top_border = vec![[0; 32]; self.mb_width + 1];
+        self.filter_strength = filter_strength;
+        self.intra4x4_pred_mode_top = intra4x4_pred_mode_top;
+        self.top_nnz = top_nnz;
+        self.top_border = top_border;
         Ok(())
     }
 
@@ -584,7 +609,7 @@ impl Decoder {
         let header_size = (rl24(buf) >> 5) as usize;
 
         if self.profile > 3 {
-            crate::log::warning(&format!("Unknown profile {}", self.profile));
+            crate::log::warning_args(format_args!("Unknown profile {}", self.profile));
         }
         if header_size > total.saturating_sub(10) {
             crate::log::error("Header size larger than data provided");
@@ -594,7 +619,10 @@ impl Decoder {
             return Ok(Status::NeedMore);
         }
         if rl24(&buf[3..]) != 0x002a_019d {
-            crate::log::error(&format!("Invalid start code 0x{:x}", rl24(&buf[3..])));
+            crate::log::error_args(format_args!(
+                "Invalid start code 0x{:x}",
+                rl24(&buf[3..])
+            ));
             return Err(Error::InvalidData);
         }
 

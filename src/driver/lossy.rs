@@ -22,6 +22,14 @@ const ALPHA_FILTER_HORIZONTAL: i32 = 1;
 const ALPHA_FILTER_VERTICAL: i32 = 2;
 const ALPHA_FILTER_GRADIENT: i32 = 3;
 
+fn vp8_decoder(vp8: &mut Vec<crate::vp8::Decoder>) -> Result<&mut crate::vp8::Decoder> {
+    if vp8.is_empty() {
+        vp8.try_reserve_exact(1).map_err(|_| Error::NoMemory)?;
+        vp8.push(crate::vp8::Decoder::new());
+    }
+    Ok(&mut vp8[0])
+}
+
 /// Undoes the per-row prediction an ALPH chunk's filter applied.
 ///
 /// The first row and the first column are predicted from their one neighbour
@@ -87,7 +95,7 @@ impl<'a> Decoder<'a> {
     /// What the last VP8 frame header declared.
     fn vp8_size(&self) -> (i32, i32) {
         self.vp8
-            .as_ref()
+            .first()
             .map_or((0, 0), |vp8| (vp8.width, vp8.height))
     }
 
@@ -225,7 +233,7 @@ impl<'a> Decoder<'a> {
         if !self.vp8_active {
             let bypass = self.bypass_filtering;
             let Self { vp8, input, .. } = self;
-            let vp8 = vp8.get_or_insert_with(Default::default);
+            let vp8 = vp8_decoder(vp8)?;
 
             /* Latched with the frame header, as the C's `vp8_decode_frame_init`
             read it out of the codec context: a mid-frame options change does
@@ -247,14 +255,14 @@ impl<'a> Decoder<'a> {
             self.vp8_active = true;
         } else {
             let Self { vp8, input, .. } = self;
-            let vp8 = vp8.get_or_insert_with(Default::default);
+            let vp8 = vp8_decoder(vp8)?;
 
             vp8.extend(input.chunk(offset, avail), avail);
         }
 
         let ret = {
             let Self { vp8, input, .. } = self;
-            let vp8 = vp8.get_or_insert_with(Default::default);
+            let vp8 = vp8_decoder(vp8)?;
 
             vp8.decode_rows(input.chunk(offset, avail))
         };
@@ -278,7 +286,7 @@ impl<'a> Decoder<'a> {
         let ret = {
             let bypass = self.bypass_filtering;
             let Self { vp8, input, .. } = self;
-            let vp8 = vp8.get_or_insert_with(Default::default);
+            let vp8 = vp8_decoder(vp8)?;
 
             vp8.bypass_filtering = bypass;
             vp8.decode_frame(input.chunk(offset, size))

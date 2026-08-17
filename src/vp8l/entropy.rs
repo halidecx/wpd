@@ -409,7 +409,9 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
 
             gb.fill(buf);
             if prefix > 39 {
-                crate::log::error(&format!("distance prefix code too large: {prefix}"));
+                crate::log::error_args(format_args!(
+                    "distance prefix code too large: {prefix}"
+                ));
                 return Err(Error::InvalidData);
             }
 
@@ -562,7 +564,9 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
 
             gb.fill(buf);
             if prefix > 39 {
-                crate::log::error(&format!("distance prefix code too large: {prefix}"));
+                crate::log::error_args(format_args!(
+                    "distance prefix code too large: {prefix}"
+                ));
                 return Err(Error::InvalidData);
             }
 

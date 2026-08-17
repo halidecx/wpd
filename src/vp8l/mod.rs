@@ -484,11 +484,17 @@ impl Decoder {
 
     fn update_canvas_size(&mut self, w: i32, h: i32) {
         if self.width != 0 && self.width != w {
-            crate::log::warning(&format!("Width mismatch. {} != {}", self.width, w));
+            crate::log::warning_args(format_args!(
+                "Width mismatch. {} != {}",
+                self.width, w
+            ));
         }
         self.width = w;
         if self.height != 0 && self.height != h {
-            crate::log::warning(&format!("Height mismatch. {} != {}", self.height, h));
+            crate::log::warning_args(format_args!(
+                "Height mismatch. {} != {}",
+                self.height, h
+            ));
         }
         self.height = h;
     }
@@ -621,7 +627,9 @@ impl Decoder {
             let bits = self.gb.bits(buf, 4);
 
             if !(1..=11).contains(&bits) {
-                crate::log::error(&format!("invalid color cache bits: {bits}"));
+                crate::log::error_args(format_args!(
+                    "invalid color cache bits: {bits}"
+                ));
                 return Err(Error::InvalidData);
             }
             bits
@@ -845,7 +853,7 @@ impl Decoder {
             let bit = 1u32 << coded;
 
             if used & bit != 0 {
-                crate::log::error(&format!(
+                crate::log::error_args(format_args!(
                     "Transform {transform:?} used more than once"
                 ));
                 return Err(Error::InvalidData);

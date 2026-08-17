@@ -9,7 +9,7 @@
 //! one of the codecs' pictures, so both arrive as borrows taken from one
 //! destructuring of the decoder. That is what says they are not the same
 //! memory — except in the one case where they are, which
-//! [`prepare_canvas`] moves aside by name.
+//! `prepare_canvas` moves aside by name.
 
 use std::mem;
 
@@ -304,8 +304,12 @@ impl<'a> Decoder<'a> {
     /// `base` is where the chunk's payload sits in the stream, which is what
     /// the alpha offset is measured from.
     pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {
-        let header = self.input.chunk(base, size.min(16)).to_owned();
-        let Some((declared_width, declared_height)) = self.read_anmf_header(&header)
+        let mut header = [0; 16];
+        let available = self.input.chunk(base, size.min(16));
+
+        header[..available.len()].copy_from_slice(available);
+        let Some((declared_width, declared_height)) =
+            self.read_anmf_header(&header[..available.len()])
         else {
             return Err(Error::InvalidData);
         };
@@ -313,7 +317,7 @@ impl<'a> Decoder<'a> {
         if self.pos_x + declared_width > self.canvas_width
             || self.pos_y + declared_height > self.canvas_height
         {
-            crate::log::error(&format!(
+            crate::log::error_args(format_args!(
                 "Frame ({declared_width}x{declared_height} at pos {}x{}) does not \
                  fit into canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
@@ -398,7 +402,7 @@ impl<'a> Decoder<'a> {
         };
 
         if sub_width != declared_width || sub_height != declared_height {
-            crate::log::warning(&format!(
+            crate::log::warning_args(format_args!(
                 "ANMF declares {declared_width}x{declared_height} but the image is \
                  {sub_width}x{sub_height}"
             ));
@@ -406,7 +410,7 @@ impl<'a> Decoder<'a> {
         if self.pos_x + sub_width > self.canvas_width
             || self.pos_y + sub_height > self.canvas_height
         {
-            crate::log::error(&format!(
+            crate::log::error_args(format_args!(
                 "Frame ({sub_width}x{sub_height} at pos {}x{}) does not fit into \
                  canvas ({}x{})",
                 self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
@@ -444,7 +448,7 @@ impl<'a> Decoder<'a> {
                 ..
             } = self;
             let src = super::lossy_view(
-                vp8.as_deref(),
+                vp8.first(),
                 alpha_plane,
                 *has_alpha,
                 *width,
@@ -532,13 +536,9 @@ impl<'a> Decoder<'a> {
             ..
         } = self;
         let src = match which {
-            Source::Lossy => super::lossy_view(
-                vp8.as_deref(),
-                alpha_plane,
-                *has_alpha,
-                *width,
-                *height,
-            ),
+            Source::Lossy => {
+                super::lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
+            }
             Source::Lossless => super::lossless_view(vp8l, *lossless_out),
             _ => converted.frame(),
         };

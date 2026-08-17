@@ -2,7 +2,7 @@ project(
   'wpd',
   'c',
   version: '0.1.0',
-  meson_version: '>= 0.57.0',
+  meson_version: '>= 1.4.0',
   default_options: [
     'buildtype=release',
     'c_std=c11',
@@ -258,8 +258,7 @@ wpd_dep = declare_dependency(
   ],
 )
 
-# The tool is a cargo binary; it links the same archive the library target
-# stages, so it goes through the C ABI exactly as an outside consumer would.
+# The tool is a cargo binary linked directly to the Rust decoder crate.
 wpd = custom_target(
   'wpd-tool',
   output: 'wpd',
