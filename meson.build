@@ -58,15 +58,6 @@ endif
 inc_dirs = [include_directories('.', 'include', 'src')]
 lib_c_args = ['-Wno-unused-parameter', '-DWPD_BUILDING']
 
-lib_c_args += '-DWPD_HAVE_GETAUXVAL=@0@'.format(
-  cc.has_function('getauxval', prefix: '#include <sys/auxv.h>') ? 1 : 0)
-lib_c_args += '-DWPD_HAVE_ELF_AUX_INFO=@0@'.format(
-  cc.has_function('elf_aux_info', prefix: '#include <sys/auxv.h>') ? 1 : 0)
-
-if get_option('force_rac32')
-  lib_c_args += '-DWPD_FORCE_RAC32'
-endif
-
 asm_enabled = get_option('enable_asm') and (
   cpu_family == 'aarch64' or
   cpu_family.startswith('arm') or
@@ -89,57 +80,20 @@ if asm_enabled
     nasm = find_program('nasm')
   elif cpu_family == 'aarch64'
     inc_dirs += [include_directories('src/aarch64')]
-    # dotprod and i8mm, probed the way dav1d does: an assembler may accept the
-    # instructions without being able to toggle the extension on and off with
-    # .arch_extension, and an assembler that takes the directive still has to
-    # be asked whether the instructions themselves assemble.
-    aarch64_extensions = {
-      'dotprod': 'sdot v0.4s, v0.16b, v0.16b',
-      'i8mm': 'usdot v0.4s, v0.16b, v0.16b',
-    }
-    foreach name, instr : aarch64_extensions
-      upper = name.to_upper()
-      archext = cc.compiles(
-        '__asm__ (".arch_extension @0@\\n");'.format(name),
-        name: '.arch_extension ' + name)
-      code = '__asm__ ('
-      if archext
-        code += '".arch_extension @0@\\n"'.format(name)
-      endif
-      code += '"@0@\\n");'.format(instr)
-      lib_c_args += '-DHAVE_AS_ARCHEXT_@0@_DIRECTIVE=@1@'.format(
-        upper, archext ? 1 : 0)
-      lib_c_args += '-DHAVE_@0@=@1@'.format(
-        upper, cc.compiles(code, name: upper) ? 1 : 0)
-    endforeach
-
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 
-    armv6 = cc.compiles(
+    # src/cpu.h starts detection from the compile-time baseline, and the ARMv6
+    # asm is only assembled when the target has it. The extension probes the
+    # assembly itself needs are cargo's, in crates/wpd/build.rs, since cargo is
+    # what assembles it.
+    if cc.compiles(
       '''#if !defined(__ARM_ARCH) || __ARM_ARCH < 6
          #error no ARMv6 on this target
          #endif
          int main(void) { return 0; }''',
       name: 'ARMv6 target')
-    armv6t2 = cc.compiles(
-      '''#if !defined(__ARM_ARCH_6T2__) && (!defined(__ARM_ARCH) || __ARM_ARCH < 7)
-         #error no Thumb-2 on this target
-         #endif
-         int main(void) { return 0; }''',
-      name: 'ARMv6T2 target')
-    armv6t2_external = armv6t2 and cc.compiles(
-      'void f(void) { __asm__(".syntax unified\\nsbfx r0, r0, #0, #1"); }',
-      name: 'ARMv6T2 assembler support')
-
-    if armv6
       cpu_baseline_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
-    endif
-    if armv6t2
-      lib_c_args += ['-DWPD_ARM_ARMV6T2_ASM=1']
-    endif
-    if armv6t2_external
-      lib_c_args += ['-DWPD_ARM_ARMV6T2_EXTERNAL_ASM=1']
     endif
   endif
 endif
