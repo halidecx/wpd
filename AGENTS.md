@@ -46,7 +46,7 @@ Test scripts:
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/testdata.sh   # asm vs fallback E2E correctness
 ./scripts/fuzz.sh       # robustness, damaged input under sanitizers
-cargo +nightly fuzz run container|vp8l|vp8   # coverage-guided, the parsers
+cargo +nightly fuzz run container|vp8l|vp8|e2e  # coverage-guided; e2e is the driver
 ./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp
 ./scripts/rac32.sh      # correctness, forced 32-bit range coder
 ./scripts/sanitize.sh   # memory safety, C harnesses under sanitizers

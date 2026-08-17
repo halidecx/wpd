@@ -173,10 +173,17 @@ undefined behaviour the compiler is otherwise entitled to assume away. It builds
 with `--no-default-features`, since miri cannot execute the hand-written
 assembly.
 
-`cargo +nightly fuzz run container|vp8l|vp8` drives the parsers in the safe core
-under coverage-guided fuzzing. That is a different question from what
+`cargo +nightly fuzz run container|vp8l|vp8|e2e` drives the safe core under
+coverage-guided fuzzing. That is a different question from what
 `scripts/fuzz.sh` asks: this one is looking for a panic on damaged input, which
 is a denial of service the C did not have, rather than for a memory error.
+
+The first three enter below the driver, so each one reaches its own decoder
+without the validation a real file passes through first; `e2e` drives a whole
+file through the safe API, which is what a caller can actually provoke. Seed it
+with the corpus — `cargo +nightly fuzz run e2e fuzz/corpus/e2e wpd-test-data` —
+because a file that reaches the pixels is not something a mutation finds on its
+own.
 
 The boolean coder has a 64-bit implementation and a 32-bit one, and every 64-bit
 build picks the former, so `./scripts/rac32.sh` runs the whole suite again
