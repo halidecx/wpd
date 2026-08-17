@@ -2045,7 +2045,7 @@ readers, swaps and error codes.
 `.arch_extension` probes and the ARMv6T2 pair were computed by meson and read by
 nobody. The rule that makes this predictable: **meson assembles nothing.**
 cargo's build script does, so a define that only a `.S` file reads must be set
-in `crates/wpd/build.rs`, and it is. A meson `-D` reaches the C harnesses and
+in `build.rs`, and it is. A meson `-D` reaches the C harnesses and
 `src/shared_stub.c`, which is empty. So any define in `lib_c_args` that no `.c`
 or `.h` mentions is dead by construction.
 
@@ -2059,3 +2059,48 @@ the decoder does, and that is the claim worth testing.
 inspection and by the absence of any consumer, not by a compile: neither
 toolchain is available here. The x86-64 no-asm, clang and `force_rac32` builds
 were all run.
+
+## The assembly and the Rust that calls it share a directory again
+
+The port left the tree split along a line that no longer meant anything. The
+Rust lived under `crates/`, the assembly stayed at `src/`, and the two halves of
+a single DSP function sat in directories that never referred to each other:
+`crates/wpd/src/asm/vp8l.rs` declares the symbols that `src/x86/vp8l.asm`
+defines, and nothing about the layout said so.
+
+rav1d does not have this problem, because rav1d has no `crates/` directory. Its
+library _is_ the root package, so `src/cdef.rs` and `src/x86/cdef_avx2.asm` are
+siblings, and `tools/` is the only other workspace member. wpd now has the same
+shape:
+
+- the decoder core is the root package, and its `src/` holds the Rust, the
+  assembly and the C headers checkasm compiles against — `cpu.rs` next to
+  `cpu.h`, `dsp/vp8.rs` next to `vp8dsp.h`, `asm/vp8l.rs` next to `x86/vp8l.asm`
+- `capi/` is the C ABI staticlib, and `tools/` the command-line tool, flattened
+  the way rav1d flattens `tools/dav1d.rs`
+
+**Where it diverges, and why.** rav1d puts the C ABI in the root crate, as one
+`staticlib`+`rlib` package. wpd keeps `capi/` separate, because the core carries
+`#![forbid(unsafe_code)]` without the `asm` feature and every raw pointer the C
+ABI is handed is confined to that other crate. Merging them would buy one fewer
+directory and cost the guarantee the README documents. Three members instead of
+two is the cheaper side of that trade.
+
+**The one rename that was not a move.** `src/asm/x86/` held `x86inc.asm` and
+`x86util.asm` — the nasm includes, not the Rust `asm` module, which needed the
+same name once it arrived at `src/`. rav1d has already picked a name for this:
+its `%include "ext/x86/x86inc.asm"` is wpd's `%include "asm/x86/x86util.asm"`.
+So `src/asm/x86/` became `src/ext/x86/`, and the collision resolved into the
+upstream convention rather than an invention.
+
+**What did not have to change.** The Meson glue drives cargo by package name —
+`-p wpd-capi`, `-p wpd-tool` — not by path, so `cargo_build.sh` and
+`cargo_tool.sh` are untouched. Keeping the package names is what made a
+directory move a directory move.
+
+**How it was checked.** A refactor that moves every file is exactly the kind
+that hides a real change, so the gate is behavioural, against a binary built
+from the commit before: `clicheck.sh` 0 of 826 invocations differing,
+`md5check.sh` every hash equal, the 28 exported symbols identical name for name,
+and — because a build that quietly stopped assembling would still pass all three
+— the 523 assembly symbols counted in both binaries and found equal.
