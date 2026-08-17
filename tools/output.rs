@@ -1,5 +1,6 @@
 //! The muxers: raw planes, md5, ppm, pam and y4m.
 
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
@@ -75,10 +76,12 @@ fn extension(filename: &str) -> Option<&str> {
 impl Output {
     /// Mirrors `output_open`: a null `filename` is only valid with the md5
     /// muxer, which is how `--verify` runs with no output at all.
-    pub fn open(muxer: Option<&str>, filename: Option<&str>) -> io::Result<Self> {
+    pub fn open(muxer: Option<&str>, filename: Option<&OsStr>) -> io::Result<Self> {
         let chosen = match muxer {
             Some(m) => m.to_owned(),
             None => filename
+                .map(OsStr::to_string_lossy)
+                .as_deref()
                 .and_then(extension)
                 .filter(|e| matches!(*e, "ppm" | "pam" | "y4m"))
                 .unwrap_or("raw")
@@ -103,9 +106,9 @@ impl Output {
                 return Ok(out);
             }
         } else {
-            let name = filename.unwrap_or("");
+            let name = filename.unwrap_or(OsStr::new(""));
 
-            out.kind = if name == "/dev/null" {
+            out.kind = if name == OsStr::new("/dev/null") {
                 Kind::Null
             } else {
                 Kind::File
@@ -121,8 +124,8 @@ impl Output {
             }
         }
 
-        let name = filename.unwrap_or("");
-        let sink: Box<dyn Write> = if name == "-" {
+        let name = filename.unwrap_or(OsStr::new(""));
+        let sink: Box<dyn Write> = if name == OsStr::new("-") {
             Box::new(io::stdout())
         } else {
             Box::new(File::create(name)?)
@@ -299,10 +302,10 @@ impl Output {
         &mut self,
         frame: &Picture<'_>,
         pixel_format: Option<&str>,
-    ) -> Result<(), ()> {
+    ) -> io::Result<()> {
         let pixel_format = pixel_format.unwrap_or_else(|| format_name(frame.format()));
 
-        self.write_frame_inner(frame, pixel_format).map_err(|_| ())
+        self.write_frame_inner(frame, pixel_format)
     }
 
     fn write_frame_inner(

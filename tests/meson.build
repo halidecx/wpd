@@ -32,6 +32,10 @@ testdata = [
   ['a_lossy',             'argb',     '0ceddbf38163256bc45bb5e7adbf3f0c'],
   ['a_lossy',             'yuv420p',  'e30670f89a1bd43b9593e8ad5f7567ba'],
   ['a_lossy',             'yuva420p', '6aba582a8c4eee341196fcfc7229ff3a'],
+  ['alpha_uncompressed_gradient', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
+  ['alpha_uncompressed_horizontal', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
+  ['alpha_uncompressed_none', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
+  ['alpha_uncompressed_vertical', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
   # A palette ALPH with a colour cache, and one with no palette transform at
   # all: the two shapes the eight-bit alpha decode hands back to the ARGB
   # canvas, and which nothing else here reaches.

@@ -114,28 +114,6 @@ pub struct WPDOutputBuffer {
     pub plane: [WPDOutputPlane; 4],
 }
 
-/// The oldest `WPDFrameInfo` this build accepts, and equally how much of the
-/// caller's struct it may touch. Appending a field leaves this where it is and
-/// adds a longer extent above it, the way the frame's does, so a caller
-/// compiled against the shorter struct keeps working.
-impl WPDFrameInfo {
-    /// A zeroed struct of this build's revision.
-    pub(crate) fn zeroed() -> Self {
-        WPDFrameInfo {
-            struct_size: mem::size_of::<WPDFrameInfo>(),
-            pos_x: 0,
-            pos_y: 0,
-            width: 0,
-            height: 0,
-            duration: 0,
-            dispose: 0,
-            blend: 0,
-            has_alpha: 0,
-            complete: 0,
-        }
-    }
-}
-
 fn frame_info_v1() -> usize {
     mem::offset_of!(WPDFrameInfo, complete) + mem::size_of::<c_int>()
 }
@@ -545,10 +523,16 @@ fn frame_info(
     is the size itself. */
     let size = info.struct_size;
 
-    *info = WPDFrameInfo {
-        struct_size: size,
-        ..WPDFrameInfo::zeroed()
-    };
+    info.pos_x = 0;
+    info.pos_y = 0;
+    info.width = 0;
+    info.height = 0;
+    info.duration = 0;
+    info.dispose = 0;
+    info.blend = 0;
+    info.has_alpha = 0;
+    info.complete = 0;
+    info.struct_size = size;
 
     let entry = decoder.frame_entry(index)?;
 

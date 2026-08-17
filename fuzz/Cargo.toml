@@ -23,6 +23,10 @@ libfuzzer-sys = "0.4"
 path = ".."
 default-features = false
 
+[dependencies.wpd-capi]
+path = "../capi"
+default-features = false
+
 [profile.release]
 debug = true
 

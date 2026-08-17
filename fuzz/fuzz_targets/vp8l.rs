@@ -7,7 +7,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wpd::vp8l::{Decoder, Target};
+use wpd::vp8l::{AlphaDst, Decoder, Target};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
@@ -15,9 +15,21 @@ fuzz_target!(|data: &[u8]| {
     }
     let (head, payload) = data.split_at(2);
     let mut decoder = Decoder::new();
+    let alpha_chunk = head[0] & 1 != 0;
 
     decoder.set_canvas(i32::from(head[0]), i32::from(head[1]));
-    let _ = decoder.decode_frame(Target::Argb, payload, false, None);
+    if alpha_chunk {
+        let width = usize::from(head[0]);
+        let mut plane = vec![0; width * usize::from(head[1])];
+        let dst = AlphaDst {
+            data: &mut plane,
+            stride: width,
+        };
+
+        let _ = decoder.decode_frame(Target::Alpha, payload, true, Some(dst));
+    } else {
+        let _ = decoder.decode_frame(Target::Argb, payload, false, None);
+    }
 
     decoder.reset();
     decoder.set_canvas(i32::from(head[0]), i32::from(head[1]));

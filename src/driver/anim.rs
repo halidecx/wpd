@@ -480,7 +480,8 @@ impl<'a> Decoder<'a> {
             codec's own canvas as the C did through its latched pointer. */
             let view = match which {
                 Source::Converted => Some(converted.frame_mut()),
-                _ => lossless_out.and_then(|which| vp8l.view_mut(which)),
+                Source::Lossless => lossless_out.and_then(|which| vp8l.view_mut(which)),
+                Source::Lossy | Source::Canvas | Source::None => None,
             };
 
             if let Some(mut view) = view {

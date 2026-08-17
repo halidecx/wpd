@@ -526,6 +526,42 @@ impl<'a> Decoder<'a> {
         )
     }
 
+    #[inline(never)]
+    fn export_complete_still_lossless<'o>(
+        &'o mut self,
+        set: &ExportSettings,
+        out: &mut Handout<'o>,
+        height: i32,
+    ) -> Result<(), Error> {
+        let Self {
+            ydsp,
+            options,
+            rescale,
+            transformed,
+            output,
+            sink,
+            vp8l,
+            lossless_out,
+            still_lossless,
+            converted_rows,
+            ..
+        } = self;
+        let img = lossless_view(vp8l, *lossless_out);
+        let targets = ExportTargets {
+            dsp: ydsp,
+            options,
+            rescale,
+            transformed,
+            output,
+            ext: sink.as_deref_mut(),
+        };
+
+        export_packed(set, targets, img, out)?;
+        *still_lossless = true;
+        *converted_rows = height;
+        Ok(())
+    }
+
     /// As [`Self::export_parts`], for the resumable row exports, which convert
     /// a codec's own picture into the decoder's buffers rather than reading
     /// one of them.
@@ -1330,12 +1366,8 @@ impl Decoder<'_> {
                     let set = decoder.export_settings();
                     let height = decoder.frame_of(Source::Lossless).height;
 
-                    decoder.still_lossless = true;
-                    decoder.converted_rows = height;
-
-                    let (t, img) = decoder.export_parts(Source::Lossless);
-
-                    export_packed(&set, t, img, out)
+                    decoder
+                        .export_complete_still_lossless(&set, out, height)
                         .map_err(|e| ("cannot output frame", e))?;
                     return Ok(true);
                 }

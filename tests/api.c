@@ -2905,6 +2905,13 @@ static void test_frame_table(const char *path) {
     WPDFrameInfo entry   = WPD_FRAME_INFO_INIT;
     WPDFrame     frame   = WPD_FRAME_INIT;
     int          index   = 0;
+    union {
+        WPDFrameInfo info;
+        struct {
+            uint8_t  fields[sizeof(size_t) + 9 * sizeof(int)];
+            uint32_t canary;
+        } guarded;
+    } exact;
 
     if (!data || !decoder) {
         free(data);
@@ -2915,6 +2922,11 @@ static void test_frame_table(const char *path) {
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
     CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
     CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    memset(&exact, 0xff, sizeof(exact));
+    exact.info.struct_size = sizeof(exact.guarded.fields);
+    exact.guarded.canary   = 0x12345678;
+    CHECK(wpd_decoder_frame_info(decoder, 0, &exact.info) == WPD_OK);
+    CHECK(exact.guarded.canary == 0x12345678);
     CHECK(wpd_decoder_frame_info(decoder, -1, &entry) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_frame_info(decoder, 0, NULL) == WPD_ERR_INVALID_ARG);
 

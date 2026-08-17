@@ -3,11 +3,14 @@
 //! Option parsing reproduces what `getopt_long` gave the C tool — clustered
 //! short options, `--name value` and `--name=value`, `--` to stop — because
 //! `scripts/md5check.sh`, `scripts/testdata.sh` and the testdata suite all
-//! drive this binary and its output has to stay byte for byte what it was.
+//! drive this binary and its output has to stay byte for byte what it was. A
+//! positional `-` extends the C tool: it names stdin as input and stdout as
+//! output.
 
 mod md5;
 mod output;
 
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
@@ -208,7 +211,7 @@ struct Options {
     verify: Option<String>,
     pixel_format: Option<&'static str>,
     out_format: Option<Format>,
-    positional: Vec<String>,
+    positional: Vec<OsString>,
 }
 
 enum Parsed {
@@ -217,10 +220,32 @@ enum Parsed {
     Bad(&'static str),
 }
 
+fn long_option(name: &str) -> Option<&'static str> {
+    match name.as_bytes().first() {
+        Some(b'h') if "help".starts_with(name) => Some("help"),
+        Some(b'r') if "repeat".starts_with(name) => Some("repeat"),
+        Some(b'f') if "fmt".starts_with(name) => Some("fmt"),
+        Some(b'm') if "muxer".starts_with(name) => Some("muxer"),
+        Some(b'v') if "verify".starts_with(name) => Some("verify"),
+        Some(b'i') if "info".starts_with(name) => Some("info"),
+        Some(b'l') if "loops".starts_with(name) => Some("loops"),
+        Some(b'c') if "cpumask".starts_with(name) => Some("cpumask"),
+        Some(b's') => {
+            match ("subframe".starts_with(name), "stream".starts_with(name)) {
+                (true, false) => Some("subframe"),
+                (false, true) => Some("stream"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Reproduces `getopt_long` with `opterr = 0`: options and operands may be
 /// interleaved, `--` ends the options, and a long option takes its value
 /// either after `=` or as the next argument.
-fn parse_args(argv: &[String]) -> Parsed {
+#[inline(never)]
+fn parse_args(argv: &[OsString]) -> Parsed {
     let mut o = Options {
         repeat: 1,
         loops: 1,
@@ -230,11 +255,12 @@ fn parse_args(argv: &[String]) -> Parsed {
     let mut only_operands = false;
 
     while i < argv.len() {
-        let arg = &argv[i];
+        let arg_os = &argv[i];
+        let arg = arg_os.to_string_lossy();
 
         i += 1;
         if only_operands || arg == "-" || !arg.starts_with('-') {
-            o.positional.push(arg.clone());
+            o.positional.push(arg_os.clone());
             continue;
         }
         if arg == "--" {
@@ -250,7 +276,7 @@ fn parse_args(argv: &[String]) -> Parsed {
             let mut value = || match inline.clone() {
                 Some(v) => Some(v),
                 None => {
-                    let v = argv.get(i).cloned();
+                    let v = argv.get(i).map(|v| v.to_string_lossy().into_owned());
                     if v.is_some() {
                         i += 1;
                     }
@@ -269,8 +295,23 @@ fn parse_args(argv: &[String]) -> Parsed {
                 };
             }
 
+            macro_rules! no_value {
+                () => {
+                    if inline.is_some() {
+                        return Parsed::Bad(MISSING);
+                    }
+                };
+            }
+
+            let Some(name) = long_option(name) else {
+                return Parsed::Bad(MISSING);
+            };
+
             match name {
-                "help" => return Parsed::Help,
+                "help" => {
+                    no_value!();
+                    return Parsed::Help;
+                }
                 "repeat" => match parse_repeat(&value!()) {
                     Some(v) => o.repeat = v,
                     None => return Parsed::Bad(BAD_REPEAT),
@@ -293,8 +334,14 @@ fn parse_args(argv: &[String]) -> Parsed {
                     _ => return Parsed::Bad(BAD_MUXER),
                 },
                 "verify" => o.verify = Some(value!()),
-                "info" => o.info = true,
-                "subframe" => o.subframe = true,
+                "info" => {
+                    no_value!();
+                    o.info = true;
+                }
+                "subframe" => {
+                    no_value!();
+                    o.subframe = true;
+                }
                 "loops" => match parse_repeat(&value!()) {
                     Some(v) => o.loops = v,
                     None => return Parsed::Bad(BAD_LOOPS),
@@ -329,7 +376,7 @@ fn parse_args(argv: &[String]) -> Parsed {
                     c = cluster.len();
                     Some(v)
                 } else {
-                    let v = argv.get(*i).cloned();
+                    let v = argv.get(*i).map(|v| v.to_string_lossy().into_owned());
                     if v.is_some() {
                         *i += 1;
                     }
@@ -476,7 +523,8 @@ fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
             );
         }
         if let Some(sink) = ctx.sink.as_deref_mut() {
-            if sink.write_frame(&frame, ctx.pixel_format).is_err() {
+            if let Err(e) = sink.write_frame(&frame, ctx.pixel_format) {
+                eprintln!("write: {e}");
                 return -1;
             }
         }
@@ -543,10 +591,10 @@ fn new_decoder(
     Some(decoder)
 }
 
-fn read_file(name: &str) -> std::io::Result<Vec<u8>> {
+fn read_file(name: &OsStr) -> std::io::Result<Vec<u8>> {
     let mut data = Vec::new();
 
-    if name == "-" {
+    if name == OsStr::new("-") {
         std::io::stdin().read_to_end(&mut data)?;
     } else {
         std::fs::File::open(name)?.read_to_end(&mut data)?;
@@ -555,8 +603,11 @@ fn read_file(name: &str) -> std::io::Result<Vec<u8>> {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().collect();
-    let app = argv.first().cloned().unwrap_or_else(|| "wpd".into());
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let app = argv
+        .first()
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "wpd".into());
 
     print_banner();
 
@@ -621,7 +672,7 @@ fn main() -> ExitCode {
     let output_name = if verifying || operands < 2 {
         None
     } else {
-        Some(opts.positional[1].as_str())
+        Some(opts.positional[1].as_os_str())
     };
 
     run(&opts, input_name, output_name, expected_md5)
@@ -629,14 +680,14 @@ fn main() -> ExitCode {
 
 fn run(
     opts: &Options,
-    input_name: &str,
-    output_name: Option<&str>,
+    input_name: &OsStr,
+    output_name: Option<&OsStr>,
     expected_md5: Option<[u8; 16]>,
 ) -> ExitCode {
     let data = match read_file(input_name) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{input_name}: {}", errmsg(&e));
+            eprintln!("{}: {}", input_name.to_string_lossy(), errmsg(&e));
             return ExitCode::FAILURE;
         }
     };
@@ -652,7 +703,11 @@ fn run(
         match Output::open(muxer, output_name) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("{}: {}", output_name.unwrap_or(""), errmsg(&e));
+                eprintln!(
+                    "{}: {}",
+                    output_name.unwrap_or(OsStr::new("")).to_string_lossy(),
+                    errmsg(&e)
+                );
                 return ExitCode::FAILURE;
             }
         }
@@ -665,7 +720,7 @@ fn run(
 
     if opened && output.muxer != Muxer::Raw {
         let Ok(image) = api::info(&data) else {
-            eprintln!("{input_name}: cannot read image header");
+            eprintln!("{}: cannot read image header", input_name.to_string_lossy());
             return ExitCode::FAILURE;
         };
 
@@ -749,13 +804,13 @@ fn run(
         }
         frames = ctx.frames;
         if ret < 0 {
-            eprintln!("{input_name}: {}", decoder.error());
+            eprintln!("{}: {}", input_name.to_string_lossy(), decoder.error());
             return ExitCode::FAILURE;
         }
     }
 
     if frames == 0 {
-        eprintln!("{input_name}: no image data found");
+        eprintln!("{}: no image data found", input_name.to_string_lossy());
         return ExitCode::FAILURE;
     }
     if let Some(expected) = expected_md5 {

@@ -142,11 +142,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wpd-capi"
+version = "0.1.0"
+dependencies = [
+ "wpd",
+]
+
+[[package]]
 name = "wpd-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "wpd",
+ "wpd-capi",
 ]
 
 [[package]]

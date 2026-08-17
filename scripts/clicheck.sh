@@ -89,9 +89,12 @@ files=(wpd-test-data/*.webp)
 # Everything that never gets as far as opening an image: the usage text, and
 # each way of being rejected by the argument parser.
 check --help
+check --help=x
 check -h
 check
 check --info
+check --info=x
+check --subframe=x
 check --fmt
 check --fmt bogus
 check -f bogus
@@ -126,6 +129,13 @@ check --info -- "${files[0]}"
 check -hf argb
 check --cpumask bogus
 check --cpumask -1
+check --inf "${files[0]}"
+check --mux ppm "${files[0]}" @OUT@
+check --verif 000102030405060708090a0b0c0d0e0f "${files[0]}"
+check --rep 2 --info "${files[0]}"
+check --loop 2 --info "${files[0]}"
+check --cpum none --info "${files[0]}"
+check --s "${files[0]}"
 
 # The cpu mask parser takes names and strtoul's three bases.
 for mask in none 0 1 0x10 010 4294967295; do
