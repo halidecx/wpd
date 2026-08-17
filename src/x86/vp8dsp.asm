@@ -1,4 +1,4 @@
-%include "asm/x86/x86util.asm"
+%include "ext/x86/x86util.asm"
 
 SECTION_RODATA
 

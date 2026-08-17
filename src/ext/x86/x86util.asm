@@ -7,7 +7,7 @@
 %define FORCE_VEX_ENCODING 1
 %endif
 
-%include "asm/x86/x86inc.asm"
+%include "ext/x86/x86inc.asm"
 
 %define PASS8ROWS(base, base3, stride, stride3) \
     [base],           [base  + stride],   [base  + 2*stride], [base3], \
