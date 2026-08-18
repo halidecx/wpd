@@ -327,6 +327,24 @@ api_test = executable(
 )
 test('api', api_test, suite: 'api')
 
+# The Rust unit tests. Nothing else runs them, and they are where the RFC 1321
+# vectors that tests/md5.c used to carry now live.
+test(
+  'cargo',
+  cargo,
+  args: [
+    'test',
+    '--manifest-path', source_root / 'Cargo.toml',
+    '--target-dir', meson.current_build_dir() / 'cargo-test',
+    '--workspace',
+    '--no-default-features',
+    '--features', ','.join(cargo_features),
+  ],
+  env: cargo_env,
+  suite: 'cargo',
+  timeout: 600,
+)
+
 if get_option('nightly_size')
   api_sealed_test = executable(
     'test_api_sealed',
