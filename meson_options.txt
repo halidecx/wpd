@@ -34,3 +34,8 @@ option('trim_dsp',
   choices: ['true', 'false', 'if-release'],
   value: 'if-release',
   description: 'Eliminate DSP functions the build target cannot reach')
+
+option('nightly_size',
+  type: 'boolean',
+  value: false,
+  description: 'Rebuild Rust std with nightly for the smallest minsize artifacts')

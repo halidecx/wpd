@@ -48,6 +48,10 @@ codegen-units = 1
 lto = "fat"
 panic = "abort"
 
+[profile.minsize]
+inherits = "release"
+opt-level = "s"
+
 [profile.release.package."*"]
 opt-level = 3
 

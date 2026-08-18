@@ -70,7 +70,8 @@ lib_c_args += asm_c_args
 
 # Eliminate DSP fallbacks the build target can never reach (dav1d's trim_dsp).
 trim_dsp = get_option('trim_dsp') == 'true' or (
-  get_option('trim_dsp') == 'if-release' and get_option('buildtype') == 'release')
+  get_option('trim_dsp') == 'if-release' and
+  get_option('buildtype') in ['release', 'minsize'])
 trim_c_args = trim_dsp ? ['-DWPD_TRIM_DSP_FUNCTIONS=1'] : []
 
 if asm_enabled
@@ -122,7 +123,7 @@ endif
 cargo_profile = {
   'release': 'release',
   'debugoptimized': 'debugopt',
-  'minsize': 'release',
+  'minsize': 'minsize',
   'debug': 'debug',
   'plain': 'release',
 }.get(get_option('buildtype'), 'release')
@@ -132,6 +133,13 @@ cargo_profile = {
 # CFLAGS. Rust's own sanitizer support needs nightly and is wired up in
 # scripts/sanitize.sh.
 cargo_env = environment()
+if get_option('nightly_size')
+  if get_option('buildtype') != 'minsize'
+    error('nightly_size requires buildtype=minsize')
+  endif
+  cargo_env.set('RUSTUP_TOOLCHAIN', 'nightly')
+  cargo_env.set('WPD_NIGHTLY_SIZE', '1')
+endif
 if get_option('b_sanitize') != 'none'
   cargo_env.append('CFLAGS', '-fsanitize=' + get_option('b_sanitize'),
                    '-fno-omit-frame-pointer', separator: ' ')
@@ -201,20 +209,43 @@ foreach s : wpd_symbols
   undefined_args += '-Wl,-u,' + symbol_prefix + s
 endforeach
 
+libwpd_sealed = disabler()
+if get_option('nightly_size')
+  libwpd_sealed_artifacts = custom_target(
+    'libwpd_sealed',
+    output: ['libwpd-sealed.a'],
+    command: [
+      files('tools/seal_archive.sh'),
+      libwpd,
+      '@OUTPUT@',
+      export_format,
+      wpd_symbols,
+    ],
+    depends: libwpd_artifacts,
+    build_by_default: true,
+    install: true,
+    install_dir: get_option('libdir'),
+  )
+  libwpd_sealed = libwpd_sealed_artifacts[0]
+endif
+
 # The export list already says the header's symbols are the only ones that
 # leave, and `-u` names the same list, which is exactly the root set a
 # dead-strip wants: anything the public API cannot reach goes. rustc emits one
 # section per function, so what it drops is whole functions -- half the
-# library, most of it std's, none of it ours. Release only, and only if the
-# linker takes the flag, so a toolchain without one still gets a library.
-if cargo_profile == 'release'
+# library, most of it std's, none of it ours. Optimised profiles only, and only
+# if the linker takes the flag, so a toolchain without one still gets a library.
+if cargo_profile in ['release', 'minsize']
   if host_machine.system() == 'darwin'
     gc_args = cc.get_supported_link_arguments('-Wl,-dead_strip')
+    strip_args = cc.get_supported_link_arguments('-Wl,-x')
   else
     gc_args = cc.get_supported_link_arguments('-Wl,--gc-sections')
+    strip_args = cc.get_supported_link_arguments('-Wl,-s')
   endif
 else
   gc_args = []
+  strip_args = []
 endif
 
 # Meson owns the versioned names, the soname or install_name, and the symlinks
@@ -222,7 +253,7 @@ endif
 libwpd_shared = shared_library(
   'wpd',
   files('src/shared_stub.c'),
-  link_args: undefined_args + gc_args + [
+  link_args: undefined_args + gc_args + strip_args + [
     export_flag + meson.current_build_dir() / 'wpd.exports',
     meson.current_build_dir() / 'libwpd.a',
   ],
@@ -258,6 +289,19 @@ wpd_dep = declare_dependency(
   ],
 )
 
+if get_option('nightly_size')
+  wpd_sealed_dep = declare_dependency(
+    link_with: libwpd_sealed,
+    include_directories: inc_dirs,
+    compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
+    dependencies: [
+      cc.find_library('m', required: false),
+      dependency('threads', required: false),
+      cc.find_library('dl', required: false),
+    ],
+  )
+endif
+
 # The tool is a cargo binary linked directly to the Rust decoder crate.
 wpd = custom_target(
   'wpd-tool',
@@ -283,6 +327,16 @@ api_test = executable(
   install: false,
 )
 test('api', api_test, suite: 'api')
+
+if get_option('nightly_size')
+  api_sealed_test = executable(
+    'test_api_sealed',
+    files('tests/api.c'),
+    dependencies: [wpd_sealed_dep, cc.find_library('m', required: false)],
+    install: false,
+  )
+  test('api_sealed', api_sealed_test, suite: 'api')
+endif
 
 fuzz_test = executable(
   'test_fuzz',

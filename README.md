@@ -65,6 +65,40 @@ Architecture-specific assembly is enabled automatically. Use
 `meson setup build -Denable_asm=false` for a portable build with the safe Rust
 fallbacks alone.
 
+### Size-optimized builds
+
+The default release build optimizes for decode speed. It strips the production
+command-line tool and shared library, and removes unneeded symbols, debug data,
+and LLVM bitcode from the staged C static archive.
+
+For smaller stable artifacts at a measured 3--6% decode-speed cost on the
+reference corpus, use Cargo's size optimizer:
+
+```sh
+meson setup build-minsize --buildtype=minsize
+meson compile -C build-minsize
+```
+
+For the smallest artifacts, rebuild Rust's standard library with nightly. This
+also removes panic formatting and panic location details, so it is intended for
+production deployments where an internal panic may abort without diagnostics. It
+requires the nightly toolchain and its `rust-src` component:
+
+```sh
+rustup component add rust-src --toolchain nightly
+meson setup build-tiny --buildtype=minsize -Dnightly_size=true
+meson compile -C build-tiny
+```
+
+This mode installs two static archives. `libwpd.a` is the normal archive: a
+downstream linker selects archive members for the APIs an application uses, so
+it is the flexible choice for native consumers. `libwpd-sealed.a` is smaller:
+the build roots every public API, removes everything unreachable from that set,
+and packs the result into one archive member. It is intended for deployments
+where package size matters more than downstream API-level dead-code selection.
+The sealed archive is linked explicitly instead of the `-lwpd` that `wpd.pc`
+provides; `wpd.pc` continues to select the normal archive.
+
 ## Library
 
 `meson install -C build` installs the shared and static libraries, the single

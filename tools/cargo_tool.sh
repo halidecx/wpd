@@ -36,6 +36,26 @@ debug)   ;;
 esac
 [ $# -gt 0 ] && args+=(--features "$(IFS=,; echo "$*")")
 
-cargo "${args[@]}"
+cargo_args=()
+built="$OUT_DIR/cargo-tool/$PROFILE"
+if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
+    target="$(rustc -vV | awk '/^host: / { print $2 }')"
+    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none"
+    cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
+    args+=(--target "$target")
+    built="$OUT_DIR/cargo-tool/$target/$PROFILE"
+fi
 
-cp -f "$OUT_DIR/cargo-tool/$PROFILE/wpd" "$OUT_DIR/wpd"
+cargo "${cargo_args[@]}" "${args[@]}"
+
+cp -f "$built/wpd" "$OUT_DIR/wpd"
+
+if [ "$PROFILE" = release ] || [ "$PROFILE" = minsize ]; then
+    slim="$OUT_DIR/wpd.slim"
+    if "${STRIP:-strip}" --strip-all -o "$slim" "$OUT_DIR/wpd" 2>/dev/null; then
+        mv -f "$slim" "$OUT_DIR/wpd"
+    else
+        rm -f "$slim"
+        echo "cargo_tool.sh: cannot strip wpd, shipping it whole" >&2
+    fi
+fi

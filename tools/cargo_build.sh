@@ -16,14 +16,23 @@ debug)   ;;
 esac
 [ $# -gt 0 ] && args+=(--features "$(IFS=,; echo "$*")")
 
-cargo "${args[@]}"
-
+cargo_args=()
 built="$OUT_DIR/cargo-$NAME/$PROFILE"
+if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
+    target="$(rustc -vV | awk '/^host: / { print $2 }')"
+    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none"
+    cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
+    args+=(--target "$target")
+    built="$OUT_DIR/cargo-$NAME/$target/$PROFILE"
+fi
+
+cargo "${cargo_args[@]}" "${args[@]}"
+
 cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"
 
-if [ "$PROFILE" = release ]; then
+if [ "$PROFILE" = release ] || [ "$PROFILE" = minsize ]; then
     slim="$OUT_DIR/lib$NAME.a.slim"
-    if "${STRIP:-strip}" --strip-debug \
+    if "${STRIP:-strip}" --strip-unneeded \
            --remove-section=.llvmbc --remove-section=.llvmcmd \
            -o "$slim" "$OUT_DIR/lib$NAME.a" 2>/dev/null; then
         mv -f "$slim" "$OUT_DIR/lib$NAME.a"
