@@ -4,7 +4,8 @@ A fast WebP decoder.
 
 ## Code
 
-- **Do not add comments**, unless they are for a public header file
+- Comments are fine anywhere; write them where they say something the code
+  cannot say for itself
 - No intrinsics; you may add them to test performance, but they should
   ultimately be re-written to handwritten assembly that matches or exceeds their
   performance
