@@ -110,6 +110,21 @@ pub enum Target {
     Alpha,
 }
 
+/// Picks one of the two output pictures.
+///
+/// Taking them as two arguments rather than reaching into the decoder is what
+/// lets the callers that have already split their borrows keep them split.
+fn target_picture<'p>(
+    target: Target,
+    argb: &'p mut Picture,
+    alpha_argb: &'p mut Picture,
+) -> &'p mut Picture {
+    match target {
+        Target::Argb => argb,
+        Target::Alpha => alpha_argb,
+    }
+}
+
 /// The alpha plane an ALPH chunk can be written straight into.
 ///
 /// This is caller memory, so it arrives per call rather than being kept in the
@@ -476,10 +491,7 @@ impl Decoder {
         if role != ROLE_ARGB {
             return &mut self.image[role].storage;
         }
-        match target {
-            Target::Argb => &mut self.argb,
-            Target::Alpha => &mut self.alpha_argb,
-        }
+        target_picture(target, &mut self.argb, &mut self.alpha_argb)
     }
 
     fn update_canvas_size(&mut self, w: i32, h: i32) {
@@ -509,62 +521,31 @@ impl Decoder {
         (bits, w, h)
     }
 
-    fn decode_entropy_image(&mut self, buf: &[u8]) -> Result<()> {
+    /// One entropy-coded pixel per block of the picture: the shape the two
+    /// spatial transforms and the meta prefix-code map are all written in.
+    fn parse_subimage(&mut self, role: usize, buf: &[u8]) -> Result<()> {
         let (block_bits, blocks_w, blocks_h) = self.parse_block_size(buf);
 
-        self.decode_entropy_coded_image(
-            ROLE_ENTROPY,
-            Target::Argb,
-            buf,
-            blocks_w,
-            blocks_h,
-        )?;
+        self.decode_entropy_coded_image(role, Target::Argb, buf, blocks_w, blocks_h)?;
+        self.image[role].size_reduction = block_bits;
+        Ok(())
+    }
 
-        let img = &mut self.image[ROLE_ENTROPY];
+    fn decode_entropy_image(&mut self, buf: &[u8]) -> Result<()> {
+        self.parse_subimage(ROLE_ENTROPY, buf)?;
 
-        img.size_reduction = block_bits;
-
-        let mut max = 0u32;
+        let img = &self.image[ROLE_ENTROPY];
+        let mut max = 0;
 
         for y in 0..img.storage.height as usize {
             let row = &img.storage.data[y * img.storage.stride..]
                 [..img.storage.width as usize];
 
             for px in row {
-                let b = px.to_ne_bytes();
-
-                max = max.max(u32::from(b[1]) << 8 | u32::from(b[2]));
+                max = max.max(entropy::group_index(*px));
             }
         }
         self.nb_huffman_groups = max as usize + 1;
-        Ok(())
-    }
-
-    fn parse_transform_predictor(&mut self, buf: &[u8]) -> Result<()> {
-        let (block_bits, blocks_w, blocks_h) = self.parse_block_size(buf);
-
-        self.decode_entropy_coded_image(
-            ROLE_PREDICTOR,
-            Target::Argb,
-            buf,
-            blocks_w,
-            blocks_h,
-        )?;
-        self.image[ROLE_PREDICTOR].size_reduction = block_bits;
-        Ok(())
-    }
-
-    fn parse_transform_color(&mut self, buf: &[u8]) -> Result<()> {
-        let (block_bits, blocks_w, blocks_h) = self.parse_block_size(buf);
-
-        self.decode_entropy_coded_image(
-            ROLE_COLOR,
-            Target::Argb,
-            buf,
-            blocks_w,
-            blocks_h,
-        )?;
-        self.image[ROLE_COLOR].size_reduction = block_bits;
         Ok(())
     }
 
@@ -785,10 +766,7 @@ impl Decoder {
             ..
         } = &mut head[ROLE_ARGB];
         let ent = &tail[0];
-        let pic = match target {
-            Target::Argb => argb,
-            Target::Alpha => alpha_argb,
-        };
+        let pic = target_picture(target, argb, alpha_argb);
 
         entropy::decode_pixels(entropy::Args {
             gb,
@@ -866,8 +844,8 @@ impl Decoder {
             self.nb_transforms += 1;
 
             match transform {
-                Transform::Predictor => self.parse_transform_predictor(buf)?,
-                Transform::Color => self.parse_transform_color(buf)?,
+                Transform::Predictor => self.parse_subimage(ROLE_PREDICTOR, buf)?,
+                Transform::Color => self.parse_subimage(ROLE_COLOR, buf)?,
                 Transform::ColorIndexing => self.parse_transform_color_indexing(buf)?,
                 Transform::SubtractGreen => {}
             }
@@ -1027,10 +1005,7 @@ impl Decoder {
             reduced_width,
             ..
         } = self;
-        let pic = match target {
-            Target::Argb => argb,
-            Target::Alpha => alpha_argb,
-        };
+        let pic = target_picture(target, argb, alpha_argb);
         let modes = &image[ROLE_PREDICTOR];
 
         transform::predictor_rows(
@@ -1057,10 +1032,7 @@ impl Decoder {
             reduced_width,
             ..
         } = self;
-        let pic = match target {
-            Target::Argb => argb,
-            Target::Alpha => alpha_argb,
-        };
+        let pic = target_picture(target, argb, alpha_argb);
         let mult = &image[ROLE_COLOR];
 
         transform::color_rows(
@@ -1093,10 +1065,7 @@ impl Decoder {
             reduced_width,
             ..
         } = self;
-        let pic = match target {
-            Target::Argb => argb,
-            Target::Alpha => alpha_argb,
-        };
+        let pic = target_picture(target, argb, alpha_argb);
         let pal = &image[ROLE_PALETTE];
         let width = pic.width as usize;
         let height = pic.height;
@@ -1129,10 +1098,7 @@ impl Decoder {
             alpha_dst_used,
             ..
         } = self;
-        let pic = match target {
-            Target::Argb => argb,
-            Target::Alpha => alpha_argb,
-        };
+        let pic = target_picture(target, argb, alpha_argb);
         let pal = &image[ROLE_PALETTE];
 
         transform::color_indexing_alpha(

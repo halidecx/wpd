@@ -29,6 +29,55 @@ pub struct Entropy<'a> {
     pub bits: u32,
 }
 
+/// The meta prefix-code index one pixel of the entropy image carries: the red
+/// and green bytes of the `[A, R, G, B]` the C read with `rb32`.
+#[inline(always)]
+pub fn group_index(pixel: u32) -> u32 {
+    let b = pixel.to_ne_bytes();
+
+    u32::from(b[1]) << 8 | u32::from(b[2])
+}
+
+/// Which meta prefix code covers a given pixel.
+///
+/// One group over the whole image is the common case and the one worth the
+/// branch: `bits` is zero there, so [`Self::mask`] never lets the pixel loops
+/// call [`Self::at`] past the first column.
+struct GroupMap<'a> {
+    entropy: Option<Entropy<'a>>,
+    bits: u32,
+    /// ANDed with x by the caller; zero means "look the group up again".
+    mask: i32,
+}
+
+impl<'a> GroupMap<'a> {
+    fn new(entropy: Option<Entropy<'a>>, groups: &[HTreeGroup]) -> Self {
+        let bits = match (&entropy, groups.len() > 1) {
+            (Some(e), true) => e.bits,
+            _ => 0,
+        };
+        let mask = if bits != 0 { (1 << bits) - 1 } else { !0 };
+
+        Self {
+            entropy,
+            bits,
+            mask,
+        }
+    }
+
+    #[inline(always)]
+    fn at(&self, x: i32, y: i32) -> usize {
+        match &self.entropy {
+            Some(e) if self.bits != 0 => {
+                let off = (y >> e.bits) as usize * e.stride + (x >> e.bits) as usize;
+
+                group_index(e.data[off]) as usize
+            }
+            _ => 0,
+        }
+    }
+}
+
 pub struct Args<'a, 'e> {
     pub gb: &'a mut BitReader,
     pub buf: &'a [u8],
@@ -293,27 +342,8 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
     let total = width * pic.height.max(0) as usize;
     let pixels = &mut pic.data[..total];
     let multi_group = groups.len() > 1;
-    let huff_bits = match (&entropy, multi_group) {
-        (Some(e), true) => e.bits,
-        _ => 0,
-    };
-    let huff_mask: i32 = if huff_bits != 0 {
-        (1 << huff_bits) - 1
-    } else {
-        !0
-    };
-
-    let group_at = |x: i32, y: i32| -> usize {
-        match &entropy {
-            Some(e) if huff_bits != 0 => {
-                let off = (y >> e.bits) as usize * e.stride + (x >> e.bits) as usize;
-                let b = e.data[off].to_ne_bytes();
-
-                usize::from(b[1]) << 8 | usize::from(b[2])
-            }
-            _ => 0,
-        }
-    };
+    let map = GroupMap::new(entropy, groups);
+    let huff_mask = map.mask;
 
     let mut pos = 0usize;
     let mut cached = 0usize;
@@ -362,7 +392,7 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
         }
 
         if x & huff_mask == 0 {
-            hgi = group_at(x, y);
+            hgi = map.at(x, y);
             hg = &groups[hgi];
             trees = resolve(hg, arena);
         }
@@ -442,7 +472,7 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                 y += 1;
             }
             if multi_group && x & huff_mask != 0 {
-                hgi = group_at(x, y);
+                hgi = map.at(x, y);
                 hg = &groups[hgi];
                 trees = resolve(hg, arena);
             }
@@ -511,27 +541,8 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
 
     let total = pixels.len();
     let multi_group = groups.len() > 1;
-    let huff_bits = match (&entropy, multi_group) {
-        (Some(e), true) => e.bits,
-        _ => 0,
-    };
-    let huff_mask: i32 = if huff_bits != 0 {
-        (1 << huff_bits) - 1
-    } else {
-        !0
-    };
-
-    let group_at = |x: i32, y: i32| -> usize {
-        match &entropy {
-            Some(e) if huff_bits != 0 => {
-                let off = (y >> e.bits) as usize * e.stride + (x >> e.bits) as usize;
-                let b = e.data[off].to_ne_bytes();
-
-                usize::from(b[1]) << 8 | usize::from(b[2])
-            }
-            _ => 0,
-        }
-    };
+    let map = GroupMap::new(entropy, groups);
+    let huff_mask = map.mask;
 
     let mut pos = 0usize;
     let mut x = 0i32;
@@ -543,7 +554,7 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
             return Err(Error::InvalidData);
         }
         if x & huff_mask == 0 {
-            trees = resolve(&groups[group_at(x, y)], arena);
+            trees = resolve(&groups[map.at(x, y)], arena);
         }
         gb.fill(buf);
 
@@ -592,7 +603,7 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
                 y += 1;
             }
             if multi_group && x & huff_mask != 0 {
-                trees = resolve(&groups[group_at(x, y)], arena);
+                trees = resolve(&groups[map.at(x, y)], arena);
             }
         } else {
             crate::log::error("color cache not found");
