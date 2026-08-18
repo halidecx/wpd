@@ -21,10 +21,12 @@ use crate::blit::{self, Rect};
 use crate::dsp::vp8l::Vp8lDsp;
 
 use super::convert::{
-    convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
+    convert_to_argb, format_bpp, format_is_packed, format_is_premultiplied,
+    premultiply_after_pack,
 };
-use super::{Decoder, Source, ANIM_SUBFRAME, TAG_ALPH, TAG_VP8, TAG_VP8L};
+use super::{Decoder, Source, ANIM_SUBFRAME};
 use crate::bits::{rl24, rl32};
+use crate::container::{TAG_ALPH, TAG_VP8, TAG_VP8L};
 use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::premultiply_argb_row;
@@ -275,7 +277,7 @@ impl<'a> Decoder<'a> {
             prev_pos_x: self.prev_pos_x,
             prev_pos_y: self.prev_pos_y,
             prev_key_frame: self.prev_key_frame,
-            premultiply: self.premultiply != 0,
+            premultiply: format_is_premultiplied(self.out_format),
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva,
@@ -450,7 +452,7 @@ impl<'a> Decoder<'a> {
         'sub' is four-byte ARGB here whatever the frame coded as. A sub-frame
         feeds no canvas, so a two-byte output premultiplies after the pack
         instead, in the four-bit domain a still uses. */
-        if self.premultiply != 0
+        if format_is_premultiplied(self.out_format)
             && !(premultiply_after_pack(self.animation, self.anim_mode)
                 && format_bpp(self.out_format) == 2)
         {

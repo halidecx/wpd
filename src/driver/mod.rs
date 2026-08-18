@@ -15,7 +15,9 @@ pub mod export;
 pub mod lossy;
 
 use crate::bits::rl32;
-use crate::container::{Coding, Info, Raw, Scan, METADATA_NB};
+use crate::container::{
+    Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
+};
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::dsp::yuv::YuvDsp;
 use crate::error::Error;
@@ -82,7 +84,6 @@ pub struct Decoder<'a> {
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
     pub(crate) out_format: i32,
-    pub(crate) premultiply: i32,
     pub(crate) options: Options,
 
     pub(crate) input: Input<'a>,
@@ -158,7 +159,7 @@ pub struct Decoder<'a> {
     pub(crate) eos: bool,
     pub(crate) headers_valid: bool,
     pub(crate) truncated: bool,
-    pub(crate) input_mode: u8,
+    pub(crate) input_mode: InputMode,
 
     /// Where a decode's rows go when the caller supplied its own memory.
     ///
@@ -177,23 +178,27 @@ pub struct Decoder<'a> {
 pub(crate) const ALPHA_COMPRESSION_NONE: i32 = 0;
 pub(crate) const ALPHA_COMPRESSION_VP8L: i32 = 1;
 
-/// A four-character chunk tag as it sits in the file, which is what `MKTAG`
-/// built.
-const fn mktag(a: u8, b: u8, c: u8, d: u8) -> u32 {
-    a as u32 | (b as u32) << 8 | (c as u32) << 16 | (d as u32) << 24
-}
-
-pub(crate) const TAG_ALPH: u32 = mktag(b'A', b'L', b'P', b'H');
-pub(crate) const TAG_VP8: u32 = mktag(b'V', b'P', b'8', b' ');
-pub(crate) const TAG_VP8L: u32 = mktag(b'V', b'P', b'8', b'L');
-const TAG_ANMF: u32 = mktag(b'A', b'N', b'M', b'F');
-
 /// As long a failure message as the C's fixed buffer held.
 const ERROR_MAX: usize = 128;
 
 /// Black in the CCIR range the YUVA canvas is cleared to, which is what
 /// `RGB_TO_Y_CCIR(0, 0, 0)` and its two companions came to.
 const CLEAR_YUVA_BLACK: [u8; 4] = [16, 128, 128, 0];
+
+/// How a stream has been fed so far.
+///
+/// The two ways of growing a stream cannot be mixed — one appends bytes the
+/// decoder then owns and may drop, the other hands over a longer prefix of the
+/// same file — and which one has been used is what the mixing and rewind
+/// guards ask about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum InputMode {
+    /// Nothing added since the stream was opened.
+    #[default]
+    Untouched,
+    Append,
+    Update,
+}
 
 /// Which picture an export reads.
 ///
@@ -301,7 +306,6 @@ impl<'a> Decoder<'a> {
             ldsp: Vp8lDsp::new(),
             ydsp: YuvDsp::new(),
             out_format: FORMAT_NONE,
-            premultiply: 0,
             options: Options::default(),
 
             input: Input::new(),
@@ -371,7 +375,7 @@ impl<'a> Decoder<'a> {
             eos: false,
             headers_valid: false,
             truncated: false,
-            input_mode: 0,
+            input_mode: InputMode::Untouched,
 
             sink: None,
 
@@ -484,7 +488,7 @@ impl<'a> Decoder<'a> {
     pub(crate) fn export_settings(&self) -> ExportSettings {
         ExportSettings {
             out_format: self.out_format,
-            premultiply: self.premultiply != 0,
+            premultiply: format_is_premultiplied(self.out_format),
             animation: self.animation,
             anim_mode: self.anim_mode,
             duration: self.frame_duration,
@@ -705,7 +709,7 @@ impl<'a> Decoder<'a> {
         self.eos = false;
         self.headers_valid = false;
         self.truncated = false;
-        self.input_mode = 0;
+        self.input_mode = InputMode::Untouched;
         self.animation = false;
         self.canvas_width = 0;
         self.canvas_height = 0;
@@ -852,12 +856,12 @@ impl<'a> Decoder<'a> {
         if data.is_empty() {
             return Ok(());
         }
-        if self.input_mode == 2 {
+        if self.input_mode == InputMode::Update {
             return Err(
                 self.fail("cannot mix append and update", Error::InvalidArgument)
             );
         }
-        self.input_mode = 1;
+        self.input_mode = InputMode::Append;
 
         self.file_compact();
         if let Err(e) = self.input.append(data) {
@@ -893,7 +897,7 @@ impl<'a> Decoder<'a> {
         if !self.streaming || self.eos {
             return Err(self.fail("not an open stream", Error::InvalidArgument));
         }
-        if self.input_mode == 1 {
+        if self.input_mode == InputMode::Append {
             return Err(
                 self.fail("cannot mix append and update", Error::InvalidArgument)
             );
@@ -901,7 +905,7 @@ impl<'a> Decoder<'a> {
         if len < self.input.size() {
             return Err(self.fail("stream buffer shrank", Error::InvalidArgument));
         }
-        self.input_mode = 2;
+        self.input_mode = InputMode::Update;
         install(&mut self.input);
 
         match self.rescan_headers() {
@@ -915,7 +919,7 @@ impl<'a> Decoder<'a> {
     }
 
     pub fn take_update_buffer(&mut self) -> Result<Vec<u8>, Error> {
-        if !self.streaming || self.eos || self.input_mode != 2 {
+        if !self.streaming || self.eos || self.input_mode != InputMode::Update {
             return Err(self.fail("not an updated stream", Error::InvalidArgument));
         }
         Ok(self.input.take_owned())
@@ -987,7 +991,6 @@ impl Decoder<'_> {
             return Err(self.fail("invalid output format", Error::InvalidArgument));
         }
         self.out_format = format;
-        self.premultiply = i32::from(format_is_premultiplied(format));
         Ok(())
     }
 
@@ -1052,7 +1055,7 @@ impl Decoder<'_> {
         }
         /* wpd_decoder_append() is free to drop bytes the decoder has moved
         past, so the head of the file may simply no longer be there. */
-        if self.input_mode == 1 {
+        if self.input_mode == InputMode::Append {
             return Err(
                 self.fail("an appended stream cannot be rewound", Error::Unsupported)
             );

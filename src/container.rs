@@ -35,12 +35,12 @@ const VP8X_FLAG_ALPHA: u8 = 0x10;
 
 const TAG_RIFF: u32 = u32::from_le_bytes(*b"RIFF");
 const TAG_WEBP: u32 = u32::from_le_bytes(*b"WEBP");
-const TAG_VP8: u32 = u32::from_le_bytes(*b"VP8 ");
-const TAG_VP8L: u32 = u32::from_le_bytes(*b"VP8L");
+pub(crate) const TAG_VP8: u32 = u32::from_le_bytes(*b"VP8 ");
+pub(crate) const TAG_VP8L: u32 = u32::from_le_bytes(*b"VP8L");
 const TAG_VP8X: u32 = u32::from_le_bytes(*b"VP8X");
-const TAG_ALPH: u32 = u32::from_le_bytes(*b"ALPH");
+pub(crate) const TAG_ALPH: u32 = u32::from_le_bytes(*b"ALPH");
 const TAG_ANIM: u32 = u32::from_le_bytes(*b"ANIM");
-const TAG_ANMF: u32 = u32::from_le_bytes(*b"ANMF");
+pub(crate) const TAG_ANMF: u32 = u32::from_le_bytes(*b"ANMF");
 
 /// The order of the `WPDMetadata` bits, so a bit indexes these tables.
 const META_TAG: [u32; METADATA_NB] = [
