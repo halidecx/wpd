@@ -877,14 +877,12 @@ pub unsafe extern "C" fn wpd_decode(
             status = WPD_ERR_NO_MEMORY;
             break;
         }
-        owner.plane[p].resize(bytes, 0);
         for y in 0..h {
             let src = unsafe { decoded.data[p].offset(y as isize * decoded.stride[p]) };
 
-            unsafe {
-                ptr::copy_nonoverlapping(src, owner.plane[p][y * w..].as_mut_ptr(), w);
-            }
+            owner.plane[p].extend_from_slice(unsafe { slice::from_raw_parts(src, w) });
         }
+        debug_assert_eq!(owner.plane[p].len(), bytes);
         out.data[p] = owner.plane[p].as_ptr();
         out.stride[p] = w as isize;
     }
