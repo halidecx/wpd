@@ -228,330 +228,60 @@ unsafe extern "C" fn argb_to_uv_c(
     }
 }
 
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-mod asm {
-    use super::*;
+/// Overlays whatever [`wpd::asm::yuv::raw_table`] selected for the running
+/// CPU. The symbols and the instruction-set ladder both live in the core, so
+/// this table and the decoder's cannot pick different kernels.
+#[cfg(all(
+    feature = "asm",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn init_asm(dsp: &mut WPDYUVDSP) {
+    let t = wpd::asm::yuv::raw_table(wpd::cpu::flags());
 
-    #[cfg(target_arch = "x86_64")]
-    mod wide {
-        use super::*;
-
-        macro_rules! upsample_syms {
-            ($($rust:ident = $sym:literal,)*) => {
-                extern "C" {
-                    $(#[link_name = $sym]
-                      pub fn $rust(
-                          top_y: *const u8,
-                          bottom_y: *const u8,
-                          top_u: *const u8,
-                          top_v: *const u8,
-                          cur_u: *const u8,
-                          cur_v: *const u8,
-                          top_dst: *mut u8,
-                          bottom_dst: *mut u8,
-                          num_blocks: c_int,
-                      );)*
-                }
-            };
-        }
-
-        upsample_syms! {
-            argb_sse2 = "ff_upsample_block_argb_sse2",
-            rgba_sse2 = "ff_upsample_block_rgba_sse2",
-            bgra_sse2 = "ff_upsample_block_bgra_sse2",
-            rgb_sse2 = "ff_upsample_block_rgb_sse2",
-            bgr_sse2 = "ff_upsample_block_bgr_sse2",
-            rgb_ssse3 = "ff_upsample_block_rgb_ssse3",
-            bgr_ssse3 = "ff_upsample_block_bgr_ssse3",
-            argb_avx2 = "ff_upsample_block_argb_avx2",
-            rgba_avx2 = "ff_upsample_block_rgba_avx2",
-            bgra_avx2 = "ff_upsample_block_bgra_avx2",
-            rgb_avx2 = "ff_upsample_block_rgb_avx2",
-            bgr_avx2 = "ff_upsample_block_bgr_avx2",
-        }
-
-        extern "C" {
-            pub fn ff_argb_to_yuv444_ssse3(
-                y: *mut u8,
-                u: *mut u8,
-                v: *mut u8,
-                argb: *const u8,
-                n: c_int,
-            );
-            pub fn ff_argb_to_yuv444_avx2(
-                y: *mut u8,
-                u: *mut u8,
-                v: *mut u8,
-                argb: *const u8,
-                n: c_int,
-            );
-            pub fn ff_argb_to_uv_avx2(
-                u: *mut u8,
-                v: *mut u8,
-                argb: *const u8,
-                argb_stride: isize,
-                n: c_int,
-                weight_alpha: c_int,
-            );
-        }
+    if let Some(v) = t.upsample_block {
+        dsp.upsample_block = v;
     }
-
-    extern "C" {
-        pub fn ff_dispatch_alpha_first_sse2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_dispatch_alpha_last_sse2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_dispatch_alpha_first_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_dispatch_alpha_last_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb565_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba4444_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr565_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra4444_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb565_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba4444_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr565_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra4444_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_premultiply_row_ssse3(rgba: *mut u8, alpha_first: c_int, n: c_int);
-        pub fn ff_premultiply_row_avx2(rgba: *mut u8, alpha_first: c_int, n: c_int);
-        pub fn ff_premultiply_row_4444_ssse3(rgba4444: *mut u8, n: c_int);
-        pub fn ff_premultiply_row_4444_avx2(rgba4444: *mut u8, n: c_int);
-        pub fn ff_premultiply_row_4444_swap_ssse3(bgra4444: *mut u8, n: c_int);
-        pub fn ff_premultiply_row_4444_swap_avx2(bgra4444: *mut u8, n: c_int);
-        pub fn ff_argb_to_y_ssse3(y: *mut u8, argb: *const u8, n: c_int);
-        pub fn ff_argb_to_y_avx2(y: *mut u8, argb: *const u8, n: c_int);
+    if let Some(v) = t.upsample_rgb {
+        dsp.upsample_block[LAYOUT_RGB] = v;
     }
-
-    pub fn init(dsp: &mut WPDYUVDSP) {
-        let flags = wpd::cpu::flags();
-
-        if flags.contains(wpd::cpu::CpuFlags::SSE2) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                dsp.upsample_block = [
-                    wide::argb_sse2,
-                    wide::rgba_sse2,
-                    wide::bgra_sse2,
-                    wide::rgb_sse2,
-                    wide::bgr_sse2,
-                ];
-            }
-            dsp.dispatch_alpha_first = ff_dispatch_alpha_first_sse2;
-            dsp.dispatch_alpha_last = ff_dispatch_alpha_last_sse2;
-        }
-
-        if flags.contains(wpd::cpu::CpuFlags::SSSE3) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                dsp.upsample_block[LAYOUT_RGB] = wide::rgb_ssse3;
-                dsp.upsample_block[LAYOUT_BGR] = wide::bgr_ssse3;
-                dsp.argb_to_yuv444 = wide::ff_argb_to_yuv444_ssse3;
-            }
-            dsp.pack_rgba = ff_pack_rgba_ssse3;
-            dsp.pack_bgra = ff_pack_bgra_ssse3;
-            dsp.pack_rgb = ff_pack_rgb_ssse3;
-            dsp.pack_bgr = ff_pack_bgr_ssse3;
-            dsp.pack_rgb565 = ff_pack_rgb565_ssse3;
-            dsp.pack_rgba4444 = ff_pack_rgba4444_ssse3;
-            dsp.pack_bgr565 = ff_pack_bgr565_ssse3;
-            dsp.pack_bgra4444 = ff_pack_bgra4444_ssse3;
-            dsp.premultiply_row = ff_premultiply_row_ssse3;
-            dsp.premultiply_row_4444 = ff_premultiply_row_4444_ssse3;
-            dsp.premultiply_row_4444_swap = ff_premultiply_row_4444_swap_ssse3;
-            dsp.argb_to_y = ff_argb_to_y_ssse3;
-        }
-
-        if flags.contains(wpd::cpu::CpuFlags::AVX2) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                dsp.upsample_block = [
-                    wide::argb_avx2,
-                    wide::rgba_avx2,
-                    wide::bgra_avx2,
-                    wide::rgb_avx2,
-                    wide::bgr_avx2,
-                ];
-                dsp.argb_to_yuv444 = wide::ff_argb_to_yuv444_avx2;
-                dsp.argb_to_uv = wide::ff_argb_to_uv_avx2;
-            }
-            dsp.dispatch_alpha_first = ff_dispatch_alpha_first_avx2;
-            dsp.dispatch_alpha_last = ff_dispatch_alpha_last_avx2;
-            dsp.pack_rgba = ff_pack_rgba_avx2;
-            dsp.pack_bgra = ff_pack_bgra_avx2;
-            dsp.pack_rgb = ff_pack_rgb_avx2;
-            dsp.pack_bgr = ff_pack_bgr_avx2;
-            dsp.pack_rgb565 = ff_pack_rgb565_avx2;
-            dsp.pack_rgba4444 = ff_pack_rgba4444_avx2;
-            dsp.pack_bgr565 = ff_pack_bgr565_avx2;
-            dsp.pack_bgra4444 = ff_pack_bgra4444_avx2;
-            dsp.premultiply_row = ff_premultiply_row_avx2;
-            dsp.premultiply_row_4444 = ff_premultiply_row_4444_avx2;
-            dsp.premultiply_row_4444_swap = ff_premultiply_row_4444_swap_avx2;
-            dsp.argb_to_y = ff_argb_to_y_avx2;
-        }
+    if let Some(v) = t.upsample_bgr {
+        dsp.upsample_block[LAYOUT_BGR] = v;
     }
-}
-
-#[cfg(all(feature = "asm", target_arch = "aarch64"))]
-mod asm {
-    use super::*;
-
-    extern "C" {
-        pub fn ff_upsample_block_argb_neon(
-            top_y: *const u8,
-            bottom_y: *const u8,
-            top_u: *const u8,
-            top_v: *const u8,
-            cur_u: *const u8,
-            cur_v: *const u8,
-            top_dst: *mut u8,
-            bottom_dst: *mut u8,
-            blocks: c_int,
-        );
-        pub fn ff_upsample_block_rgba_neon(
-            top_y: *const u8,
-            bottom_y: *const u8,
-            top_u: *const u8,
-            top_v: *const u8,
-            cur_u: *const u8,
-            cur_v: *const u8,
-            top_dst: *mut u8,
-            bottom_dst: *mut u8,
-            blocks: c_int,
-        );
-        pub fn ff_upsample_block_bgra_neon(
-            top_y: *const u8,
-            bottom_y: *const u8,
-            top_u: *const u8,
-            top_v: *const u8,
-            cur_u: *const u8,
-            cur_v: *const u8,
-            top_dst: *mut u8,
-            bottom_dst: *mut u8,
-            blocks: c_int,
-        );
-        pub fn ff_upsample_block_rgb_neon(
-            top_y: *const u8,
-            bottom_y: *const u8,
-            top_u: *const u8,
-            top_v: *const u8,
-            cur_u: *const u8,
-            cur_v: *const u8,
-            top_dst: *mut u8,
-            bottom_dst: *mut u8,
-            blocks: c_int,
-        );
-        pub fn ff_upsample_block_bgr_neon(
-            top_y: *const u8,
-            bottom_y: *const u8,
-            top_u: *const u8,
-            top_v: *const u8,
-            cur_u: *const u8,
-            cur_v: *const u8,
-            top_dst: *mut u8,
-            bottom_dst: *mut u8,
-            blocks: c_int,
-        );
-        pub fn ff_dispatch_alpha_first_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_dispatch_alpha_last_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgb565_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_rgba4444_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgr565_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_pack_bgra4444_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_premultiply_row_neon(rgba: *mut u8, alpha_first: c_int, n: c_int);
-        pub fn ff_premultiply_row_4444_neon(rgba4444: *mut u8, n: c_int);
-        pub fn ff_premultiply_row_4444_swap_neon(bgra4444: *mut u8, n: c_int);
-        pub fn ff_argb_to_y_neon(y: *mut u8, argb: *const u8, n: c_int);
-        pub fn ff_argb_to_yuv444_neon(
-            y: *mut u8,
-            u: *mut u8,
-            v: *mut u8,
-            argb: *const u8,
-            n: c_int,
-        );
-        pub fn ff_argb_to_uv_neon(
-            u: *mut u8,
-            v: *mut u8,
-            argb: *const u8,
-            argb_stride: isize,
-            n: c_int,
-            weight_alpha: c_int,
-        );
+    if let Some(v) = t.dispatch_alpha_first {
+        dsp.dispatch_alpha_first = v;
     }
-
-    #[cfg(wpd_asm_dotprod)]
-    extern "C" {
-        pub fn ff_argb_to_y_neon_dotprod(y: *mut u8, argb: *const u8, n: c_int);
-        pub fn ff_argb_to_yuv444_neon_dotprod(
-            y: *mut u8,
-            u: *mut u8,
-            v: *mut u8,
-            argb: *const u8,
-            n: c_int,
-        );
+    if let Some(v) = t.dispatch_alpha_last {
+        dsp.dispatch_alpha_last = v;
     }
+    if let Some(v) = t.packers {
+        let [rgba, bgra, rgb, bgr, rgb565, rgba4444, bgr565, bgra4444] = v;
 
-    #[cfg(wpd_asm_i8mm)]
-    extern "C" {
-        pub fn ff_argb_to_y_neon_i8mm(y: *mut u8, argb: *const u8, n: c_int);
-        pub fn ff_argb_to_yuv444_neon_i8mm(
-            y: *mut u8,
-            u: *mut u8,
-            v: *mut u8,
-            argb: *const u8,
-            n: c_int,
-        );
+        dsp.pack_rgba = rgba;
+        dsp.pack_bgra = bgra;
+        dsp.pack_rgb = rgb;
+        dsp.pack_bgr = bgr;
+        dsp.pack_rgb565 = rgb565;
+        dsp.pack_rgba4444 = rgba4444;
+        dsp.pack_bgr565 = bgr565;
+        dsp.pack_bgra4444 = bgra4444;
     }
-
-    pub fn init(dsp: &mut WPDYUVDSP) {
-        let flags = wpd::cpu::flags();
-
-        if !flags.contains(wpd::cpu::CpuFlags::NEON) {
-            return;
-        }
-        dsp.upsample_block = [
-            ff_upsample_block_argb_neon,
-            ff_upsample_block_rgba_neon,
-            ff_upsample_block_bgra_neon,
-            ff_upsample_block_rgb_neon,
-            ff_upsample_block_bgr_neon,
-        ];
-        dsp.dispatch_alpha_first = ff_dispatch_alpha_first_neon;
-        dsp.dispatch_alpha_last = ff_dispatch_alpha_last_neon;
-        dsp.pack_rgba = ff_pack_rgba_neon;
-        dsp.pack_bgra = ff_pack_bgra_neon;
-        dsp.pack_rgb = ff_pack_rgb_neon;
-        dsp.pack_bgr = ff_pack_bgr_neon;
-        dsp.pack_rgb565 = ff_pack_rgb565_neon;
-        dsp.pack_rgba4444 = ff_pack_rgba4444_neon;
-        dsp.pack_bgr565 = ff_pack_bgr565_neon;
-        dsp.pack_bgra4444 = ff_pack_bgra4444_neon;
-        dsp.premultiply_row = ff_premultiply_row_neon;
-        dsp.premultiply_row_4444 = ff_premultiply_row_4444_neon;
-        dsp.premultiply_row_4444_swap = ff_premultiply_row_4444_swap_neon;
-        dsp.argb_to_y = ff_argb_to_y_neon;
-        dsp.argb_to_yuv444 = ff_argb_to_yuv444_neon;
-        dsp.argb_to_uv = ff_argb_to_uv_neon;
-
-        #[cfg(wpd_asm_dotprod)]
-        if flags.contains(wpd::cpu::CpuFlags::DOTPROD) {
-            dsp.argb_to_y = ff_argb_to_y_neon_dotprod;
-            dsp.argb_to_yuv444 = ff_argb_to_yuv444_neon_dotprod;
-        }
-        #[cfg(wpd_asm_i8mm)]
-        if flags.contains(wpd::cpu::CpuFlags::I8MM) {
-            dsp.argb_to_y = ff_argb_to_y_neon_i8mm;
-            dsp.argb_to_yuv444 = ff_argb_to_yuv444_neon_i8mm;
-        }
+    if let Some(v) = t.premultiply_row {
+        dsp.premultiply_row = v;
+    }
+    if let Some(v) = t.premultiply_row_4444 {
+        dsp.premultiply_row_4444 = v;
+    }
+    if let Some(v) = t.premultiply_row_4444_swap {
+        dsp.premultiply_row_4444_swap = v;
+    }
+    if let Some(v) = t.argb_to_y {
+        dsp.argb_to_y = v;
+    }
+    if let Some(v) = t.argb_to_yuv444 {
+        dsp.argb_to_yuv444 = v;
+    }
+    if let Some(v) = t.argb_to_uv {
+        dsp.argb_to_uv = v;
     }
 }
 
@@ -589,7 +319,7 @@ impl WPDYUVDSP {
             feature = "asm",
             any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
         ))]
-        asm::init(&mut table);
+        init_asm(&mut table);
 
         table
     }

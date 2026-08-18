@@ -148,6 +148,20 @@ fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
+/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
+/// the caller's fallback in place. The C table holds the raw symbols, so it
+/// cannot share the safe wrappers above — but it shares the selection, which
+/// is the part that has to agree with what the decoder actually runs.
+#[derive(Default)]
+pub struct RawTable {
+    pub pred_add: Option<[PredAddRaw; 14]>,
+    pub extract_green: Option<BlendRowRaw>,
+    pub map_color32: Option<MapColorRaw>,
+    pub blend_row_argb: Option<BlendRowRaw>,
+    pub blend_row_argb_premult: Option<BlendRowRaw>,
+    pub color_row: Option<ColorRowRaw>,
+}
+
 /// The fourteen predictors of one instruction set, in table order.
 macro_rules! pred_table {
     ($set:ident) => {
@@ -166,6 +180,29 @@ macro_rules! pred_table {
             pred_add::<$set::Pred11, true>,
             pred_add::<$set::Pred12, true>,
             pred_add::<$set::Pred13, true>,
+        ]
+    };
+}
+
+/// The same fourteen, unwrapped, for the C ABI table.
+#[allow(unused_macros)]
+macro_rules! raw_pred_table {
+    ($set:ident) => {
+        [
+            $set::Pred0::F,
+            $set::Pred1::F,
+            $set::Pred2::F,
+            $set::Pred3::F,
+            $set::Pred4::F,
+            $set::Pred5::F,
+            $set::Pred6::F,
+            $set::Pred7::F,
+            $set::Pred8::F,
+            $set::Pred9::F,
+            $set::Pred10::F,
+            $set::Pred11::F,
+            $set::Pred12::F,
+            $set::Pred13::F,
         ]
     };
 }
@@ -236,6 +273,24 @@ mod arch {
             dsp.blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::SSSE3) {
+            t.color_row = Some(ssse3::ColorRow::F);
+            t.blend_row_argb_premult = Some(ssse3::BlendPremult::F);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            t.pred_add = Some(raw_pred_table!(avx2));
+            t.map_color32 = Some(avx2::MapColor::F);
+            t.color_row = Some(avx2::ColorRow::F);
+            t.extract_green = Some(avx2::ExtractGreen::F);
+            t.blend_row_argb = Some(avx2::Blend::F);
+            t.blend_row_argb_premult = Some(avx2::BlendPremult::F);
+        }
+        t
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -282,6 +337,20 @@ mod arch {
         dsp.blend_row_argb = blend_row::<neon::Blend>;
         dsp.blend_row_argb_premult = blend_row::<neon::BlendPremult>;
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if !flags.contains(CpuFlags::NEON) {
+            return t;
+        }
+        t.pred_add = Some(raw_pred_table!(neon));
+        t.map_color32 = Some(neon::MapColor::F);
+        t.extract_green = Some(neon::ExtractGreen::F);
+        t.blend_row_argb = Some(neon::Blend::F);
+        t.blend_row_argb_premult = Some(neon::BlendPremult::F);
+        t
+    }
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
@@ -289,6 +358,10 @@ mod arch {
     use super::*;
 
     pub fn init(_dsp: &mut Vp8lDsp, _flags: CpuFlags) {}
+
+    pub fn raw_table(_flags: CpuFlags) -> RawTable {
+        RawTable::default()
+    }
 }
 
 pub use arch::*;

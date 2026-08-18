@@ -89,162 +89,37 @@ pred_entry!(left_dc16_c, k::pred_left_dc::<16>, 16, 0, 1);
 pred_entry!(top_dc16_c, k::pred_top_dc::<16>, 16, 1, 0);
 pred_entry!(dc128_16_c, k::pred_dc128::<16>, 16, 0, 0);
 
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8pred::{avx2, sse, sse2, ssse3, Raw};
-    use wpd::cpu::CpuFlags;
+/// Overlays whatever [`wpd::asm::vp8pred::raw_table`] selected for the running
+/// CPU. The symbols and the instruction-set ladder both live in the core, so
+/// this table and the decoder's cannot pick different kernels.
+#[cfg(all(
+    feature = "asm",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm"
+    )
+))]
+fn init_asm(p: &mut VP8PredContext) {
+    let t = wpd::asm::vp8pred::raw_table(wpd::cpu::flags());
 
-    pub fn init(p: &mut VP8PredContext) {
-        let flags = wpd::cpu::flags();
-
-        if flags.contains(CpuFlags::SSE) {
-            p.pred16x16[VERT] = sse::Vert16::F;
+    for (slot, entry) in p.pred4x4.iter_mut().zip(t.pred4x4) {
+        if let Some(f) = entry {
+            *slot = f;
         }
-
-        if flags.contains(CpuFlags::SSE2) {
-            p.pred4x4[DIAG_DOWN_LEFT] = sse2::DownLeft4::F;
-            p.pred4x4[DIAG_DOWN_RIGHT] = sse2::DownRight4::F;
-            p.pred4x4[VERT_RIGHT] = sse2::VertRight4::F;
-            p.pred4x4[HOR_DOWN] = sse2::HorDown4::F;
-            p.pred4x4[HOR_UP] = sse2::HorUp4::F;
-            p.pred4x4[DC4] = sse2::Dc4::F;
-            p.pred4x4[TM4] = sse2::Tm4::F;
-            p.pred4x4[VERT4] = sse2::Vert4::F;
-            p.pred4x4[HOR4] = sse2::Hor4::F;
-
-            p.pred8x8[DC] = sse2::Dc8::F;
-            p.pred8x8[HOR] = sse2::Hor8::F;
-            p.pred8x8[VERT] = sse2::Vert8::F;
-            p.pred8x8[PLANE] = sse2::Tm8::F;
-            p.pred8x8[TOP_DC] = sse2::TopDc8::F;
-            p.pred8x8[LEFT_DC] = sse2::LeftDc8::F;
-
-            p.pred16x16[HOR] = sse2::Hor16::F;
-            p.pred16x16[DC] = sse2::Dc16::F;
-            p.pred16x16[PLANE] = sse2::Tm16::F;
-            p.pred16x16[TOP_DC] = sse2::TopDc16::F;
-            p.pred16x16[LEFT_DC] = sse2::LeftDc16::F;
+    }
+    for (slot, entry) in p.pred8x8.iter_mut().zip(t.pred8x8) {
+        if let Some(f) = entry {
+            *slot = f;
         }
-
-        if flags.contains(CpuFlags::SSSE3) {
-            p.pred4x4[TM4] = ssse3::Tm4::F;
-            p.pred4x4[VERT_LEFT] = ssse3::VertLeft4::F;
-
-            p.pred8x8[HOR] = ssse3::Hor8::F;
-            p.pred8x8[PLANE] = ssse3::Tm8::F;
-            p.pred8x8[TOP_DC] = ssse3::TopDc8::F;
-            p.pred8x8[LEFT_DC] = ssse3::LeftDc8::F;
-
-            p.pred16x16[PLANE] = ssse3::Tm16::F;
-            p.pred16x16[HOR] = ssse3::Hor16::F;
-            p.pred16x16[DC] = ssse3::Dc16::F;
-            p.pred16x16[TOP_DC] = ssse3::TopDc16::F;
-            p.pred16x16[LEFT_DC] = ssse3::LeftDc16::F;
-        }
-
-        if flags.contains(CpuFlags::AVX2) {
-            p.pred16x16[PLANE] = avx2::Tm16::F;
+    }
+    for (slot, entry) in p.pred16x16.iter_mut().zip(t.pred16x16) {
+        if let Some(f) = entry {
+            *slot = f;
         }
     }
 }
-
-#[cfg(all(feature = "asm", target_arch = "aarch64"))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8pred::{neon, Raw};
-    use wpd::cpu::CpuFlags;
-
-    pub fn init(p: &mut VP8PredContext) {
-        if !wpd::cpu::flags().contains(CpuFlags::NEON) {
-            return;
-        }
-
-        p.pred4x4[TM4] = neon::Tm4::F;
-        p.pred4x4[DC4] = neon::Dc4::F;
-        p.pred4x4[VERT4] = neon::Vert4::F;
-        p.pred4x4[HOR4] = neon::Hor4::F;
-        p.pred4x4[DIAG_DOWN_LEFT] = neon::DownLeft4::F;
-        p.pred4x4[DIAG_DOWN_RIGHT] = neon::DownRight4::F;
-        p.pred4x4[VERT_LEFT] = neon::VertLeft4::F;
-        p.pred4x4[VERT_RIGHT] = neon::VertRight4::F;
-        p.pred4x4[HOR_UP] = neon::HorUp4::F;
-        p.pred4x4[HOR_DOWN] = neon::HorDown4::F;
-
-        p.pred8x8[VERT] = neon::Vert8::F;
-        p.pred8x8[DC] = neon::Dc8::F;
-        p.pred8x8[PLANE] = neon::Tm8::F;
-
-        p.pred16x16[DC] = neon::Dc16::F;
-        p.pred16x16[VERT] = neon::Vert16::F;
-        p.pred16x16[HOR] = neon::Hor16::F;
-        p.pred16x16[PLANE] = neon::Tm16::F;
-    }
-}
-
-#[cfg(all(feature = "asm", target_arch = "arm"))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8pred::{neon, Raw};
-    use wpd::cpu::CpuFlags;
-
-    pub fn init(p: &mut VP8PredContext) {
-        if !wpd::cpu::flags().contains(CpuFlags::NEON) {
-            return;
-        }
-
-        p.pred8x8[VERT] = neon::Vert8::F;
-        p.pred8x8[HOR] = neon::Hor8::F;
-        p.pred8x8[DC_128] = neon::Dc128_8::F;
-
-        p.pred16x16[DC] = neon::Dc16::F;
-        p.pred16x16[VERT] = neon::Vert16::F;
-        p.pred16x16[HOR] = neon::Hor16::F;
-        p.pred16x16[LEFT_DC] = neon::LeftDc16::F;
-        p.pred16x16[TOP_DC] = neon::TopDc16::F;
-        p.pred16x16[DC_128] = neon::Dc128_16::F;
-    }
-}
-
-/* The mode indices are the table's layout, so they are stated whether or not
-this build has an assembly entry that names one. */
-#[allow(dead_code)]
-/// `VP8Pred4x4Mode`.
-const VERT4: usize = 0;
-#[allow(dead_code)]
-const HOR4: usize = 1;
-#[allow(dead_code)]
-const DC4: usize = 2;
-#[allow(dead_code)]
-const DIAG_DOWN_LEFT: usize = 3;
-#[allow(dead_code)]
-const DIAG_DOWN_RIGHT: usize = 4;
-#[allow(dead_code)]
-const VERT_RIGHT: usize = 5;
-#[allow(dead_code)]
-const HOR_DOWN: usize = 6;
-#[allow(dead_code)]
-const VERT_LEFT: usize = 7;
-#[allow(dead_code)]
-const HOR_UP: usize = 8;
-#[allow(dead_code)]
-const TM4: usize = 9;
-
-/// `VP8Pred8x8Mode`.
-#[allow(dead_code)]
-const DC: usize = 0;
-#[allow(dead_code)]
-const HOR: usize = 1;
-#[allow(dead_code)]
-const VERT: usize = 2;
-#[allow(dead_code)]
-const PLANE: usize = 3;
-#[allow(dead_code)]
-const LEFT_DC: usize = 4;
-#[allow(dead_code)]
-const TOP_DC: usize = 5;
-#[allow(dead_code)]
-const DC_128: usize = 6;
 
 /// Fills in `p` with the best implementation the running CPU allows.
 ///
@@ -296,7 +171,7 @@ pub unsafe extern "C" fn ff_vp8_pred_init(p: *mut VP8PredContext) {
             target_arch = "arm"
         )
     ))]
-    asm::init(&mut table);
+    init_asm(&mut table);
 
     unsafe { p.write(table) }
 }

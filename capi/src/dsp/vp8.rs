@@ -364,221 +364,54 @@ unsafe extern "C" fn idct_dc_add4uv_c(
     }
 }
 
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8::{avx2, sse2, sse2_idct, sse4, ssse3, Raw};
-    use wpd::cpu::CpuFlags;
+/// Overlays whatever [`wpd::asm::vp8::raw_table`] selected for the running
+/// CPU. The symbols, the macroblock-edge compositions and the instruction-set
+/// ladder all live in the core, so this table and the decoder's cannot pick
+/// different kernels. The scalar entries above stay here, since they compose
+/// this table's own fallbacks.
+#[cfg(all(
+    feature = "asm",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "arm"
+    )
+))]
+fn init_asm(c: &mut VP8DSPContext) {
+    let t = wpd::asm::vp8::raw_table(wpd::cpu::flags());
 
-    h_simple_mb!(h_simple_mb_sse2, sse2::HSimple::F);
-    v_simple_mb!(v_simple_mb_sse2, sse2::VSimple::F);
-    h_mb!(h16_mb_sse2, sse2::H16::F, sse2::H16Inner::F);
-    v_mb!(v16_mb_sse2, sse2::V16::F, sse2::V16Inner::F);
-    h_uv_mb!(h8uv_mb_sse2, sse2::H8uv::F, sse2::H8uvInner::F);
-    v_uv_mb!(v8uv_mb_sse2, sse2::V8uv::F, sse2::V8uvInner::F);
-
-    h_simple_mb!(h_simple_mb_ssse3, ssse3::HSimple::F);
-    v_simple_mb!(v_simple_mb_ssse3, ssse3::VSimple::F);
-    h_mb!(h16_mb_ssse3, ssse3::H16::F, ssse3::H16Inner::F);
-    v_mb!(v16_mb_ssse3, ssse3::V16::F, ssse3::V16Inner::F);
-    h_uv_mb!(h8uv_mb_ssse3, ssse3::H8uv::F, ssse3::H8uvInner::F);
-    v_uv_mb!(v8uv_mb_ssse3, ssse3::V8uv::F, ssse3::V8uvInner::F);
-
-    pub fn init(c: &mut VP8DSPContext) {
-        let flags = wpd::cpu::flags();
-
-        if flags.contains(CpuFlags::SSE2) {
-            c.vp8_idct_add = sse2_idct::Add::F;
-            c.vp8_luma_dc_wht = sse2_idct::Wht::F;
-            c.vp8_idct_dc_add = sse2_idct::DcAdd::F;
-            c.vp8_idct_dc_add4y = sse2_idct::DcAdd4y::F;
-            c.vp8_idct_dc_add4uv = sse2_idct::DcAdd4uv::F;
-
-            c.vp8_v_loop_filter_simple = sse2::VSimple::F;
-            c.vp8_h_loop_filter_simple = sse2::HSimple::F;
-            c.vp8_v_loop_filter_simple_mb = v_simple_mb_sse2;
-            c.vp8_h_loop_filter_simple_mb = h_simple_mb_sse2;
-
-            c.vp8_v_loop_filter16y_inner = sse2::V16Inner::F;
-            c.vp8_h_loop_filter16y_inner = sse2::H16Inner::F;
-            c.vp8_v_loop_filter8uv_inner = sse2::V8uvInner::F;
-            c.vp8_h_loop_filter8uv_inner = sse2::H8uvInner::F;
-
-            c.vp8_v_loop_filter16y = sse2::V16::F;
-            c.vp8_h_loop_filter16y = sse2::H16::F;
-            c.vp8_v_loop_filter8uv = sse2::V8uv::F;
-            c.vp8_h_loop_filter8uv = sse2::H8uv::F;
-
-            c.vp8_h_loop_filter16y_mb = h16_mb_sse2;
-            c.vp8_h_loop_filter8uv_mb = h8uv_mb_sse2;
-            c.vp8_v_loop_filter16y_mb = v16_mb_sse2;
-            c.vp8_v_loop_filter8uv_mb = v8uv_mb_sse2;
-        }
-
-        if flags.contains(CpuFlags::SSSE3) {
-            c.vp8_v_loop_filter_simple = ssse3::VSimple::F;
-            c.vp8_h_loop_filter_simple = ssse3::HSimple::F;
-            c.vp8_v_loop_filter_simple_mb = v_simple_mb_ssse3;
-            c.vp8_h_loop_filter_simple_mb = h_simple_mb_ssse3;
-
-            c.vp8_v_loop_filter16y_inner = ssse3::V16Inner::F;
-            c.vp8_h_loop_filter16y_inner = ssse3::H16Inner::F;
-            c.vp8_v_loop_filter8uv_inner = ssse3::V8uvInner::F;
-            c.vp8_h_loop_filter8uv_inner = ssse3::H8uvInner::F;
-
-            c.vp8_v_loop_filter16y = ssse3::V16::F;
-            c.vp8_h_loop_filter16y = ssse3::H16::F;
-            c.vp8_v_loop_filter8uv = ssse3::V8uv::F;
-            c.vp8_h_loop_filter8uv = ssse3::H8uv::F;
-
-            c.vp8_h_loop_filter16y_mb = h16_mb_ssse3;
-            c.vp8_h_loop_filter8uv_mb = h8uv_mb_ssse3;
-            c.vp8_v_loop_filter16y_mb = v16_mb_ssse3;
-            c.vp8_v_loop_filter8uv_mb = v8uv_mb_ssse3;
-        }
-
-        if flags.contains(CpuFlags::SSE41) {
-            c.vp8_idct_dc_add = sse4::DcAdd::F;
-            c.vp8_luma_dc_wht = sse4::Wht::F;
-        }
-
-        if flags.contains(CpuFlags::AVX2) {
-            c.vp8_v_loop_filter8uv_inner = avx2::V8uvInner::F;
-            c.vp8_v_loop_filter_simple_mb = avx2::VSimpleMb::F;
-            c.vp8_h_loop_filter_simple_mb = avx2::HSimpleMb::F;
-            c.vp8_h_loop_filter16y_mb = wpd::asm::vp8::h16_mb_avx2;
-            c.vp8_h_loop_filter8uv_mb = wpd::asm::vp8::h8uv_mb_avx2;
-        }
-    }
-}
-
-#[cfg(all(feature = "asm", target_arch = "aarch64"))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8::{fused, neon, neon_idct, Raw};
-    use wpd::cpu::CpuFlags;
-
-    v_simple_mb!(v_simple_mb_neon, neon::VSimple::F);
-    v_mb!(v16_mb_neon, neon::V16::F, neon::V16Inner::F);
-    v_uv_mb!(v8uv_mb_neon, neon::V8uv::F, neon::V8uvInner::F);
-
-    pub fn init(c: &mut VP8DSPContext) {
-        if !wpd::cpu::flags().contains(CpuFlags::NEON) {
-            return;
-        }
-
-        c.vp8_luma_dc_wht = neon_idct::Wht::F;
-        c.vp8_idct_add = neon_idct::Add::F;
-        c.vp8_idct_dc_add = neon_idct::DcAdd::F;
-        c.vp8_idct_dc_add4y = neon_idct::DcAdd4y::F;
-        c.vp8_idct_dc_add4uv = neon_idct::DcAdd4uv::F;
-
-        c.vp8_v_loop_filter16y = neon::V16::F;
-        c.vp8_h_loop_filter16y = neon::H16::F;
-        c.vp8_v_loop_filter8uv = neon::V8uv::F;
-        c.vp8_h_loop_filter8uv = neon::H8uv::F;
-
-        c.vp8_v_loop_filter16y_inner = neon::V16Inner::F;
-        c.vp8_h_loop_filter16y_inner = neon::H16Inner::F;
-        c.vp8_v_loop_filter8uv_inner = neon::V8uvInner::F;
-        c.vp8_h_loop_filter8uv_inner = neon::H8uvInner::F;
-
-        c.vp8_h_loop_filter16y_mb = fused::H16Mb::F;
-        c.vp8_h_loop_filter8uv_mb = fused::H8uvMb::F;
-        c.vp8_v_loop_filter16y_mb = v16_mb_neon;
-        c.vp8_v_loop_filter8uv_mb = v8uv_mb_neon;
-
-        c.vp8_v_loop_filter_simple = neon::VSimple::F;
-        c.vp8_h_loop_filter_simple = neon::HSimple::F;
-        c.vp8_h_loop_filter_simple_mb = fused::HSimpleMb::F;
-        c.vp8_v_loop_filter_simple_mb = v_simple_mb_neon;
-    }
-}
-
-#[cfg(all(feature = "asm", target_arch = "arm"))]
-mod asm {
-    use super::*;
-    use wpd::asm::vp8::{neon, neon_idct, Raw};
-    use wpd::cpu::CpuFlags;
-
-    h_simple_mb!(h_simple_mb_neon, neon::HSimple::F);
-    v_simple_mb!(v_simple_mb_neon, neon::VSimple::F);
-    h_mb!(h16_mb_neon, neon::H16::F, neon::H16Inner::F);
-    v_mb!(v16_mb_neon, neon::V16::F, neon::V16Inner::F);
-    h_uv_mb!(h8uv_mb_neon, neon::H8uv::F, neon::H8uvInner::F);
-    v_uv_mb!(v8uv_mb_neon, neon::V8uv::F, neon::V8uvInner::F);
-
-    fn init_neon(c: &mut VP8DSPContext) {
-        c.vp8_luma_dc_wht = neon_idct::Wht::F;
-        c.vp8_idct_add = neon_idct::Add::F;
-        c.vp8_idct_dc_add = neon_idct::DcAdd::F;
-        c.vp8_idct_dc_add4y = neon_idct::DcAdd4y::F;
-        c.vp8_idct_dc_add4uv = neon_idct::DcAdd4uv::F;
-
-        c.vp8_v_loop_filter16y = neon::V16::F;
-        c.vp8_h_loop_filter16y = neon::H16::F;
-        c.vp8_v_loop_filter8uv = neon::V8uv::F;
-        c.vp8_h_loop_filter8uv = neon::H8uv::F;
-
-        c.vp8_v_loop_filter16y_inner = neon::V16Inner::F;
-        c.vp8_h_loop_filter16y_inner = neon::H16Inner::F;
-        c.vp8_v_loop_filter8uv_inner = neon::V8uvInner::F;
-        c.vp8_h_loop_filter8uv_inner = neon::H8uvInner::F;
-
-        c.vp8_h_loop_filter16y_mb = h16_mb_neon;
-        c.vp8_h_loop_filter8uv_mb = h8uv_mb_neon;
-        c.vp8_v_loop_filter16y_mb = v16_mb_neon;
-        c.vp8_v_loop_filter8uv_mb = v8uv_mb_neon;
-
-        c.vp8_v_loop_filter_simple = neon::VSimple::F;
-        c.vp8_h_loop_filter_simple = neon::HSimple::F;
-        c.vp8_h_loop_filter_simple_mb = h_simple_mb_neon;
-        c.vp8_v_loop_filter_simple_mb = v_simple_mb_neon;
+    macro_rules! take {
+        ($($field:ident => $slot:ident,)*) => {
+            $(if let Some(f) = t.$field {
+                c.$slot = f;
+            })*
+        };
     }
 
-    #[cfg(wpd_asm_armv6)]
-    mod armv6 {
-        use super::*;
-        use wpd::asm::vp8::{armv6, armv6_idct, armv6_wht_dc};
-
-        h_simple_mb!(h_simple_mb_armv6, armv6::HSimple::F);
-        v_simple_mb!(v_simple_mb_armv6, armv6::VSimple::F);
-
-        pub fn init(c: &mut VP8DSPContext) {
-            c.vp8_luma_dc_wht = armv6_idct::Wht::F;
-            c.vp8_luma_dc_wht_dc = armv6_wht_dc::WhtDc::F;
-            c.vp8_idct_add = armv6_idct::Add::F;
-            c.vp8_idct_dc_add = armv6_idct::DcAdd::F;
-            c.vp8_idct_dc_add4y = armv6_idct::DcAdd4y::F;
-            c.vp8_idct_dc_add4uv = armv6_idct::DcAdd4uv::F;
-
-            c.vp8_v_loop_filter16y = armv6::V16::F;
-            c.vp8_h_loop_filter16y = armv6::H16::F;
-            c.vp8_v_loop_filter8uv = armv6::V8uv::F;
-            c.vp8_h_loop_filter8uv = armv6::H8uv::F;
-
-            c.vp8_v_loop_filter16y_inner = armv6::V16Inner::F;
-            c.vp8_h_loop_filter16y_inner = armv6::H16Inner::F;
-            c.vp8_v_loop_filter8uv_inner = armv6::V8uvInner::F;
-            c.vp8_h_loop_filter8uv_inner = armv6::H8uvInner::F;
-
-            c.vp8_v_loop_filter_simple = armv6::VSimple::F;
-            c.vp8_h_loop_filter_simple = armv6::HSimple::F;
-            c.vp8_h_loop_filter_simple_mb = h_simple_mb_armv6;
-            c.vp8_v_loop_filter_simple_mb = v_simple_mb_armv6;
-        }
-    }
-
-    pub fn init(c: &mut VP8DSPContext) {
-        let flags = wpd::cpu::flags();
-
-        #[cfg(wpd_asm_armv6)]
-        if flags.contains(CpuFlags::ARMV6) {
-            armv6::init(c);
-        }
-        if flags.contains(CpuFlags::NEON) {
-            init_neon(c);
-        }
+    take! {
+        luma_dc_wht => vp8_luma_dc_wht,
+        luma_dc_wht_dc => vp8_luma_dc_wht_dc,
+        idct_add => vp8_idct_add,
+        idct_dc_add => vp8_idct_dc_add,
+        idct_dc_add4y => vp8_idct_dc_add4y,
+        idct_dc_add4uv => vp8_idct_dc_add4uv,
+        v_loop_filter16y => vp8_v_loop_filter16y,
+        h_loop_filter16y => vp8_h_loop_filter16y,
+        v_loop_filter8uv => vp8_v_loop_filter8uv,
+        h_loop_filter8uv => vp8_h_loop_filter8uv,
+        v_loop_filter16y_inner => vp8_v_loop_filter16y_inner,
+        h_loop_filter16y_inner => vp8_h_loop_filter16y_inner,
+        v_loop_filter8uv_inner => vp8_v_loop_filter8uv_inner,
+        h_loop_filter8uv_inner => vp8_h_loop_filter8uv_inner,
+        v_loop_filter16y_mb => vp8_v_loop_filter16y_mb,
+        h_loop_filter16y_mb => vp8_h_loop_filter16y_mb,
+        v_loop_filter8uv_mb => vp8_v_loop_filter8uv_mb,
+        h_loop_filter8uv_mb => vp8_h_loop_filter8uv_mb,
+        v_loop_filter_simple => vp8_v_loop_filter_simple,
+        h_loop_filter_simple => vp8_h_loop_filter_simple,
+        v_loop_filter_simple_mb => vp8_v_loop_filter_simple_mb,
+        h_loop_filter_simple_mb => vp8_h_loop_filter_simple_mb,
     }
 }
 
@@ -629,7 +462,7 @@ pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
             target_arch = "arm"
         )
     ))]
-    asm::init(&mut table);
+    init_asm(&mut table);
 
     unsafe { c.write(table) }
 }

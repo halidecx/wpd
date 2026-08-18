@@ -507,6 +507,249 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
     unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
 }
 
+/// The same four compositions as [`mb_from`], [`uv_mb_from`] and
+/// [`simple_mb_from`], but producing raw entry points for the C ABI table,
+/// which cannot call the safe wrappers. The step arithmetic is stated once
+/// here rather than once per crate.
+macro_rules! composed_mb {
+    ($set:ident) => {
+        /// # Safety
+        ///
+        /// As the C prototype: `dst` is the horizontal edge of a plane with
+        /// two rows before it and fourteen from it, sixteen columns wide.
+        pub unsafe extern "C" fn v_simple_mb(
+            dst: *mut u8,
+            stride: isize,
+            mbedge_lim: c_int,
+            bedge_lim: c_int,
+        ) {
+            let f = <$set::VSimple as Raw>::F;
+
+            unsafe {
+                f(dst, stride, mbedge_lim);
+                f(dst.offset(4 * stride), stride, bedge_lim);
+                f(dst.offset(8 * stride), stride, bedge_lim);
+                f(dst.offset(12 * stride), stride, bedge_lim);
+            }
+        }
+
+        /// # Safety
+        ///
+        /// As [`v_simple_mb`], transposed: two columns before `dst` and
+        /// fourteen from it, in each of sixteen rows.
+        pub unsafe extern "C" fn h_simple_mb(
+            dst: *mut u8,
+            stride: isize,
+            mbedge_lim: c_int,
+            bedge_lim: c_int,
+        ) {
+            let f = <$set::HSimple as Raw>::F;
+
+            unsafe {
+                f(dst, stride, mbedge_lim);
+                f(dst.add(4), stride, bedge_lim);
+                f(dst.add(8), stride, bedge_lim);
+                f(dst.add(12), stride, bedge_lim);
+            }
+        }
+
+        /// # Safety
+        ///
+        /// As the C prototype: `dst` is the horizontal edge of a plane with
+        /// four rows before it and sixteen from it, sixteen columns wide.
+        pub unsafe extern "C" fn v16_mb(
+            dst: *mut u8,
+            stride: isize,
+            mbedge_e: c_int,
+            bedge_e: c_int,
+            flim_i: c_int,
+            hev: c_int,
+        ) {
+            let (edge, inner) = (<$set::V16 as Raw>::F, <$set::V16Inner as Raw>::F);
+
+            unsafe {
+                edge(dst, stride, mbedge_e, flim_i, hev);
+                inner(dst.offset(4 * stride), stride, bedge_e, flim_i, hev);
+                inner(dst.offset(8 * stride), stride, bedge_e, flim_i, hev);
+                inner(dst.offset(12 * stride), stride, bedge_e, flim_i, hev);
+            }
+        }
+
+        /// # Safety
+        ///
+        /// As [`v16_mb`], transposed: four columns before `dst` and sixteen
+        /// from it, in each of sixteen rows.
+        pub unsafe extern "C" fn h16_mb(
+            dst: *mut u8,
+            stride: isize,
+            mbedge_e: c_int,
+            bedge_e: c_int,
+            flim_i: c_int,
+            hev: c_int,
+        ) {
+            let (edge, inner) = (<$set::H16 as Raw>::F, <$set::H16Inner as Raw>::F);
+
+            unsafe {
+                edge(dst, stride, mbedge_e, flim_i, hev);
+                inner(dst.add(4), stride, bedge_e, flim_i, hev);
+                inner(dst.add(8), stride, bedge_e, flim_i, hev);
+                inner(dst.add(12), stride, bedge_e, flim_i, hev);
+            }
+        }
+
+        /// # Safety
+        ///
+        /// As [`v16_mb`], for the two chroma planes: eight columns wide.
+        pub unsafe extern "C" fn v8uv_mb(
+            dst_u: *mut u8,
+            dst_v: *mut u8,
+            stride: isize,
+            mbedge_e: c_int,
+            bedge_e: c_int,
+            flim_i: c_int,
+            hev: c_int,
+        ) {
+            let (edge, inner) = (<$set::V8uv as Raw>::F, <$set::V8uvInner as Raw>::F);
+
+            unsafe {
+                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
+                inner(
+                    dst_u.offset(4 * stride),
+                    dst_v.offset(4 * stride),
+                    stride,
+                    bedge_e,
+                    flim_i,
+                    hev,
+                );
+            }
+        }
+
+        /// # Safety
+        ///
+        /// As [`h16_mb`], for the two chroma planes: eight rows.
+        pub unsafe extern "C" fn h8uv_mb(
+            dst_u: *mut u8,
+            dst_v: *mut u8,
+            stride: isize,
+            mbedge_e: c_int,
+            bedge_e: c_int,
+            flim_i: c_int,
+            hev: c_int,
+        ) {
+            let (edge, inner) = (<$set::H8uv as Raw>::F, <$set::H8uvInner as Raw>::F);
+
+            unsafe {
+                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
+                inner(dst_u.add(4), dst_v.add(4), stride, bedge_e, flim_i, hev);
+            }
+        }
+
+        pub struct VSimpleMb;
+        pub struct HSimpleMb;
+        pub struct V16Mb;
+        pub struct H16Mb;
+        pub struct V8uvMb;
+        pub struct H8uvMb;
+
+        impl Raw for VSimpleMb {
+            type Sig = LfSimpleMbRaw;
+            const F: LfSimpleMbRaw = v_simple_mb;
+        }
+
+        impl Raw for HSimpleMb {
+            type Sig = LfSimpleMbRaw;
+            const F: LfSimpleMbRaw = h_simple_mb;
+        }
+
+        impl Raw for V16Mb {
+            type Sig = LfMbRaw;
+            const F: LfMbRaw = v16_mb;
+        }
+
+        impl Raw for H16Mb {
+            type Sig = LfMbRaw;
+            const F: LfMbRaw = h16_mb;
+        }
+
+        impl Raw for V8uvMb {
+            type Sig = LfUvMbRaw;
+            const F: LfUvMbRaw = v8uv_mb;
+        }
+
+        impl Raw for H8uvMb {
+            type Sig = LfUvMbRaw;
+            const F: LfUvMbRaw = h8uv_mb;
+        }
+    };
+}
+
+/// The raw counterpart of [`install_lf`]: every slot one instruction set's
+/// loop filters cover, for the C ABI table.
+macro_rules! raw_install_lf {
+    ($t:expr, $p:ident, $mb:ident) => {
+        $t.v_loop_filter_simple = Some($p::VSimple::F);
+        $t.h_loop_filter_simple = Some($p::HSimple::F);
+        $t.v_loop_filter_simple_mb = Some($mb::VSimpleMb::F);
+        $t.h_loop_filter_simple_mb = Some($mb::HSimpleMb::F);
+
+        $t.v_loop_filter16y = Some($p::V16::F);
+        $t.h_loop_filter16y = Some($p::H16::F);
+        $t.v_loop_filter8uv = Some($p::V8uv::F);
+        $t.h_loop_filter8uv = Some($p::H8uv::F);
+
+        $t.v_loop_filter16y_inner = Some($p::V16Inner::F);
+        $t.h_loop_filter16y_inner = Some($p::H16Inner::F);
+        $t.v_loop_filter8uv_inner = Some($p::V8uvInner::F);
+        $t.h_loop_filter8uv_inner = Some($p::H8uvInner::F);
+
+        $t.v_loop_filter16y_mb = Some($mb::V16Mb::F);
+        $t.h_loop_filter16y_mb = Some($mb::H16Mb::F);
+        $t.v_loop_filter8uv_mb = Some($mb::V8uvMb::F);
+        $t.h_loop_filter8uv_mb = Some($mb::H8uvMb::F);
+    };
+}
+
+/// The raw counterpart of [`install_idct`].
+macro_rules! raw_install_idct {
+    ($t:expr, $p:ident) => {
+        $t.luma_dc_wht = Some($p::Wht::F);
+        $t.idct_add = Some($p::Add::F);
+        $t.idct_dc_add = Some($p::DcAdd::F);
+        $t.idct_dc_add4y = Some($p::DcAdd4y::F);
+        $t.idct_dc_add4uv = Some($p::DcAdd4uv::F);
+    };
+}
+
+/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
+/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
+/// the instruction-set selection with the decoder's own table without sharing
+/// the safe wrappers, which the C ABI cannot use.
+#[derive(Default)]
+pub struct RawTable {
+    pub luma_dc_wht: Option<WhtRaw>,
+    pub luma_dc_wht_dc: Option<WhtRaw>,
+    pub idct_add: Option<IdctRaw>,
+    pub idct_dc_add: Option<IdctRaw>,
+    pub idct_dc_add4y: Option<Idct4Raw>,
+    pub idct_dc_add4uv: Option<Idct4Raw>,
+    pub v_loop_filter_simple: Option<LfSimpleRaw>,
+    pub h_loop_filter_simple: Option<LfSimpleRaw>,
+    pub v_loop_filter_simple_mb: Option<LfSimpleMbRaw>,
+    pub h_loop_filter_simple_mb: Option<LfSimpleMbRaw>,
+    pub v_loop_filter16y: Option<LfRaw>,
+    pub h_loop_filter16y: Option<LfRaw>,
+    pub v_loop_filter8uv: Option<LfUvRaw>,
+    pub h_loop_filter8uv: Option<LfUvRaw>,
+    pub v_loop_filter16y_inner: Option<LfRaw>,
+    pub h_loop_filter16y_inner: Option<LfRaw>,
+    pub v_loop_filter8uv_inner: Option<LfUvRaw>,
+    pub h_loop_filter8uv_inner: Option<LfUvRaw>,
+    pub v_loop_filter16y_mb: Option<LfMbRaw>,
+    pub h_loop_filter16y_mb: Option<LfMbRaw>,
+    pub v_loop_filter8uv_mb: Option<LfUvMbRaw>,
+    pub h_loop_filter8uv_mb: Option<LfUvMbRaw>,
+}
+
 /// Installs everything one instruction set's ten loop filters cover, composing
 /// the four macroblock entries from the edge and inner kernels.
 macro_rules! install_lf {
@@ -573,6 +816,18 @@ mod arch {
         "ff_vp8_v_loop_filter8uv_inner_ssse3",
         "ff_vp8_h_loop_filter8uv_inner_ssse3"
     );
+
+    pub mod sse2_mb {
+        use super::*;
+
+        composed_mb!(sse2);
+    }
+
+    pub mod ssse3_mb {
+        use super::*;
+
+        composed_mb!(ssse3);
+    }
 
     pub mod sse2_idct {
         use super::*;
@@ -715,6 +970,30 @@ mod arch {
             c.h_loop_filter8uv_mb = lf_h_uv_mb::<H8uvMbAvx2>;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::SSE2) {
+            raw_install_lf!(t, sse2, sse2_mb);
+            raw_install_idct!(t, sse2_idct);
+        }
+        if flags.contains(CpuFlags::SSSE3) {
+            raw_install_lf!(t, ssse3, ssse3_mb);
+        }
+        if flags.contains(CpuFlags::SSE41) {
+            t.luma_dc_wht = Some(sse4::Wht::F);
+            t.idct_dc_add = Some(sse4::DcAdd::F);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            t.v_loop_filter8uv_inner = Some(avx2::V8uvInner::F);
+            t.v_loop_filter_simple_mb = Some(avx2::VSimpleMb::F);
+            t.h_loop_filter_simple_mb = Some(avx2::HSimpleMb::F);
+            t.h_loop_filter16y_mb = Some(H16MbAvx2::F);
+            t.h_loop_filter8uv_mb = Some(H8uvMbAvx2::F);
+        }
+        t
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -743,6 +1022,12 @@ mod arch {
         "ff_vp8_idct_dc_add4uv_neon"
     );
 
+    pub mod neon_mb {
+        use super::*;
+
+        composed_mb!(neon);
+    }
+
     pub mod fused {
         use super::*;
 
@@ -765,6 +1050,21 @@ mod arch {
         c.h_loop_filter_simple_mb = lf_h_simple_mb::<fused::HSimpleMb>;
         c.h_loop_filter16y_mb = lf_h_mb::<fused::H16Mb>;
         c.h_loop_filter8uv_mb = lf_h_uv_mb::<fused::H8uvMb>;
+    }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if !flags.contains(CpuFlags::NEON) {
+            return t;
+        }
+        raw_install_lf!(t, neon, neon_mb);
+        raw_install_idct!(t, neon_idct);
+
+        t.h_loop_filter_simple_mb = Some(fused::HSimpleMb::F);
+        t.h_loop_filter16y_mb = Some(fused::H16Mb::F);
+        t.h_loop_filter8uv_mb = Some(fused::H8uvMb::F);
+        t
     }
 }
 
@@ -825,6 +1125,19 @@ mod arch {
         raw_wht!(WhtDc, wht_dc, "ff_vp8_luma_dc_wht_dc_armv6");
     }
 
+    pub mod neon_mb {
+        use super::*;
+
+        composed_mb!(neon);
+    }
+
+    #[cfg(wpd_asm_armv6)]
+    pub mod armv6_mb {
+        use super::*;
+
+        composed_mb!(armv6);
+    }
+
     pub fn init(c: &mut Vp8Dsp, flags: CpuFlags) {
         #[cfg(wpd_asm_armv6)]
         if flags.contains(CpuFlags::ARMV6) {
@@ -836,6 +1149,22 @@ mod arch {
             install_lf!(c, neon);
             install_idct!(c, neon_idct);
         }
+    }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        #[cfg(wpd_asm_armv6)]
+        if flags.contains(CpuFlags::ARMV6) {
+            raw_install_lf!(t, armv6, armv6_mb);
+            raw_install_idct!(t, armv6_idct);
+            t.luma_dc_wht_dc = Some(armv6_wht_dc::WhtDc::F);
+        }
+        if flags.contains(CpuFlags::NEON) {
+            raw_install_lf!(t, neon, neon_mb);
+            raw_install_idct!(t, neon_idct);
+        }
+        t
     }
 }
 
@@ -849,6 +1178,10 @@ mod arch {
     use super::*;
 
     pub fn init(_c: &mut Vp8Dsp, _flags: CpuFlags) {}
+
+    pub fn raw_table(_flags: CpuFlags) -> RawTable {
+        RawTable::default()
+    }
 }
 
 pub use arch::*;

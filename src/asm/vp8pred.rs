@@ -21,6 +21,26 @@ pub type Pred4x4Raw = unsafe extern "C" fn(*mut u8, *const u8, isize);
 
 pub use super::vp8::Raw;
 
+/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
+/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
+/// the instruction-set selection with the decoder's own table without sharing
+/// the safe wrappers, which the C ABI cannot use.
+pub struct RawTable {
+    pub pred4x4: [Option<Pred4x4Raw>; PRED4X4_COUNT],
+    pub pred8x8: [Option<PredRaw>; PRED8X8_COUNT],
+    pub pred16x16: [Option<PredRaw>; PRED8X8_COUNT],
+}
+
+impl Default for RawTable {
+    fn default() -> Self {
+        RawTable {
+            pred4x4: [None; PRED4X4_COUNT],
+            pred8x8: [None; PRED8X8_COUNT],
+            pred16x16: [None; PRED8X8_COUNT],
+        }
+    }
+}
+
 macro_rules! raw_pred {
     ($marker:ident, $inner:ident, $sym:literal) => {
         extern "C" {
@@ -180,6 +200,57 @@ mod arch {
             p.pred16x16[PLANE_PRED8X8] = pred::<avx2::Tm16, 16>;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::SSE) {
+            t.pred16x16[VERT_PRED8X8] = Some(sse::Vert16::F);
+        }
+        if flags.contains(CpuFlags::SSE2) {
+            t.pred4x4[DIAG_DOWN_LEFT_PRED] = Some(sse2::DownLeft4::F);
+            t.pred4x4[DIAG_DOWN_RIGHT_PRED] = Some(sse2::DownRight4::F);
+            t.pred4x4[VERT_RIGHT_PRED] = Some(sse2::VertRight4::F);
+            t.pred4x4[HOR_DOWN_PRED] = Some(sse2::HorDown4::F);
+            t.pred4x4[HOR_UP_PRED] = Some(sse2::HorUp4::F);
+            t.pred4x4[DC_PRED] = Some(sse2::Dc4::F);
+            t.pred4x4[TM_VP8_PRED] = Some(sse2::Tm4::F);
+            t.pred4x4[VERT_PRED] = Some(sse2::Vert4::F);
+            t.pred4x4[HOR_PRED] = Some(sse2::Hor4::F);
+
+            t.pred8x8[DC_PRED8X8] = Some(sse2::Dc8::F);
+            t.pred8x8[HOR_PRED8X8] = Some(sse2::Hor8::F);
+            t.pred8x8[VERT_PRED8X8] = Some(sse2::Vert8::F);
+            t.pred8x8[PLANE_PRED8X8] = Some(sse2::Tm8::F);
+            t.pred8x8[TOP_DC_PRED8X8] = Some(sse2::TopDc8::F);
+            t.pred8x8[LEFT_DC_PRED8X8] = Some(sse2::LeftDc8::F);
+
+            t.pred16x16[HOR_PRED8X8] = Some(sse2::Hor16::F);
+            t.pred16x16[DC_PRED8X8] = Some(sse2::Dc16::F);
+            t.pred16x16[PLANE_PRED8X8] = Some(sse2::Tm16::F);
+            t.pred16x16[TOP_DC_PRED8X8] = Some(sse2::TopDc16::F);
+            t.pred16x16[LEFT_DC_PRED8X8] = Some(sse2::LeftDc16::F);
+        }
+        if flags.contains(CpuFlags::SSSE3) {
+            t.pred4x4[TM_VP8_PRED] = Some(ssse3::Tm4::F);
+            t.pred4x4[VERT_LEFT_PRED] = Some(ssse3::VertLeft4::F);
+
+            t.pred8x8[HOR_PRED8X8] = Some(ssse3::Hor8::F);
+            t.pred8x8[PLANE_PRED8X8] = Some(ssse3::Tm8::F);
+            t.pred8x8[TOP_DC_PRED8X8] = Some(ssse3::TopDc8::F);
+            t.pred8x8[LEFT_DC_PRED8X8] = Some(ssse3::LeftDc8::F);
+
+            t.pred16x16[PLANE_PRED8X8] = Some(ssse3::Tm16::F);
+            t.pred16x16[HOR_PRED8X8] = Some(ssse3::Hor16::F);
+            t.pred16x16[DC_PRED8X8] = Some(ssse3::Dc16::F);
+            t.pred16x16[TOP_DC_PRED8X8] = Some(ssse3::TopDc16::F);
+            t.pred16x16[LEFT_DC_PRED8X8] = Some(ssse3::LeftDc16::F);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            t.pred16x16[PLANE_PRED8X8] = Some(avx2::Tm16::F);
+        }
+        t
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -234,6 +305,34 @@ mod arch {
         p.pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
         p.pred16x16[PLANE_PRED8X8] = pred::<neon::Tm16, 16>;
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if !flags.contains(CpuFlags::NEON) {
+            return t;
+        }
+        t.pred4x4[TM_VP8_PRED] = Some(neon::Tm4::F);
+        t.pred4x4[DC_PRED] = Some(neon::Dc4::F);
+        t.pred4x4[VERT_PRED] = Some(neon::Vert4::F);
+        t.pred4x4[HOR_PRED] = Some(neon::Hor4::F);
+        t.pred4x4[DIAG_DOWN_LEFT_PRED] = Some(neon::DownLeft4::F);
+        t.pred4x4[DIAG_DOWN_RIGHT_PRED] = Some(neon::DownRight4::F);
+        t.pred4x4[VERT_LEFT_PRED] = Some(neon::VertLeft4::F);
+        t.pred4x4[VERT_RIGHT_PRED] = Some(neon::VertRight4::F);
+        t.pred4x4[HOR_UP_PRED] = Some(neon::HorUp4::F);
+        t.pred4x4[HOR_DOWN_PRED] = Some(neon::HorDown4::F);
+
+        t.pred8x8[VERT_PRED8X8] = Some(neon::Vert8::F);
+        t.pred8x8[DC_PRED8X8] = Some(neon::Dc8::F);
+        t.pred8x8[PLANE_PRED8X8] = Some(neon::Tm8::F);
+
+        t.pred16x16[DC_PRED8X8] = Some(neon::Dc16::F);
+        t.pred16x16[VERT_PRED8X8] = Some(neon::Vert16::F);
+        t.pred16x16[HOR_PRED8X8] = Some(neon::Hor16::F);
+        t.pred16x16[PLANE_PRED8X8] = Some(neon::Tm16::F);
+        t
+    }
 }
 
 #[cfg(target_arch = "arm")]
@@ -270,6 +369,25 @@ mod arch {
         p.pred16x16[TOP_DC_PRED8X8] = pred::<neon::TopDc16, 16>;
         p.pred16x16[DC_128_PRED8X8] = pred::<neon::Dc128_16, 16>;
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if !flags.contains(CpuFlags::NEON) {
+            return t;
+        }
+        t.pred8x8[VERT_PRED8X8] = Some(neon::Vert8::F);
+        t.pred8x8[HOR_PRED8X8] = Some(neon::Hor8::F);
+        t.pred8x8[DC_128_PRED8X8] = Some(neon::Dc128_8::F);
+
+        t.pred16x16[DC_PRED8X8] = Some(neon::Dc16::F);
+        t.pred16x16[VERT_PRED8X8] = Some(neon::Vert16::F);
+        t.pred16x16[HOR_PRED8X8] = Some(neon::Hor16::F);
+        t.pred16x16[LEFT_DC_PRED8X8] = Some(neon::LeftDc16::F);
+        t.pred16x16[TOP_DC_PRED8X8] = Some(neon::TopDc16::F);
+        t.pred16x16[DC_128_PRED8X8] = Some(neon::Dc128_16::F);
+        t
+    }
 }
 
 #[cfg(not(any(
@@ -282,6 +400,10 @@ mod arch {
     use super::*;
 
     pub fn init(_p: &mut Vp8Pred, _flags: CpuFlags) {}
+
+    pub fn raw_table(_flags: CpuFlags) -> RawTable {
+        RawTable::default()
+    }
 }
 
 pub use arch::*;

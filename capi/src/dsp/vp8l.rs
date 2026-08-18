@@ -165,127 +165,33 @@ unsafe extern "C" fn blend_row_argb_premult_c(dst: *mut u8, src: *const u8, n: c
     }
 }
 
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-mod asm {
-    use super::*;
+/// Overlays whatever [`wpd::asm::vp8l::raw_table`] selected for the running
+/// CPU. The symbols and the instruction-set ladder both live in the core, so
+/// this table and the decoder's cannot pick different kernels.
+#[cfg(all(
+    feature = "asm",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn init_asm(dsp: &mut WPDLosslessDSP) {
+    let t = wpd::asm::vp8l::raw_table(wpd::cpu::flags());
 
-    extern "C" {
-        pub fn ff_pred_add_0_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_1_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_2_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_3_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_4_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_5_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_6_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_7_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_8_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_9_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_10_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_11_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_12_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_13_avx2(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_extract_green_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_map_color32_avx2(
-            dst: *mut u8,
-            src: *const u8,
-            palette: *const u32,
-            n: c_int,
-        );
-        pub fn ff_blend_row_argb_avx2(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_blend_row_argb_premult_ssse3(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_color_row_ssse3(dst: *mut u32, src: *const u32, n: c_int, mult: u32);
-        pub fn ff_color_row_avx2(dst: *mut u32, src: *const u32, n: c_int, mult: u32);
-        pub fn ff_blend_row_argb_premult_avx2(dst: *mut u8, src: *const u8, n: c_int);
+    if let Some(v) = t.pred_add {
+        dsp.pred_add = v;
     }
-
-    pub fn init(dsp: &mut WPDLosslessDSP) {
-        let flags = wpd::cpu::flags();
-
-        if flags.contains(wpd::cpu::CpuFlags::SSSE3) {
-            dsp.blend_row_argb_premult = ff_blend_row_argb_premult_ssse3;
-            dsp.color_row = ff_color_row_ssse3;
-        }
-
-        if flags.contains(wpd::cpu::CpuFlags::AVX2) {
-            dsp.pred_add = [
-                ff_pred_add_0_avx2,
-                ff_pred_add_1_avx2,
-                ff_pred_add_2_avx2,
-                ff_pred_add_3_avx2,
-                ff_pred_add_4_avx2,
-                ff_pred_add_5_avx2,
-                ff_pred_add_6_avx2,
-                ff_pred_add_7_avx2,
-                ff_pred_add_8_avx2,
-                ff_pred_add_9_avx2,
-                ff_pred_add_10_avx2,
-                ff_pred_add_11_avx2,
-                ff_pred_add_12_avx2,
-                ff_pred_add_13_avx2,
-            ];
-            dsp.extract_green = ff_extract_green_avx2;
-            dsp.map_color32 = ff_map_color32_avx2;
-            dsp.blend_row_argb = ff_blend_row_argb_avx2;
-            dsp.blend_row_argb_premult = ff_blend_row_argb_premult_avx2;
-            dsp.color_row = ff_color_row_avx2;
-        }
+    if let Some(v) = t.extract_green {
+        dsp.extract_green = v;
     }
-}
-
-#[cfg(all(feature = "asm", target_arch = "aarch64"))]
-mod asm {
-    use super::*;
-
-    extern "C" {
-        pub fn ff_pred_add_0_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_1_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_2_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_3_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_4_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_5_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_6_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_7_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_8_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_9_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_10_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_11_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_12_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_pred_add_13_neon(a: *const u32, b: *const u32, n: c_int, o: *mut u32);
-        pub fn ff_extract_green_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_map_color32_neon(
-            dst: *mut u8,
-            src: *const u8,
-            palette: *const u32,
-            n: c_int,
-        );
-        pub fn ff_blend_row_argb_neon(dst: *mut u8, src: *const u8, n: c_int);
-        pub fn ff_blend_row_argb_premult_neon(dst: *mut u8, src: *const u8, n: c_int);
+    if let Some(v) = t.map_color32 {
+        dsp.map_color32 = v;
     }
-
-    pub fn init(dsp: &mut WPDLosslessDSP) {
-        if !wpd::cpu::flags().contains(wpd::cpu::CpuFlags::NEON) {
-            return;
-        }
-        dsp.pred_add = [
-            ff_pred_add_0_neon,
-            ff_pred_add_1_neon,
-            ff_pred_add_2_neon,
-            ff_pred_add_3_neon,
-            ff_pred_add_4_neon,
-            ff_pred_add_5_neon,
-            ff_pred_add_6_neon,
-            ff_pred_add_7_neon,
-            ff_pred_add_8_neon,
-            ff_pred_add_9_neon,
-            ff_pred_add_10_neon,
-            ff_pred_add_11_neon,
-            ff_pred_add_12_neon,
-            ff_pred_add_13_neon,
-        ];
-        dsp.extract_green = ff_extract_green_neon;
-        dsp.map_color32 = ff_map_color32_neon;
-        dsp.blend_row_argb = ff_blend_row_argb_neon;
-        dsp.blend_row_argb_premult = ff_blend_row_argb_premult_neon;
+    if let Some(v) = t.blend_row_argb {
+        dsp.blend_row_argb = v;
+    }
+    if let Some(v) = t.blend_row_argb_premult {
+        dsp.blend_row_argb_premult = v;
+    }
+    if let Some(v) = t.color_row {
+        dsp.color_row = v;
     }
 }
 
@@ -321,7 +227,7 @@ impl WPDLosslessDSP {
             feature = "asm",
             any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
         ))]
-        asm::init(&mut table);
+        init_asm(&mut table);
 
         table
     }

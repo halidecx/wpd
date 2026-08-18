@@ -200,6 +200,68 @@ fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
     }
 }
 
+/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
+/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
+/// the instruction-set selection with the decoder's own table without sharing
+/// the safe wrappers, which the C ABI cannot use.
+#[derive(Default)]
+pub struct RawTable {
+    pub upsample_block: Option<[UpsampleBlockRaw; 5]>,
+    pub upsample_rgb: Option<UpsampleBlockRaw>,
+    pub upsample_bgr: Option<UpsampleBlockRaw>,
+    pub dispatch_alpha_first: Option<RowRaw>,
+    pub dispatch_alpha_last: Option<RowRaw>,
+    pub packers: Option<[RowRaw; 8]>,
+    pub premultiply_row: Option<PremultiplyRaw>,
+    pub premultiply_row_4444: Option<Premultiply4444Raw>,
+    pub premultiply_row_4444_swap: Option<Premultiply4444Raw>,
+    pub argb_to_y: Option<RowRaw>,
+    pub argb_to_yuv444: Option<ArgbToYuv444Raw>,
+    pub argb_to_uv: Option<ArgbToUvRaw>,
+}
+
+/// The eight packers of one instruction set, raw, in [`RawTable::packers`]
+/// order — which is the field order of the C table.
+#[allow(unused_macros)]
+macro_rules! raw_packers {
+    ($set:ident) => {
+        [
+            $set::PackRgba::F,
+            $set::PackBgra::F,
+            $set::PackRgb::F,
+            $set::PackBgr::F,
+            $set::PackRgb565::F,
+            $set::PackRgba4444::F,
+            $set::PackBgr565::F,
+            $set::PackBgra4444::F,
+        ]
+    };
+}
+
+/// The five upsamplers of one instruction set, raw, in layout order.
+#[allow(unused_macros)]
+macro_rules! raw_upsample_table {
+    ($set:ident) => {
+        [
+            $set::UpsampleArgb::F,
+            $set::UpsampleRgba::F,
+            $set::UpsampleBgra::F,
+            $set::UpsampleRgb::F,
+            $set::UpsampleBgr::F,
+        ]
+    };
+}
+
+/// The three premultipliers of one instruction set.
+#[allow(unused_macros)]
+macro_rules! raw_premultiply {
+    ($t:ident, $set:ident) => {
+        $t.premultiply_row = Some($set::Premultiply::F);
+        $t.premultiply_row_4444 = Some($set::Premultiply4444::F);
+        $t.premultiply_row_4444_swap = Some($set::Premultiply4444Swap::F);
+    };
+}
+
 /// The eight packers of one instruction set, in table order.
 macro_rules! packers {
     ($dsp:ident, $set:ident) => {
@@ -431,6 +493,46 @@ mod arch {
             dsp.argb_to_y = argb_to_y::<avx2::ArgbToY>;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::SSE2) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                t.upsample_block = Some(raw_upsample_table!(sse2));
+            }
+            t.dispatch_alpha_first = Some(sse2::DispatchFirst::F);
+            t.dispatch_alpha_last = Some(sse2::DispatchLast::F);
+        }
+        if flags.contains(CpuFlags::SSSE3) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                t.upsample_rgb = Some(ssse3::UpsampleRgb::F);
+                t.upsample_bgr = Some(ssse3::UpsampleBgr::F);
+                t.argb_to_yuv444 = Some(ssse3::ArgbToYuv444::F);
+            }
+            t.packers = Some(raw_packers!(ssse3));
+            raw_premultiply!(t, ssse3);
+            t.argb_to_y = Some(ssse3::ArgbToY::F);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            #[cfg(target_arch = "x86_64")]
+            {
+                t.upsample_block = Some(raw_upsample_table!(avx2));
+                t.upsample_rgb = None;
+                t.upsample_bgr = None;
+                t.argb_to_yuv444 = Some(avx2::ArgbToYuv444::F);
+                t.argb_to_uv = Some(avx2::ArgbToUv::F);
+            }
+            t.dispatch_alpha_first = Some(avx2::DispatchFirst::F);
+            t.dispatch_alpha_last = Some(avx2::DispatchLast::F);
+            t.packers = Some(raw_packers!(avx2));
+            raw_premultiply!(t, avx2);
+            t.argb_to_y = Some(avx2::ArgbToY::F);
+        }
+        t
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -543,6 +645,34 @@ mod arch {
             dsp.argb_to_yuv444 = argb_to_yuv444::<i8mm::ArgbToYuv444>;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if !flags.contains(CpuFlags::NEON) {
+            return t;
+        }
+        t.upsample_block = Some(raw_upsample_table!(neon));
+        t.packers = Some(raw_packers!(neon));
+        t.dispatch_alpha_first = Some(neon::DispatchFirst::F);
+        t.dispatch_alpha_last = Some(neon::DispatchLast::F);
+        raw_premultiply!(t, neon);
+        t.argb_to_y = Some(neon::ArgbToY::F);
+        t.argb_to_yuv444 = Some(neon::ArgbToYuv444::F);
+        t.argb_to_uv = Some(neon::ArgbToUv::F);
+
+        #[cfg(wpd_asm_dotprod)]
+        if flags.contains(CpuFlags::DOTPROD) {
+            t.argb_to_y = Some(dotprod::ArgbToY::F);
+            t.argb_to_yuv444 = Some(dotprod::ArgbToYuv444::F);
+        }
+        #[cfg(wpd_asm_i8mm)]
+        if flags.contains(CpuFlags::I8MM) {
+            t.argb_to_y = Some(i8mm::ArgbToY::F);
+            t.argb_to_yuv444 = Some(i8mm::ArgbToYuv444::F);
+        }
+        t
+    }
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
@@ -550,6 +680,10 @@ mod arch {
     use super::*;
 
     pub fn init(_dsp: &mut YuvDsp, _flags: CpuFlags) {}
+
+    pub fn raw_table(_flags: CpuFlags) -> RawTable {
+        RawTable::default()
+    }
 }
 
 pub use arch::*;
