@@ -13,16 +13,28 @@ fn main() {
         .canonicalize()
         .unwrap();
 
+    /* In a worktree `.git` is a file naming the real directory, and HEAD and
+    packed-refs live apart from each other, so ask git where each one is rather
+    than assuming the layout of a plain checkout. */
+    let git_path = |f: &str| -> Option<PathBuf> {
+        let out = Command::new("git")
+            .args(["-C", root.to_str()?, "rev-parse", "--git-path", f])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let path = root.join(String::from_utf8(out.stdout).ok()?.trim());
+
+        path.exists().then_some(path)
+    };
+
     for f in ["HEAD", "packed-refs"] {
-        let path = root.join(".git").join(f);
-        if path.exists() {
+        if let Some(path) = git_path(f) {
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
-    if let Ok(head) = fs::read_to_string(root.join(".git/HEAD")) {
+    if let Some(head) = git_path("HEAD").and_then(|p| fs::read_to_string(p).ok()) {
         if let Some(r) = head.strip_prefix("ref: ") {
-            let path = root.join(".git").join(r.trim());
-            if path.exists() {
+            if let Some(path) = git_path(r.trim()) {
                 println!("cargo:rerun-if-changed={}", path.display());
             }
         }
