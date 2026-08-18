@@ -18,6 +18,32 @@ pub enum Muxer {
     Y4m,
 }
 
+impl Muxer {
+    /// What the muxer calls itself in a message.
+    fn name(self) -> &'static str {
+        match self {
+            Muxer::Raw => "raw",
+            Muxer::Ppm => "ppm",
+            Muxer::Pam => "pam",
+            Muxer::Y4m => "y4m",
+        }
+    }
+
+    /// The one pixel format the muxer writes, and the name of it.
+    ///
+    /// `None` for the two that have no single answer: y4m picks between two
+    /// from the frame, and raw writes whatever it is handed. Both of the
+    /// places that refuse a mismatched format ask this rather than pairing
+    /// ppm with rgb and pam with rgba again.
+    fn required(self) -> Option<(&'static str, Format)> {
+        match self {
+            Muxer::Ppm => Some(("rgb", Format::Rgb)),
+            Muxer::Pam => Some(("rgba", Format::Rgba)),
+            Muxer::Raw | Muxer::Y4m => None,
+        }
+    }
+}
+
 #[derive(PartialEq, Eq)]
 enum Kind {
     File,
@@ -180,10 +206,9 @@ impl Output {
         pixel_format: &mut Option<&'static str>,
         format: &mut Option<Format>,
     ) -> Result<(), ()> {
-        let (required_name, required) = match self.muxer {
-            Muxer::Ppm => ("rgb", Format::Rgb),
-            Muxer::Pam => ("rgba", Format::Rgba),
-            Muxer::Y4m => {
+        let (required_name, required) = match (self.muxer.required(), self.muxer) {
+            (Some(one), _) => one,
+            (None, Muxer::Y4m) => {
                 if info.coding == Coding::Lossless && format.is_none() {
                     self.has_alpha = info.has_alpha;
                     ("argb", Format::Argb)
@@ -201,19 +226,11 @@ impl Output {
                     ("yuv420p", Format::Yuv420p)
                 }
             }
-            Muxer::Raw => return Ok(()),
+            (None, _) => return Ok(()),
         };
 
         if format.is_some_and(|f| f != required) {
-            eprintln!(
-                "{} requires {} output",
-                if self.muxer == Muxer::Ppm {
-                    "ppm"
-                } else {
-                    "pam"
-                },
-                required_name
-            );
+            eprintln!("{} requires {required_name} output", self.muxer.name());
             return Err(());
         }
         *pixel_format = Some(required_name);
@@ -290,20 +307,14 @@ impl Output {
         let pixel_format = pixel_format.unwrap_or_else(|| format_name(frame.format()));
         let fail = |msg: String| io::Error::other(msg);
 
-        match self.muxer {
-            Muxer::Ppm | Muxer::Pam => {
-                let ppm = self.muxer == Muxer::Ppm;
-                let required = if ppm { Format::Rgb } else { Format::Rgba };
-
+        match (self.muxer.required(), self.muxer) {
+            (Some((required_name, required)), _) => {
                 if frame.format() != required {
-                    eprintln!(
-                        "{} requires {} output",
-                        if ppm { "ppm" } else { "pam" },
-                        if ppm { "rgb" } else { "rgba" }
-                    );
+                    eprintln!("{} requires {required_name} output", self.muxer.name());
                     return Err(fail("wrong format".into()));
                 }
-                let header = if ppm {
+                /* The one thing the two headers do not share. */
+                let header = if self.muxer == Muxer::Ppm {
                     format!("P6\n{} {}\n255\n", frame.width(), frame.height())
                 } else {
                     format!(
@@ -317,8 +328,8 @@ impl Output {
                 self.write(header.as_bytes())?;
                 self.write_plane(frame, 0)
             }
-            Muxer::Y4m => self.write_y4m(frame),
-            Muxer::Raw => self.write_raw(frame, pixel_format),
+            (None, Muxer::Y4m) => self.write_y4m(frame),
+            (None, _) => self.write_raw(frame, pixel_format),
         }
     }
 

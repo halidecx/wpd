@@ -241,6 +241,35 @@ fn long_option(name: &str) -> Option<&'static str> {
     }
 }
 
+/// The short spelling of an option, as the canonical long name.
+fn short_option(opt: char) -> Option<&'static str> {
+    match opt {
+        'h' => Some("help"),
+        'r' => Some("repeat"),
+        'f' => Some("fmt"),
+        _ => None,
+    }
+}
+
+/// Applies an option that takes a value, given its canonical long name.
+///
+/// `-r` and `--repeat` are one option, so this is where it is parsed: written
+/// out in both arms, the two spellings were two copies of the same body down
+/// to the error string, and free to drift apart.
+fn set_valued(o: &mut Options, name: &str, value: &str) -> Result<(), &'static str> {
+    match name {
+        "repeat" => o.repeat = parse_repeat(value).ok_or(BAD_REPEAT)?,
+        "fmt" => {
+            let (pixel_format, out_format) = parse_format(value).ok_or(BAD_FORMAT)?;
+
+            o.pixel_format = pixel_format;
+            o.out_format = out_format;
+        }
+        _ => return Err(MISSING),
+    }
+    Ok(())
+}
+
 /// Reproduces `getopt_long` with `opterr = 0`: options and operands may be
 /// interleaved, `--` ends the options, and a long option takes its value
 /// either after `=` or as the next argument.
@@ -312,17 +341,11 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                     no_value!();
                     return Parsed::Help;
                 }
-                "repeat" => match parse_repeat(&value!()) {
-                    Some(v) => o.repeat = v,
-                    None => return Parsed::Bad(BAD_REPEAT),
-                },
-                "fmt" => match parse_format(&value!()) {
-                    Some((name, format)) => {
-                        o.pixel_format = name;
-                        o.out_format = format;
+                "repeat" | "fmt" => {
+                    if let Err(e) = set_valued(&mut o, name, &value!()) {
+                        return Parsed::Bad(e);
                     }
-                    None => return Parsed::Bad(BAD_FORMAT),
-                },
+                }
                 "muxer" => match value!() {
                     v if matches!(
                         v.as_str(),
@@ -393,20 +416,17 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                 };
             }
 
-            match opt {
-                'h' => return Parsed::Help,
-                'r' => match parse_repeat(&value!()) {
-                    Some(v) => o.repeat = v,
-                    None => return Parsed::Bad(BAD_REPEAT),
-                },
-                'f' => match parse_format(&value!()) {
-                    Some((name, format)) => {
-                        o.pixel_format = name;
-                        o.out_format = format;
-                    }
-                    None => return Parsed::Bad(BAD_FORMAT),
-                },
-                _ => return Parsed::Bad(MISSING),
+            let Some(name) = short_option(opt) else {
+                return Parsed::Bad(MISSING);
+            };
+
+            /* -h asks for help wherever it appears, so -hf needs no value for
+            the f; --help=x, which has one, is an error. */
+            if name == "help" {
+                return Parsed::Help;
+            }
+            if let Err(e) = set_valued(&mut o, name, &value!()) {
+                return Parsed::Bad(e);
             }
         }
     }
