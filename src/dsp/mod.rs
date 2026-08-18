@@ -10,15 +10,15 @@ pub mod vp8l;
 pub mod vp8pred;
 pub mod yuv;
 
-/// Saturates a signed intermediate back into a sample. Spelled out rather than
-/// with `clamp`, which is not usable from the `const fn` colour kernels.
+/// Saturates a signed intermediate back into a sample.
+///
+/// This is `v.clamp(0, 255)`, which `const fn` cannot call, written as the two
+/// separate bounds it is. Keep the two steps sequential: folding them into one
+/// `else if` chain costs the lossy scalar kernels a few percent, because the
+/// branchy form is what reaches the back end rather than a pair of selects.
 #[inline(always)]
 pub(crate) const fn clip_uint8(v: i32) -> u8 {
-    if v < 0 {
-        0
-    } else if v > 255 {
-        255
-    } else {
-        v as u8
-    }
+    let lo = if v < 0 { 0 } else { v };
+
+    (if lo > 255 { 255 } else { lo }) as u8
 }
