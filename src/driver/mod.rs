@@ -14,6 +14,7 @@ pub mod convert;
 pub mod export;
 pub mod lossy;
 
+use crate::anim::AnimState;
 use crate::bits::rl32;
 use crate::container::{
     Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
@@ -98,7 +99,6 @@ pub struct Decoder<'a> {
     pub(crate) converted_rows: i32,
     pub(crate) converted_format: i32,
     pub(crate) still_lossless: bool,
-    pub(crate) frame_index: i32,
     pub(crate) canvas_width: i32,
     pub(crate) canvas_height: i32,
 
@@ -129,17 +129,10 @@ pub struct Decoder<'a> {
     pub(crate) canvas: Buffer,
     pub(crate) subframe_out: Option<Source>,
     pub(crate) anim_mode: i32,
-    pub(crate) anmf_flags: i32,
-    pub(crate) pos_x: i32,
-    pub(crate) pos_y: i32,
-    pub(crate) frame_has_alpha: bool,
-    pub(crate) key_frame: bool,
-    pub(crate) prev_anmf_flags: i32,
-    pub(crate) prev_width: i32,
-    pub(crate) prev_height: i32,
-    pub(crate) prev_pos_x: i32,
-    pub(crate) prev_pos_y: i32,
-    pub(crate) prev_key_frame: bool,
+    /// Where the frame being decoded goes and what the one before it left
+    /// behind, which is all of what [`Self::anim_state_reset`] clears and all
+    /// of what the compositor is handed.
+    pub(crate) anim: AnimState,
     pub(crate) clear_argb: [u8; 4],
     pub(crate) clear_yuva: [u8; 4],
 
@@ -320,7 +313,6 @@ impl<'a> Decoder<'a> {
             converted_rows: 0,
             converted_format: FORMAT_NONE,
             still_lossless: false,
-            frame_index: 0,
             canvas_width: 0,
             canvas_height: 0,
 
@@ -345,17 +337,7 @@ impl<'a> Decoder<'a> {
             canvas: Buffer::default(),
             subframe_out: None,
             anim_mode: ANIM_COMPOSITED,
-            anmf_flags: 0,
-            pos_x: 0,
-            pos_y: 0,
-            frame_has_alpha: false,
-            key_frame: false,
-            prev_anmf_flags: 0,
-            prev_width: 0,
-            prev_height: 0,
-            prev_pos_x: 0,
-            prev_pos_y: 0,
-            prev_key_frame: false,
+            anim: AnimState::default(),
             clear_argb: [0; 4],
             clear_yuva: CLEAR_YUVA_BLACK,
 
@@ -492,14 +474,14 @@ impl<'a> Decoder<'a> {
             animation: self.animation,
             anim_mode: self.anim_mode,
             duration: self.frame_duration,
-            pos_x: self.pos_x,
-            pos_y: self.pos_y,
-            anmf_flags: self.anmf_flags,
+            pos_x: self.anim.pos_x,
+            pos_y: self.anim.pos_y,
+            anmf_flags: self.anim.anmf_flags,
             /* An animation latches each sub-frame's alpha as it decodes it; a
             still has only the one image, whose two decoders report it
             separately. */
             has_alpha: if self.animation {
-                self.frame_has_alpha
+                self.anim.frame_has_alpha
             } else {
                 self.has_alpha || self.lossless_has_alpha
             },
@@ -671,22 +653,11 @@ impl<'a> Decoder<'a> {
         self.still_lossless = false;
         self.lossless_out = None;
         self.subframe_out = None;
-        self.frame_index = 0;
         self.width = 0;
         self.height = 0;
         self.has_alpha = false;
         self.lossless_has_alpha = false;
-        self.frame_has_alpha = false;
-        self.key_frame = false;
-        self.prev_key_frame = false;
-        self.anmf_flags = 0;
-        self.prev_anmf_flags = 0;
-        self.prev_width = 0;
-        self.prev_height = 0;
-        self.prev_pos_x = 0;
-        self.prev_pos_y = 0;
-        self.pos_x = 0;
-        self.pos_y = 0;
+        self.anim = AnimState::default();
         self.frame_duration = 0;
         self.frame_timestamp = 0;
     }
@@ -976,7 +947,7 @@ impl Decoder<'_> {
         from frame to frame, so the two cannot be swapped part-way through an
         animation. wpd_decoder_rewind() clears the frame index and reopens the
         choice. */
-        if mode != self.anim_mode && self.animation && self.frame_index != 0 {
+        if mode != self.anim_mode && self.animation && self.anim.frame_index != 0 {
             return Err(self.fail(
                 "the animation mode cannot change mid-animation",
                 Error::InvalidArgument,

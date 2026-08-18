@@ -13,7 +13,7 @@
 
 use std::mem;
 
-use crate::anim::{regions, Placement, Region};
+use crate::anim::{regions, AnimState, Placement, Region};
 use crate::error::{Error, Result};
 use crate::image::Format;
 
@@ -34,20 +34,9 @@ use crate::rescale::premultiply_argb_row;
 /// Everything the compositor asks the decoder about a frame's placement,
 /// gathered at the call.
 pub struct CPlacement {
-    pub canvas_width: i32,
-    pub canvas_height: i32,
-    pub pos_x: i32,
-    pub pos_y: i32,
-    pub anmf_flags: i32,
-    pub frame_index: i32,
-    pub frame_has_alpha: bool,
-    pub key_frame: bool,
-    pub prev_anmf_flags: i32,
-    pub prev_width: i32,
-    pub prev_height: i32,
-    pub prev_pos_x: i32,
-    pub prev_pos_y: i32,
-    pub prev_key_frame: bool,
+    /// The geometry, exactly as [`regions`] and [`Placement::is_key_frame`]
+    /// want it, rather than copied out field by field on the way in.
+    pub geom: Placement,
     pub premultiply: bool,
     pub no_fancy_upsampling: bool,
     pub clear_argb: [u8; 4],
@@ -59,27 +48,6 @@ pub struct CompositeTargets<'a> {
     pub ldsp: &'a Vp8lDsp,
     pub ydsp: &'a YuvDsp,
     pub canvas: &'a mut Buffer,
-}
-
-impl CPlacement {
-    fn geometry(&self) -> Placement {
-        Placement {
-            canvas_width: self.canvas_width,
-            canvas_height: self.canvas_height,
-            pos_x: self.pos_x,
-            pos_y: self.pos_y,
-            anmf_flags: self.anmf_flags as u8,
-            frame_index: self.frame_index,
-            frame_has_alpha: self.frame_has_alpha,
-            key_frame: self.key_frame,
-            prev_anmf_flags: self.prev_anmf_flags as u8,
-            prev_width: self.prev_width,
-            prev_height: self.prev_height,
-            prev_pos_x: self.prev_pos_x,
-            prev_pos_y: self.prev_pos_y,
-            prev_key_frame: self.prev_key_frame,
-        }
-    }
 }
 
 /// Paints `region` of `frame` onto the canvas at the frame's position.
@@ -101,7 +69,7 @@ fn paint(
     };
     let argb = canvas.format == Some(Format::Argb);
     let mut dst = canvas.frame_mut();
-    let (x, y) = (pl.pos_x, pl.pos_y);
+    let (x, y) = (pl.geom.frame.pos_x, pl.geom.frame.pos_y);
 
     match (argb, region.blend) {
         (true, true) => {
@@ -170,12 +138,12 @@ fn prepare_canvas(
     frame: &Frame<'_>,
     format: Format,
 ) -> Result<()> {
-    let covers_canvas = pl.pos_x == 0
-        && pl.pos_y == 0
-        && frame.width == pl.canvas_width
-        && frame.height == pl.canvas_height;
+    let covers_canvas = pl.geom.frame.pos_x == 0
+        && pl.geom.frame.pos_y == 0
+        && frame.width == pl.geom.canvas_width
+        && frame.height == pl.geom.canvas_height;
 
-    if pl.key_frame && !canvas.is_empty() && canvas.format != Some(format) {
+    if pl.geom.frame.key_frame && !canvas.is_empty() && canvas.format != Some(format) {
         canvas.release();
     }
 
@@ -183,15 +151,15 @@ fn prepare_canvas(
 
     if fresh {
         let alloc = if format == Format::Argb {
-            canvas.alloc_argb(pl.canvas_width, pl.canvas_height)
+            canvas.alloc_argb(pl.geom.canvas_width, pl.geom.canvas_height)
         } else {
-            canvas.alloc_planar(pl.canvas_width, pl.canvas_height, true)
+            canvas.alloc_planar(pl.geom.canvas_width, pl.geom.canvas_height, true)
         };
 
         alloc?;
         canvas.premultiplied = pl.premultiply;
     }
-    if fresh || pl.key_frame {
+    if fresh || pl.geom.frame.key_frame {
         if !covers_canvas {
             let (w, h) = (canvas.width, canvas.height);
 
@@ -205,14 +173,14 @@ fn prepare_canvas(
 
             convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
         }
-        if pl.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE as i32 != 0 {
+        if pl.geom.frame.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE != 0 {
             clear_rect(
                 pl,
                 canvas,
-                pl.prev_pos_x,
-                pl.prev_pos_y,
-                pl.prev_width,
-                pl.prev_height,
+                pl.geom.frame.prev_pos_x,
+                pl.geom.frame.prev_pos_y,
+                pl.geom.frame.prev_width,
+                pl.geom.frame.prev_height,
             );
         }
     }
@@ -243,7 +211,7 @@ pub fn anim_composite(
         blend: false,
     }; 5];
     let n = regions(
-        &pl.geometry(),
+        &pl.geom,
         frame.width,
         frame.height,
         has_alpha_plane,
@@ -263,20 +231,14 @@ impl<'a> Decoder<'a> {
     /// [`Placement::is_key_frame`] decides it from the rest.
     fn placement(&self) -> CPlacement {
         CPlacement {
-            canvas_width: self.canvas_width,
-            canvas_height: self.canvas_height,
-            pos_x: self.pos_x,
-            pos_y: self.pos_y,
-            anmf_flags: self.anmf_flags,
-            frame_index: self.frame_index,
-            frame_has_alpha: self.frame_has_alpha,
-            key_frame: false,
-            prev_anmf_flags: self.prev_anmf_flags,
-            prev_width: self.prev_width,
-            prev_height: self.prev_height,
-            prev_pos_x: self.prev_pos_x,
-            prev_pos_y: self.prev_pos_y,
-            prev_key_frame: self.prev_key_frame,
+            geom: Placement {
+                canvas_width: self.canvas_width,
+                canvas_height: self.canvas_height,
+                frame: AnimState {
+                    key_frame: false,
+                    ..self.anim
+                },
+            },
             premultiply: format_is_premultiplied(self.out_format),
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
@@ -292,10 +254,10 @@ impl<'a> Decoder<'a> {
         if header.len() < 16 {
             return None;
         }
-        self.pos_x = rl24(header) as i32 * 2;
-        self.pos_y = rl24(&header[3..]) as i32 * 2;
+        self.anim.pos_x = rl24(header) as i32 * 2;
+        self.anim.pos_y = rl24(&header[3..]) as i32 * 2;
         self.frame_duration = rl24(&header[12..]) as i32;
-        self.anmf_flags = header[15] as i32;
+        self.anim.anmf_flags = header[15];
         Some((rl24(&header[6..]) as i32 + 1, rl24(&header[9..]) as i32 + 1))
     }
 
@@ -314,13 +276,13 @@ impl<'a> Decoder<'a> {
             return Err(Error::InvalidData);
         };
 
-        if self.pos_x + declared_width > self.canvas_width
-            || self.pos_y + declared_height > self.canvas_height
+        if self.anim.pos_x + declared_width > self.canvas_width
+            || self.anim.pos_y + declared_height > self.canvas_height
         {
             crate::log::error_args(format_args!(
                 "Frame ({declared_width}x{declared_height} at pos {}x{}) does not \
                  fit into canvas ({}x{})",
-                self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
+                self.anim.pos_x, self.anim.pos_y, self.canvas_width, self.canvas_height
             ));
             return Err(Error::InvalidData);
         }
@@ -367,12 +329,12 @@ impl<'a> Decoder<'a> {
                 TAG_VP8 if sub.is_none() => {
                     self.vp8_lossy_decode_frame(at, payload_size)?;
                     sub = Some(Source::Lossy);
-                    self.frame_has_alpha = self.has_alpha;
+                    self.anim.frame_has_alpha = self.has_alpha;
                 }
                 TAG_VP8L if sub.is_none() => {
                     self.lossless_decode(at, payload_size)?;
                     sub = Some(Source::Lossless);
-                    self.frame_has_alpha = self.lossless_has_alpha;
+                    self.anim.frame_has_alpha = self.lossless_has_alpha;
                 }
                 _ => {}
             }
@@ -395,28 +357,28 @@ impl<'a> Decoder<'a> {
                  {sub_width}x{sub_height}"
             ));
         }
-        if self.pos_x + sub_width > self.canvas_width
-            || self.pos_y + sub_height > self.canvas_height
+        if self.anim.pos_x + sub_width > self.canvas_width
+            || self.anim.pos_y + sub_height > self.canvas_height
         {
             crate::log::error_args(format_args!(
                 "Frame ({sub_width}x{sub_height} at pos {}x{}) does not fit into \
                  canvas ({}x{})",
-                self.pos_x, self.pos_y, self.canvas_width, self.canvas_height
+                self.anim.pos_x, self.anim.pos_y, self.canvas_width, self.canvas_height
             ));
             return Err(Error::InvalidData);
         }
 
         let mut pl = self.placement();
 
-        self.key_frame = pl.geometry().is_key_frame(sub_width, sub_height);
-        pl.key_frame = self.key_frame;
+        self.anim.key_frame = pl.geom.is_key_frame(sub_width, sub_height);
+        pl.geom.frame.key_frame = self.anim.key_frame;
 
         let argb = Format::Argb;
         let mut target = Format::Yuva420p;
 
         if sub_format == argb
             || format_is_packed(self.out_format)
-            || (!self.key_frame
+            || (!self.anim.key_frame
                 && !self.canvas.is_empty()
                 && self.canvas.format == Some(argb))
         {
@@ -491,13 +453,13 @@ impl<'a> Decoder<'a> {
         }
 
         self.frame_timestamp += self.frame_duration as i64;
-        self.prev_anmf_flags = self.anmf_flags;
-        self.prev_width = sub_width;
-        self.prev_height = sub_height;
-        self.prev_pos_x = self.pos_x;
-        self.prev_pos_y = self.pos_y;
-        self.prev_key_frame = self.key_frame;
-        self.frame_index += 1;
+        self.anim.prev_anmf_flags = self.anim.anmf_flags;
+        self.anim.prev_width = sub_width;
+        self.anim.prev_height = sub_height;
+        self.anim.prev_pos_x = self.anim.pos_x;
+        self.anim.prev_pos_y = self.anim.pos_y;
+        self.anim.prev_key_frame = self.anim.key_frame;
+        self.anim.frame_index += 1;
 
         Ok(())
     }

@@ -43,7 +43,7 @@ pub struct ExportSettings {
     pub duration: i32,
     pub pos_x: i32,
     pub pos_y: i32,
-    pub anmf_flags: i32,
+    pub anmf_flags: u8,
     pub has_alpha: bool,
     pub timestamp: i64,
 }
@@ -85,7 +85,7 @@ pub(crate) fn export_frame(
     format: i32,
     out: &mut Handout<'_>,
 ) {
-    let flags = set.anmf_flags as u8;
+    let flags = set.anmf_flags;
 
     out.pixels = Pixels::None;
     out.format = Format::from_raw(format).unwrap_or(Format::Argb);

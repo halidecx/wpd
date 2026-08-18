@@ -19,11 +19,16 @@ pub struct Region {
     pub blend: bool,
 }
 
-/// Where the frame goes and what the frame before it left behind.
+/// One frame's place in the animation, and what the frame before it left
+/// behind.
+///
+/// This is the whole of what an animation carries from frame to frame, which
+/// is why it is one struct: the decoder holds it, clears it as a unit when the
+/// animation restarts, and hands it to the compositor as a unit. Split into
+/// fields it was three lists of the same twelve names, each maintained by
+/// hand.
 #[derive(Clone, Copy, Default, Debug)]
-pub struct Placement {
-    pub canvas_width: i32,
-    pub canvas_height: i32,
+pub struct AnimState {
     pub pos_x: i32,
     pub pos_y: i32,
     pub anmf_flags: u8,
@@ -38,6 +43,14 @@ pub struct Placement {
     pub prev_key_frame: bool,
 }
 
+/// Where the frame goes and what the frame before it left behind.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Placement {
+    pub canvas_width: i32,
+    pub canvas_height: i32,
+    pub frame: AnimState,
+}
+
 impl Placement {
     fn is_full_frame(&self, width: i32, height: i32) -> bool {
         width == self.canvas_width && height == self.canvas_height
@@ -50,19 +63,20 @@ impl Placement {
     /// cannot show through; or the frame before it disposed everything this
     /// one could have seen.
     pub fn is_key_frame(&self, width: i32, height: i32) -> bool {
-        if self.frame_index == 0 {
+        if self.frame.frame_index == 0 {
             return true;
         }
-        if (!self.frame_has_alpha || self.anmf_flags & ANMF_FLAG_NO_BLEND != 0)
-            && self.pos_x == 0
-            && self.pos_y == 0
+        if (!self.frame.frame_has_alpha
+            || self.frame.anmf_flags & ANMF_FLAG_NO_BLEND != 0)
+            && self.frame.pos_x == 0
+            && self.frame.pos_y == 0
             && self.is_full_frame(width, height)
         {
             return true;
         }
-        self.prev_anmf_flags & ANMF_FLAG_DISPOSE != 0
-            && (self.is_full_frame(self.prev_width, self.prev_height)
-                || self.prev_key_frame)
+        self.frame.prev_anmf_flags & ANMF_FLAG_DISPOSE != 0
+            && (self.is_full_frame(self.frame.prev_width, self.frame.prev_height)
+                || self.frame.prev_key_frame)
     }
 }
 
@@ -99,25 +113,27 @@ pub fn regions(
         ..full
     };
 
-    if place.key_frame
-        || place.anmf_flags & ANMF_FLAG_NO_BLEND != 0
+    if place.frame.key_frame
+        || place.frame.anmf_flags & ANMF_FLAG_NO_BLEND != 0
         || !frame_has_alpha_plane
     {
         out[0] = copy_all;
         return 1;
     }
-    if place.prev_anmf_flags & ANMF_FLAG_DISPOSE == 0 {
+    if place.frame.prev_anmf_flags & ANMF_FLAG_DISPOSE == 0 {
         out[0] = full;
         return 1;
     }
 
-    let kx = place.pos_x.max(place.prev_pos_x) - place.pos_x;
-    let ky = place.pos_y.max(place.prev_pos_y) - place.pos_y;
-    let mut kw = (place.pos_x + width).min(place.prev_pos_x + place.prev_width)
-        - place.pos_x
+    let kx = place.frame.pos_x.max(place.frame.prev_pos_x) - place.frame.pos_x;
+    let ky = place.frame.pos_y.max(place.frame.prev_pos_y) - place.frame.pos_y;
+    let mut kw = (place.frame.pos_x + width)
+        .min(place.frame.prev_pos_x + place.frame.prev_width)
+        - place.frame.pos_x
         - kx;
-    let mut kh = (place.pos_y + height).min(place.prev_pos_y + place.prev_height)
-        - place.pos_y
+    let mut kh = (place.frame.pos_y + height)
+        .min(place.frame.prev_pos_y + place.frame.prev_height)
+        - place.frame.pos_y
         - ky;
 
     if kw <= 0 || kh <= 0 {
@@ -177,74 +193,85 @@ pub fn regions(
 mod tests {
     use super::*;
 
-    fn place() -> Placement {
+    /// A 64x64 canvas, so a test only has to say what the frame does on it.
+    fn on_canvas(frame: AnimState) -> Placement {
         Placement {
             canvas_width: 64,
             canvas_height: 64,
+            frame,
+        }
+    }
+
+    fn place() -> Placement {
+        on_canvas(state())
+    }
+
+    fn state() -> AnimState {
+        AnimState {
             frame_index: 1,
-            ..Placement::default()
+            ..AnimState::default()
         }
     }
 
     #[test]
     fn the_first_frame_is_always_a_key_frame() {
-        let p = Placement {
+        let p = on_canvas(AnimState {
             frame_index: 0,
-            ..place()
-        };
+            ..state()
+        });
 
         assert!(p.is_key_frame(1, 1));
     }
 
     #[test]
     fn a_full_opaque_frame_at_the_origin_is_a_key_frame() {
-        let p = Placement {
+        let p = on_canvas(AnimState {
             frame_has_alpha: false,
-            ..place()
-        };
+            ..state()
+        });
 
         assert!(p.is_key_frame(64, 64));
         assert!(!p.is_key_frame(63, 64));
 
-        let p = Placement {
+        let p = on_canvas(AnimState {
             frame_has_alpha: true,
-            ..place()
-        };
+            ..state()
+        });
 
         assert!(!p.is_key_frame(64, 64));
 
-        let p = Placement {
+        let p = on_canvas(AnimState {
             frame_has_alpha: true,
             anmf_flags: ANMF_FLAG_NO_BLEND,
-            ..place()
-        };
+            ..state()
+        });
 
         assert!(p.is_key_frame(64, 64));
     }
 
     #[test]
     fn a_frame_after_a_full_dispose_is_a_key_frame() {
-        let p = Placement {
+        let p = on_canvas(AnimState {
             frame_has_alpha: true,
             prev_anmf_flags: ANMF_FLAG_DISPOSE,
             prev_width: 64,
             prev_height: 64,
-            ..place()
-        };
+            ..state()
+        });
 
         assert!(p.is_key_frame(10, 10));
 
-        let p = Placement {
+        let p = on_canvas(AnimState {
             prev_width: 10,
             prev_height: 10,
-            ..p
-        };
+            ..p.frame
+        });
 
         assert!(!p.is_key_frame(10, 10));
-        assert!(Placement {
+        assert!(on_canvas(AnimState {
             prev_key_frame: true,
-            ..p
-        }
+            ..p.frame
+        })
         .is_key_frame(10, 10));
     }
 
@@ -257,10 +284,10 @@ mod tests {
             h: 0,
             blend: false,
         }; 5];
-        let p = Placement {
+        let p = on_canvas(AnimState {
             key_frame: true,
-            ..place()
-        };
+            ..state()
+        });
 
         assert_eq!(regions(&p, 8, 8, true, false, &mut out), 1);
         assert!(!out[0].blend);
@@ -306,7 +333,7 @@ mod tests {
             h: 0,
             blend: false,
         }; 5];
-        let p = Placement {
+        let p = on_canvas(AnimState {
             prev_anmf_flags: ANMF_FLAG_DISPOSE,
             pos_x: 4,
             pos_y: 6,
@@ -314,8 +341,8 @@ mod tests {
             prev_pos_y: 8,
             prev_width: 10,
             prev_height: 10,
-            ..place()
-        };
+            ..state()
+        });
         let (w, h) = (12, 14);
 
         assert_eq!(regions(&p, w, h, true, false, &mut out), 5);
@@ -346,13 +373,13 @@ mod tests {
             h: 0,
             blend: false,
         }; 5];
-        let p = Placement {
+        let p = on_canvas(AnimState {
             prev_anmf_flags: ANMF_FLAG_DISPOSE,
             prev_pos_x: 7,
             prev_width: 1,
             prev_height: 64,
-            ..place()
-        };
+            ..state()
+        });
 
         assert_eq!(regions(&p, 32, 32, true, true, &mut out), 1);
         assert!(out[0].blend);
@@ -368,14 +395,14 @@ mod tests {
             h: 0,
             blend: false,
         }; 5];
-        let p = Placement {
+        let p = on_canvas(AnimState {
             prev_anmf_flags: ANMF_FLAG_DISPOSE,
             prev_pos_x: 40,
             prev_pos_y: 40,
             prev_width: 8,
             prev_height: 8,
-            ..place()
-        };
+            ..state()
+        });
 
         assert_eq!(regions(&p, 8, 8, true, false, &mut out), 1);
         assert!(out[0].blend);
