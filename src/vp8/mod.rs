@@ -298,6 +298,12 @@ pub struct Decoder {
     filter: Filter,
     lf_delta: LfDelta,
     qmat: [QMat; 4],
+    /// Per segment, then per "is this macroblock split into 4x4 blocks". Both
+    /// inputs come out of the frame header, so the strength is settled once a
+    /// frame rather than recomputed for every macroblock, as libwebp's
+    /// `PrecomputeFilterStrengths` does. `inner_filter` also reads `skip`, so
+    /// that bit alone stays per macroblock.
+    filter_levels: [[FilterStrength; 2]; 4],
 
     filter_strength: Vec<FilterStrength>,
     intra4x4_pred_mode_top: Vec<u8>,
@@ -353,6 +359,7 @@ impl Decoder {
             filter: Filter::default(),
             lf_delta: LfDelta::default(),
             qmat: [QMat::default(); 4],
+            filter_levels: [[FilterStrength::default(); 2]; 4],
             filter_strength: Vec::new(),
             intra4x4_pred_mode_top: Vec::new(),
             intra4x4_pred_mode_left: [0; 4],
@@ -587,6 +594,51 @@ impl Decoder {
         }
     }
 
+    /// The companion of [`Self::get_quants`]: the other per-segment table the
+    /// frame header settles.
+    fn get_filter_strengths(&mut self) {
+        for segment in 0..4 {
+            let base = if self.segmentation.enabled {
+                let level = i32::from(self.segmentation.filter_level[segment]);
+
+                if self.segmentation.absolute_vals {
+                    level
+                } else {
+                    level + i32::from(self.filter.level)
+                }
+            } else {
+                i32::from(self.filter.level)
+            };
+
+            for i4 in 0..2 {
+                let mut filter_level = base;
+
+                if self.lf_delta.enabled {
+                    filter_level += self.lf_delta.ref_intra;
+                    if i4 == 1 {
+                        filter_level += self.lf_delta.mode_i4;
+                    }
+                }
+
+                let filter_level = clip_uintp2(filter_level, 6);
+                let mut interior_limit = filter_level;
+
+                if self.filter.sharpness != 0 {
+                    interior_limit >>= (i32::from(self.filter.sharpness) + 3) >> 2;
+                    interior_limit =
+                        interior_limit.min(9 - i32::from(self.filter.sharpness));
+                }
+                interior_limit = interior_limit.max(1);
+
+                self.filter_levels[segment][i4] = FilterStrength {
+                    filter_level: filter_level as u8,
+                    inner_limit: interior_limit as u8,
+                    inner_filter: i4 == 1,
+                };
+            }
+        }
+    }
+
     fn decode_frame_header(
         &mut self,
         buf: &[u8],
@@ -659,6 +711,7 @@ impl Decoder {
         if self.lf_delta.enabled && self.c.get(buf) != 0 {
             self.update_lf_deltas(buf);
         }
+        self.get_filter_strengths();
 
         match self.setup_partitions(buf, 10 + header_size, avail, total) {
             Err(e) => {
@@ -1075,39 +1128,11 @@ impl Decoder {
 
     #[inline(always)]
     fn filter_level_for_mb(&self, mb: &Macroblock) -> FilterStrength {
-        let mut filter_level = if self.segmentation.enabled {
-            let level = i32::from(self.segmentation.filter_level[self.segment]);
+        let i4 = usize::from(mb.mode == MODE_I4);
+        let mut f = self.filter_levels[self.segment][i4];
 
-            if self.segmentation.absolute_vals {
-                level
-            } else {
-                level + i32::from(self.filter.level)
-            }
-        } else {
-            i32::from(self.filter.level)
-        };
-
-        if self.lf_delta.enabled {
-            filter_level += self.lf_delta.ref_intra;
-            if mb.mode == MODE_I4 {
-                filter_level += self.lf_delta.mode_i4;
-            }
-        }
-
-        let filter_level = clip_uintp2(filter_level, 6);
-        let mut interior_limit = filter_level;
-
-        if self.filter.sharpness != 0 {
-            interior_limit >>= (i32::from(self.filter.sharpness) + 3) >> 2;
-            interior_limit = interior_limit.min(9 - i32::from(self.filter.sharpness));
-        }
-        interior_limit = interior_limit.max(1);
-
-        FilterStrength {
-            filter_level: filter_level as u8,
-            inner_limit: interior_limit as u8,
-            inner_filter: !mb.skip || mb.mode == MODE_I4,
-        }
+        f.inner_filter = !mb.skip || i4 == 1;
+        f
     }
 
     #[inline(always)]
