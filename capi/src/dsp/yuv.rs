@@ -616,7 +616,8 @@ pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
 /// # Safety
 ///
 /// The planes must hold `height` rows of `width` samples at the given strides,
-/// and `dst` the same in the packed layout.
+/// and `dst` the same in the packed layout. Every stride must be positive;
+/// a negative one is rejected, since the row walk here is unsigned.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
@@ -636,6 +637,12 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     row_end: c_int,
 ) -> c_int {
     if width <= 0 || height <= 0 || row_start >= row_end {
+        return row_start;
+    }
+    if dst_stride <= 0 || y_stride <= 0 || uv_stride <= 0 {
+        return row_start;
+    }
+    if !a.is_null() && a_stride <= 0 {
         return row_start;
     }
 
