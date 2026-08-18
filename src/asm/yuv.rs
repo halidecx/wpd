@@ -345,6 +345,78 @@ macro_rules! upsample_syms {
     };
 }
 
+/// Both dispatch tables, from one list of kernels; see the module docs for
+/// why they are two lists in the first place.
+///
+/// The `@` forms stand for a whole set of slots rather than a field, which is
+/// where the two tables stop looking alike: the decoder keeps five upsamplers
+/// in one array and the C ABI keeps the array beside the two slots a partial
+/// tier fills, so `@upsample` has to clear those two as it overwrites all
+/// five. Doing that by hand was one line in one tier that nothing would have
+/// missed.
+///
+/// A tier may be named more than once, which is how the entries an
+/// architecture only has on some targets get their `#[cfg]` without every
+/// entry carrying one. Order within a tier does not matter: no two entries
+/// write the same slot.
+#[allow(unused_macros)]
+macro_rules! ladder {
+    ($(
+        $(#[$attr:meta])*
+        $($flag:ident)|+ {
+            $( @upsample $up:ident; )?
+            $( @upsample_rgb $up_rgb:ident; )?
+            $( @upsample_bgr $up_bgr:ident; )?
+            $( @packers $packers:ident; )?
+            $( @premultiply $premul:ident; )?
+            $( $field:ident = $wrap:ident::<$marker:path>; )*
+        }
+    )*) => {
+        pub fn init(dsp: &mut YuvDsp, flags: CpuFlags) {
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
+                    $( upsample_table!(dsp, $up); )?
+                    $( dsp.upsample_block[LAYOUT_RGB] =
+                        upsample_block::<$up_rgb::UpsampleRgb, LAYOUT_RGB>; )?
+                    $( dsp.upsample_block[LAYOUT_BGR] =
+                        upsample_block::<$up_bgr::UpsampleBgr, LAYOUT_BGR>; )?
+                    $( packers!(dsp, $packers); )?
+                    $(
+                        dsp.premultiply_row = premultiply_row::<$premul::Premultiply>;
+                        dsp.premultiply_row_4444 =
+                            premultiply_row_4444::<$premul::Premultiply4444>;
+                        dsp.premultiply_row_4444_swap =
+                            premultiply_row_4444::<$premul::Premultiply4444Swap>;
+                    )?
+                    $( dsp.$field = $wrap::<$marker>; )*
+                }
+            )*
+        }
+
+        pub fn raw_table(flags: CpuFlags) -> RawTable {
+            let mut t = RawTable::default();
+
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
+                    $(
+                        t.upsample_block = Some(raw_upsample_table!($up));
+                        t.upsample_rgb = None;
+                        t.upsample_bgr = None;
+                    )?
+                    $( t.upsample_rgb = Some($up_rgb::UpsampleRgb::F); )?
+                    $( t.upsample_bgr = Some($up_bgr::UpsampleBgr::F); )?
+                    $( t.packers = Some(raw_packers!($packers)); )?
+                    $( raw_premultiply!(t, $premul); )?
+                    $( t.$field = Some(<$marker as Raw>::F); )*
+                }
+            )*
+            t
+        }
+    };
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
     use super::*;
@@ -458,85 +530,43 @@ mod arch {
         );
     }
 
-    pub fn init(dsp: &mut YuvDsp, flags: CpuFlags) {
-        if flags.contains(CpuFlags::SSE2) {
-            #[cfg(target_arch = "x86_64")]
-            upsample_table!(dsp, sse2);
-            dsp.dispatch_alpha_first = dispatch_alpha::<sse2::DispatchFirst>;
-            dsp.dispatch_alpha_last = dispatch_alpha::<sse2::DispatchLast>;
+    ladder! {
+        #[cfg(target_arch = "x86_64")]
+        SSE2 {
+            @upsample sse2;
         }
-        if flags.contains(CpuFlags::SSSE3) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                dsp.upsample_block[LAYOUT_RGB] =
-                    upsample_block::<ssse3::UpsampleRgb, LAYOUT_RGB>;
-                dsp.upsample_block[LAYOUT_BGR] =
-                    upsample_block::<ssse3::UpsampleBgr, LAYOUT_BGR>;
-                dsp.argb_to_yuv444 = argb_to_yuv444::<ssse3::ArgbToYuv444>;
-            }
-            packers!(dsp, ssse3);
-            dsp.premultiply_row = premultiply_row::<ssse3::Premultiply>;
-            dsp.premultiply_row_4444 = premultiply_row_4444::<ssse3::Premultiply4444>;
-            dsp.premultiply_row_4444_swap =
-                premultiply_row_4444::<ssse3::Premultiply4444Swap>;
-            dsp.argb_to_y = argb_to_y::<ssse3::ArgbToY>;
+        SSE2 {
+            dispatch_alpha_first = dispatch_alpha::<sse2::DispatchFirst>;
+            dispatch_alpha_last = dispatch_alpha::<sse2::DispatchLast>;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                upsample_table!(dsp, avx2);
-                dsp.argb_to_yuv444 = argb_to_yuv444::<avx2::ArgbToYuv444>;
-                dsp.argb_to_uv = argb_to_uv::<avx2::ArgbToUv>;
-            }
-            dsp.dispatch_alpha_first = dispatch_alpha::<avx2::DispatchFirst>;
-            dsp.dispatch_alpha_last = dispatch_alpha::<avx2::DispatchLast>;
-            packers!(dsp, avx2);
-            dsp.premultiply_row = premultiply_row::<avx2::Premultiply>;
-            dsp.premultiply_row_4444 = premultiply_row_4444::<avx2::Premultiply4444>;
-            dsp.premultiply_row_4444_swap =
-                premultiply_row_4444::<avx2::Premultiply4444Swap>;
-            dsp.argb_to_y = argb_to_y::<avx2::ArgbToY>;
-        }
-    }
+        #[cfg(target_arch = "x86_64")]
+        SSSE3 {
+            @upsample_rgb ssse3;
+            @upsample_bgr ssse3;
 
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
+            argb_to_yuv444 = argb_to_yuv444::<ssse3::ArgbToYuv444>;
+        }
+        SSSE3 {
+            @packers ssse3;
+            @premultiply ssse3;
 
-        if flags.contains(CpuFlags::SSE2) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                t.upsample_block = Some(raw_upsample_table!(sse2));
-            }
-            t.dispatch_alpha_first = Some(sse2::DispatchFirst::F);
-            t.dispatch_alpha_last = Some(sse2::DispatchLast::F);
+            argb_to_y = argb_to_y::<ssse3::ArgbToY>;
         }
-        if flags.contains(CpuFlags::SSSE3) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                t.upsample_rgb = Some(ssse3::UpsampleRgb::F);
-                t.upsample_bgr = Some(ssse3::UpsampleBgr::F);
-                t.argb_to_yuv444 = Some(ssse3::ArgbToYuv444::F);
-            }
-            t.packers = Some(raw_packers!(ssse3));
-            raw_premultiply!(t, ssse3);
-            t.argb_to_y = Some(ssse3::ArgbToY::F);
+        #[cfg(target_arch = "x86_64")]
+        AVX2 {
+            @upsample avx2;
+
+            argb_to_yuv444 = argb_to_yuv444::<avx2::ArgbToYuv444>;
+            argb_to_uv = argb_to_uv::<avx2::ArgbToUv>;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            #[cfg(target_arch = "x86_64")]
-            {
-                t.upsample_block = Some(raw_upsample_table!(avx2));
-                t.upsample_rgb = None;
-                t.upsample_bgr = None;
-                t.argb_to_yuv444 = Some(avx2::ArgbToYuv444::F);
-                t.argb_to_uv = Some(avx2::ArgbToUv::F);
-            }
-            t.dispatch_alpha_first = Some(avx2::DispatchFirst::F);
-            t.dispatch_alpha_last = Some(avx2::DispatchLast::F);
-            t.packers = Some(raw_packers!(avx2));
-            raw_premultiply!(t, avx2);
-            t.argb_to_y = Some(avx2::ArgbToY::F);
+        AVX2 {
+            @packers avx2;
+            @premultiply avx2;
+
+            dispatch_alpha_first = dispatch_alpha::<avx2::DispatchFirst>;
+            dispatch_alpha_last = dispatch_alpha::<avx2::DispatchLast>;
+            argb_to_y = argb_to_y::<avx2::ArgbToY>;
         }
-        t
     }
 }
 
@@ -623,60 +653,28 @@ mod arch {
         );
     }
 
-    pub fn init(dsp: &mut YuvDsp, flags: CpuFlags) {
-        if !flags.contains(CpuFlags::NEON) {
-            return;
-        }
-        upsample_table!(dsp, neon);
-        packers!(dsp, neon);
-        dsp.dispatch_alpha_first = dispatch_alpha::<neon::DispatchFirst>;
-        dsp.dispatch_alpha_last = dispatch_alpha::<neon::DispatchLast>;
-        dsp.premultiply_row = premultiply_row::<neon::Premultiply>;
-        dsp.premultiply_row_4444 = premultiply_row_4444::<neon::Premultiply4444>;
-        dsp.premultiply_row_4444_swap =
-            premultiply_row_4444::<neon::Premultiply4444Swap>;
-        dsp.argb_to_y = argb_to_y::<neon::ArgbToY>;
-        dsp.argb_to_yuv444 = argb_to_yuv444::<neon::ArgbToYuv444>;
-        dsp.argb_to_uv = argb_to_uv::<neon::ArgbToUv>;
+    ladder! {
+        NEON {
+            @upsample neon;
+            @packers neon;
+            @premultiply neon;
 
+            dispatch_alpha_first = dispatch_alpha::<neon::DispatchFirst>;
+            dispatch_alpha_last = dispatch_alpha::<neon::DispatchLast>;
+            argb_to_y = argb_to_y::<neon::ArgbToY>;
+            argb_to_yuv444 = argb_to_yuv444::<neon::ArgbToYuv444>;
+            argb_to_uv = argb_to_uv::<neon::ArgbToUv>;
+        }
         #[cfg(wpd_asm_dotprod)]
-        if flags.contains(CpuFlags::DOTPROD) {
-            dsp.argb_to_y = argb_to_y::<dotprod::ArgbToY>;
-            dsp.argb_to_yuv444 = argb_to_yuv444::<dotprod::ArgbToYuv444>;
+        NEON | DOTPROD {
+            argb_to_y = argb_to_y::<dotprod::ArgbToY>;
+            argb_to_yuv444 = argb_to_yuv444::<dotprod::ArgbToYuv444>;
         }
         #[cfg(wpd_asm_i8mm)]
-        if flags.contains(CpuFlags::I8MM) {
-            dsp.argb_to_y = argb_to_y::<i8mm::ArgbToY>;
-            dsp.argb_to_yuv444 = argb_to_yuv444::<i8mm::ArgbToYuv444>;
+        NEON | I8MM {
+            argb_to_y = argb_to_y::<i8mm::ArgbToY>;
+            argb_to_yuv444 = argb_to_yuv444::<i8mm::ArgbToYuv444>;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if !flags.contains(CpuFlags::NEON) {
-            return t;
-        }
-        t.upsample_block = Some(raw_upsample_table!(neon));
-        t.packers = Some(raw_packers!(neon));
-        t.dispatch_alpha_first = Some(neon::DispatchFirst::F);
-        t.dispatch_alpha_last = Some(neon::DispatchLast::F);
-        raw_premultiply!(t, neon);
-        t.argb_to_y = Some(neon::ArgbToY::F);
-        t.argb_to_yuv444 = Some(neon::ArgbToYuv444::F);
-        t.argb_to_uv = Some(neon::ArgbToUv::F);
-
-        #[cfg(wpd_asm_dotprod)]
-        if flags.contains(CpuFlags::DOTPROD) {
-            t.argb_to_y = Some(dotprod::ArgbToY::F);
-            t.argb_to_yuv444 = Some(dotprod::ArgbToYuv444::F);
-        }
-        #[cfg(wpd_asm_i8mm)]
-        if flags.contains(CpuFlags::I8MM) {
-            t.argb_to_y = Some(i8mm::ArgbToY::F);
-            t.argb_to_yuv444 = Some(i8mm::ArgbToYuv444::F);
-        }
-        t
     }
 }
 

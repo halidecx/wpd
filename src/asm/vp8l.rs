@@ -229,6 +229,39 @@ macro_rules! preds {
     };
 }
 
+/// Both dispatch tables, from one list of kernels; see the module docs for
+/// why they are two lists in the first place.
+///
+/// `@preds` stands for the fourteen predictors, which are a whole table on
+/// both sides rather than a field; the `@` is what keeps it from looking like
+/// a field name to the matcher.
+#[allow(unused_macros)]
+macro_rules! ladder {
+    ($(
+        $flag:ident {
+            $( @preds $preds:ident; )?
+            $( $field:ident = $wrap:ident::<$marker:path>; )*
+        }
+    )*) => {
+        pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
+            $(if flags.contains(CpuFlags::$flag) {
+                $( dsp.pred_add = pred_table!($preds); )?
+                $( dsp.$field = $wrap::<$marker>; )*
+            })*
+        }
+
+        pub fn raw_table(flags: CpuFlags) -> RawTable {
+            let mut t = RawTable::default();
+
+            $(if flags.contains(CpuFlags::$flag) {
+                $( t.pred_add = Some(raw_pred_table!($preds)); )?
+                $( t.$field = Some(<$marker as Raw>::F); )*
+            })*
+            t
+        }
+    };
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
     use super::*;
@@ -275,37 +308,19 @@ mod arch {
         );
     }
 
-    pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
-        if flags.contains(CpuFlags::SSSE3) {
-            dsp.color_row = color_row::<ssse3::ColorRow>;
-            dsp.blend_row_argb_premult = blend_row::<ssse3::BlendPremult>;
+    ladder! {
+        SSSE3 {
+            color_row = color_row::<ssse3::ColorRow>;
+            blend_row_argb_premult = blend_row::<ssse3::BlendPremult>;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            dsp.pred_add = pred_table!(avx2);
-            dsp.map_color32 = map_color32::<avx2::MapColor>;
-            dsp.color_row = color_row::<avx2::ColorRow>;
-            dsp.extract_green = extract_green::<avx2::ExtractGreen>;
-            dsp.blend_row_argb = blend_row::<avx2::Blend>;
-            dsp.blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
+        AVX2 {
+            @preds avx2;
+            map_color32 = map_color32::<avx2::MapColor>;
+            color_row = color_row::<avx2::ColorRow>;
+            extract_green = extract_green::<avx2::ExtractGreen>;
+            blend_row_argb = blend_row::<avx2::Blend>;
+            blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if flags.contains(CpuFlags::SSSE3) {
-            t.color_row = Some(ssse3::ColorRow::F);
-            t.blend_row_argb_premult = Some(ssse3::BlendPremult::F);
-        }
-        if flags.contains(CpuFlags::AVX2) {
-            t.pred_add = Some(raw_pred_table!(avx2));
-            t.map_color32 = Some(avx2::MapColor::F);
-            t.color_row = Some(avx2::ColorRow::F);
-            t.extract_green = Some(avx2::ExtractGreen::F);
-            t.blend_row_argb = Some(avx2::Blend::F);
-            t.blend_row_argb_premult = Some(avx2::BlendPremult::F);
-        }
-        t
     }
 }
 
@@ -343,29 +358,14 @@ mod arch {
         );
     }
 
-    pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
-        if !flags.contains(CpuFlags::NEON) {
-            return;
+    ladder! {
+        NEON {
+            @preds neon;
+            map_color32 = map_color32::<neon::MapColor>;
+            extract_green = extract_green::<neon::ExtractGreen>;
+            blend_row_argb = blend_row::<neon::Blend>;
+            blend_row_argb_premult = blend_row::<neon::BlendPremult>;
         }
-        dsp.pred_add = pred_table!(neon);
-        dsp.map_color32 = map_color32::<neon::MapColor>;
-        dsp.extract_green = extract_green::<neon::ExtractGreen>;
-        dsp.blend_row_argb = blend_row::<neon::Blend>;
-        dsp.blend_row_argb_premult = blend_row::<neon::BlendPremult>;
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if !flags.contains(CpuFlags::NEON) {
-            return t;
-        }
-        t.pred_add = Some(raw_pred_table!(neon));
-        t.map_color32 = Some(neon::MapColor::F);
-        t.extract_green = Some(neon::ExtractGreen::F);
-        t.blend_row_argb = Some(neon::Blend::F);
-        t.blend_row_argb_premult = Some(neon::BlendPremult::F);
-        t
     }
 }
 

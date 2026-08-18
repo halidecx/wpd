@@ -786,6 +786,50 @@ macro_rules! install_idct {
     };
 }
 
+/// Both dispatch tables, from one list of kernels; see the module docs for
+/// why they are two lists in the first place.
+///
+/// `@lf` and `@idct` stand for whole instruction sets rather than single
+/// slots, and take the composed-macroblock module the raw table needs beside
+/// the set the wrappers compose for themselves. The `@` is what keeps them
+/// from looking like field names to the matcher.
+#[allow(unused_macros)]
+macro_rules! ladder {
+    ($(
+        $(#[$attr:meta])*
+        $flag:ident {
+            $( @lf $lf:ident, $lf_mb:ident; )?
+            $( @idct $idct:ident; )?
+            $( $field:ident = $wrap:ident::<$marker:path>; )*
+        }
+    )*) => {
+        pub fn init(c: &mut Vp8Dsp, flags: CpuFlags) {
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::$flag) {
+                    $( install_lf!(c, $lf); )?
+                    $( install_idct!(c, $idct); )?
+                    $( c.$field = $wrap::<$marker>; )*
+                }
+            )*
+        }
+
+        pub fn raw_table(flags: CpuFlags) -> RawTable {
+            let mut t = RawTable::default();
+
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::$flag) {
+                    $( raw_install_lf!(t, $lf, $lf_mb); )?
+                    $( raw_install_idct!(t, $idct); )?
+                    $( t.$field = Some(<$marker as Raw>::F); )*
+                }
+            )*
+            t
+        }
+    };
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
     use super::*;
@@ -950,49 +994,25 @@ mod arch {
         const F: LfUvMbRaw = h8uv_mb_avx2;
     }
 
-    pub fn init(c: &mut Vp8Dsp, flags: CpuFlags) {
-        if flags.contains(CpuFlags::SSE2) {
-            install_lf!(c, sse2);
-            install_idct!(c, sse2_idct);
+    ladder! {
+        SSE2 {
+            @lf sse2, sse2_mb;
+            @idct sse2_idct;
         }
-        if flags.contains(CpuFlags::SSSE3) {
-            install_lf!(c, ssse3);
+        SSSE3 {
+            @lf ssse3, ssse3_mb;
         }
-        if flags.contains(CpuFlags::SSE41) {
-            c.luma_dc_wht = wht::<sse4::Wht>;
-            c.idct_dc_add = idct::<sse4::DcAdd>;
+        SSE41 {
+            luma_dc_wht = wht::<sse4::Wht>;
+            idct_dc_add = idct::<sse4::DcAdd>;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            c.v_loop_filter8uv_inner = lf_v_uv::<avx2::V8uvInner>;
-            c.v_loop_filter_simple_mb = lf_v_simple_mb::<avx2::VSimpleMb>;
-            c.h_loop_filter_simple_mb = lf_h_simple_mb::<avx2::HSimpleMb>;
-            c.h_loop_filter16y_mb = lf_h_mb::<H16MbAvx2>;
-            c.h_loop_filter8uv_mb = lf_h_uv_mb::<H8uvMbAvx2>;
+        AVX2 {
+            v_loop_filter8uv_inner = lf_v_uv::<avx2::V8uvInner>;
+            v_loop_filter_simple_mb = lf_v_simple_mb::<avx2::VSimpleMb>;
+            h_loop_filter_simple_mb = lf_h_simple_mb::<avx2::HSimpleMb>;
+            h_loop_filter16y_mb = lf_h_mb::<H16MbAvx2>;
+            h_loop_filter8uv_mb = lf_h_uv_mb::<H8uvMbAvx2>;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if flags.contains(CpuFlags::SSE2) {
-            raw_install_lf!(t, sse2, sse2_mb);
-            raw_install_idct!(t, sse2_idct);
-        }
-        if flags.contains(CpuFlags::SSSE3) {
-            raw_install_lf!(t, ssse3, ssse3_mb);
-        }
-        if flags.contains(CpuFlags::SSE41) {
-            t.luma_dc_wht = Some(sse4::Wht::F);
-            t.idct_dc_add = Some(sse4::DcAdd::F);
-        }
-        if flags.contains(CpuFlags::AVX2) {
-            t.v_loop_filter8uv_inner = Some(avx2::V8uvInner::F);
-            t.v_loop_filter_simple_mb = Some(avx2::VSimpleMb::F);
-            t.h_loop_filter_simple_mb = Some(avx2::HSimpleMb::F);
-            t.h_loop_filter16y_mb = Some(H16MbAvx2::F);
-            t.h_loop_filter8uv_mb = Some(H8uvMbAvx2::F);
-        }
-        t
     }
 }
 
@@ -1040,31 +1060,15 @@ mod arch {
         raw_lf_uv_mb!(H8uvMb, h8uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
     }
 
-    pub fn init(c: &mut Vp8Dsp, flags: CpuFlags) {
-        if !flags.contains(CpuFlags::NEON) {
-            return;
+    ladder! {
+        NEON {
+            @lf neon, neon_mb;
+            @idct neon_idct;
+
+            h_loop_filter_simple_mb = lf_h_simple_mb::<fused::HSimpleMb>;
+            h_loop_filter16y_mb = lf_h_mb::<fused::H16Mb>;
+            h_loop_filter8uv_mb = lf_h_uv_mb::<fused::H8uvMb>;
         }
-        install_lf!(c, neon);
-        install_idct!(c, neon_idct);
-
-        c.h_loop_filter_simple_mb = lf_h_simple_mb::<fused::HSimpleMb>;
-        c.h_loop_filter16y_mb = lf_h_mb::<fused::H16Mb>;
-        c.h_loop_filter8uv_mb = lf_h_uv_mb::<fused::H8uvMb>;
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if !flags.contains(CpuFlags::NEON) {
-            return t;
-        }
-        raw_install_lf!(t, neon, neon_mb);
-        raw_install_idct!(t, neon_idct);
-
-        t.h_loop_filter_simple_mb = Some(fused::HSimpleMb::F);
-        t.h_loop_filter16y_mb = Some(fused::H16Mb::F);
-        t.h_loop_filter8uv_mb = Some(fused::H8uvMb::F);
-        t
     }
 }
 
@@ -1138,33 +1142,18 @@ mod arch {
         composed_mb!(armv6);
     }
 
-    pub fn init(c: &mut Vp8Dsp, flags: CpuFlags) {
+    ladder! {
         #[cfg(wpd_asm_armv6)]
-        if flags.contains(CpuFlags::ARMV6) {
-            install_lf!(c, armv6);
-            install_idct!(c, armv6_idct);
-            c.luma_dc_wht_dc = wht::<armv6_wht_dc::WhtDc>;
-        }
-        if flags.contains(CpuFlags::NEON) {
-            install_lf!(c, neon);
-            install_idct!(c, neon_idct);
-        }
-    }
+        ARMV6 {
+            @lf armv6, armv6_mb;
+            @idct armv6_idct;
 
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        #[cfg(wpd_asm_armv6)]
-        if flags.contains(CpuFlags::ARMV6) {
-            raw_install_lf!(t, armv6, armv6_mb);
-            raw_install_idct!(t, armv6_idct);
-            t.luma_dc_wht_dc = Some(armv6_wht_dc::WhtDc::F);
+            luma_dc_wht_dc = wht::<armv6_wht_dc::WhtDc>;
         }
-        if flags.contains(CpuFlags::NEON) {
-            raw_install_lf!(t, neon, neon_mb);
-            raw_install_idct!(t, neon_idct);
+        NEON {
+            @lf neon, neon_mb;
+            @idct neon_idct;
         }
-        t
     }
 }
 

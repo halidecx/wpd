@@ -88,6 +88,32 @@ fn pred4x4<T: Raw<Sig = Pred4x4Raw>>(p: &mut [u8], o: usize, s: usize, tr: &[u8;
     unsafe { (T::F)(p.as_mut_ptr().add(o), tr.as_ptr(), s as isize) }
 }
 
+/// Both dispatch tables, from one list of kernels; see the module docs for
+/// why they are two lists in the first place.
+#[allow(unused_macros)]
+macro_rules! ladder {
+    ($(
+        $flag:ident {
+            $( $table:ident[$idx:ident] = $wrap:ident::<$marker:path $(, $n:tt)?>; )*
+        }
+    )*) => {
+        pub fn init(p: &mut Vp8Pred, flags: CpuFlags) {
+            $(if flags.contains(CpuFlags::$flag) {
+                $( p.$table[$idx] = $wrap::<$marker $(, $n)?>; )*
+            })*
+        }
+
+        pub fn raw_table(flags: CpuFlags) -> RawTable {
+            let mut t = RawTable::default();
+
+            $(if flags.contains(CpuFlags::$flag) {
+                $( t.$table[$idx] = Some(<$marker as Raw>::F); )*
+            })*
+            t
+        }
+    };
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
     use super::*;
@@ -153,103 +179,52 @@ mod arch {
         raw_pred!(Tm16, tm16, "ff_pred16x16_tm_vp8_8_avx2");
     }
 
-    pub fn init(p: &mut Vp8Pred, flags: CpuFlags) {
-        if flags.contains(CpuFlags::SSE) {
-            p.pred16x16[VERT_PRED8X8] = pred::<sse::Vert16, 16>;
+    ladder! {
+        SSE {
+            pred16x16[VERT_PRED8X8] = pred::<sse::Vert16, 16>;
         }
-        if flags.contains(CpuFlags::SSE2) {
-            p.pred4x4[DIAG_DOWN_LEFT_PRED] = pred4x4::<sse2::DownLeft4>;
-            p.pred4x4[DIAG_DOWN_RIGHT_PRED] = pred4x4::<sse2::DownRight4>;
-            p.pred4x4[VERT_RIGHT_PRED] = pred4x4::<sse2::VertRight4>;
-            p.pred4x4[HOR_DOWN_PRED] = pred4x4::<sse2::HorDown4>;
-            p.pred4x4[HOR_UP_PRED] = pred4x4::<sse2::HorUp4>;
-            p.pred4x4[DC_PRED] = pred4x4::<sse2::Dc4>;
-            p.pred4x4[TM_VP8_PRED] = pred4x4::<sse2::Tm4>;
-            p.pred4x4[VERT_PRED] = pred4x4::<sse2::Vert4>;
-            p.pred4x4[HOR_PRED] = pred4x4::<sse2::Hor4>;
+        SSE2 {
+            pred4x4[DIAG_DOWN_LEFT_PRED] = pred4x4::<sse2::DownLeft4>;
+            pred4x4[DIAG_DOWN_RIGHT_PRED] = pred4x4::<sse2::DownRight4>;
+            pred4x4[VERT_RIGHT_PRED] = pred4x4::<sse2::VertRight4>;
+            pred4x4[HOR_DOWN_PRED] = pred4x4::<sse2::HorDown4>;
+            pred4x4[HOR_UP_PRED] = pred4x4::<sse2::HorUp4>;
+            pred4x4[DC_PRED] = pred4x4::<sse2::Dc4>;
+            pred4x4[TM_VP8_PRED] = pred4x4::<sse2::Tm4>;
+            pred4x4[VERT_PRED] = pred4x4::<sse2::Vert4>;
+            pred4x4[HOR_PRED] = pred4x4::<sse2::Hor4>;
 
-            p.pred8x8[DC_PRED8X8] = pred::<sse2::Dc8, 8>;
-            p.pred8x8[HOR_PRED8X8] = pred::<sse2::Hor8, 8>;
-            p.pred8x8[VERT_PRED8X8] = pred::<sse2::Vert8, 8>;
-            p.pred8x8[PLANE_PRED8X8] = pred::<sse2::Tm8, 8>;
-            p.pred8x8[TOP_DC_PRED8X8] = pred::<sse2::TopDc8, 8>;
-            p.pred8x8[LEFT_DC_PRED8X8] = pred::<sse2::LeftDc8, 8>;
+            pred8x8[DC_PRED8X8] = pred::<sse2::Dc8, 8>;
+            pred8x8[HOR_PRED8X8] = pred::<sse2::Hor8, 8>;
+            pred8x8[VERT_PRED8X8] = pred::<sse2::Vert8, 8>;
+            pred8x8[PLANE_PRED8X8] = pred::<sse2::Tm8, 8>;
+            pred8x8[TOP_DC_PRED8X8] = pred::<sse2::TopDc8, 8>;
+            pred8x8[LEFT_DC_PRED8X8] = pred::<sse2::LeftDc8, 8>;
 
-            p.pred16x16[HOR_PRED8X8] = pred::<sse2::Hor16, 16>;
-            p.pred16x16[DC_PRED8X8] = pred::<sse2::Dc16, 16>;
-            p.pred16x16[PLANE_PRED8X8] = pred::<sse2::Tm16, 16>;
-            p.pred16x16[TOP_DC_PRED8X8] = pred::<sse2::TopDc16, 16>;
-            p.pred16x16[LEFT_DC_PRED8X8] = pred::<sse2::LeftDc16, 16>;
+            pred16x16[HOR_PRED8X8] = pred::<sse2::Hor16, 16>;
+            pred16x16[DC_PRED8X8] = pred::<sse2::Dc16, 16>;
+            pred16x16[PLANE_PRED8X8] = pred::<sse2::Tm16, 16>;
+            pred16x16[TOP_DC_PRED8X8] = pred::<sse2::TopDc16, 16>;
+            pred16x16[LEFT_DC_PRED8X8] = pred::<sse2::LeftDc16, 16>;
         }
-        if flags.contains(CpuFlags::SSSE3) {
-            p.pred4x4[TM_VP8_PRED] = pred4x4::<ssse3::Tm4>;
-            p.pred4x4[VERT_LEFT_PRED] = pred4x4::<ssse3::VertLeft4>;
+        SSSE3 {
+            pred4x4[TM_VP8_PRED] = pred4x4::<ssse3::Tm4>;
+            pred4x4[VERT_LEFT_PRED] = pred4x4::<ssse3::VertLeft4>;
 
-            p.pred8x8[HOR_PRED8X8] = pred::<ssse3::Hor8, 8>;
-            p.pred8x8[PLANE_PRED8X8] = pred::<ssse3::Tm8, 8>;
-            p.pred8x8[TOP_DC_PRED8X8] = pred::<ssse3::TopDc8, 8>;
-            p.pred8x8[LEFT_DC_PRED8X8] = pred::<ssse3::LeftDc8, 8>;
+            pred8x8[HOR_PRED8X8] = pred::<ssse3::Hor8, 8>;
+            pred8x8[PLANE_PRED8X8] = pred::<ssse3::Tm8, 8>;
+            pred8x8[TOP_DC_PRED8X8] = pred::<ssse3::TopDc8, 8>;
+            pred8x8[LEFT_DC_PRED8X8] = pred::<ssse3::LeftDc8, 8>;
 
-            p.pred16x16[PLANE_PRED8X8] = pred::<ssse3::Tm16, 16>;
-            p.pred16x16[HOR_PRED8X8] = pred::<ssse3::Hor16, 16>;
-            p.pred16x16[DC_PRED8X8] = pred::<ssse3::Dc16, 16>;
-            p.pred16x16[TOP_DC_PRED8X8] = pred::<ssse3::TopDc16, 16>;
-            p.pred16x16[LEFT_DC_PRED8X8] = pred::<ssse3::LeftDc16, 16>;
+            pred16x16[PLANE_PRED8X8] = pred::<ssse3::Tm16, 16>;
+            pred16x16[HOR_PRED8X8] = pred::<ssse3::Hor16, 16>;
+            pred16x16[DC_PRED8X8] = pred::<ssse3::Dc16, 16>;
+            pred16x16[TOP_DC_PRED8X8] = pred::<ssse3::TopDc16, 16>;
+            pred16x16[LEFT_DC_PRED8X8] = pred::<ssse3::LeftDc16, 16>;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            p.pred16x16[PLANE_PRED8X8] = pred::<avx2::Tm16, 16>;
+        AVX2 {
+            pred16x16[PLANE_PRED8X8] = pred::<avx2::Tm16, 16>;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if flags.contains(CpuFlags::SSE) {
-            t.pred16x16[VERT_PRED8X8] = Some(sse::Vert16::F);
-        }
-        if flags.contains(CpuFlags::SSE2) {
-            t.pred4x4[DIAG_DOWN_LEFT_PRED] = Some(sse2::DownLeft4::F);
-            t.pred4x4[DIAG_DOWN_RIGHT_PRED] = Some(sse2::DownRight4::F);
-            t.pred4x4[VERT_RIGHT_PRED] = Some(sse2::VertRight4::F);
-            t.pred4x4[HOR_DOWN_PRED] = Some(sse2::HorDown4::F);
-            t.pred4x4[HOR_UP_PRED] = Some(sse2::HorUp4::F);
-            t.pred4x4[DC_PRED] = Some(sse2::Dc4::F);
-            t.pred4x4[TM_VP8_PRED] = Some(sse2::Tm4::F);
-            t.pred4x4[VERT_PRED] = Some(sse2::Vert4::F);
-            t.pred4x4[HOR_PRED] = Some(sse2::Hor4::F);
-
-            t.pred8x8[DC_PRED8X8] = Some(sse2::Dc8::F);
-            t.pred8x8[HOR_PRED8X8] = Some(sse2::Hor8::F);
-            t.pred8x8[VERT_PRED8X8] = Some(sse2::Vert8::F);
-            t.pred8x8[PLANE_PRED8X8] = Some(sse2::Tm8::F);
-            t.pred8x8[TOP_DC_PRED8X8] = Some(sse2::TopDc8::F);
-            t.pred8x8[LEFT_DC_PRED8X8] = Some(sse2::LeftDc8::F);
-
-            t.pred16x16[HOR_PRED8X8] = Some(sse2::Hor16::F);
-            t.pred16x16[DC_PRED8X8] = Some(sse2::Dc16::F);
-            t.pred16x16[PLANE_PRED8X8] = Some(sse2::Tm16::F);
-            t.pred16x16[TOP_DC_PRED8X8] = Some(sse2::TopDc16::F);
-            t.pred16x16[LEFT_DC_PRED8X8] = Some(sse2::LeftDc16::F);
-        }
-        if flags.contains(CpuFlags::SSSE3) {
-            t.pred4x4[TM_VP8_PRED] = Some(ssse3::Tm4::F);
-            t.pred4x4[VERT_LEFT_PRED] = Some(ssse3::VertLeft4::F);
-
-            t.pred8x8[HOR_PRED8X8] = Some(ssse3::Hor8::F);
-            t.pred8x8[PLANE_PRED8X8] = Some(ssse3::Tm8::F);
-            t.pred8x8[TOP_DC_PRED8X8] = Some(ssse3::TopDc8::F);
-            t.pred8x8[LEFT_DC_PRED8X8] = Some(ssse3::LeftDc8::F);
-
-            t.pred16x16[PLANE_PRED8X8] = Some(ssse3::Tm16::F);
-            t.pred16x16[HOR_PRED8X8] = Some(ssse3::Hor16::F);
-            t.pred16x16[DC_PRED8X8] = Some(ssse3::Dc16::F);
-            t.pred16x16[TOP_DC_PRED8X8] = Some(ssse3::TopDc16::F);
-            t.pred16x16[LEFT_DC_PRED8X8] = Some(ssse3::LeftDc16::F);
-        }
-        if flags.contains(CpuFlags::AVX2) {
-            t.pred16x16[PLANE_PRED8X8] = Some(avx2::Tm16::F);
-        }
-        t
     }
 }
 
@@ -281,57 +256,28 @@ mod arch {
         raw_pred!(Tm16, tm16, "ff_pred16x16_tm_neon");
     }
 
-    pub fn init(p: &mut Vp8Pred, flags: CpuFlags) {
-        if !flags.contains(CpuFlags::NEON) {
-            return;
+    ladder! {
+        NEON {
+            pred4x4[TM_VP8_PRED] = pred4x4::<neon::Tm4>;
+            pred4x4[DC_PRED] = pred4x4::<neon::Dc4>;
+            pred4x4[VERT_PRED] = pred4x4::<neon::Vert4>;
+            pred4x4[HOR_PRED] = pred4x4::<neon::Hor4>;
+            pred4x4[DIAG_DOWN_LEFT_PRED] = pred4x4::<neon::DownLeft4>;
+            pred4x4[DIAG_DOWN_RIGHT_PRED] = pred4x4::<neon::DownRight4>;
+            pred4x4[VERT_LEFT_PRED] = pred4x4::<neon::VertLeft4>;
+            pred4x4[VERT_RIGHT_PRED] = pred4x4::<neon::VertRight4>;
+            pred4x4[HOR_UP_PRED] = pred4x4::<neon::HorUp4>;
+            pred4x4[HOR_DOWN_PRED] = pred4x4::<neon::HorDown4>;
+
+            pred8x8[VERT_PRED8X8] = pred::<neon::Vert8, 8>;
+            pred8x8[DC_PRED8X8] = pred::<neon::Dc8, 8>;
+            pred8x8[PLANE_PRED8X8] = pred::<neon::Tm8, 8>;
+
+            pred16x16[DC_PRED8X8] = pred::<neon::Dc16, 16>;
+            pred16x16[VERT_PRED8X8] = pred::<neon::Vert16, 16>;
+            pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
+            pred16x16[PLANE_PRED8X8] = pred::<neon::Tm16, 16>;
         }
-        p.pred4x4[TM_VP8_PRED] = pred4x4::<neon::Tm4>;
-        p.pred4x4[DC_PRED] = pred4x4::<neon::Dc4>;
-        p.pred4x4[VERT_PRED] = pred4x4::<neon::Vert4>;
-        p.pred4x4[HOR_PRED] = pred4x4::<neon::Hor4>;
-        p.pred4x4[DIAG_DOWN_LEFT_PRED] = pred4x4::<neon::DownLeft4>;
-        p.pred4x4[DIAG_DOWN_RIGHT_PRED] = pred4x4::<neon::DownRight4>;
-        p.pred4x4[VERT_LEFT_PRED] = pred4x4::<neon::VertLeft4>;
-        p.pred4x4[VERT_RIGHT_PRED] = pred4x4::<neon::VertRight4>;
-        p.pred4x4[HOR_UP_PRED] = pred4x4::<neon::HorUp4>;
-        p.pred4x4[HOR_DOWN_PRED] = pred4x4::<neon::HorDown4>;
-
-        p.pred8x8[VERT_PRED8X8] = pred::<neon::Vert8, 8>;
-        p.pred8x8[DC_PRED8X8] = pred::<neon::Dc8, 8>;
-        p.pred8x8[PLANE_PRED8X8] = pred::<neon::Tm8, 8>;
-
-        p.pred16x16[DC_PRED8X8] = pred::<neon::Dc16, 16>;
-        p.pred16x16[VERT_PRED8X8] = pred::<neon::Vert16, 16>;
-        p.pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
-        p.pred16x16[PLANE_PRED8X8] = pred::<neon::Tm16, 16>;
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if !flags.contains(CpuFlags::NEON) {
-            return t;
-        }
-        t.pred4x4[TM_VP8_PRED] = Some(neon::Tm4::F);
-        t.pred4x4[DC_PRED] = Some(neon::Dc4::F);
-        t.pred4x4[VERT_PRED] = Some(neon::Vert4::F);
-        t.pred4x4[HOR_PRED] = Some(neon::Hor4::F);
-        t.pred4x4[DIAG_DOWN_LEFT_PRED] = Some(neon::DownLeft4::F);
-        t.pred4x4[DIAG_DOWN_RIGHT_PRED] = Some(neon::DownRight4::F);
-        t.pred4x4[VERT_LEFT_PRED] = Some(neon::VertLeft4::F);
-        t.pred4x4[VERT_RIGHT_PRED] = Some(neon::VertRight4::F);
-        t.pred4x4[HOR_UP_PRED] = Some(neon::HorUp4::F);
-        t.pred4x4[HOR_DOWN_PRED] = Some(neon::HorDown4::F);
-
-        t.pred8x8[VERT_PRED8X8] = Some(neon::Vert8::F);
-        t.pred8x8[DC_PRED8X8] = Some(neon::Dc8::F);
-        t.pred8x8[PLANE_PRED8X8] = Some(neon::Tm8::F);
-
-        t.pred16x16[DC_PRED8X8] = Some(neon::Dc16::F);
-        t.pred16x16[VERT_PRED8X8] = Some(neon::Vert16::F);
-        t.pred16x16[HOR_PRED8X8] = Some(neon::Hor16::F);
-        t.pred16x16[PLANE_PRED8X8] = Some(neon::Tm16::F);
-        t
     }
 }
 
@@ -354,39 +300,19 @@ mod arch {
         raw_pred!(Dc128_16, dc128_16, "ff_pred16x16_128_dc_neon");
     }
 
-    pub fn init(p: &mut Vp8Pred, flags: CpuFlags) {
-        if !flags.contains(CpuFlags::NEON) {
-            return;
+    ladder! {
+        NEON {
+            pred8x8[VERT_PRED8X8] = pred::<neon::Vert8, 8>;
+            pred8x8[HOR_PRED8X8] = pred::<neon::Hor8, 8>;
+            pred8x8[DC_128_PRED8X8] = pred::<neon::Dc128_8, 8>;
+
+            pred16x16[DC_PRED8X8] = pred::<neon::Dc16, 16>;
+            pred16x16[VERT_PRED8X8] = pred::<neon::Vert16, 16>;
+            pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
+            pred16x16[LEFT_DC_PRED8X8] = pred::<neon::LeftDc16, 16>;
+            pred16x16[TOP_DC_PRED8X8] = pred::<neon::TopDc16, 16>;
+            pred16x16[DC_128_PRED8X8] = pred::<neon::Dc128_16, 16>;
         }
-        p.pred8x8[VERT_PRED8X8] = pred::<neon::Vert8, 8>;
-        p.pred8x8[HOR_PRED8X8] = pred::<neon::Hor8, 8>;
-        p.pred8x8[DC_128_PRED8X8] = pred::<neon::Dc128_8, 8>;
-
-        p.pred16x16[DC_PRED8X8] = pred::<neon::Dc16, 16>;
-        p.pred16x16[VERT_PRED8X8] = pred::<neon::Vert16, 16>;
-        p.pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
-        p.pred16x16[LEFT_DC_PRED8X8] = pred::<neon::LeftDc16, 16>;
-        p.pred16x16[TOP_DC_PRED8X8] = pred::<neon::TopDc16, 16>;
-        p.pred16x16[DC_128_PRED8X8] = pred::<neon::Dc128_16, 16>;
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if !flags.contains(CpuFlags::NEON) {
-            return t;
-        }
-        t.pred8x8[VERT_PRED8X8] = Some(neon::Vert8::F);
-        t.pred8x8[HOR_PRED8X8] = Some(neon::Hor8::F);
-        t.pred8x8[DC_128_PRED8X8] = Some(neon::Dc128_8::F);
-
-        t.pred16x16[DC_PRED8X8] = Some(neon::Dc16::F);
-        t.pred16x16[VERT_PRED8X8] = Some(neon::Vert16::F);
-        t.pred16x16[HOR_PRED8X8] = Some(neon::Hor16::F);
-        t.pred16x16[LEFT_DC_PRED8X8] = Some(neon::LeftDc16::F);
-        t.pred16x16[TOP_DC_PRED8X8] = Some(neon::TopDc16::F);
-        t.pred16x16[DC_128_PRED8X8] = Some(neon::Dc128_16::F);
-        t
     }
 }
 
