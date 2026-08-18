@@ -395,7 +395,11 @@ impl Decoder {
     }
 
     fn update_dimensions(&mut self, width: i32, height: i32) -> Result<()> {
-        check_image_size(width, height)?;
+        /* A keyframe header that declares a size the decoder will not allocate
+        is a damaged bitstream, not a caller asking for too much: the size came
+        out of the file. Only VP8L, whose canvas size the container may also
+        have declared, reports the limit as such. */
+        check_image_size(width, height).map_err(|_| Error::InvalidData)?;
 
         if width == self.width
             && height == self.height
@@ -528,16 +532,21 @@ impl Decoder {
     /// Opens, or widens, a range coder over each coefficient partition that has
     /// enough of its bytes present to be started.
     fn open_partitions(&mut self, buf: &[u8]) {
-        let init_bytes = if rac::RAC_64 { 0 } else { 3 };
+        let init_bytes: i64 = if rac::RAC_64 { 0 } else { 3 };
 
         for i in 0..self.num_coeff_partitions {
             let start = self.partition_start[i];
             let size = self.partition_size[i];
-            let have = self.chunk_avail.saturating_sub(start);
-            let win = if have >= size {
+            /* Signed, as the C's was: a partition whose first byte has not
+            arrived is short by a negative amount, and must stay unopened.
+            Saturating the subtraction to zero would open it over an empty
+            window instead, and let the row loop run against a range coder
+            with nothing in it. */
+            let have = self.chunk_avail as i64 - start as i64;
+            let win = if have >= size as i64 {
                 size
             } else if have >= init_bytes {
-                have
+                have as usize
             } else {
                 continue;
             };

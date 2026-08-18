@@ -59,6 +59,13 @@ pub fn described((message, e): Failure) -> String {
     format!("{message} ({})", e.message())
 }
 
+/// The two fields a completed lossless still latches, borrowed apart from the
+/// picture an export reads so that the export can go first.
+pub(crate) struct StillLatch<'a> {
+    still_lossless: &'a mut bool,
+    converted_rows: &'a mut i32,
+}
+
 /// The decoder, with the lifetime of the file it was pointed at.
 ///
 /// Everything a decode builds up is owned here, and released by [`Drop`]
@@ -507,7 +514,24 @@ impl<'a> Decoder<'a> {
         &mut self,
         which: Source,
     ) -> (ExportTargets<'_>, Frame<'_>) {
+        let (targets, img, _) = self.export_parts_latched(which);
+
+        (targets, img)
+    }
+
+    /// As [`Self::export_parts`], with the two fields a finished lossless
+    /// still latches handed back beside them.
+    ///
+    /// They come out of the same destructuring as the export's own borrows,
+    /// which is what proves they are not part of what the export reads — and
+    /// so what lets them be written after the export rather than before it.
+    fn export_parts_latched(
+        &mut self,
+        which: Source,
+    ) -> (ExportTargets<'_>, Frame<'_>, StillLatch<'_>) {
         let Self {
+            still_lossless,
+            converted_rows,
             ydsp,
             options,
             rescale,
@@ -548,28 +572,35 @@ impl<'a> Decoder<'a> {
                 ext: sink.as_deref_mut(),
             },
             img,
+            StillLatch {
+                still_lossless,
+                converted_rows,
+            },
         )
     }
 
     /// Finishes a lossless still that decoded in one go, which is the one
     /// sequence both the raw file and the RIFF walk end on.
     ///
-    /// The flags go up front so that the export itself is just
-    /// [`Self::export_parts`]; neither is in [`ExportTargets`], and the caller
-    /// has already set `still_done`, so a failed export cannot come back here.
+    /// The flags go up last, so that an export that fails leaves the decoder
+    /// claiming no finished picture rather than one whose rows were never
+    /// written. [`Self::export_parts_latched`] is what makes that orderable:
+    /// neither field is in [`ExportTargets`], so neither is borrowed by the
+    /// export it has to outlive.
     #[inline(never)]
     fn export_complete_still_lossless<'o>(
         &'o mut self,
         out: &mut Handout<'o>,
     ) -> Result<(), Error> {
         let set = self.export_settings();
+        let (targets, img, latch) = self.export_parts_latched(Source::Lossless);
+        let height = img.height;
 
-        self.still_lossless = true;
-        self.converted_rows = self.frame_of(Source::Lossless).height;
+        export_packed(&set, targets, img, out)?;
 
-        let (targets, img) = self.export_parts(Source::Lossless);
-
-        export_packed(&set, targets, img, out)
+        *latch.still_lossless = true;
+        *latch.converted_rows = height;
+        Ok(())
     }
 
     /// As [`Self::export_parts`], for the resumable row exports, which convert
