@@ -49,12 +49,29 @@ capture() {
     sed -i -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stdout"
 }
 
-check() {
-    local part diff_found="" produced
+# Runs one argument vector with a reader that goes away after a byte. A closed
+# pipe has to kill the tool the way it killed the C, which is only true if the
+# tool put SIGPIPE back: Rust's runtime ignores it before main, so without that
+# the write turns into an error, or a panic out of println!, and the exit status
+# stops being 141. Only the status and stderr are observable -- the pixels went
+# to a reader that stopped caring.
+capture_pipe() {
+    local bin="$1" tag="$2"
+    shift 2
 
-    checked=$((checked + 1))
-    capture "$OLD" old "$@"
-    capture "$NEW" new "$@"
+    rm -f "$tmp/$tag.file"*
+    : > "$tmp/$tag.stdout"
+    set +e
+    "$bin" "$@" 2> "$tmp/$tag.stderr" | head -c 1 > /dev/null
+    printf 'exit %d\n' "${PIPESTATUS[0]}" > "$tmp/$tag.status"
+    set -e
+
+    sed -i -e "1s|^wpd by .*\$|wpd by BANNER|" \
+           -e "s|$bin|BIN|g" -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stderr"
+}
+
+compare() {
+    local part diff_found="" produced
 
     for part in status stdout stderr; do
         if ! diff -u "$tmp/old.$part" "$tmp/new.$part" > "$tmp/diff.$part"; then
@@ -75,11 +92,30 @@ check() {
     if [ -n "$diff_found" ]; then
         failed=$((failed + 1))
         printf 'differs (%s): %s\n' "${diff_found# }" "$*" >&2
+        # Capped, and with the unprintables escaped: a muxer writing to stdout
+        # puts a frame's worth of pixels in the diff, and the first few lines
+        # say which case broke as well as the whole thing would.
         for part in status stdout stderr; do
-            [ -s "$tmp/diff.$part" ] && sed 's/^/  /' "$tmp/diff.$part" >&2
+            [ -s "$tmp/diff.$part" ] || continue
+            head -c 4096 "$tmp/diff.$part" | head -n 20 | cat -v |
+                sed 's/^/  /' >&2
         done
     fi
     return 0
+}
+
+check() {
+    checked=$((checked + 1))
+    capture "$OLD" old "$@"
+    capture "$NEW" new "$@"
+    compare "$@"
+}
+
+check_pipe() {
+    checked=$((checked + 1))
+    capture_pipe "$OLD" old "$@"
+    capture_pipe "$NEW" new "$@"
+    compare "(closed pipe)" "$@"
 }
 
 shopt -s nullglob
@@ -186,6 +222,42 @@ for f in "${files[@]}"; do
     check --muxer md5 --stream 64 "$f" -
     check --muxer md5 --stream 1 --loops 2 "$f" -
     check --muxer md5 --subframe "$f" -
+done
+
+# A rejection the muxer only reaches once it has a frame in hand, which is what
+# separates it from the --fmt disagreements above: those are settled before the
+# decode starts. --subframe hands y4m frames of differing size, and hands the
+# raw muxer a format it cannot convert, so the message and the exit status here
+# cover the sink's own error path rather than the argument parser's.
+for f in "${files[@]}"; do
+    check --muxer y4m --subframe "$f" @OUT@
+    check --muxer y4m --subframe -f argb "$f" @OUT@
+    check --subframe -f yuv420p "$f" @OUT@
+    check --subframe -f yuva420p "$f" @OUT@
+done
+
+# --info writes through printf while the frames go through the sink, so the two
+# share stdout when the output is "-". Anything that buffers the sink separately
+# reorders the report against the pixels it describes, which is invisible unless
+# both land in the same capture.
+for f in "${files[@]}"; do
+    check --info --muxer y4m "$f" -
+    check --info --muxer ppm "$f" -
+    check --info "$f" -
+done
+
+# A reader that stops after one byte. The output has to outrun the pipe buffer
+# for the writer to reach a closed pipe at all, so these are the files with the
+# most pixels rather than files[0]; a small one would exit 0 and prove nothing.
+# The md5 case is the other side of it: its output fits, so nothing is ever
+# written to a closed pipe and the tool still exits 0.
+for f in wpd-test-data/anim_yuva.webp wpd-test-data/anim_rgb.webp \
+         wpd-test-data/lossy.webp; do
+    [ -e "$f" ] || continue
+    check_pipe --muxer y4m -f yuv420p "$f" -
+    check_pipe -f argb "$f" -
+    check_pipe --info --muxer y4m -f yuv420p "$f" -
+    check_pipe --muxer md5 "$f" -
 done
 
 # Writing to stdout, to a discarded sink, and reading the image from stdin.
