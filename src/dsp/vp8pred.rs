@@ -11,9 +11,7 @@
 //! `stride` when only the row above is, `1` when only the column, and `0` for
 //! the modes that read nothing at all.
 
-fn clip_uint8(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
-}
+use super::clip_uint8;
 
 /// The sample `x` along the row above the block.
 #[inline(always)]

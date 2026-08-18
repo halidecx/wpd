@@ -17,6 +17,8 @@
 //! for both, and so does checkasm. The C prototype keeps them separate only
 //! because that is the assembly's ABI.
 
+use super::clip_uint8;
+
 const fn avg2(a: u32, b: u32) -> u32 {
     (((a ^ b) & 0xFEFE_FEFE) >> 1) + (a & b)
 }
@@ -56,26 +58,16 @@ const fn select(t: u32, l: u32, tl: u32) -> u32 {
     }
 }
 
-const fn clip_uint8(v: i32) -> u32 {
-    if v < 0 {
-        0
-    } else if v > 255 {
-        255
-    } else {
-        v as u32
-    }
-}
-
 const fn clamped_add_sub_full(c0: u32, c1: u32, c2: u32) -> u32 {
-    let a = clip_uint8(byte(c0, 24) + byte(c1, 24) - byte(c2, 24));
-    let r = clip_uint8(byte(c0, 16) + byte(c1, 16) - byte(c2, 16));
-    let g = clip_uint8(byte(c0, 8) + byte(c1, 8) - byte(c2, 8));
-    let b = clip_uint8(byte(c0, 0) + byte(c1, 0) - byte(c2, 0));
+    let a = clip_uint8(byte(c0, 24) + byte(c1, 24) - byte(c2, 24)) as u32;
+    let r = clip_uint8(byte(c0, 16) + byte(c1, 16) - byte(c2, 16)) as u32;
+    let g = clip_uint8(byte(c0, 8) + byte(c1, 8) - byte(c2, 8)) as u32;
+    let b = clip_uint8(byte(c0, 0) + byte(c1, 0) - byte(c2, 0)) as u32;
     a << 24 | r << 16 | g << 8 | b
 }
 
 const fn add_sub_half(a: i32, b: i32) -> u32 {
-    clip_uint8(a + (a - b) / 2)
+    clip_uint8(a + (a - b) / 2) as u32
 }
 
 const fn clamped_add_sub_half(c0: u32, c1: u32, c2: u32) -> u32 {

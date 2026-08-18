@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 
 use wpd::api::{Coding, ImageInfo, Picture};
-use wpd::dsp::yuv::YuvDsp;
+use wpd::dsp::yuv::{extract_alpha, YuvDsp};
 use wpd::image::Format;
 
 use crate::md5::{hex, Md5};
@@ -87,18 +87,7 @@ impl Output {
                 .unwrap_or("raw")
                 .to_owned(),
         };
-        let mut out = Self {
-            kind: Kind::Null,
-            muxer: Muxer::Raw,
-            file: None,
-            md5: Md5::new(),
-            frames: 0,
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            format: Format::Argb,
-            yuvdsp: YuvDsp::new(),
-        };
+        let mut out = Self::null();
 
         if chosen == "md5" {
             out.kind = Kind::Md5;
@@ -287,11 +276,7 @@ impl Output {
         let mut row = vec![0u8; frame.width() as usize];
 
         for y in 0..frame.height() {
-            let src = frame.row(0, y);
-
-            for (x, o) in row.iter_mut().enumerate() {
-                *o = src[4 * x];
-            }
+            extract_alpha(&mut row, frame.row(0, y));
             self.write(&row)?;
         }
         Ok(())
@@ -303,15 +288,6 @@ impl Output {
         pixel_format: Option<&str>,
     ) -> io::Result<()> {
         let pixel_format = pixel_format.unwrap_or_else(|| format_name(frame.format()));
-
-        self.write_frame_inner(frame, pixel_format)
-    }
-
-    fn write_frame_inner(
-        &mut self,
-        frame: &Picture<'_>,
-        pixel_format: &str,
-    ) -> io::Result<()> {
         let fail = |msg: String| io::Error::other(msg);
 
         match self.muxer {

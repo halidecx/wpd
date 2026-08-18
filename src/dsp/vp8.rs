@@ -14,10 +14,7 @@
 //! filter has `stridea = 1` and `strideb = stride`, and a horizontal one has
 //! them the other way round.
 
-#[inline(always)]
-fn clip_uint8(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
-}
+use super::clip_uint8;
 
 #[inline(always)]
 fn clip_int8(v: i32) -> i32 {

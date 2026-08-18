@@ -111,10 +111,6 @@ impl<'a> Input<'a> {
         self.window = Window::default();
     }
 
-    pub fn window(&self) -> Window {
-        self.window
-    }
-
     pub fn size(&self) -> usize {
         self.window.size
     }
