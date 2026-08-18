@@ -18,6 +18,14 @@ pub type ColorRowFn = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 
 pub const PRED_COUNT: usize = 14;
 
+/// The table's counts come in signed, and the assembly entries run a loop that
+/// falls straight through when the count is not positive. A cast would instead
+/// turn a negative one into a slice length no allocation can back, so the
+/// trampolines answer it the same way the assembly does: with nothing.
+fn count(n: c_int) -> Option<usize> {
+    usize::try_from(n).ok()
+}
+
 #[repr(C)]
 pub struct WPDLosslessDSP {
     pub pred_add: [PredAddFn; PRED_COUNT],
@@ -35,7 +43,10 @@ unsafe extern "C" fn pred_add_0_c(
     out: *mut u32,
 ) {
     debug_assert_eq!(inp, out.cast_const());
-    unsafe { k::pred_add_0(slice::from_raw_parts_mut(out, n as usize)) }
+    let Some(n) = count(n) else {
+        return;
+    };
+    unsafe { k::pred_add_0(slice::from_raw_parts_mut(out, n)) }
 }
 
 unsafe extern "C" fn pred_add_1_c(
@@ -45,10 +56,9 @@ unsafe extern "C" fn pred_add_1_c(
     out: *mut u32,
 ) {
     debug_assert_eq!(inp, out.cast_const());
-    let n = n as usize;
-    if n == 0 {
+    let Some(n) = count(n).filter(|&n| n != 0) else {
         return;
-    }
+    };
     unsafe {
         let left = *out.sub(1);
         k::pred_add_1(slice::from_raw_parts_mut(out, n), left);
@@ -68,10 +78,9 @@ macro_rules! pred_tramp {
             out: *mut u32,
         ) {
             debug_assert_eq!(inp, out.cast_const());
-            let n = n as usize;
-            if n == 0 {
+            let Some(n) = count(n).filter(|&n| n != 0) else {
                 return;
-            }
+            };
             unsafe {
                 let left = if $l { *out.sub(1) } else { 0 };
                 let top_left = if $tl { *upper.sub(1) } else { 0 };
@@ -100,7 +109,9 @@ pred_tramp!(pred_add_12_c, pred_add_12, true, true, false);
 pred_tramp!(pred_add_13_c, pred_add_13, true, true, false);
 
 unsafe extern "C" fn extract_green_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
     unsafe {
         k::extract_green(
             slice::from_raw_parts_mut(dst, n),
@@ -115,7 +126,9 @@ unsafe extern "C" fn map_color32_c(
     palette: *const u32,
     n: c_int,
 ) {
-    let n = 4 * n as usize;
+    let Some(n) = count(n).map(|n| 4 * n) else {
+        return;
+    };
     unsafe {
         let palette = slice::from_raw_parts(palette, 256);
         if dst.cast_const() == src {
@@ -134,7 +147,9 @@ unsafe extern "C" fn map_color32_c(
 /// a distinct destination is copied first so checkasm can still compare the
 /// two forms.
 unsafe extern "C" fn color_row_c(dst: *mut u32, src: *const u32, n: c_int, mult: u32) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
     unsafe {
         let row = slice::from_raw_parts_mut(dst, n);
 
@@ -146,7 +161,9 @@ unsafe extern "C" fn color_row_c(dst: *mut u32, src: *const u32, n: c_int, mult:
 }
 
 unsafe extern "C" fn blend_row_argb_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let n = 4 * n as usize;
+    let Some(n) = count(n).map(|n| 4 * n) else {
+        return;
+    };
     unsafe {
         k::blend_row_argb(
             slice::from_raw_parts_mut(dst, n),
@@ -156,7 +173,9 @@ unsafe extern "C" fn blend_row_argb_c(dst: *mut u8, src: *const u8, n: c_int) {
 }
 
 unsafe extern "C" fn blend_row_argb_premult_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let n = 4 * n as usize;
+    let Some(n) = count(n).map(|n| 4 * n) else {
+        return;
+    };
     unsafe {
         k::blend_row_argb_premult(
             slice::from_raw_parts_mut(dst, n),

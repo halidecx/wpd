@@ -62,6 +62,14 @@ pub struct WPDYUVDSP {
     pub argb_to_uv: ArgbToUvFn,
 }
 
+/// The table's counts come in signed, and the assembly entries run a loop that
+/// falls straight through when the count is not positive. A cast would instead
+/// turn a negative one into a slice length no allocation can back, so the
+/// trampolines answer it the same way the assembly does: with nothing.
+fn count(n: c_int) -> Option<usize> {
+    usize::try_from(n).ok()
+}
+
 /// Builds the row an upsample block entry point reads, given the pair count.
 ///
 /// For `n` blocks the kernel walks pairs `1..=16n`, so it touches luma and
@@ -79,7 +87,10 @@ macro_rules! upsample_block_tramp {
             bottom_dst: *mut u8,
             num_blocks: c_int,
         ) {
-            let last = num_blocks as usize * (UPSAMPLE_BLOCK / 2);
+            let Some(blocks) = count(num_blocks) else {
+                return;
+            };
+            let last = blocks * (UPSAMPLE_BLOCK / 2);
             let pixels = 2 * last;
             let bpp = bpp($layout);
 
@@ -111,7 +122,9 @@ upsample_block_tramp!(upsample_block_rgb_c, LAYOUT_RGB);
 upsample_block_tramp!(upsample_block_bgr_c, LAYOUT_BGR);
 
 unsafe extern "C" fn dispatch_alpha_first_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
 
     unsafe {
         k::dispatch_alpha_first(
@@ -122,7 +135,9 @@ unsafe extern "C" fn dispatch_alpha_first_c(dst: *mut u8, src: *const u8, n: c_i
 }
 
 unsafe extern "C" fn dispatch_alpha_last_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
 
     unsafe {
         k::dispatch_alpha_last(
@@ -135,7 +150,9 @@ unsafe extern "C" fn dispatch_alpha_last_c(dst: *mut u8, src: *const u8, n: c_in
 macro_rules! pack_tramp {
     ($name:ident, $kernel:ident, $bpp:literal) => {
         unsafe extern "C" fn $name(dst: *mut u8, src: *const u8, n: c_int) {
-            let n = n as usize;
+            let Some(n) = count(n) else {
+                return;
+            };
 
             unsafe {
                 k::$kernel(
@@ -157,25 +174,36 @@ pack_tramp!(pack_rgba4444_c, pack_rgba4444, 2);
 pack_tramp!(pack_bgra4444_c, pack_bgra4444, 2);
 
 unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_int) {
-    let row = unsafe { slice::from_raw_parts_mut(rgba, 4 * n as usize) };
+    let Some(n) = count(n) else {
+        return;
+    };
+    let row = unsafe { slice::from_raw_parts_mut(rgba, 4 * n) };
 
     k::premultiply_row(row, alpha_first != 0);
 }
 
 unsafe extern "C" fn premultiply_row_4444_c(rgba4444: *mut u8, n: c_int) {
-    let row = unsafe { slice::from_raw_parts_mut(rgba4444, 2 * n as usize) };
+    let Some(n) = count(n) else {
+        return;
+    };
+    let row = unsafe { slice::from_raw_parts_mut(rgba4444, 2 * n) };
 
     k::premultiply_row_4444(row, false);
 }
 
 unsafe extern "C" fn premultiply_row_4444_swap_c(bgra4444: *mut u8, n: c_int) {
-    let row = unsafe { slice::from_raw_parts_mut(bgra4444, 2 * n as usize) };
+    let Some(n) = count(n) else {
+        return;
+    };
+    let row = unsafe { slice::from_raw_parts_mut(bgra4444, 2 * n) };
 
     k::premultiply_row_4444(row, true);
 }
 
 unsafe extern "C" fn argb_to_y_c(y: *mut u8, argb: *const u8, n: c_int) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
 
     unsafe {
         k::argb_to_y(
@@ -192,7 +220,9 @@ unsafe extern "C" fn argb_to_yuv444_c(
     argb: *const u8,
     n: c_int,
 ) {
-    let n = n as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
 
     unsafe {
         k::argb_to_yuv444(
@@ -212,8 +242,12 @@ unsafe extern "C" fn argb_to_uv_c(
     n: c_int,
     weight_alpha: c_int,
 ) {
-    let n = n as usize;
-    let stride = argb_stride as usize;
+    let Some(n) = count(n) else {
+        return;
+    };
+    let Ok(stride) = usize::try_from(argb_stride) else {
+        return;
+    };
     let chroma = n.div_ceil(2);
 
     unsafe {
