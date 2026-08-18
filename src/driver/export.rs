@@ -23,8 +23,8 @@ use crate::image::Format;
 
 use super::convert::{
     convert_to_packed, ensure_yuva, ensure_yuva_rows, format_bpp, format_is_packed,
-    format_layout, format_packer, format_premultiplier_4444, premultiply_after_pack,
-    transform_image, yuv_planes,
+    format_layout, format_packer, format_planes, format_premultiplier_4444,
+    premultiply_after_pack, transform_image, yuv_planes,
 };
 use crate::dsp::yuv::{RowFn, YuvDsp};
 use crate::error::{Error, Result};
@@ -76,11 +76,6 @@ pub struct RowTargets<'a> {
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
     pub converted_rows: &'a mut i32,
     pub converted_format: &'a mut i32,
-}
-
-/// The planes a format hands out: three or four for planar, one for packed.
-fn frame_planes(format: i32) -> usize {
-    Format::from_raw(format).map_or(1, Format::nb_components)
 }
 
 /// Describes `img` as the picture a decode hands back.
@@ -170,10 +165,10 @@ pub(crate) fn export_external_planar_rows(
     row_start: i32,
     row_end: i32,
 ) -> Result<()> {
-    let planes = frame_planes(format);
+    let planes = format_planes(format);
 
     for p in 0..planes {
-        let shift = u32::from(p == 1 || p == 2);
+        let shift = crate::image::plane_shift(p);
         let w = crate::image::ceil_rshift(img.width, shift) as usize;
         let h = crate::image::ceil_rshift(img.height, shift);
 
@@ -183,7 +178,7 @@ pub(crate) fn export_external_planar_rows(
     }
 
     for p in 0..planes {
-        let shift = u32::from(p == 1 || p == 2);
+        let shift = crate::image::plane_shift(p);
         let w = crate::image::ceil_rshift(img.width, shift) as usize;
         let y0 = row_start >> shift;
         let h = crate::image::ceil_rshift(row_end, shift);

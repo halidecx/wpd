@@ -116,6 +116,12 @@ pub fn ceil_rshift(v: i32, shift: u32) -> i32 {
     -((-v) >> shift)
 }
 
+/// How far plane `p` is subsampled from the picture: planes one and two are
+/// the chroma pair, half the picture each way, and luma and alpha are neither.
+pub fn plane_shift(p: usize) -> u32 {
+    u32::from(p == 1 || p == 2)
+}
+
 /// The byte count one plane of `w` by `h` samples at `bpp` needs, padding
 /// included, or `TooLarge` when the multiplication would not fit.
 pub fn plane_size(w: i32, h: i32, bpp: usize) -> Result<usize> {

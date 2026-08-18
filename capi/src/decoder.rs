@@ -15,11 +15,10 @@ use std::ops::{Deref, DerefMut};
 use std::{alloc, mem, ptr, slice};
 
 use wpd::container::Coding;
-use wpd::driver::convert::format_bpp;
+use wpd::driver::convert::{format_plane_dims, format_planes};
 use wpd::driver::{Decoder, FORMAT_NONE};
 use wpd::error::Error;
 use wpd::handout::Handout;
-use wpd::image::Format;
 
 use crate::container::{info_clear, WPDImageInfo};
 use crate::frame::{
@@ -706,12 +705,6 @@ pub unsafe extern "C" fn wpd_decoder_error(
     }
 }
 
-/// The planes `wpd_decode` copies out, which is what the frame's format says
-/// it has.
-fn frame_planes(format: c_int) -> usize {
-    Format::from_raw(format).map_or(1, Format::nb_components)
-}
-
 /// The memory behind a frame `wpd_decode` handed out, released by
 /// `wpd_frame_free`.
 struct WPDFrameOwner {
@@ -848,7 +841,7 @@ pub unsafe extern "C" fn wpd_decode(
             return status(e);
         }
     };
-    let planes = frame_planes(decoded.format);
+    let planes = format_planes(decoded.format);
 
     unsafe { frame_clear(frame) };
     frame_copy(frame, &decoded);
@@ -861,13 +854,8 @@ pub unsafe extern "C" fn wpd_decode(
     let mut status = WPD_OK;
 
     for p in 0..planes {
-        let shift = u32::from(p == 1 || p == 2);
-        let w = if planes == 1 {
-            decoded.width as usize * format_bpp(decoded.format) as usize
-        } else {
-            wpd::image::ceil_rshift(decoded.width, shift) as usize
-        };
-        let h = wpd::image::ceil_rshift(decoded.height, shift) as usize;
+        let (w, h) =
+            format_plane_dims(decoded.format, p, decoded.width, decoded.height);
         let Some(bytes) = w.checked_mul(h) else {
             status = WPD_ERR_TOO_LARGE;
             break;

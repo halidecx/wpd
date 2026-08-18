@@ -32,6 +32,30 @@ pub fn format_valid(format: i32) -> bool {
     Format::from_raw(format).is_some()
 }
 
+/// The planes a format hands out: three or four for planar, one for packed.
+pub fn format_planes(format: i32) -> usize {
+    Format::from_raw(format).map_or(1, Format::nb_components)
+}
+
+/// The row width in bytes and the height of plane `p` of a `w` by `h` picture
+/// in `format`.
+///
+/// A packed format has the one plane, whose row is `bpp` bytes to the pixel; a
+/// planar one gives its chroma pair half the picture each way. Anything that
+/// sizes a plane answers both questions at once, so they are answered here
+/// rather than at each caller.
+pub fn format_plane_dims(format: i32, p: usize, w: i32, h: i32) -> (usize, usize) {
+    if format_planes(format) == 1 {
+        return (w.max(0) as usize * format_bpp(format), h.max(0) as usize);
+    }
+    let shift = image::plane_shift(p);
+
+    (
+        ceil_rshift(w, shift).max(0) as usize,
+        ceil_rshift(h, shift).max(0) as usize,
+    )
+}
+
 pub fn format_layout(format: i32) -> usize {
     Format::from_raw(format).map_or(LAYOUT_ARGB, Format::layout)
 }
@@ -370,7 +394,7 @@ pub fn ensure_yuva_rows(
     let opaque = src.format == Format::Yuv420p;
 
     for p in 0..4 {
-        let shift = u32::from(p == 1 || p == 2);
+        let shift = image::plane_shift(p);
         let w = ceil_rshift(width, shift) as usize;
 
         for y in (row_start >> shift)..ceil_rshift(row_end, shift) {
