@@ -18,15 +18,6 @@
 use crate::error::{Error, Result};
 use crate::image::{ceil_rshift, plane_size, Format};
 
-/// How many planes a format hands out.
-pub fn planes_of(format: Format) -> usize {
-    match format {
-        Format::Yuva420p => 4,
-        Format::Yuv420p => 3,
-        _ => 1,
-    }
-}
-
 /// Whether plane `p` is subsampled by two in both directions.
 fn chroma(p: usize) -> u32 {
     u32::from(p == 1 || p == 2)
@@ -373,7 +364,7 @@ impl<'a> Frame<'a> {
     /// rescaler brings U and V up to the output size on the way to a packed
     /// format, and the picture is still labelled YUVA.
     fn shift(&self, p: usize) -> u32 {
-        if planes_of(self.format) == 1 || self.chroma_full {
+        if self.format.nb_components() == 1 || self.chroma_full {
             0
         } else {
             chroma(p)
@@ -382,7 +373,7 @@ impl<'a> Frame<'a> {
 
     /// The width of plane `p` in bytes.
     pub fn row_len(&self, p: usize) -> usize {
-        if planes_of(self.format) == 1 {
+        if self.format.nb_components() == 1 {
             self.width as usize * self.format.bpp()
         } else {
             ceil_rshift(self.width, self.shift(p)) as usize
@@ -391,7 +382,7 @@ impl<'a> Frame<'a> {
 
     /// How many rows plane `p` has.
     pub fn rows(&self, p: usize) -> i32 {
-        if planes_of(self.format) == 1 {
+        if self.format.nb_components() == 1 {
             self.height
         } else {
             ceil_rshift(self.height, self.shift(p))
@@ -424,7 +415,7 @@ impl<'a> Frame<'a> {
 
         for p in 0..4 {
             let shift = self.shift(p);
-            let bpp = if planes_of(self.format) == 1 {
+            let bpp = if self.format.nb_components() == 1 {
                 self.format.bpp()
             } else {
                 1
@@ -468,7 +459,7 @@ impl<'a> FrameMut<'a> {
     }
 
     fn shift(&self, p: usize) -> u32 {
-        if planes_of(self.format) == 1 || self.chroma_full {
+        if self.format.nb_components() == 1 || self.chroma_full {
             0
         } else {
             chroma(p)
@@ -485,7 +476,7 @@ impl<'a> FrameMut<'a> {
     }
 
     pub fn row_len(&self, p: usize) -> usize {
-        if planes_of(self.format) == 1 {
+        if self.format.nb_components() == 1 {
             self.width as usize * self.format.bpp()
         } else {
             ceil_rshift(self.width, self.shift(p)) as usize
@@ -493,7 +484,7 @@ impl<'a> FrameMut<'a> {
     }
 
     pub fn rows(&self, p: usize) -> i32 {
-        if planes_of(self.format) == 1 {
+        if self.format.nb_components() == 1 {
             self.height
         } else {
             ceil_rshift(self.height, self.shift(p))

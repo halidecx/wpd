@@ -24,9 +24,9 @@ use super::convert::{
     convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
 };
 use super::{
-    rl24, rl32, Decoder, Source, ALPHA_COMPRESSION_VP8L, ANIM_SUBFRAME, TAG_ALPH,
-    TAG_VP8, TAG_VP8L,
+    Decoder, Source, ALPHA_COMPRESSION_VP8L, ANIM_SUBFRAME, TAG_ALPH, TAG_VP8, TAG_VP8L,
 };
+use crate::bits::{rl24, rl32};
 use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::premultiply_argb_row;

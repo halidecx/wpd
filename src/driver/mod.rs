@@ -14,6 +14,7 @@ pub mod convert;
 pub mod export;
 pub mod lossy;
 
+use crate::bits::rl32;
 use crate::container::{Coding, Info, Raw, Scan, METADATA_NB};
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::dsp::yuv::YuvDsp;
@@ -247,14 +248,6 @@ pub(crate) fn lossless_view(
         Some(frame) => frame,
         None => Frame::packed(&[], 0, 0, 0, Format::Argb),
     }
-}
-
-pub(crate) fn rl24(b: &[u8]) -> u32 {
-    b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16
-}
-
-pub(crate) fn rl32(b: &[u8]) -> u32 {
-    rl24(b) | (b[3] as u32) << 24
 }
 
 impl Default for Decoder<'_> {
@@ -526,6 +519,9 @@ impl<'a> Decoder<'a> {
         )
     }
 
+    /// The flags go up front so that the export itself is just
+    /// [`Self::export_parts`]; neither is in [`ExportTargets`], and the caller
+    /// has already set `still_done`, so a failed export cannot come back here.
     #[inline(never)]
     fn export_complete_still_lossless<'o>(
         &'o mut self,
@@ -533,33 +529,12 @@ impl<'a> Decoder<'a> {
         out: &mut Handout<'o>,
         height: i32,
     ) -> Result<(), Error> {
-        let Self {
-            ydsp,
-            options,
-            rescale,
-            transformed,
-            output,
-            sink,
-            vp8l,
-            lossless_out,
-            still_lossless,
-            converted_rows,
-            ..
-        } = self;
-        let img = lossless_view(vp8l, *lossless_out);
-        let targets = ExportTargets {
-            dsp: ydsp,
-            options,
-            rescale,
-            transformed,
-            output,
-            ext: sink.as_deref_mut(),
-        };
+        self.still_lossless = true;
+        self.converted_rows = height;
 
-        export_packed(set, targets, img, out)?;
-        *still_lossless = true;
-        *converted_rows = height;
-        Ok(())
+        let (targets, img) = self.export_parts(Source::Lossless);
+
+        export_packed(set, targets, img, out)
     }
 
     /// As [`Self::export_parts`], for the resumable row exports, which convert
@@ -828,31 +803,22 @@ impl<'a> Decoder<'a> {
     /// Replaces the stream with a longer prefix of the same file, which the
     /// decoder reads in place.
     pub fn update(&mut self, data: &'a [u8]) -> Result<(), Error> {
-        if !self.streaming || self.eos {
-            return Err(self.fail("not an open stream", Error::InvalidArgument));
-        }
-        if self.input_mode == 1 {
-            return Err(
-                self.fail("cannot mix append and update", Error::InvalidArgument)
-            );
-        }
-        if data.len() < self.input.size() {
-            return Err(self.fail("stream buffer shrank", Error::InvalidArgument));
-        }
-        self.input_mode = 2;
-        self.input.borrow(data);
-
-        match self.rescan_headers() {
-            Err(Error::Truncated) | Ok(()) => Ok(()),
-            Err(e) => {
-                self.input.reset();
-                self.headers_valid = false;
-                Err(self.fail("cannot read headers", e))
-            }
-        }
+        self.update_with(data.len(), |input| input.borrow(data))
     }
 
     pub fn update_owned(&mut self, data: Vec<u8>) -> Result<(), Error> {
+        self.update_with(data.len(), move |input| input.replace_owned(data))
+    }
+
+    /// The body of both updates: they differ only in whether the longer prefix
+    /// is borrowed or owned, and the C ABI takes one while the safe API takes
+    /// the other — so the guards and the error recovery are shared rather than
+    /// left to agree.
+    fn update_with(
+        &mut self,
+        len: usize,
+        install: impl FnOnce(&mut Input<'a>),
+    ) -> Result<(), Error> {
         if !self.streaming || self.eos {
             return Err(self.fail("not an open stream", Error::InvalidArgument));
         }
@@ -861,11 +827,11 @@ impl<'a> Decoder<'a> {
                 self.fail("cannot mix append and update", Error::InvalidArgument)
             );
         }
-        if data.len() < self.input.size() {
+        if len < self.input.size() {
             return Err(self.fail("stream buffer shrank", Error::InvalidArgument));
         }
         self.input_mode = 2;
-        self.input.replace_owned(data);
+        install(&mut self.input);
 
         match self.rescan_headers() {
             Err(Error::Truncated) | Ok(()) => Ok(()),

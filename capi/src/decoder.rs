@@ -709,11 +709,7 @@ pub unsafe extern "C" fn wpd_decoder_error(
 /// The planes `wpd_decode` copies out, which is what the frame's format says
 /// it has.
 fn frame_planes(format: c_int) -> usize {
-    match Format::from_raw(format) {
-        Some(Format::Yuva420p) => 4,
-        Some(Format::Yuv420p) => 3,
-        _ => 1,
-    }
+    Format::from_raw(format).map_or(1, Format::nb_components)
 }
 
 /// The memory behind a frame `wpd_decode` handed out, released by

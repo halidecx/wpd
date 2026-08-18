@@ -80,11 +80,7 @@ pub struct RowTargets<'a> {
 
 /// The planes a format hands out: three or four for planar, one for packed.
 fn frame_planes(format: i32) -> usize {
-    match Format::from_raw(format) {
-        Some(Format::Yuva420p) => 4,
-        Some(Format::Yuv420p) => 3,
-        _ => 1,
-    }
+    Format::from_raw(format).map_or(1, Format::nb_components)
 }
 
 /// Describes `img` as the picture a decode hands back.

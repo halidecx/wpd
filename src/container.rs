@@ -13,6 +13,7 @@
 //! input would be a denial of service the C did not have, so the reads simply
 //! cannot leave the slice.
 
+use crate::bits;
 use crate::error::{Error, Result};
 use crate::log;
 
@@ -166,16 +167,18 @@ fn byte(b: &[u8], at: usize) -> u8 {
     b.get(at).copied().unwrap_or(0)
 }
 
+/* A header walk reads fields the stream may not have reached, so every read
+here is padded rather than bounds-checked at the call site. */
 fn rl16(b: &[u8], at: usize) -> u32 {
-    u32::from(byte(b, at)) | u32::from(byte(b, at + 1)) << 8
+    bits::rl16(&bits::quad(b, at))
 }
 
 fn rl24(b: &[u8], at: usize) -> u32 {
-    rl16(b, at) | u32::from(byte(b, at + 2)) << 16
+    bits::rl24(&bits::quad(b, at))
 }
 
 fn rl32(b: &[u8], at: usize) -> u32 {
-    rl24(b, at) | u32::from(byte(b, at + 3)) << 24
+    bits::rl32(&bits::quad(b, at))
 }
 
 /// `len` bytes of `b` from `from`, clipped to what is there.

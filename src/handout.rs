@@ -12,7 +12,7 @@
 //! the far side of the boundary.
 
 use crate::image::Format;
-use crate::picture::{planes_of, Frame};
+use crate::picture::Frame;
 
 /// Where the pixels a handout describes actually are.
 pub enum Pixels<'a> {
@@ -63,7 +63,7 @@ impl Default for Handout<'_> {
 impl<'a> Handout<'a> {
     /// How many planes this handout's format describes.
     pub fn planes(&self) -> usize {
-        planes_of(self.format)
+        self.format.nb_components()
     }
 
     /// The picture, when it is in the decoder's own memory.

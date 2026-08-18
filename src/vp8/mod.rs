@@ -21,6 +21,7 @@
 pub mod rac;
 pub mod tables;
 
+use crate::bits::{rl16, rl24};
 use crate::dsp::vp8::Vp8Dsp;
 use crate::dsp::vp8pred::{self as pred, Vp8Pred};
 use rac::RangeCoder;
@@ -39,14 +40,6 @@ pub use crate::error::{check_image_size, Error, Result, Status};
 
 fn clip_uintp2(value: i32, bits: u32) -> i32 {
     value.clamp(0, (1 << bits) - 1)
-}
-
-fn rl16(b: &[u8]) -> u32 {
-    u32::from(b[0]) | u32::from(b[1]) << 8
-}
-
-fn rl24(b: &[u8]) -> u32 {
-    u32::from(b[0]) | u32::from(b[1]) << 8 | u32::from(b[2]) << 16
 }
 
 /// The three planes of the picture being decoded, split out of its one
