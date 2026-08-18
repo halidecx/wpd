@@ -28,7 +28,7 @@ enum Kind {
 pub struct Output {
     kind: Kind,
     pub muxer: Muxer,
-    file: Option<BufWriter<Box<dyn Write>>>,
+    file: Option<Box<dyn Write>>,
     md5: Md5,
     frames: i32,
     width: i32,
@@ -125,13 +125,12 @@ impl Output {
         }
 
         let name = filename.unwrap_or(OsStr::new(""));
-        let sink: Box<dyn Write> = if name == OsStr::new("-") {
+
+        out.file = Some(if name == OsStr::new("-") {
             Box::new(io::stdout())
         } else {
-            Box::new(File::create(name)?)
-        };
-
-        out.file = Some(BufWriter::new(sink));
+            Box::new(BufWriter::new(File::create(name)?))
+        });
         Ok(out)
     }
 

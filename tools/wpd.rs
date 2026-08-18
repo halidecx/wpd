@@ -487,7 +487,9 @@ fn print_metadata(decoder: &mut Decoder<'_>) {
 
     for (which, name) in KINDS {
         if let Some(data) = decoder.metadata(which) {
-            println!("{name}: {} bytes", data.len());
+            if !data.is_empty() {
+                println!("{name}: {} bytes", data.len());
+            }
         }
     }
 }
@@ -524,7 +526,9 @@ fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
         }
         if let Some(sink) = ctx.sink.as_deref_mut() {
             if let Err(e) = sink.write_frame(&frame, ctx.pixel_format) {
-                eprintln!("write: {e}");
+                if e.raw_os_error().is_some() {
+                    eprintln!("write: {}", errmsg(&e));
+                }
                 return -1;
             }
         }
@@ -602,7 +606,27 @@ fn read_file(name: &OsStr) -> std::io::Result<Vec<u8>> {
     Ok(data)
 }
 
+/// Rust's runtime ignores `SIGPIPE` before `main`, which would turn a closed
+/// reader into a write error or a panic out of `println!`. The C tool died of
+/// the signal, so a truncated pipe has to keep exiting 141.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    const SIGPIPE: i32 = 13;
+    const SIG_DFL: usize = 0;
+
+    extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+
+    unsafe { signal(SIGPIPE, SIG_DFL) };
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
+
 fn main() -> ExitCode {
+    restore_sigpipe();
+
     let argv: Vec<OsString> = std::env::args_os().collect();
     let app = argv
         .first()
