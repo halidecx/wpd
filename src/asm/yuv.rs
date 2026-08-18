@@ -101,6 +101,11 @@ fn upsample_block<T: Raw<Sig = UpsampleBlockRaw>, const L: usize>(
         "short chroma row"
     );
     assert!(dst.top.len() >= bpp(L) * pixels, "short output row");
+    assert_eq!(
+        src.bottom_y.is_some(),
+        dst.bottom.is_some(),
+        "a bottom luma row needs a bottom output row"
+    );
     if let (Some(y), Some(d)) = (src.bottom_y, dst.bottom.as_deref()) {
         assert!(y.len() >= pixels, "short luma row");
         assert!(d.len() >= bpp(L) * pixels, "short output row");

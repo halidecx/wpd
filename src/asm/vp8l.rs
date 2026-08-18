@@ -90,8 +90,16 @@ macro_rules! raw_blend_row {
 }
 
 /// `UP` is false for the two predictors that run on the first row of a picture,
-/// where there is no row above and the caller passes no offset for one.
-fn pred_add<T: Raw<Sig = PredAddRaw>, const UP: bool>(
+/// where there is no row above and the caller passes no offset for one. `LEFT`
+/// and `TL` say which out-of-row neighbours the kernel reads, the same split the
+/// scalar table encodes: a predictor that reads one has to be given a row it can
+/// read it from.
+fn pred_add<
+    T: Raw<Sig = PredAddRaw>,
+    const UP: bool,
+    const LEFT: bool,
+    const TL: bool,
+>(
     plane: &mut [u32],
     out: usize,
     up: usize,
@@ -100,6 +108,12 @@ fn pred_add<T: Raw<Sig = PredAddRaw>, const UP: bool>(
     assert!(plane.len() >= out + n, "picture too small");
     if UP {
         assert!(up < out && plane.len() > up + n, "picture too small");
+    }
+    if LEFT {
+        assert!(out >= 1, "no left neighbour");
+    }
+    if TL {
+        assert!(UP && up >= 1, "no top-left neighbour");
     }
     unsafe {
         let base = plane.as_mut_ptr();
@@ -162,24 +176,26 @@ pub struct RawTable {
     pub color_row: Option<ColorRowRaw>,
 }
 
-/// The fourteen predictors of one instruction set, in table order.
+/// The fourteen predictors of one instruction set, in table order. The flags
+/// after each marker are `UP`, `LEFT`, `TL`, and they match the `l`/`tl` pair
+/// the scalar table passes to its own kernels.
 macro_rules! pred_table {
     ($set:ident) => {
         [
-            pred_add::<$set::Pred0, false>,
-            pred_add::<$set::Pred1, false>,
-            pred_add::<$set::Pred2, true>,
-            pred_add::<$set::Pred3, true>,
-            pred_add::<$set::Pred4, true>,
-            pred_add::<$set::Pred5, true>,
-            pred_add::<$set::Pred6, true>,
-            pred_add::<$set::Pred7, true>,
-            pred_add::<$set::Pred8, true>,
-            pred_add::<$set::Pred9, true>,
-            pred_add::<$set::Pred10, true>,
-            pred_add::<$set::Pred11, true>,
-            pred_add::<$set::Pred12, true>,
-            pred_add::<$set::Pred13, true>,
+            pred_add::<$set::Pred0, false, false, false>,
+            pred_add::<$set::Pred1, false, true, false>,
+            pred_add::<$set::Pred2, true, false, false>,
+            pred_add::<$set::Pred3, true, false, false>,
+            pred_add::<$set::Pred4, true, false, true>,
+            pred_add::<$set::Pred5, true, true, false>,
+            pred_add::<$set::Pred6, true, true, true>,
+            pred_add::<$set::Pred7, true, true, false>,
+            pred_add::<$set::Pred8, true, false, true>,
+            pred_add::<$set::Pred9, true, false, false>,
+            pred_add::<$set::Pred10, true, true, true>,
+            pred_add::<$set::Pred11, true, true, true>,
+            pred_add::<$set::Pred12, true, true, true>,
+            pred_add::<$set::Pred13, true, true, true>,
         ]
     };
 }
