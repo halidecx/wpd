@@ -174,15 +174,14 @@ libwpd = libwpd_artifacts[0]
 # point has to be named on the link line to be pulled in, and the export list
 # then hides everything the archive brought along with them. src/shared_stub.c
 # is empty and exists only because a Meson target needs a source of its own.
-wpd_symbols = []
-foreach line : public_header.split('\n')
-  if line.startswith('WPD_API ')
-    wpd_symbols += line.split('(')[0].strip().split(' ')[-1].split('*')[-1]
-  endif
-endforeach
-if wpd_symbols.length() == 0
-  error('no WPD_API symbols found in include/wpd.h')
-endif
+# Taken from the same parser that writes the export list, so the root set and
+# the list of what stays visible cannot disagree about a declaration.
+wpd_symbols = run_command(
+  files('tools/gen_exports.sh'),
+  source_root / 'include/wpd.h',
+  'names',
+  check: true,
+).stdout().strip().split('\n')
 
 if host_machine.system() == 'darwin'
   export_format = 'macho'
