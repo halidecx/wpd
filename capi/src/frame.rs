@@ -97,6 +97,16 @@ pub(crate) fn private_data_extent() -> usize {
     mem::offset_of!(WPDFrame, private_data) + mem::size_of::<*mut c_void>()
 }
 
+/// Where the part of `WPDFrame` this build owns starts.
+///
+/// `struct_size` is the caller's: it says which revision of the struct was
+/// compiled against, so it is the one field a copy or a clear has to leave
+/// alone. Tied to the layout here rather than spelled as a pointer's width at
+/// each of the two places that skip it.
+pub(crate) fn frame_head() -> usize {
+    mem::offset_of!(WPDFrame, data)
+}
+
 /// # Safety
 ///
 /// `frame`, when not null, must point to a `WPDFrame` of at least its own
@@ -127,7 +137,7 @@ pub(crate) unsafe fn frame_extent(frame: *const WPDFrame) -> usize {
 ///
 /// As [`frame_extent`], and the frame must be writable.
 pub(crate) unsafe fn frame_clear(frame: *mut WPDFrame) {
-    let head = mem::size_of::<usize>();
+    let head = frame_head();
     let extent = unsafe { frame_extent(frame) };
 
     unsafe { ptr::write_bytes(frame.cast::<u8>().add(head), 0, extent - head) };

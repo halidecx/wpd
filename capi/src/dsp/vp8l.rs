@@ -7,6 +7,8 @@
 //! side, where it affects neither correctness nor the benchmark.
 
 use std::ffi::c_int;
+
+use super::count;
 use std::slice;
 
 use wpd::dsp::vp8l as k;
@@ -17,14 +19,6 @@ pub type MapColorFn = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int
 pub type ColorRowFn = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 
 pub const PRED_COUNT: usize = 14;
-
-/// The table's counts come in signed, and the assembly entries run a loop that
-/// falls straight through when the count is not positive. A cast would instead
-/// turn a negative one into a slice length no allocation can back, so the
-/// trampolines answer it the same way the assembly does: with nothing.
-fn count(n: c_int) -> Option<usize> {
-    usize::try_from(n).ok()
-}
 
 #[repr(C)]
 pub struct WPDLosslessDSP {

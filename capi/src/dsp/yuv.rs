@@ -9,6 +9,8 @@
 //! three entry points the C harnesses in `tests/` and the tool still call.
 
 use std::ffi::c_int;
+
+use super::count;
 use std::slice;
 
 use wpd::convert::YuvPlanes;
@@ -60,14 +62,6 @@ pub struct WPDYUVDSP {
     pub argb_to_y: ArgbToYFn,
     pub argb_to_yuv444: ArgbToYuv444Fn,
     pub argb_to_uv: ArgbToUvFn,
-}
-
-/// The table's counts come in signed, and the assembly entries run a loop that
-/// falls straight through when the count is not positive. A cast would instead
-/// turn a negative one into a slice length no allocation can back, so the
-/// trampolines answer it the same way the assembly does: with nothing.
-fn count(n: c_int) -> Option<usize> {
-    usize::try_from(n).ok()
 }
 
 /// Builds the row an upsample block entry point reads, given the pair count.

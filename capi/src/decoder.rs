@@ -886,7 +886,7 @@ pub unsafe extern "C" fn wpd_decode(
 /// Copies past `struct_size` rather than assigning: the caller's frame may be
 /// a newer, longer revision of the struct, and its own size has to survive.
 fn frame_copy(dst: *mut WPDFrame, src: &WPDFrame) {
-    let head = mem::size_of::<usize>();
+    let head = crate::frame::frame_head();
     let extent = unsafe { crate::frame::frame_extent(dst) }
         .min(unsafe { crate::frame::frame_extent(src) });
 
