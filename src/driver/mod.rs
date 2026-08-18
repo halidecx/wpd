@@ -72,7 +72,6 @@ pub struct Decoder<'a> {
     /// Built on the first lossy frame, as the C's `vp8_decode_init` was: a
     /// file with no VP8 chunk in it never pays for the lossy decoder.
     pub(crate) vp8: Vec<crate::vp8::Decoder>,
-    pub(crate) bypass_filtering: bool,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
     pub(crate) out_format: i32,
@@ -246,7 +245,39 @@ pub(crate) fn lossless_view(
 ) -> Frame<'_> {
     match which.and_then(|which| vp8l.view(which)) {
         Some(frame) => frame,
-        None => Frame::packed(&[], 0, 0, 0, Format::Argb),
+        None => empty_view(),
+    }
+}
+
+pub(crate) fn empty_view<'a>() -> Frame<'a> {
+    Frame::packed(&[], 0, 0, 0, Format::Argb)
+}
+
+/// The picture a [`Source`] names, assembled from borrows the caller has
+/// already split off the decoder.
+///
+/// The two buffers come in optional because a caller that has lent one out
+/// mutably for the same call has nothing to offer here — and cannot be naming
+/// it as its source either, or the compositor would be reading what it writes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_view<'a>(
+    which: Source,
+    vp8: Option<&'a crate::vp8::Decoder>,
+    vp8l: &'a crate::vp8l::Decoder,
+    lossless_out: Option<Lossless>,
+    alpha: &'a [u8],
+    has_alpha: bool,
+    width: i32,
+    height: i32,
+    converted: Option<&'a Buffer>,
+    canvas: Option<&'a Buffer>,
+) -> Frame<'a> {
+    match which {
+        Source::Lossy => lossy_view(vp8, alpha, has_alpha, width, height),
+        Source::Lossless => lossless_view(vp8l, lossless_out),
+        Source::Converted => converted.map_or_else(empty_view, Buffer::frame),
+        Source::Canvas => canvas.map_or_else(empty_view, Buffer::frame),
+        Source::None => empty_view(),
     }
 }
 
@@ -260,7 +291,6 @@ impl<'a> Decoder<'a> {
     pub fn new() -> Self {
         Decoder {
             vp8: Vec::new(),
-            bypass_filtering: false,
             ldsp: Vp8lDsp::new(),
             ydsp: YuvDsp::new(),
             out_format: FORMAT_NONE,
@@ -375,19 +405,18 @@ impl<'a> Decoder<'a> {
     /// end of every decode; these are all fields of the same struct, so a
     /// borrow says the same thing and cannot go stale.
     pub(crate) fn frame_of(&self, which: Source) -> Frame<'_> {
-        match which {
-            Source::Lossy => lossy_view(
-                self.vp8.first(),
-                &self.alpha_plane,
-                self.has_alpha,
-                self.width,
-                self.height,
-            ),
-            Source::Lossless => lossless_view(&self.vp8l, self.lossless_out),
-            Source::Converted => self.converted.frame(),
-            Source::Canvas => self.canvas.frame(),
-            Source::None => Frame::packed(&[], 0, 0, 0, Format::Argb),
-        }
+        source_view(
+            which,
+            self.vp8.first(),
+            &self.vp8l,
+            self.lossless_out,
+            &self.alpha_plane,
+            self.has_alpha,
+            self.width,
+            self.height,
+            Some(&self.converted),
+            Some(&self.canvas),
+        )
     }
 
     pub(crate) fn update_canvas_size(&mut self, w: i32, h: i32) {
@@ -496,15 +525,18 @@ impl<'a> Decoder<'a> {
             height,
             ..
         } = self;
-        let img = match which {
-            Source::Lossy => {
-                lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
-            }
-            Source::Lossless => lossless_view(vp8l, *lossless_out),
-            Source::Converted => converted.frame(),
-            Source::Canvas => canvas.frame(),
-            Source::None => Frame::packed(&[], 0, 0, 0, Format::Argb),
-        };
+        let img = source_view(
+            which,
+            vp8.first(),
+            vp8l,
+            *lossless_out,
+            alpha_plane,
+            *has_alpha,
+            *width,
+            *height,
+            Some(converted),
+            Some(canvas),
+        );
 
         (
             ExportTargets {
@@ -519,22 +551,25 @@ impl<'a> Decoder<'a> {
         )
     }
 
+    /// Finishes a lossless still that decoded in one go, which is the one
+    /// sequence both the raw file and the RIFF walk end on.
+    ///
     /// The flags go up front so that the export itself is just
     /// [`Self::export_parts`]; neither is in [`ExportTargets`], and the caller
     /// has already set `still_done`, so a failed export cannot come back here.
     #[inline(never)]
     fn export_complete_still_lossless<'o>(
         &'o mut self,
-        set: &ExportSettings,
         out: &mut Handout<'o>,
-        height: i32,
     ) -> Result<(), Error> {
+        let set = self.export_settings();
+
         self.still_lossless = true;
-        self.converted_rows = height;
+        self.converted_rows = self.frame_of(Source::Lossless).height;
 
         let (targets, img) = self.export_parts(Source::Lossless);
 
-        export_packed(set, targets, img, out)
+        export_packed(&set, targets, img, out)
     }
 
     /// As [`Self::export_parts`], for the resumable row exports, which convert
@@ -558,13 +593,18 @@ impl<'a> Decoder<'a> {
             height,
             ..
         } = self;
-        let img = match which {
-            Source::Lossy => {
-                lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
-            }
-            Source::Lossless => lossless_view(vp8l, *lossless_out),
-            _ => Frame::packed(&[], 0, 0, 0, Format::Argb),
-        };
+        let img = source_view(
+            which,
+            vp8.first(),
+            vp8l,
+            *lossless_out,
+            alpha_plane,
+            *has_alpha,
+            *width,
+            *height,
+            None,
+            None,
+        );
 
         (
             RowTargets {
@@ -883,7 +923,6 @@ impl Decoder<'_> {
                 Error::InvalidArgument,
             ));
         }
-        self.bypass_filtering = options.bypass_filtering;
         self.options = options;
         Ok(())
     }
@@ -1145,6 +1184,28 @@ impl<'a> Decoder<'a> {
         Ok(true)
     }
 
+    /// Takes apart the byte an ALPH chunk opens with and records where the rest
+    /// of the chunk is.
+    ///
+    /// A compression this decoder does not know leaves `has_alpha` alone, which
+    /// is what lets the frame come out without its alpha rather than fail. The
+    /// raw path is the one caller that treats it as fatal instead, and says so
+    /// before it gets here.
+    pub(crate) fn set_alpha_chunk(&mut self, header: i32, offset: usize, size: usize) {
+        self.alpha_data_offset = offset;
+        self.alpha_data_size = size;
+
+        let compression = header & 3;
+
+        if compression > ALPHA_COMPRESSION_VP8L {
+            crate::log::warning("skipping unsupported ALPHA chunk");
+            return;
+        }
+        self.has_alpha = true;
+        self.alpha_compression = compression;
+        self.alpha_filter = header >> 2 & 3;
+    }
+
     /// A file with no RIFF wrapper: one image chunk, and for the lossy shape
     /// possibly an ALPH chunk ahead of it.
     fn decode_raw<'o>(&'o mut self, out: &mut Handout<'o>) -> Result<bool, Failure> {
@@ -1162,36 +1223,35 @@ impl<'a> Decoder<'a> {
         self.width = 0;
         self.height = 0;
 
-        let source = if hs.raw == Raw::Lossless {
+        if hs.raw == Raw::Lossless {
             self.lossless_decode(hs.raw_image_offset, hs.raw_image_size)
                 .map_err(|e| ("VP8L decode failed", e))?;
             self.still_done = true;
-            self.still_lossless = true;
-            self.converted_rows = self.frame_of(Source::Lossless).height;
-            Source::Lossless
-        } else {
-            if hs.raw == Raw::AlphaAndLossy {
-                if hs.raw_alpha_size == 0 {
-                    return Err(("invalid ALPHA chunk", Error::InvalidData));
-                }
-                let header = self.file_at(hs.raw_alpha_offset)[0] as i32;
-
-                if header & 3 > ALPHA_COMPRESSION_VP8L {
-                    return Err(("unsupported ALPHA compression", Error::Unsupported));
-                }
-                self.has_alpha = true;
-                self.alpha_compression = header & 3;
-                self.alpha_filter = header >> 2 & 3;
-                self.alpha_data_offset = hs.raw_alpha_offset + 1;
-                self.alpha_data_size = hs.raw_alpha_size - 1;
+            self.export_complete_still_lossless(out)
+                .map_err(|e| ("cannot output frame", e))?;
+            return Ok(true);
+        }
+        if hs.raw == Raw::AlphaAndLossy {
+            if hs.raw_alpha_size == 0 {
+                return Err(("invalid ALPHA chunk", Error::InvalidData));
             }
-            self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size)
-                .map_err(|e| ("VP8 decode failed", e))?;
-            self.still_done = true;
-            Source::Lossy
-        };
+            let header = self.file_at(hs.raw_alpha_offset)[0] as i32;
+
+            if header & 3 > ALPHA_COMPRESSION_VP8L {
+                return Err(("unsupported ALPHA compression", Error::Unsupported));
+            }
+            self.set_alpha_chunk(
+                header,
+                hs.raw_alpha_offset + 1,
+                hs.raw_alpha_size - 1,
+            );
+        }
+        self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size)
+            .map_err(|e| ("VP8 decode failed", e))?;
+        self.still_done = true;
+
         let set = self.export_settings();
-        let (t, img) = self.export_parts(source);
+        let (t, img) = self.export_parts(Source::Lossy);
 
         export_packed(&set, t, img, out).map_err(|e| ("cannot output frame", e))?;
         Ok(true)
@@ -1271,22 +1331,10 @@ impl Decoder<'_> {
                     if size == 0 {
                         return Err(("invalid ALPHA chunk size", Error::InvalidData));
                     }
-                    let alpha_header = decoder.file_at(payload_pos)[0] as i32;
+                    let header = decoder.file_at(payload_pos)[0] as i32;
 
-                    decoder.alpha_data_offset = payload_pos + 1;
                     decoder.alpha_pending = true;
-                    decoder.alpha_data_size = size - 1;
-
-                    let filter_m = (alpha_header >> 2) & 0x03;
-                    let compression = alpha_header & 0x03;
-
-                    if compression > ALPHA_COMPRESSION_VP8L {
-                        crate::log::warning("skipping unsupported ALPHA chunk");
-                    } else {
-                        decoder.has_alpha = true;
-                        decoder.alpha_compression = compression;
-                        decoder.alpha_filter = filter_m;
-                    }
+                    decoder.set_alpha_chunk(header, payload_pos + 1, size - 1);
                 }
                 TAG_VP8 => {
                     if decoder.animation || decoder.still_done {
@@ -1329,11 +1377,8 @@ impl Decoder<'_> {
                         .map_err(|e| ("VP8L decode failed", e))?;
                     decoder.still_done = true;
 
-                    let set = decoder.export_settings();
-                    let height = decoder.frame_of(Source::Lossless).height;
-
                     decoder
-                        .export_complete_still_lossless(&set, out, height)
+                        .export_complete_still_lossless(out)
                         .map_err(|e| ("cannot output frame", e))?;
                     return Ok(true);
                 }

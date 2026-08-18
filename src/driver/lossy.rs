@@ -202,22 +202,23 @@ impl<'a> Decoder<'a> {
     survives the downscale, so a scaled lossy frame only matches it if the
     filter goes too. The threshold is measured against the whole frame, not the
     cropped part. */
-    fn update_filter_bypass(&mut self) {
-        self.bypass_filtering = self.options.bypass_filtering;
+    fn filter_bypass(&self) -> bool {
+        if self.options.bypass_filtering {
+            return true;
+        }
         if self.options.scale.is_none()
             || self.canvas_width == 0
             || self.canvas_height == 0
         {
-            return;
+            return false;
         }
         let (.., src_w, src_h) =
             self.options.crop_or(self.canvas_width, self.canvas_height);
         let Ok((width, height)) = scaled_size(&self.options, src_w, src_h) else {
-            return;
+            return false;
         };
-        if width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4 {
-            self.bypass_filtering = true;
-        }
+
+        width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4
     }
 
     /// Returns whether the frame is complete; `false` means more of the chunk
@@ -228,10 +229,8 @@ impl<'a> Decoder<'a> {
         avail: usize,
         size: usize,
     ) -> Result<bool> {
-        self.update_filter_bypass();
-
         if !self.vp8_active {
-            let bypass = self.bypass_filtering;
+            let bypass = self.filter_bypass();
             let Self { vp8, input, .. } = self;
             let vp8 = vp8_decoder(vp8)?;
 
@@ -281,10 +280,8 @@ impl<'a> Decoder<'a> {
         offset: usize,
         size: usize,
     ) -> Result<()> {
-        self.update_filter_bypass();
-
         let ret = {
-            let bypass = self.bypass_filtering;
+            let bypass = self.filter_bypass();
             let Self { vp8, input, .. } = self;
             let vp8 = vp8_decoder(vp8)?;
 

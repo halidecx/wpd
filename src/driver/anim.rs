@@ -23,9 +23,7 @@ use crate::dsp::vp8l::Vp8lDsp;
 use super::convert::{
     convert_to_argb, format_bpp, format_is_packed, premultiply_after_pack,
 };
-use super::{
-    Decoder, Source, ALPHA_COMPRESSION_VP8L, ANIM_SUBFRAME, TAG_ALPH, TAG_VP8, TAG_VP8L,
-};
+use super::{Decoder, Source, ANIM_SUBFRAME, TAG_ALPH, TAG_VP8, TAG_VP8L};
 use crate::bits::{rl24, rl32};
 use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
@@ -360,21 +358,9 @@ impl<'a> Decoder<'a> {
                         crate::log::error("invalid ALPHA chunk size");
                         return Err(Error::InvalidData);
                     }
-                    let alpha_header = self.input.chunk(at, 1)[0] as i32;
+                    let header = self.input.chunk(at, 1)[0] as i32;
 
-                    self.alpha_data_offset = at + 1;
-                    self.alpha_data_size = payload_size - 1;
-
-                    let filter_m = (alpha_header >> 2) & 0x03;
-                    let compression = alpha_header & 0x03;
-
-                    if compression > ALPHA_COMPRESSION_VP8L {
-                        crate::log::warning("skipping unsupported ALPHA chunk");
-                    } else {
-                        self.has_alpha = true;
-                        self.alpha_compression = compression;
-                        self.alpha_filter = filter_m;
-                    }
+                    self.set_alpha_chunk(header, at + 1, payload_size - 1);
                 }
                 TAG_VP8 if sub.is_none() => {
                     self.vp8_lossy_decode_frame(at, payload_size)?;
@@ -536,13 +522,18 @@ impl<'a> Decoder<'a> {
             height,
             ..
         } = self;
-        let src = match which {
-            Source::Lossy => {
-                super::lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
-            }
-            Source::Lossless => super::lossless_view(vp8l, *lossless_out),
-            _ => converted.frame(),
-        };
+        let src = super::source_view(
+            which,
+            vp8.first(),
+            vp8l,
+            *lossless_out,
+            alpha_plane,
+            *has_alpha,
+            *width,
+            *height,
+            Some(converted),
+            None,
+        );
 
         anim_composite(pl, CompositeTargets { ldsp, ydsp, canvas }, &src, target)
     }
