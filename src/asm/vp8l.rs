@@ -166,7 +166,7 @@ fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
 /// is the part that has to agree with what the decoder actually runs.
 #[derive(Default)]
 pub struct RawTable {
-    pub pred_add: Option<[PredAddRaw; 14]>,
+    pub pred_add: [Option<PredAddRaw>; 14],
     pub extract_green: Option<BlendRowRaw>,
     pub map_color32: Option<MapColorRaw>,
     pub blend_row_argb: Option<BlendRowRaw>,
@@ -174,50 +174,103 @@ pub struct RawTable {
     pub color_row: Option<ColorRowRaw>,
 }
 
-/// The fourteen predictors of one instruction set, in table order. The flags
-/// after each marker are `UP`, `LEFT`, `TL`, and they match the `l`/`tl` pair
-/// the scalar table passes to its own kernels.
-macro_rules! pred_table {
-    ($set:ident) => {
-        [
-            pred_add::<$set::Pred0, false, false, false>,
-            pred_add::<$set::Pred1, false, true, false>,
-            pred_add::<$set::Pred2, true, false, false>,
-            pred_add::<$set::Pred3, true, false, false>,
-            pred_add::<$set::Pred4, true, false, true>,
-            pred_add::<$set::Pred5, true, true, false>,
-            pred_add::<$set::Pred6, true, true, true>,
-            pred_add::<$set::Pred7, true, true, false>,
-            pred_add::<$set::Pred8, true, false, true>,
-            pred_add::<$set::Pred9, true, false, false>,
-            pred_add::<$set::Pred10, true, true, true>,
-            pred_add::<$set::Pred11, true, true, true>,
-            pred_add::<$set::Pred12, true, true, true>,
-            pred_add::<$set::Pred13, true, true, true>,
-        ]
+/// One predictor, by its index in the table. The flags after each marker are
+/// `UP`, `LEFT`, `TL`, and they match the `l`/`tl` pair the scalar table
+/// passes to its own kernels.
+///
+/// A tier names the indices it fills rather than handing over a whole table:
+/// the widest kernels are the ones that need the widest instruction set, and
+/// the six that run a serial left chain in an xmm register do not, so they
+/// arrive two tiers earlier than the rest.
+macro_rules! pred_slot {
+    ($set:ident, 0) => {
+        pred_add::<$set::Pred0, false, false, false>
+    };
+    ($set:ident, 1) => {
+        pred_add::<$set::Pred1, false, true, false>
+    };
+    ($set:ident, 2) => {
+        pred_add::<$set::Pred2, true, false, false>
+    };
+    ($set:ident, 3) => {
+        pred_add::<$set::Pred3, true, false, false>
+    };
+    ($set:ident, 4) => {
+        pred_add::<$set::Pred4, true, false, true>
+    };
+    ($set:ident, 5) => {
+        pred_add::<$set::Pred5, true, true, false>
+    };
+    ($set:ident, 6) => {
+        pred_add::<$set::Pred6, true, true, true>
+    };
+    ($set:ident, 7) => {
+        pred_add::<$set::Pred7, true, true, false>
+    };
+    ($set:ident, 8) => {
+        pred_add::<$set::Pred8, true, false, true>
+    };
+    ($set:ident, 9) => {
+        pred_add::<$set::Pred9, true, false, false>
+    };
+    ($set:ident, 10) => {
+        pred_add::<$set::Pred10, true, true, true>
+    };
+    ($set:ident, 11) => {
+        pred_add::<$set::Pred11, true, true, true>
+    };
+    ($set:ident, 12) => {
+        pred_add::<$set::Pred12, true, true, true>
+    };
+    ($set:ident, 13) => {
+        pred_add::<$set::Pred13, true, true, true>
     };
 }
 
-/// The same fourteen, unwrapped, for the C ABI table.
+/// The same, unwrapped, for the C ABI table.
 #[allow(unused_macros)]
-macro_rules! raw_pred_table {
-    ($set:ident) => {
-        [
-            $set::Pred0::F,
-            $set::Pred1::F,
-            $set::Pred2::F,
-            $set::Pred3::F,
-            $set::Pred4::F,
-            $set::Pred5::F,
-            $set::Pred6::F,
-            $set::Pred7::F,
-            $set::Pred8::F,
-            $set::Pred9::F,
-            $set::Pred10::F,
-            $set::Pred11::F,
-            $set::Pred12::F,
-            $set::Pred13::F,
-        ]
+macro_rules! pred_raw {
+    ($set:ident, 0) => {
+        <$set::Pred0 as Raw>::F
+    };
+    ($set:ident, 1) => {
+        <$set::Pred1 as Raw>::F
+    };
+    ($set:ident, 2) => {
+        <$set::Pred2 as Raw>::F
+    };
+    ($set:ident, 3) => {
+        <$set::Pred3 as Raw>::F
+    };
+    ($set:ident, 4) => {
+        <$set::Pred4 as Raw>::F
+    };
+    ($set:ident, 5) => {
+        <$set::Pred5 as Raw>::F
+    };
+    ($set:ident, 6) => {
+        <$set::Pred6 as Raw>::F
+    };
+    ($set:ident, 7) => {
+        <$set::Pred7 as Raw>::F
+    };
+    ($set:ident, 8) => {
+        <$set::Pred8 as Raw>::F
+    };
+    ($set:ident, 9) => {
+        <$set::Pred9 as Raw>::F
+    };
+    ($set:ident, 10) => {
+        <$set::Pred10 as Raw>::F
+    };
+    ($set:ident, 11) => {
+        <$set::Pred11 as Raw>::F
+    };
+    ($set:ident, 12) => {
+        <$set::Pred12 as Raw>::F
+    };
+    ($set:ident, 13) => {
+        <$set::Pred13 as Raw>::F
     };
 }
 
@@ -237,13 +290,13 @@ macro_rules! preds {
 macro_rules! ladder {
     ($(
         $flag:ident {
-            $( @preds $preds:ident; )?
+            $( @preds $preds:ident [ $($idx:tt),* ]; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
         pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
             $(if flags.contains(CpuFlags::$flag) {
-                $( dsp.pred_add = pred_table!($preds); )?
+                $( $( dsp.pred_add[$idx] = pred_slot!($preds, $idx); )* )?
                 $( dsp.$field = $wrap::<$marker>; )*
             })*
         }
@@ -252,7 +305,7 @@ macro_rules! ladder {
             let mut t = RawTable::default();
 
             $(if flags.contains(CpuFlags::$flag) {
-                $( t.pred_add = Some(raw_pred_table!($preds)); )?
+                $( $( t.pred_add[$idx] = Some(pred_raw!($preds, $idx)); )* )?
                 $( t.$field = Some(<$marker as Raw>::F); )*
             })*
             t
@@ -263,6 +316,26 @@ macro_rules! ladder {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
     use super::*;
+
+    pub mod sse2 {
+        use super::*;
+
+        preds! {
+            Pred5, pred5, "ff_pred_add_5_sse2";
+            Pred6, pred6, "ff_pred_add_6_sse2";
+            Pred7, pred7, "ff_pred_add_7_sse2";
+            Pred10, pred10, "ff_pred_add_10_sse2";
+            Pred12, pred12, "ff_pred_add_12_sse2";
+        }
+    }
+
+    pub mod sse4 {
+        use super::*;
+
+        preds! {
+            Pred13, pred13, "ff_pred_add_13_sse4";
+        }
+    }
 
     pub mod ssse3 {
         use super::*;
@@ -284,15 +357,9 @@ mod arch {
             Pred2, pred2, "ff_pred_add_2_avx2";
             Pred3, pred3, "ff_pred_add_3_avx2";
             Pred4, pred4, "ff_pred_add_4_avx2";
-            Pred5, pred5, "ff_pred_add_5_avx2";
-            Pred6, pred6, "ff_pred_add_6_avx2";
-            Pred7, pred7, "ff_pred_add_7_avx2";
             Pred8, pred8, "ff_pred_add_8_avx2";
             Pred9, pred9, "ff_pred_add_9_avx2";
-            Pred10, pred10, "ff_pred_add_10_avx2";
             Pred11, pred11, "ff_pred_add_11_avx2";
-            Pred12, pred12, "ff_pred_add_12_avx2";
-            Pred13, pred13, "ff_pred_add_13_avx2";
         }
 
         raw_map_color!(MapColor, map_color, "ff_map_color32_avx2");
@@ -307,12 +374,18 @@ mod arch {
     }
 
     ladder! {
+        SSE2 {
+            @preds sse2 [5, 6, 7, 10, 12];
+        }
+        SSE41 {
+            @preds sse4 [13];
+        }
         SSSE3 {
             color_row = color_row::<ssse3::ColorRow>;
             blend_row_argb_premult = blend_row::<ssse3::BlendPremult>;
         }
         AVX2 {
-            @preds avx2;
+            @preds avx2 [0, 1, 2, 3, 4, 8, 9, 11];
             map_color32 = map_color32::<avx2::MapColor>;
             color_row = color_row::<avx2::ColorRow>;
             extract_green = extract_green::<avx2::ExtractGreen>;
@@ -359,7 +432,7 @@ mod arch {
 
     ladder! {
         NEON {
-            @preds neon;
+            @preds neon [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
             map_color32 = map_color32::<neon::MapColor>;
             color_row = color_row::<neon::ColorRow>;
             extract_green = extract_green::<neon::ExtractGreen>;

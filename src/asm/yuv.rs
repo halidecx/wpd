@@ -257,16 +257,6 @@ macro_rules! raw_upsample_table {
     };
 }
 
-/// The three premultipliers of one instruction set.
-#[allow(unused_macros)]
-macro_rules! raw_premultiply {
-    ($t:ident, $set:ident) => {
-        $t.premultiply_row = Some($set::Premultiply::F);
-        $t.premultiply_row_4444 = Some($set::Premultiply4444::F);
-        $t.premultiply_row_4444_swap = Some($set::Premultiply4444Swap::F);
-    };
-}
-
 /// The eight packers of one instruction set, in table order.
 macro_rules! packers {
     ($dsp:ident, $set:ident) => {
@@ -298,7 +288,7 @@ macro_rules! pack_syms {
 }
 
 macro_rules! premultiply_syms {
-    ($row:literal, $p4444:literal, $swap:literal) => {
+    ($row:literal) => {
         raw!(
             Premultiply,
             premultiply,
@@ -306,6 +296,11 @@ macro_rules! premultiply_syms {
             $row,
             (*mut u8, c_int, c_int)
         );
+    };
+}
+
+macro_rules! premultiply_4444_syms {
+    ($p4444:literal, $swap:literal) => {
         raw!(
             Premultiply4444,
             premultiply_4444,
@@ -368,7 +363,6 @@ macro_rules! ladder {
             $( @upsample_rgb $up_rgb:ident; )?
             $( @upsample_bgr $up_bgr:ident; )?
             $( @packers $packers:ident; )?
-            $( @premultiply $premul:ident; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -382,13 +376,6 @@ macro_rules! ladder {
                     $( dsp.upsample_block[LAYOUT_BGR] =
                         upsample_block::<$up_bgr::UpsampleBgr, LAYOUT_BGR>; )?
                     $( packers!(dsp, $packers); )?
-                    $(
-                        dsp.premultiply_row = premultiply_row::<$premul::Premultiply>;
-                        dsp.premultiply_row_4444 =
-                            premultiply_row_4444::<$premul::Premultiply4444>;
-                        dsp.premultiply_row_4444_swap =
-                            premultiply_row_4444::<$premul::Premultiply4444Swap>;
-                    )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
             )*
@@ -408,7 +395,6 @@ macro_rules! ladder {
                     $( t.upsample_rgb = Some($up_rgb::UpsampleRgb::F); )?
                     $( t.upsample_bgr = Some($up_bgr::UpsampleBgr::F); )?
                     $( t.packers = Some(raw_packers!($packers)); )?
-                    $( raw_premultiply!(t, $premul); )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
             )*
@@ -433,6 +419,10 @@ mod arch {
             "ff_dispatch_alpha_first_sse2"
         );
         raw_row!(DispatchLast, dispatch_last, "ff_dispatch_alpha_last_sse2");
+        premultiply_4444_syms!(
+            "ff_premultiply_row_4444_sse2",
+            "ff_premultiply_row_4444_swap_sse2"
+        );
 
         #[cfg(target_arch = "x86_64")]
         upsample_syms!(
@@ -457,11 +447,7 @@ mod arch {
             "ff_pack_bgr565_ssse3",
             "ff_pack_bgra4444_ssse3"
         );
-        premultiply_syms!(
-            "ff_premultiply_row_ssse3",
-            "ff_premultiply_row_4444_ssse3",
-            "ff_premultiply_row_4444_swap_ssse3"
-        );
+        premultiply_syms!("ff_premultiply_row_ssse3");
         raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_ssse3");
 
         #[cfg(target_arch = "x86_64")]
@@ -497,8 +483,8 @@ mod arch {
             "ff_pack_bgr565_avx2",
             "ff_pack_bgra4444_avx2"
         );
-        premultiply_syms!(
-            "ff_premultiply_row_avx2",
+        premultiply_syms!("ff_premultiply_row_avx2");
+        premultiply_4444_syms!(
             "ff_premultiply_row_4444_avx2",
             "ff_premultiply_row_4444_swap_avx2"
         );
@@ -538,6 +524,9 @@ mod arch {
         SSE2 {
             dispatch_alpha_first = dispatch_alpha::<sse2::DispatchFirst>;
             dispatch_alpha_last = dispatch_alpha::<sse2::DispatchLast>;
+            premultiply_row_4444 = premultiply_row_4444::<sse2::Premultiply4444>;
+            premultiply_row_4444_swap =
+                premultiply_row_4444::<sse2::Premultiply4444Swap>;
         }
         #[cfg(target_arch = "x86_64")]
         SSSE3 {
@@ -548,8 +537,8 @@ mod arch {
         }
         SSSE3 {
             @packers ssse3;
-            @premultiply ssse3;
 
+            premultiply_row = premultiply_row::<ssse3::Premultiply>;
             argb_to_y = argb_to_y::<ssse3::ArgbToY>;
         }
         #[cfg(target_arch = "x86_64")]
@@ -561,8 +550,11 @@ mod arch {
         }
         AVX2 {
             @packers avx2;
-            @premultiply avx2;
 
+            premultiply_row = premultiply_row::<avx2::Premultiply>;
+            premultiply_row_4444 = premultiply_row_4444::<avx2::Premultiply4444>;
+            premultiply_row_4444_swap =
+                premultiply_row_4444::<avx2::Premultiply4444Swap>;
             dispatch_alpha_first = dispatch_alpha::<avx2::DispatchFirst>;
             dispatch_alpha_last = dispatch_alpha::<avx2::DispatchLast>;
             argb_to_y = argb_to_y::<avx2::ArgbToY>;
@@ -597,8 +589,8 @@ mod arch {
             "ff_pack_bgr565_neon",
             "ff_pack_bgra4444_neon"
         );
-        premultiply_syms!(
-            "ff_premultiply_row_neon",
+        premultiply_syms!("ff_premultiply_row_neon");
+        premultiply_4444_syms!(
             "ff_premultiply_row_4444_neon",
             "ff_premultiply_row_4444_swap_neon"
         );
@@ -657,8 +649,11 @@ mod arch {
         NEON {
             @upsample neon;
             @packers neon;
-            @premultiply neon;
 
+            premultiply_row = premultiply_row::<neon::Premultiply>;
+            premultiply_row_4444 = premultiply_row_4444::<neon::Premultiply4444>;
+            premultiply_row_4444_swap =
+                premultiply_row_4444::<neon::Premultiply4444Swap>;
             dispatch_alpha_first = dispatch_alpha::<neon::DispatchFirst>;
             dispatch_alpha_last = dispatch_alpha::<neon::DispatchLast>;
             argb_to_y = argb_to_y::<neon::ArgbToY>;

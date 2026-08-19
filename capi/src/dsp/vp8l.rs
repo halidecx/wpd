@@ -188,8 +188,10 @@ unsafe extern "C" fn blend_row_argb_premult_c(dst: *mut u8, src: *const u8, n: c
 fn init_asm(dsp: &mut WPDLosslessDSP) {
     let t = wpd::asm::vp8l::raw_table(wpd::cpu::flags());
 
-    if let Some(v) = t.pred_add {
-        dsp.pred_add = v;
+    for (slot, sel) in dsp.pred_add.iter_mut().zip(t.pred_add) {
+        if let Some(v) = sel {
+            *slot = v;
+        }
     }
     if let Some(v) = t.extract_green {
         dsp.extract_green = v;

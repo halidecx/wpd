@@ -893,7 +893,6 @@ mod arch {
     pub mod avx2 {
         use super::*;
 
-        raw_lf_uv!(V8uvInner, v8uv_inner, "ff_vp8_v_loop_filter8uv_inner_avx2");
         raw_lf_simple_mb!(
             VSimpleMb,
             v_simple_mb,
@@ -1007,7 +1006,6 @@ mod arch {
             idct_dc_add = idct::<sse4::DcAdd>;
         }
         AVX2 {
-            v_loop_filter8uv_inner = lf_v_uv::<avx2::V8uvInner>;
             v_loop_filter_simple_mb = lf_v_simple_mb::<avx2::VSimpleMb>;
             h_loop_filter_simple_mb = lf_h_simple_mb::<avx2::HSimpleMb>;
             h_loop_filter16y_mb = lf_h_mb::<H16MbAvx2>;
