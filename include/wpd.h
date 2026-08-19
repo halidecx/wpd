@@ -42,6 +42,10 @@ typedef struct WPDDecoder WPDDecoder;
  * decoder it happened on refuses every later call with the same status; free
  * it. The message goes to the log callback, not to wpd_decoder_error(), which
  * still reports whatever the last real decode failure was.
+ *
+ * The exception is a build compiled to abort on panic rather than unwind,
+ * which is what -Dnightly_size does to reach the size it does. There is no
+ * unwind to catch there and a defect ends the process, as it did in the C.
  */
 typedef enum WPDStatus {
     WPD_OK                   = 0,

@@ -1000,6 +1000,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(panic = "abort"))]
     fn a_panicked_decoder_is_poisoned_and_stays_that_way() {
         let mut decoder = WPDDecoder::new();
 
