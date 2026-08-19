@@ -26,7 +26,8 @@ if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
     built="$OUT_DIR/cargo-$NAME/$target/$PROFILE"
 fi
 
-cargo "${cargo_args[@]}" "${args[@]}"
+# ${var[@]+...} keeps macOS bash 3.2 from tripping set -u on an empty array.
+cargo ${cargo_args[@]+"${cargo_args[@]}"} "${args[@]}"
 
 cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"
 
