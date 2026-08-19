@@ -32,13 +32,7 @@ cargo ${cargo_args[@]+"${cargo_args[@]}"} "${args[@]}"
 cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"
 
 if [ "$PROFILE" = release ] || [ "$PROFILE" = minsize ]; then
-    slim="$OUT_DIR/lib$NAME.a.slim"
-    if "${STRIP:-strip}" --strip-unneeded \
-           --remove-section=.llvmbc --remove-section=.llvmcmd \
-           -o "$slim" "$OUT_DIR/lib$NAME.a" 2>/dev/null; then
-        mv -f "$slim" "$OUT_DIR/lib$NAME.a"
-    else
-        rm -f "$slim"
+    . "$(dirname "$0")/strip_artifact.sh"
+    strip_artifact archive "$OUT_DIR/lib$NAME.a" ||
         echo "cargo_build.sh: cannot slim lib$NAME.a, shipping it whole" >&2
-    fi
 fi
