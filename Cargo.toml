@@ -1,0 +1,66 @@
+[workspace]
+members = [".", "capi", "tools"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "BSD-2-Clause"
+repository = "https://github.com/halidecx/wpd"
+
+[package]
+name = "wpd"
+description = "A fast WebP decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Lets wpd-capi read the assembler probe results via DEP_WPDASM_*.
+links = "wpdasm"
+# The C that is left builds the test harnesses and the libwebp oracle, none of
+# which a consumer of the crate needs.
+exclude = ["*.c", "*.h", "meson*", "scripts/", "tests/", "tools/", "wpd-test-data/"]
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["asm"]
+# Hand-written assembly, dispatched at runtime. Turning this off makes the
+# crate compile under #![forbid(unsafe_code)].
+asm = []
+# Drop DSP fallbacks the build target can never reach (dav1d's trim_dsp).
+trim_dsp = []
+# Use the 32-bit range coder even where the 64-bit one fits.
+force_rac32 = []
+
+[build-dependencies]
+cc = "1"
+nasm-rs = { version = "0.3", features = ["parallel"] }
+
+[dependencies]
+zerocopy = { version = "0.8", default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+
+[profile.minsize]
+inherits = "release"
+opt-level = "s"
+
+[profile.release.package."*"]
+opt-level = 3
+
+# What meson's `debugoptimized` maps to: optimised, but with the debug info and
+# the checks that make a sanitizer or a fuzzer run useful.
+[profile.debugopt]
+inherits = "release"
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+codegen-units = 16

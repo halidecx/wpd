@@ -4,7 +4,8 @@ A fast WebP decoder.
 
 ## Code
 
-- **Do not add comments**, unless they are for a public header file
+- Comments are fine anywhere; write them where they say something the code
+  cannot say for itself
 - No intrinsics; you may add them to test performance, but they should
   ultimately be re-written to handwritten assembly that matches or exceeds their
   performance
@@ -44,12 +45,16 @@ Test scripts:
 ./scripts/bench.sh      # performance, wpd vs libwebpdec
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
-./scripts/testdata.sh   # asm vs c E2E correctness
+./scripts/clicheck.sh   # correctness, everything else the tool prints
+./scripts/testdata.sh   # asm vs fallback E2E correctness
 ./scripts/fuzz.sh       # robustness, damaged input under sanitizers
+cargo +nightly fuzz run container|vp8l|vp8|e2e  # coverage-guided; e2e is the driver
 ./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp
 ./scripts/rac32.sh      # correctness, forced 32-bit range coder
-./scripts/sanitize.sh   # memory safety, suite under sanitizers, asm and c
-./scripts/stylecheck.sh # format codebase
+./scripts/sanitize.sh   # memory safety, C harnesses under sanitizers
+./scripts/rustsan.sh    # memory safety, the Rust under ASan (needs nightly)
+./scripts/miri.sh       # undefined behaviour in the safe core (needs nightly)
+./scripts/stylecheck.sh # format and lint the codebase
 ```
 
 Inspect the structure of a WebP file (still or animated):

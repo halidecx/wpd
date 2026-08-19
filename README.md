@@ -11,6 +11,13 @@ meson setup build
 meson compile -C build
 ```
 
+Meson drives the build and owns the tools and test harnesses; the library itself
+is built by cargo, which also assembles the hand-written assembly. A Rust
+toolchain and `nasm` (on x86) are therefore build requirements. The decoder is
+written in Rust and hand-written assembly, ported from the C the project started
+as — see [LOG.md](LOG.md) — and it keeps the same public C ABI, declared by the
+single header `include/wpd.h`.
+
 The decoder executable is written to `build/wpd`. It reads a WebP file and
 writes decoded frames:
 
@@ -55,13 +62,50 @@ build/wpd --verify "$expected_md5" input.webp
 ```
 
 Architecture-specific assembly is enabled automatically. Use
-`meson setup build -Denable_asm=false` for a portable C-only build.
+`meson setup build -Denable_asm=false` for a portable build with the safe Rust
+fallbacks alone.
+
+### Size-optimized builds
+
+The default release build optimizes for decode speed. It strips the production
+command-line tool and shared library, and removes unneeded symbols, debug data,
+and LLVM bitcode from the staged C static archive.
+
+For smaller stable artifacts at a measured 3--6% decode-speed cost on the
+reference corpus, use Cargo's size optimizer:
+
+```sh
+meson setup build-minsize --buildtype=minsize
+meson compile -C build-minsize
+```
+
+For the smallest artifacts, rebuild Rust's standard library with nightly. This
+also removes panic formatting and panic location details, so it is intended for
+production deployments where an internal panic may abort without diagnostics. It
+requires the nightly toolchain and its `rust-src` component:
+
+```sh
+rustup component add rust-src --toolchain nightly
+meson setup build-tiny --buildtype=minsize -Dnightly_size=true
+meson compile -C build-tiny
+```
+
+This mode installs two static archives. `libwpd.a` is the normal archive: a
+downstream linker selects archive members for the APIs an application uses, so
+it is the flexible choice for native consumers. `libwpd-sealed.a` is smaller:
+the build roots every public API, removes everything unreachable from that set,
+and packs the result into one archive member. It is intended for deployments
+where package size matters more than downstream API-level dead-code selection.
+The sealed archive is linked explicitly instead of the `-lwpd` that `wpd.pc`
+provides; `wpd.pc` continues to select the normal archive.
 
 ## Library
 
 `meson install -C build` installs the shared and static libraries, the single
 public header `wpd.h`, and a `wpd.pc` for pkg-config. Only the `wpd_*` entry
 points declared in `wpd.h` are exported.
+
+### C
 
 ```c
 #include <wpd.h>
@@ -92,6 +136,8 @@ that the next call invalidates; with it they are written straight into
 caller-owned memory. Packed formats use `plane[0]`; planar output uses separate
 Y, U, V and optional A planes. A negative stride reverses a plane vertically.
 
+### One-shot
+
 For a still image or the first frame of an animation, the one-shot API owns the
 finished pixels independently of a decoder:
 
@@ -102,12 +148,14 @@ if (wpd_decode(data, size, WPD_PIX_FMT_RGBA, NULL, &frame) == WPD_OK)
 wpd_frame_free(&frame);
 ```
 
-`WPDDecoderOptions` controls cropping, scaling, vertical flipping, lossy in-loop
-filtering and fancy chroma upsampling. Cropping precedes scaling. Setting one
-scaled dimension to zero infers it from the other, rounded up. A lossy frame is
-cropped in its native YUV, so its crop origin is rounded down to even
-coordinates; a lossless frame is cropped in ARGB and takes the origin exactly,
-as it does in libwebp.
+### Options
+
+`WPDDecoderOptions`, and `wpd::options::Options` behind it, control cropping,
+scaling, vertical flipping, lossy in-loop filtering and fancy chroma upsampling.
+Cropping precedes scaling. Setting one scaled dimension to zero infers it from
+the other, rounded up. A lossy frame is cropped in its native YUV, so its crop
+origin is rounded down to even coordinates; a lossless frame is cropped in ARGB
+and takes the origin exactly, as it does in libwebp.
 
 Scaling is the same area rescaler libwebp uses, applied where libwebp applies
 it: over ARGB for a lossless frame and over the Y, U and V planes for a lossy
@@ -117,6 +165,59 @@ through the rescaler rather than the fancy upsampler, and a steep enough
 downscale — under three quarters in both directions — drops the in-loop filter,
 so scaled output is not the unscaled output resampled. Both are libwebp's
 behaviour, and scaled output is bit-exact with it.
+
+### Rust
+
+The decoder is a Rust library, and the C ABI above is a shim over it. A Rust
+consumer takes the `wpd` crate directly and skips the shim, which is where the
+raw pointers are:
+
+```toml
+[dependencies]
+wpd = { git = "https://github.com/halidecx/wpd" }
+```
+
+```rust
+use wpd::api::Decoder;
+use wpd::image::Format;
+use wpd::options::Options;
+
+let mut decoder = Decoder::new();
+
+decoder.set_format(Format::Rgba)?;
+decoder.set_options(Options {
+    scale: Some((320, 0)),
+    ..Options::default()
+})?;
+decoder.open(&data)?;
+
+let info = decoder.info()?;
+
+while let Some(frame) = decoder.next_frame()? {
+    for row in frame.rows_of(0) {
+        present(row);
+    }
+}
+```
+
+A frame borrows the decoder, so the next call is what invalidates it and the
+compiler is what says so — there is no counterpart to
+`wpd_decoder_set_output_buffer`, because a row arrives as a `&[u8]` of exactly
+its own length. `rows_of` walks a plane in output order, which is what makes
+`Options::flip` invisible to a caller: a flip is the order the rows come out in,
+so there is no negative stride to apply. Packed formats have one plane; planar
+output has separate Y, U, V and optional A, indexed by `planes()`.
+
+`open_stream`, `append` and `end_of_stream` decode a file that is still
+arriving, and `partial_frame` hands out the rows of the frame in progress.
+`update` takes ownership of a cumulative `Vec` without copying it. Call
+`UpdatedDecoder::into_buffer`, extend the returned `UpdateBuffer`, and call
+`UpdateBuffer::update` to resume decoding from the same allocation.
+
+Default features build the assembly, which is the one place the crate has
+`unsafe`. `default-features = false` drops it for the safe scalar fallbacks, and
+the crate then compiles under `#![forbid(unsafe_code)]` — a decoder that is free
+of memory-unsafety by construction, at the cost of the assembly's speed.
 
 Decoded output is checked against libwebp byte for byte:
 
@@ -148,10 +249,34 @@ from a decode, and `huffman_simple_duplicate` and `huffman_simple_single` differ
 in bytes while having to decode identically.
 
 `./scripts/sanitize.sh` runs the ordinary suite under the same two sanitizers,
-once with the assembly enabled and once without. Both are needed: ASan sees
-compiler-generated code only, so an overrun inside a hand-written kernel shows
-up in the C build alone, while the assembly build is the one that sanitizes the
-real dispatch and the only one with a checkasm target.
+once with the assembly enabled and once without. The decoder is Rust, so what
+ASan instruments there is the C test harnesses; the decoder benefits through the
+intercepted allocator, which still catches a heap overrun that crosses a
+redzone, and not through instrumented loads and stores.
+
+`./scripts/rustsan.sh` closes that gap. It needs a nightly toolchain, because
+both `-Zsanitizer=address` and the `-Zbuild-std` that gets an instrumented
+standard library are unstable, and it decodes the whole corpus in every output
+format with every load and store the decoder makes checked, in both feature
+configurations. The no-asm run is the one where a bad index in a fallback has
+nowhere to hide; the asm run exercises the real dispatch.
+
+`./scripts/miri.sh` runs the core crate's tests under miri, which reports
+undefined behaviour the compiler is otherwise entitled to assume away. It builds
+with `--no-default-features`, since miri cannot execute the hand-written
+assembly.
+
+`cargo +nightly fuzz run container|vp8l|vp8|e2e` drives the safe core under
+coverage-guided fuzzing. That is a different question from what
+`scripts/fuzz.sh` asks: this one is looking for a panic on damaged input, which
+is a denial of service the C did not have, rather than for a memory error.
+
+The first three enter below the driver, so each one reaches its own decoder
+without the validation a real file passes through first; `e2e` drives a whole
+file through the safe API, which is what a caller can actually provoke. Seed it
+with the corpus — `cargo +nightly fuzz run e2e fuzz/corpus/e2e wpd-test-data` —
+because a file that reaches the pixels is not something a mutation finds on its
+own.
 
 The boolean coder has a 64-bit implementation and a 32-bit one, and every 64-bit
 build picks the former, so `./scripts/rac32.sh` runs the whole suite again

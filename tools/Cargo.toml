@@ -1,0 +1,25 @@
+[package]
+name = "wpd-tool"
+description = "Command-line front end for the wpd WebP decoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# The C here belongs to the libwebp oracle and the getopt shim, which Meson
+# builds; neither is part of the tool.
+exclude = ["*.c", "*.h", "*.sh", "compat/"]
+
+[[bin]]
+name = "wpd"
+path = "wpd.rs"
+doc = false
+
+[dependencies]
+wpd = { path = "..", default-features = false }
+
+[features]
+default = ["asm"]
+asm = ["wpd/asm"]
+trim_dsp = ["wpd/trim_dsp"]
+force_rac32 = ["wpd/force_rac32"]

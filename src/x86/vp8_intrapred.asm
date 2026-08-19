@@ -1,5 +1,5 @@
 
-%include "asm/x86/x86util.asm"
+%include "ext/x86/x86util.asm"
 
 SECTION_RODATA
 
@@ -10,10 +10,13 @@ tm_shuf2: times 4 db 0x03, 0x80
 
 vl_shuf: db 0, 1, 2, 3, 8, 9, 10, 11, 1, 2, 3, 12, 9, 10, 11, 13
 
-SECTION .text
+; tm_shuf2 is eight bytes, so the aligned loads below need the section put
+; back on a sixteen-byte boundary first.
+alignb 16
+pb_1:    times 16 db 1
+pb_3:    times 16 db 3
 
-cextern_naked wpd_pb_1
-cextern_naked wpd_pb_3
+SECTION .text
 
 %macro PALIGNR_Q 4
 %ifnidn %4, %2
@@ -44,7 +47,7 @@ cglobal pred16x16_vertical_8, 2,3
 %macro PRED16x16_H 0
 cglobal pred16x16_horizontal_8, 2,3
 %if cpuflag(ssse3)
-    mova      m2, [wpd_pb_3]
+    mova      m2, [pb_3]
 %endif
 %rep 8
     movd      m0, [r0+r1*0-4]
@@ -286,7 +289,7 @@ cglobal pred8x8_vertical_8, 2,2
 %macro PRED8x8_H 0
 cglobal pred8x8_horizontal_8, 2,3,3
 %if cpuflag(ssse3)
-    mova      m2, [wpd_pb_3]
+    mova      m2, [pb_3]
 %endif
 %rep 4
     SPLATB_LOAD m0, r0+r1*0-1, m2
@@ -446,7 +449,7 @@ cglobal pred8x8_tm_vp8_8, 2,3,6
 %ifnidn %1, %4
     mova    %1, %4
 %endif
-    pand    %3, [wpd_pb_1]
+    pand    %3, [pb_1]
     psubusb %2, %3
     pavgb   %1, %2
 %endmacro

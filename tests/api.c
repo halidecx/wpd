@@ -1255,6 +1255,81 @@ static void test_scale_keeps_source(const char *path, WPDPixelFormat other,
     free(still);
 }
 
+/* Every frame of a decode, rows packed one after another, with 'flip' either
+   set or not. */
+static uint8_t *decode_flipped(const uint8_t *data, size_t size,
+                               WPDPixelFormat format, int flip, size_t *bytes,
+                               size_t *row_bytes, int *height) {
+    WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
+    WPDDecoder       *decoder = wpd_decoder_create();
+    WPDFrame          frame   = WPD_FRAME_INIT;
+    uint8_t          *out     = NULL;
+    size_t            used    = 0;
+
+    *bytes     = 0;
+    *row_bytes = 0;
+    *height    = 0;
+    CHECK(decoder != NULL);
+    if (!decoder)
+        return NULL;
+    options.flip = flip;
+    CHECK(wpd_decoder_set_options(decoder, &options) == WPD_OK);
+    CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
+    CHECK(wpd_decoder_open(decoder, data, size) == WPD_OK);
+    while (wpd_decoder_next_frame(decoder, &frame) > 0) {
+        const size_t row   = (size_t)frame.width * packed_bpp(frame.format);
+        uint8_t     *grown = realloc(out, used + row * (size_t)frame.height);
+
+        if (!grown)
+            break;
+        out = grown;
+        for (int y = 0; y < frame.height; y++)
+            memcpy(out + used + row * (size_t)y,
+                   frame.data[0] + (ptrdiff_t)y * frame.stride[0],
+                   row);
+        used += row * (size_t)frame.height;
+        *row_bytes = row;
+        *height    = frame.height;
+    }
+    wpd_decoder_free(decoder);
+    *bytes = used;
+    return out;
+}
+
+/* Flipping is the last pass over finished rows, so a flipped decode has to be
+   the row-reversal of an unflipped one. That holds for an animation as much as
+   a still, and needs no second decoder to agree, which matters because the
+   parity harness skips animations and leaves the transformed animation paths
+   with no oracle of their own. */
+static void test_flip_reverses_rows(const char *path, WPDPixelFormat format) {
+    size_t   size;
+    uint8_t *data = read_file(path, &size);
+    uint8_t *plain, *flipped;
+    size_t   plain_bytes, flipped_bytes, row, flipped_row;
+    int      height, flipped_height;
+
+    if (!data)
+        return;
+    plain = decode_flipped(data, size, format, 0, &plain_bytes, &row, &height);
+    flipped = decode_flipped(
+        data, size, format, 1, &flipped_bytes, &flipped_row, &flipped_height);
+    free(data);
+    CHECK(plain != NULL && flipped != NULL);
+    CHECK(plain_bytes == flipped_bytes && plain_bytes > 0);
+    CHECK(row == flipped_row && height == flipped_height && height > 0);
+    if (plain && flipped && plain_bytes == flipped_bytes && row && height > 0) {
+        const size_t picture = row * (size_t)height;
+
+        for (size_t at = 0; at + picture <= plain_bytes; at += picture)
+            for (int y = 0; y < height; y++)
+                CHECK(memcmp(plain + at + row * (size_t)y,
+                             flipped + at + row * (size_t)(height - 1 - y),
+                             row) == 0);
+    }
+    free(plain);
+    free(flipped);
+}
+
 static void test_partial_format_change(const char *path, size_t chunk,
                                        WPDPixelFormat from, WPDPixelFormat to,
                                        int peek_again) {
@@ -2830,6 +2905,13 @@ static void test_frame_table(const char *path) {
     WPDFrameInfo entry   = WPD_FRAME_INFO_INIT;
     WPDFrame     frame   = WPD_FRAME_INIT;
     int          index   = 0;
+    union {
+        WPDFrameInfo info;
+        struct {
+            uint8_t  fields[sizeof(size_t) + 9 * sizeof(int)];
+            uint32_t canary;
+        } guarded;
+    } exact;
 
     if (!data || !decoder) {
         free(data);
@@ -2840,6 +2922,11 @@ static void test_frame_table(const char *path) {
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
     CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
     CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
+    memset(&exact, 0xff, sizeof(exact));
+    exact.info.struct_size = sizeof(exact.guarded.fields);
+    exact.guarded.canary   = 0x12345678;
+    CHECK(wpd_decoder_frame_info(decoder, 0, &exact.info) == WPD_OK);
+    CHECK(exact.guarded.canary == 0x12345678);
     CHECK(wpd_decoder_frame_info(decoder, -1, &entry) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_frame_info(decoder, 0, NULL) == WPD_ERR_INVALID_ARG);
 
@@ -3224,6 +3311,7 @@ int main(int argc, char **argv) {
 
         snprintf(path, sizeof(path), "%s/lossless.webp", dir);
         test_file_info(path, 576, 576, 0, 0, 1, WPD_CODING_LOSSLESS);
+        test_flip_reverses_rows(path, WPD_PIX_FMT_RGBA);
         test_replacement_api_file(path, "VP8L", 0);
         test_output_buffer(path, WPD_PIX_FMT_NONE);
         test_output_buffer(path, WPD_PIX_FMT_RGBA);
@@ -3242,6 +3330,11 @@ int main(int argc, char **argv) {
 
         snprintf(path, sizeof(path), "%s/anim_yuva.webp", dir);
         test_file_info(path, 422, 480, 1, 1, 14, WPD_CODING_UNKNOWN);
+        /* ARGB_PRE over a composited canvas is the one packed output that is
+           relabelled rather than converted, and flipping it is the only way
+           that branch is reached twice in a row. */
+        test_flip_reverses_rows(path, WPD_PIX_FMT_ARGB_PRE);
+        test_flip_reverses_rows(path, WPD_PIX_FMT_RGBA);
         test_replacement_animation(path);
         test_subframe_composite(path);
         test_subframe_4444_premultiply(path);

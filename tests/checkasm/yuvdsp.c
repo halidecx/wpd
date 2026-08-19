@@ -452,8 +452,7 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
                                  MAX_W,
                                  w,
                                  h);
-            wpd_yuv420_to_packed(dsp,
-                                 layout,
+            wpd_yuv420_to_packed(layout,
                                  dst1,
                                  stride,
                                  y,
@@ -482,8 +481,7 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
                     if (end > h)
                         end = h;
 
-                    from = wpd_yuv420_to_packed_rows(dsp,
-                                                     layout,
+                    from = wpd_yuv420_to_packed_rows(layout,
                                                      dst1,
                                                      stride,
                                                      y,

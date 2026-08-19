@@ -1,5 +1,5 @@
 
-%include "asm/x86/x86util.asm"
+%include "ext/x86/x86util.asm"
 
 SECTION_RODATA 32
 
@@ -17,10 +17,10 @@ pb_27_63: times 8 db 27, 63
 pb_18_63: times 8 db 18, 63
 pb_9_63:  times 8 db  9, 63
 
-cextern_naked wpd_pb_1
-cextern_naked wpd_pw_9
-cextern_naked wpd_pw_18
-cextern_naked wpd_pb_80
+pb_1:     times 16 db 1
+pb_80:    times 16 db 0x80
+pw_9:     times 8 dw 9
+pw_18:    times 8 dw 18
 
 SECTION .text
 
@@ -174,7 +174,7 @@ cglobal vp8_%1_loop_filter_simple, 3, %2, 8, dst, stride, flim, cntr
     psubusb        m3, m0
     psubusb        m0, m4
     por            m3, m0
-    mova           m0, [wpd_pb_80]
+    mova           m0, [pb_80]
     pxor           m2, m0
     pxor           m4, m0
     psubsb         m2, m4
@@ -322,7 +322,7 @@ cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
     vpbroadcastb  xm4, xm4
     vpbroadcastb   m5, xm5              ; edges 2 and 3, both inner
     vinserti128    m4, m4, xm5, 1       ; edge 0 is the macroblock edge
-    vbroadcasti128 m10, [wpd_pb_80]
+    vbroadcasti128 m10, [pb_80]
 
     DEFINE_ARGS dst, stride, mstride, dst4
     mov      mstrideq, strideq
@@ -449,7 +449,7 @@ cglobal vp8_h_loop_filter_simple_mb, 4, 9, 16, dst, stride, mbedge, bedge
     vpbroadcastb   m9, xm9               ; edges 1 and 3, both inner
     vinserti128   m10, m10, xm9, 1       ; edge 0 is the macroblock edge, edge 2
                                          ; rides along in the other lane
-    vbroadcasti128 m8, [wpd_pb_80]
+    vbroadcasti128 m8, [pb_80]
 
     SIMPLE_FILTER  m0, m1, m2, m3, m10, m11, m12, m13, m14, m8
     SIMPLE_FILTER  m4, m5, m6, m7,  m9, m11, m12, m13, m14, m8
@@ -846,10 +846,10 @@ cglobal vp8_%1_loop_filter16y_inner, 5, 5, 13, stack_size, dst, stride, flimE, f
     pand             m0, m7
 
 %ifdef m8
-    mova             m8, [wpd_pb_80]
+    mova             m8, [pb_80]
 %define m_pb_80 m8
 %else
-%define m_pb_80 [wpd_pb_80]
+%define m_pb_80 [pb_80]
 %endif
     mova             m1, m4
     mova             m7, m3
@@ -1202,10 +1202,10 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     pand             m0, m7
 
 %ifdef m8
-    mova             m8, [wpd_pb_80]
+    mova             m8, [pb_80]
 %define m_pb_80 m8
 %else
-%define m_pb_80 [wpd_pb_80]
+%define m_pb_80 [pb_80]
 %endif
     mova             m1, m4
     mova             m7, m3
@@ -1245,15 +1245,15 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     psubb            m7, [pb_16]
     psubb            m6, [pb_16]
 
-    pxor             m3, [wpd_pb_80]
+    pxor             m3, [pb_80]
     paddsb           m3, m7
-    pxor             m3, [wpd_pb_80]
-    pxor             m4, [wpd_pb_80]
+    pxor             m3, [pb_80]
+    pxor             m4, [pb_80]
     psubsb           m4, m6
-    pxor             m4, [wpd_pb_80]
+    pxor             m4, [pb_80]
 
 %if cpuflag(ssse3)
-    mova             m7, [wpd_pb_1]
+    mova             m7, [pb_1]
 %else
     mova             m7, [pw_63]
 %endif
@@ -1299,12 +1299,12 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     psraw           m6, 7
     psraw           m1, 7
     packsswb        m6, m1
-    pxor            m3, [wpd_pb_80]
+    pxor            m3, [pb_80]
     paddsb          m3, m6
-    pxor            m3, [wpd_pb_80]
-    pxor            m4, [wpd_pb_80]
+    pxor            m3, [pb_80]
+    pxor            m4, [pb_80]
     psubsb          m4, m6
-    pxor            m4, [wpd_pb_80]
+    pxor            m4, [pb_80]
 %if cpuflag(ssse3)
     mova            m6, [pb_18_63]
 %endif
@@ -1327,20 +1327,20 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
 %else
     mova            m6, m_maskres
     mova            m1, m_limres
-    pmullw          m6, [wpd_pw_18]
-    pmullw          m1, [wpd_pw_18]
+    pmullw          m6, [pw_18]
+    pmullw          m1, [pw_18]
     paddw           m6, m7
     paddw           m1, m7
 %endif
     psraw           m6, 7
     psraw           m1, 7
     packsswb        m6, m1
-    pxor            m2, [wpd_pb_80]
+    pxor            m2, [pb_80]
     paddsb          m2, m6
-    pxor            m2, [wpd_pb_80]
-    pxor            m5, [wpd_pb_80]
+    pxor            m2, [pb_80]
+    pxor            m5, [pb_80]
     psubsb          m5, m6
-    pxor            m5, [wpd_pb_80]
+    pxor            m5, [pb_80]
 %if cpuflag(ssse3)
     mova            m6, [pb_9_63]
 %endif
@@ -1365,8 +1365,8 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     mova            m6, m_maskres
     mova            m1, m_limres
 %endif
-    pmullw          m6, [wpd_pw_9]
-    pmullw          m1, [wpd_pw_9]
+    pmullw          m6, [pw_9]
+    pmullw          m1, [pw_9]
     paddw           m6, m7
     paddw           m1, m7
 %endif
@@ -1374,23 +1374,23 @@ cglobal vp8_%1_loop_filter16y_mbedge, 5, 5, 15, stack_size, dst1, stride, flimE,
     psraw           m1, 7
     packsswb        m6, m1
 %ifdef m8
-    pxor     m_p2backup, [wpd_pb_80]
+    pxor     m_p2backup, [pb_80]
     paddsb   m_p2backup, m6
-    pxor     m_p2backup, [wpd_pb_80]
-    pxor     m_q2backup, [wpd_pb_80]
+    pxor     m_p2backup, [pb_80]
+    pxor     m_q2backup, [pb_80]
     psubsb   m_q2backup, m6
-    pxor     m_q2backup, [wpd_pb_80]
+    pxor     m_q2backup, [pb_80]
     SWAP             1, 13
     SWAP             6, 14
 %else
     mova            m1, m_p2backup
     mova            m0, m_q2backup
-    pxor            m1, [wpd_pb_80]
+    pxor            m1, [pb_80]
     paddsb          m1, m6
-    pxor            m1, [wpd_pb_80]
-    pxor            m0, [wpd_pb_80]
+    pxor            m1, [pb_80]
+    pxor            m0, [pb_80]
     psubsb          m0, m6
-    pxor            m0, [wpd_pb_80]
+    pxor            m0, [pb_80]
     mova            m6, m0
 %endif
 
