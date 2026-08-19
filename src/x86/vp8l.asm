@@ -260,7 +260,6 @@ PRED_AVGTOP 9, 0, 4
 
 
 %macro PRED_AVGLEFT 2
-INIT_XMM avx2
 cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -282,11 +281,9 @@ cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
     RET
 %endmacro
 
-PRED_AVGLEFT 6, -4
-PRED_AVGLEFT 7, 0
 
-
-INIT_XMM avx2
+; 5: avg3(l, t, tr).
+%macro PRED_AVG3 0
 cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -308,9 +305,11 @@ cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
     jl .loop
 .ret:
     RET
+%endmacro
 
 
-INIT_XMM avx2
+; 10: avg4(l, tl, t, tr).
+%macro PRED_AVG4 0
 cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -335,8 +334,12 @@ cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
     jl .loop
 .ret:
     RET
+%endmacro
 
 
+; 11: select(t, l, tl). AVX2-only, unlike its neighbours: the blend takes the
+; mask in a register, and SSE4.1's pblendvb reads it from xmm0 alone, which
+; this kernel has no spare register to free up.
 INIT_XMM avx2
 cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     test       nd, nd
@@ -394,7 +397,8 @@ cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     RET
 
 
-INIT_XMM avx2
+; 12: clamped_add_sub_full(l, t, tl).
+%macro PRED_CLAMP_FULL 0
 cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -414,9 +418,11 @@ cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
     jl .loop
 .ret:
     RET
+%endmacro
 
 
-INIT_XMM avx2
+; 13: clamped_add_sub_half(l, t, tl).
+%macro PRED_CLAMP_HALF 0
 cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -447,6 +453,27 @@ cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
     jl .loop
 .ret:
     RET
+%endmacro
+
+
+; These six are xmm-wide because a serial left chain cannot be any wider, and
+; nothing about that needs AVX2 -- so each is built once, at the lowest tier its
+; instructions allow, and every tier above runs the same copy. 11 is the one
+; exception, for the reason given above it.
+;
+; A VEX build of these was measured and dropped: the two-operand forms cost one
+; to four register copies per kernel, which rename eliminates, so the AVX2
+; encoding came out level on 5 and 12 and 2-5% behind on the rest.
+INIT_XMM sse2
+PRED_AVGLEFT 6, -4
+PRED_AVGLEFT 7, 0
+PRED_AVG3
+PRED_AVG4
+PRED_CLAMP_FULL
+
+; pmovzxbw is what keeps this one off the SSE2 tier.
+INIT_XMM sse4
+PRED_CLAMP_HALF
 
 
 INIT_YMM avx2

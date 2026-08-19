@@ -973,6 +973,12 @@ cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
     RET
 %endmacro
 
+; The 4444 premultipliers are word arithmetic and a few masks, so they sit a
+; tier below the packers they are grouped with everywhere else.
+INIT_XMM sse2
+PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
+PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
+
 INIT_XMM ssse3
 PACK32 rgba
 PACK32 bgra
@@ -983,8 +989,6 @@ PACK16 rgba4444
 PACK16 bgr565
 PACK16 bgra4444
 PREMULTIPLY_ROW
-PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
-PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
 ARGB_TO_Y
 %if ARCH_X86_64
 ARGB_TO_YUV444

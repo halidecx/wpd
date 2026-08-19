@@ -458,6 +458,57 @@ function ff_extract_green_neon, export=1
 9:      ret
 endfunc
 
+// Both the multiplier byte and the colour byte are signed, so the products
+// use smull; shrn #5 then keeps bits 5..13 of the i16 product, which is the
+// scalar (i16 >> 5) as u8 exactly, for either shift signedness.
+function ff_color_row_neon, export=1
+        lsr             w4,  w3,  #24           // green_to_red
+        lsr             w5,  w3,  #16           // green_to_blue
+        lsr             w6,  w3,  #8            // red_to_blue
+        dup             v28.16b, w4
+        dup             v29.16b, w5
+        dup             v30.16b, w6
+        cmp             w2,  #16
+        b.lt            2f
+        // dst may alias src, so every load of a block precedes its stores.
+1:      ld4             {v0.16b-v3.16b}, [x1], #64
+        smull           v4.8h,   v2.8b,  v28.8b
+        smull2          v5.8h,   v2.16b, v28.16b
+        shrn            v4.8b,   v4.8h,  #5
+        shrn2           v4.16b,  v5.8h,  #5
+        add             v1.16b,  v1.16b, v4.16b
+        // Blue's red term reads the red just updated, not the input red.
+        smull           v6.8h,   v2.8b,  v29.8b
+        smull2          v7.8h,   v2.16b, v29.16b
+        smull           v16.8h,  v1.8b,  v30.8b
+        smull2          v17.8h,  v1.16b, v30.16b
+        shrn            v6.8b,   v6.8h,  #5
+        shrn2           v6.16b,  v7.8h,  #5
+        shrn            v16.8b,  v16.8h, #5
+        shrn2           v16.16b, v17.8h, #5
+        add             v3.16b,  v3.16b, v6.16b
+        sub             w2,  w2,  #16
+        add             v3.16b,  v3.16b, v16.16b
+        cmp             w2,  #16
+        st4             {v0.16b-v3.16b}, [x0], #64
+        b.ge            1b
+2:      cbz             w2,  9f
+3:      ld4             {v0.b-v3.b}[0], [x1], #4
+        smull           v4.8h,   v2.8b,  v28.8b
+        shrn            v4.8b,   v4.8h,  #5
+        add             v1.8b,   v1.8b,  v4.8b
+        smull           v6.8h,   v2.8b,  v29.8b
+        smull           v16.8h,  v1.8b,  v30.8b
+        shrn            v6.8b,   v6.8h,  #5
+        shrn            v16.8b,  v16.8h, #5
+        add             v3.8b,   v3.8b,  v6.8b
+        add             v3.8b,   v3.8b,  v16.8b
+        subs            w2,  w2,  #1
+        st4             {v0.b-v3.b}[0], [x0], #4
+        b.gt            3b
+9:      ret
+endfunc
+
 // NEON has no gather, so index in general registers; ubfx beats a per-pixel
 // byte load, and pairing results into stp halves the stores.
 function ff_map_color32_neon, export=1
