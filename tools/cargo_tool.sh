@@ -97,7 +97,19 @@ built="$OUT_DIR/cargo-tool/$PROFILE"
 target="$sanitize_target"
 if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
     target="$(rustc -vV | awk '/^host: / { print $2 }')"
-    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none"
+    # -Cpanic=abort and not immediate-abort, which is smaller and does not
+    # reliably kill anything. immediate-abort lowers a panic to a bare trap
+    # instruction rather than a call to abort(), and a trap is not a signal:
+    # on macOS it raises a Mach exception, which on macOS 26 is caught and
+    # resumed without advancing past it, so the process spins on the trap
+    # forever at no diagnostic and cannot be killed by anything it does to
+    # itself. A hung decoder is worse than a dead one -- it is a denial of
+    # service where the C had a crash -- and README promises this build aborts.
+    # libc's abort() raises SIGABRT, which is a signal everywhere.
+    #
+    # It costs the panic formatting machinery back: 11% of the tool and 13% of
+    # the sealed archive. -Zlocation-detail=none still drops the file and line.
+    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=abort -Zlocation-detail=none"
     cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
 fi
 if [ -n "$target" ]; then

@@ -80,9 +80,11 @@ meson compile -C build-minsize
 ```
 
 For the smallest artifacts, rebuild Rust's standard library with nightly. This
-also removes panic formatting and panic location details, so it is intended for
-production deployments where an internal panic may abort without diagnostics. It
-requires the nightly toolchain and its `rust-src` component:
+also drops panic location details and compiles the library to abort on a panic
+rather than unwind, so it is intended for production deployments where an
+internal panic may end the process without diagnostics -- the one build where
+the C ABI does not turn a defect into `WPD_ERR_INTERNAL`, because there is no
+unwind to catch. It requires the nightly toolchain and its `rust-src` component:
 
 ```sh
 rustup component add rust-src --toolchain nightly
