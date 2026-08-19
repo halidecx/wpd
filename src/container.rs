@@ -11,7 +11,10 @@
 //! below, which return zero past the end of the window. The C could prove its
 //! reads in range by construction; a Rust bounds check that fires on damaged
 //! input would be a denial of service the C did not have, so the reads simply
-//! cannot leave the slice.
+//! cannot leave the slice. That is still the rule, and it is still what makes
+//! the scanner safe to run on a stranger's bytes -- `wpd-capi`'s guard turns a
+//! panic into a status rather than the end of the process, but a guard is a
+//! backstop for a defect, not a licence to index without looking.
 
 use crate::bits;
 use crate::error::{Error, Result};

@@ -72,6 +72,13 @@ pub unsafe extern "C" fn wpd_set_log_callback(
     LOG_CALLBACK.store(callback, Ordering::Release);
 }
 
+/* This, wpd_version, wpd_version_string, wpd_status_string, wpd_decoder_status
+and wpd_decoder_error are the entry points [`crate::guard`] does not wrap: two
+atomic stores, a constant, and three reads of a field or a static string, with
+nothing in any of them that can fail. The last two are also the ones a caller
+reaches for after a call has failed, so they stay callable on a decoder a panic
+has poisoned -- which is exactly when someone wants to ask what happened. */
+
 /// The sink [`wpd::log`] is given, which is where every message the decoder
 /// raises leaves the library.
 ///

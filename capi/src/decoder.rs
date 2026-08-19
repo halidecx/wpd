@@ -34,6 +34,11 @@ use crate::options::WPDDecoderOptions;
 /// The safe API in [`wpd::api`] hands out a real `'a` instead.
 pub struct WPDDecoder<'a> {
     decoder: Decoder<'a>,
+    /// Set while a call is running and left set if that call panicked, since
+    /// unwinding out of the middle of a decode leaves the decoder part way
+    /// through whatever it was doing. Every entry point below refuses a
+    /// poisoned decoder rather than build on what the unwind left.
+    poisoned: bool,
     /// The planes `wpd_decoder_set_output_buffer` named, kept beside the sink
     /// built over them. Only the ABI needs these: a decode reports where its
     /// pixels went, and for a caller's own buffer that is the caller's own
@@ -45,7 +50,29 @@ impl WPDDecoder<'_> {
     pub(crate) fn new() -> Self {
         WPDDecoder {
             decoder: Decoder::new(),
+            poisoned: false,
             planes: [WPDOutputPlane::empty(); 4],
+        }
+    }
+
+    /// Runs `body` on this decoder with a panic turned into `fallback`, and
+    /// refuses to run it at all once one has happened. See [`crate::guard`].
+    ///
+    /// The flag goes up for the duration rather than only on the way out, so
+    /// the unwind has nothing to do to leave it up.
+    fn guarded<T>(&mut self, fallback: T, body: impl FnOnce(&mut Self) -> T) -> T {
+        if self.poisoned {
+            wpd::log::error("decoder used after an internal error");
+            return fallback;
+        }
+        self.poisoned = true;
+
+        match crate::guard(None, || Some(body(self))) {
+            Some(value) => {
+                self.poisoned = false;
+                value
+            }
+            None => fallback,
         }
     }
 }
@@ -90,6 +117,7 @@ pub const WPD_ERR_UNSUPPORTED: c_int = -5;
 pub const WPD_ERR_NO_MEMORY: c_int = -6;
 pub const WPD_ERR_TOO_LARGE: c_int = -7;
 pub const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
+pub const WPD_ERR_INTERNAL: c_int = -9;
 
 /// `WPDFrameInfo` from `include/wpd.h`.
 #[repr(C)]
@@ -158,6 +186,7 @@ fn status_string(status: c_int) -> &'static CStr {
         WPD_ERR_NO_MEMORY => c"out of memory",
         WPD_ERR_TOO_LARGE => c"image too large",
         WPD_ERR_BUFFER_TOO_SMALL => c"output buffer too small",
+        WPD_ERR_INTERNAL => c"internal error",
         _ => c"unknown error",
     }
 }
@@ -169,10 +198,12 @@ pub extern "C" fn wpd_status_string(status: c_int) -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn wpd_decoder_create() -> *mut WPDDecoderRaw {
-    wpd::log::set_sink(crate::compat::forward_log);
-    wpd::cpu::init();
+    crate::guard(ptr::null_mut(), || {
+        wpd::log::set_sink(crate::compat::forward_log);
+        wpd::cpu::init();
 
-    try_box(WPDDecoder::new()).map_or(ptr::null_mut(), Box::into_raw)
+        try_box(WPDDecoder::new()).map_or(ptr::null_mut(), Box::into_raw)
+    })
 }
 
 /// # Safety
@@ -181,7 +212,7 @@ pub extern "C" fn wpd_decoder_create() -> *mut WPDDecoderRaw {
 #[no_mangle]
 pub unsafe extern "C" fn wpd_decoder_free(decoder: *mut WPDDecoderRaw) {
     if !decoder.is_null() {
-        drop(unsafe { Box::from_raw(decoder) });
+        crate::guard((), || drop(unsafe { Box::from_raw(decoder) }));
     }
 }
 
@@ -257,7 +288,9 @@ pub unsafe extern "C" fn wpd_decoder_set_options(
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    reported(set_options(decoder, options).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(set_options(decoder, options).map(|()| WPD_OK))
+    })
 }
 
 /// # Safety
@@ -269,7 +302,9 @@ pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
     mode: c_int,
 ) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(decoder.set_animation_mode(mode).map(|()| WPD_OK)),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(decoder.set_animation_mode(mode).map(|()| WPD_OK))
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -283,7 +318,9 @@ pub unsafe extern "C" fn wpd_decoder_set_output_format(
     format: c_int,
 ) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(decoder.set_output_format(format).map(|()| WPD_OK)),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(decoder.set_output_format(format).map(|()| WPD_OK))
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -301,7 +338,11 @@ pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
         return WPD_ERR_INVALID_ARG;
     };
 
-    reported(unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(
+            unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK),
+        )
+    })
 }
 
 /// The caller's bytes as a slice, with the one lifetime extension the C ABI
@@ -335,7 +376,9 @@ pub unsafe extern "C" fn wpd_decoder_open(
     if data.is_null() {
         return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-    reported(decoder.open(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(decoder.open(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    })
 }
 
 /// # Safety
@@ -355,11 +398,13 @@ pub unsafe extern "C" fn wpd_decoder_open_borrowed(
     if data.is_null() {
         return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-    reported(
-        decoder
-            .open_borrowed(unsafe { lent(data, size) })
-            .map(|()| WPD_OK),
-    )
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(
+            decoder
+                .open_borrowed(unsafe { lent(data, size) })
+                .map(|()| WPD_OK),
+        )
+    })
 }
 
 /// # Safety
@@ -368,7 +413,9 @@ pub unsafe extern "C" fn wpd_decoder_open_borrowed(
 #[no_mangle]
 pub unsafe extern "C" fn wpd_decoder_open_stream(decoder: *mut WPDDecoderRaw) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(decoder.open_stream().map(|()| WPD_OK)),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(decoder.open_stream().map(|()| WPD_OK))
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -389,7 +436,9 @@ pub unsafe extern "C" fn wpd_decoder_append(
     if data.is_null() {
         return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-    reported(decoder.append(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(decoder.append(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    })
 }
 
 /// # Safety
@@ -409,7 +458,9 @@ pub unsafe extern "C" fn wpd_decoder_update(
     if data.is_null() {
         return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-    reported(decoder.update(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(decoder.update(unsafe { lent(data, size) }).map(|()| WPD_OK))
+    })
 }
 
 /// # Safety
@@ -420,7 +471,9 @@ pub unsafe extern "C" fn wpd_decoder_end_of_stream(
     decoder: *mut WPDDecoderRaw,
 ) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(decoder.end_of_stream().map(|()| WPD_OK)),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(decoder.end_of_stream().map(|()| WPD_OK))
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -441,7 +494,9 @@ pub unsafe extern "C" fn wpd_decoder_get_info(
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
 
-    reported(get_info(decoder, info).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(get_info(decoder, info).map(|()| WPD_OK))
+    })
 }
 
 /// Fills the caller's versioned struct in from what the decoder reports.
@@ -478,7 +533,9 @@ fn get_info(
 #[no_mangle]
 pub unsafe extern "C" fn wpd_decoder_rewind(decoder: *mut WPDDecoderRaw) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(decoder.rewind().map(|()| WPD_OK)),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(decoder.rewind().map(|()| WPD_OK))
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -500,7 +557,9 @@ pub unsafe extern "C" fn wpd_decoder_frame_info(
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
 
-    reported(frame_info(decoder, index, info).map(|()| WPD_OK))
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        reported(frame_info(decoder, index, info).map(|()| WPD_OK))
+    })
 }
 
 /// Fills the caller's versioned struct in from what the decoder reports.
@@ -564,7 +623,7 @@ pub unsafe extern "C" fn wpd_decoder_metadata(
     if data.is_null() || size.is_null() {
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     }
-    match decoder.metadata(which) {
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| match decoder.metadata(which) {
         Err(e) => status(e),
         Ok(found) => {
             let (at, len) = match found {
@@ -578,7 +637,7 @@ pub unsafe extern "C" fn wpd_decoder_metadata(
             }
             WPD_OK
         }
-    }
+    })
 }
 
 /// # Safety
@@ -591,9 +650,9 @@ pub unsafe extern "C" fn wpd_decoder_next_frame(
     frame: *mut WPDFrame,
 ) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => {
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
             reported(unsafe { next_frame(decoder, frame) }.map(c_int::from))
-        }
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -637,9 +696,11 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
     rows_valid: *mut c_int,
 ) -> c_int {
     match unsafe { decoder.as_mut() } {
-        Some(decoder) => reported(
-            unsafe { partial_frame(decoder, frame, rows_valid) }.map(|()| WPD_OK),
-        ),
+        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+            reported(
+                unsafe { partial_frame(decoder, frame, rows_valid) }.map(|()| WPD_OK),
+            )
+        }),
         None => WPD_ERR_INVALID_ARG,
     }
 }
@@ -772,25 +833,31 @@ pub unsafe extern "C" fn wpd_decode_into(
     buffer: *const WPDOutputBuffer,
     frame: *mut WPDFrame,
 ) -> c_int {
-    if data.is_null() || buffer.is_null() || !unsafe { frame_valid(frame) } {
-        return WPD_ERR_INVALID_ARG;
-    }
-    if !unsafe { (*frame).private_data }.is_null() {
-        unsafe { wpd_frame_free(frame) };
-    }
-    let (decoder, ret) =
-        unsafe { decode_once(data, size, format, options, buffer, frame) };
+    /* Whole-body rather than per-step: the two one-shot entry points do work
+    of their own between the guarded calls they are built out of, and a panic
+    escaping the middle of one leaks the decoder it had open. A leak is what
+    is left to trade against an abort. */
+    crate::guard(WPD_ERR_INTERNAL, || {
+        if data.is_null() || buffer.is_null() || !unsafe { frame_valid(frame) } {
+            return WPD_ERR_INVALID_ARG;
+        }
+        if !unsafe { (*frame).private_data }.is_null() {
+            unsafe { wpd_frame_free(frame) };
+        }
+        let (decoder, ret) =
+            unsafe { decode_once(data, size, format, options, buffer, frame) };
 
-    if decoder.is_null() {
-        return ret;
-    }
-    unsafe { wpd_decoder_free(decoder) };
+        if decoder.is_null() {
+            return ret;
+        }
+        unsafe { wpd_decoder_free(decoder) };
 
-    match ret {
-        0 => WPD_ERR_BITSTREAM,
-        ret if ret < 0 => ret,
-        _ => WPD_OK,
-    }
+        match ret {
+            0 => WPD_ERR_BITSTREAM,
+            ret if ret < 0 => ret,
+            _ => WPD_OK,
+        }
+    })
 }
 
 /// # Safety
@@ -804,88 +871,93 @@ pub unsafe extern "C" fn wpd_decode(
     options: *const WPDDecoderOptions,
     frame: *mut WPDFrame,
 ) -> c_int {
-    if data.is_null() || !unsafe { frame_valid(frame) } {
-        return WPD_ERR_INVALID_ARG;
-    }
-    if !unsafe { (*frame).private_data }.is_null() {
-        unsafe { wpd_frame_free(frame) };
-    }
-    let mut decoded = WPDFrame {
-        struct_size: mem::size_of::<WPDFrame>(),
-        data: [ptr::null(); 4],
-        stride: [0; 4],
-        width: 0,
-        height: 0,
-        format: FORMAT_NONE,
-        duration: 0,
-        timestamp: 0,
-        private_data: ptr::null_mut(),
-        pos_x: 0,
-        pos_y: 0,
-        dispose: 0,
-        blend: 0,
-        has_alpha: 0,
-    };
-    let (decoder, ret) =
-        unsafe { decode_once(data, size, format, options, ptr::null(), &mut decoded) };
-
-    if decoder.is_null() {
-        return ret;
-    }
-    if ret <= 0 {
-        unsafe { wpd_decoder_free(decoder) };
-        return if ret < 0 { ret } else { WPD_ERR_BITSTREAM };
-    }
-
-    let owner = match try_box(WPDFrameOwner {
-        plane: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-    }) {
-        Ok(owner) => owner,
-        Err(e) => {
-            unsafe { wpd_decoder_free(decoder) };
-            return status(e);
+    crate::guard(WPD_ERR_INTERNAL, || {
+        if data.is_null() || !unsafe { frame_valid(frame) } {
+            return WPD_ERR_INVALID_ARG;
         }
-    };
-    let planes = format_planes(decoded.format);
-
-    unsafe { frame_clear(frame) };
-    frame_copy(frame, &decoded);
-
-    let out = unsafe { &mut *frame };
-
-    out.private_data = Box::into_raw(owner).cast::<c_void>();
-
-    let owner = unsafe { &mut *out.private_data.cast::<WPDFrameOwner>() };
-    let mut status = WPD_OK;
-
-    for p in 0..planes {
-        let (w, h) =
-            format_plane_dims(decoded.format, p, decoded.width, decoded.height);
-        let Some(bytes) = w.checked_mul(h) else {
-            status = WPD_ERR_TOO_LARGE;
-            break;
+        if !unsafe { (*frame).private_data }.is_null() {
+            unsafe { wpd_frame_free(frame) };
+        }
+        let mut decoded = WPDFrame {
+            struct_size: mem::size_of::<WPDFrame>(),
+            data: [ptr::null(); 4],
+            stride: [0; 4],
+            width: 0,
+            height: 0,
+            format: FORMAT_NONE,
+            duration: 0,
+            timestamp: 0,
+            private_data: ptr::null_mut(),
+            pos_x: 0,
+            pos_y: 0,
+            dispose: 0,
+            blend: 0,
+            has_alpha: 0,
+        };
+        let (decoder, ret) = unsafe {
+            decode_once(data, size, format, options, ptr::null(), &mut decoded)
         };
 
-        if owner.plane[p].try_reserve_exact(bytes).is_err() {
-            status = WPD_ERR_NO_MEMORY;
-            break;
+        if decoder.is_null() {
+            return ret;
         }
-        for y in 0..h {
-            let src = unsafe { decoded.data[p].offset(y as isize * decoded.stride[p]) };
-
-            owner.plane[p].extend_from_slice(unsafe { slice::from_raw_parts(src, w) });
+        if ret <= 0 {
+            unsafe { wpd_decoder_free(decoder) };
+            return if ret < 0 { ret } else { WPD_ERR_BITSTREAM };
         }
-        debug_assert_eq!(owner.plane[p].len(), bytes);
-        out.data[p] = owner.plane[p].as_ptr();
-        out.stride[p] = w as isize;
-    }
-    unsafe { wpd_decoder_free(decoder) };
 
-    if status != WPD_OK {
-        unsafe { wpd_frame_free(frame) };
-        return status;
-    }
-    WPD_OK
+        let owner = match try_box(WPDFrameOwner {
+            plane: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+        }) {
+            Ok(owner) => owner,
+            Err(e) => {
+                unsafe { wpd_decoder_free(decoder) };
+                return status(e);
+            }
+        };
+        let planes = format_planes(decoded.format);
+
+        unsafe { frame_clear(frame) };
+        frame_copy(frame, &decoded);
+
+        let out = unsafe { &mut *frame };
+
+        out.private_data = Box::into_raw(owner).cast::<c_void>();
+
+        let owner = unsafe { &mut *out.private_data.cast::<WPDFrameOwner>() };
+        let mut status = WPD_OK;
+
+        for p in 0..planes {
+            let (w, h) =
+                format_plane_dims(decoded.format, p, decoded.width, decoded.height);
+            let Some(bytes) = w.checked_mul(h) else {
+                status = WPD_ERR_TOO_LARGE;
+                break;
+            };
+
+            if owner.plane[p].try_reserve_exact(bytes).is_err() {
+                status = WPD_ERR_NO_MEMORY;
+                break;
+            }
+            for y in 0..h {
+                let src =
+                    unsafe { decoded.data[p].offset(y as isize * decoded.stride[p]) };
+
+                owner.plane[p]
+                    .extend_from_slice(unsafe { slice::from_raw_parts(src, w) });
+            }
+            debug_assert_eq!(owner.plane[p].len(), bytes);
+            out.data[p] = owner.plane[p].as_ptr();
+            out.stride[p] = w as isize;
+        }
+        unsafe { wpd_decoder_free(decoder) };
+
+        if status != WPD_OK {
+            unsafe { wpd_frame_free(frame) };
+            return status;
+        }
+        WPD_OK
+    })
 }
 
 /// Copies past `struct_size` rather than assigning: the caller's frame may be
@@ -916,7 +988,9 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
     let owner = unsafe { (*frame).private_data };
 
     if !owner.is_null() {
-        drop(unsafe { Box::from_raw(owner.cast::<WPDFrameOwner>()) });
+        crate::guard((), || {
+            drop(unsafe { Box::from_raw(owner.cast::<WPDFrameOwner>()) })
+        });
     }
     unsafe { frame_clear(frame) };
 }
@@ -924,6 +998,27 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicked_decoder_is_poisoned_and_stays_that_way() {
+        let mut decoder = WPDDecoder::new();
+
+        assert_eq!(decoder.guarded(WPD_ERR_INTERNAL, |_| WPD_OK), WPD_OK);
+        assert!(!decoder.poisoned);
+
+        assert_eq!(
+            decoder.guarded(WPD_ERR_INTERNAL, |_| panic!("mid-decode")),
+            WPD_ERR_INTERNAL
+        );
+        assert!(decoder.poisoned);
+
+        /* And every call after it is turned away rather than built on what
+        the unwind left behind. */
+        assert_eq!(
+            decoder.guarded(WPD_ERR_INTERNAL, |_| WPD_OK),
+            WPD_ERR_INTERNAL
+        );
+    }
 
     /// A rejected call must leave the caller's frame and row count as it found
     /// them: `wpd_decoder_partial_frame` clears the frame, so the one rejection
