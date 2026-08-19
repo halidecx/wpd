@@ -503,6 +503,14 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
             }
         }
     }
+    /* Every pixel is out, but the last one may have been assembled from bits
+    the chunk never carried. An incremental decode that reached the end of the
+    picture is finished either way -- libwebp asserts as much -- so only a
+    whole-chunk decode calls the overrun an error. */
+    if !RESUMABLE && gb.is_eos(buf) {
+        crate::log::error("image data runs past the end of the chunk");
+        return Err(Error::InvalidData);
+    }
     st.rows_done = y;
     Ok(Status::Done)
 }
@@ -609,6 +617,13 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
             crate::log::error("color cache not found");
             return Err(Error::InvalidData);
         }
+    }
+    /* As in [`run`]: the plane is full, but not if its last byte came out of
+    the zeros past the chunk. An alpha chunk is never decoded incrementally,
+    so there is no resumable case to spare here. */
+    if gb.is_eos(buf) {
+        crate::log::error("alpha data runs past the end of the chunk");
+        return Err(Error::InvalidData);
     }
     Ok(())
 }
