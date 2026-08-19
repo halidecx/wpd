@@ -392,6 +392,23 @@ impl<'a> Decoder<'a> {
         self.input.at(offset)
     }
 
+    /// Fails unless a file has been opened.
+    ///
+    /// Public because the C ABI has to make this check itself rather than let
+    /// [`Self::partial_picture`] make it: `wpd_decoder_partial_frame` clears
+    /// the caller's `WPDFrame` before it asks for anything, and a decoder with
+    /// no file open has to be turned away before that, with the frame left as
+    /// it was. Having the one caller that needs it early share the message
+    /// with the calls that make it themselves is what keeps the two from
+    /// drifting.
+    #[inline]
+    pub fn require_open(&self) -> Result<(), Failure> {
+        if !self.opened {
+            return Err(("no file opened", Error::InvalidArgument));
+        }
+        Ok(())
+    }
+
     /// The named picture, which is what an export reads.
     ///
     /// The C latched a `WebPImage` of pointers into a codec's memory at the
@@ -570,9 +587,12 @@ impl<'a> Decoder<'a> {
     ///
     /// The flags go up last, so that an export that fails leaves the decoder
     /// claiming no finished picture rather than one whose rows were never
-    /// written. [`Self::export_parts_latched`] is what makes that orderable:
-    /// neither field is in [`ExportTargets`], so neither is borrowed by the
-    /// export it has to outlive.
+    /// written. That is the RIFF walk's rule; the headerless path in
+    /// [`Self::decode_raw`] raises them itself beforehand, and this raising
+    /// them again on the way out writes the same two values.
+    /// [`Self::export_parts_latched`] is what makes either orderable: neither
+    /// field is in [`ExportTargets`], so neither is borrowed by the export
+    /// they have to outlive.
     #[inline(never)]
     fn export_complete_still_lossless<'o>(
         &'o mut self,
@@ -1232,6 +1252,14 @@ impl<'a> Decoder<'a> {
             self.lossless_decode(hs.raw_image_offset, hs.raw_image_size)
                 .map_err(|e| ("VP8L decode failed", e))?;
             self.still_done = true;
+            /* Raised before the export, not after it as the RIFF walk does:
+            a headerless file whose export fails -- a caller's buffer that was
+            too small, say -- still holds a finished picture, and this is what
+            lets `wpd_decoder_partial_frame` hand it over once the buffer is
+            fixed. The two shapes disagreed in the C and the disagreement is
+            observable, so it is written down rather than smoothed over. */
+            self.still_lossless = true;
+            self.converted_rows = self.frame_of(Source::Lossless).height;
             self.export_complete_still_lossless(out)
                 .map_err(|e| ("cannot output frame", e))?;
             return Ok(true);
@@ -1272,9 +1300,7 @@ impl Decoder<'_> {
     ) -> Result<bool, Failure> {
         let decoder = self;
 
-        if !decoder.opened {
-            return Err(("no file opened", Error::InvalidArgument));
-        }
+        decoder.require_open()?;
         if !decoder.headers_valid {
             if !decoder.eos {
                 return Ok(false); /* the headers have not arrived yet */
@@ -1432,9 +1458,8 @@ impl Decoder<'_> {
     ) -> Result<bool, Failure> {
         let decoder = self;
 
-        if !decoder.opened {
-            return Err(("no file opened", Error::InvalidArgument));
-        }
+        decoder.require_open()?;
+
         let set = decoder.export_settings();
 
         if decoder.still_lossless && decoder.vp8l.still_active() {
@@ -1604,5 +1629,102 @@ impl Decoder<'_> {
     /// `wpd_decoder_error` hands a pointer to.
     pub fn error_raw(&self) -> &[u8] {
         &self.error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2x2 headerless lossless still, hand-written: the whole image is
+    /// sixty-three bits of header and no pixel data at all, because five
+    /// one-symbol prefix codes leave the pixel loop nothing to read.
+    ///
+    /// The fields, least-significant bit first: `2f`, then 14 bits of width
+    /// minus one and 14 of height minus one, an alpha flag, three version bits,
+    /// a zero to end the transform list, a zero for the colour cache and one
+    /// for the meta prefix code, then five times `1, 0, 0, 0` — a simple code
+    /// of one symbol, that symbol being zero.
+    const RAW_LOSSLESS: &[u8] = &[
+        0x2f, 0x01, 0x40, 0x00, 0x00, 0x88, 0x88, 0x08, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// The same image inside the RIFF container, which is the other of the two
+    /// paths that end on [`Decoder::export_complete_still_lossless`].
+    fn riff_lossless() -> Vec<u8> {
+        let mut out = Vec::new();
+
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(12 + RAW_LOSSLESS.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WEBPVP8L");
+        out.extend_from_slice(&(RAW_LOSSLESS.len() as u32).to_le_bytes());
+        out.extend_from_slice(RAW_LOSSLESS);
+        out
+    }
+
+    /// A caller's buffer with no room in it, which is what turns an export into
+    /// the `BufferTooSmall` these two tests are about.
+    struct NeverFits;
+
+    impl RowSink for NeverFits {
+        fn fits(&self, _p: usize, _row_len: usize, _rows: i32) -> bool {
+            false
+        }
+
+        fn row(&mut self, _p: usize, _y: i32, _len: usize) -> &mut [u8] {
+            unreachable!("a plane that does not fit is never written")
+        }
+    }
+
+    fn failed_export(data: &[u8]) -> Decoder<'_> {
+        let mut decoder = Decoder::new();
+
+        decoder.set_sink(Some(Box::new(NeverFits)));
+        decoder.open(data).unwrap();
+
+        let mut out = Handout::default();
+
+        assert_eq!(
+            decoder.next_picture(&mut out).map_err(|(m, _)| m),
+            Err("cannot output frame")
+        );
+        decoder
+    }
+
+    /// A headerless file raises the completion flags before it exports, so a
+    /// caller whose buffer was too small can still ask for the picture. This is
+    /// what `main`'s `decode_raw` did, and it is the half of the pair that is
+    /// easy to lose to a shared helper.
+    #[test]
+    fn a_headerless_lossless_still_latches_before_its_export() {
+        let decoder = failed_export(RAW_LOSSLESS);
+
+        assert!(decoder.still_lossless);
+        assert_eq!(decoder.converted_rows, 2);
+    }
+
+    /// The RIFF walk raises them after, so the same failure leaves the decoder
+    /// claiming nothing finished.
+    #[test]
+    fn a_riff_lossless_still_latches_after_its_export() {
+        let data = riff_lossless();
+        let decoder = failed_export(&data);
+
+        assert!(!decoder.still_lossless);
+        assert_eq!(decoder.converted_rows, 0);
+    }
+
+    /// `wpd_decoder_partial_frame` clears the caller's frame before it asks for
+    /// anything, so the one rejection that can follow it has to be reachable on
+    /// its own.
+    #[test]
+    fn a_decoder_with_no_file_open_is_turned_away() {
+        let decoder = Decoder::new();
+
+        assert_eq!(
+            decoder.require_open().map_err(|(m, _)| m),
+            Err("no file opened")
+        );
+        assert_eq!(failed_export(RAW_LOSSLESS).require_open(), Ok(()));
     }
 }

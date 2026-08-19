@@ -655,6 +655,11 @@ unsafe fn partial_frame(
     if !unsafe { frame_valid(frame) } {
         return Err(decoder.fail("invalid frame", Error::InvalidArgument));
     }
+    /* Asked before the frame is cleared, not left to `partial_picture`: a
+    rejected call leaves the caller's frame and row count as it found them. */
+    if let Err((message, e)) = decoder.require_open() {
+        return Err(decoder.fail(message, e));
+    }
 
     let ext = decoder.planes;
     let mut out = Handout::default();
@@ -919,6 +924,42 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rejected call must leave the caller's frame and row count as it found
+    /// them: `wpd_decoder_partial_frame` clears the frame, so the one rejection
+    /// that can follow the clear has to come before it. Reusing a `WPDFrame`
+    /// across calls is what makes the difference visible.
+    #[test]
+    fn a_rejected_partial_frame_leaves_the_caller_s_frame_alone() {
+        let decoder = wpd_decoder_create();
+        let mut frame = WPDFrame {
+            struct_size: mem::size_of::<WPDFrame>(),
+            data: [ptr::null(); 4],
+            stride: [0; 4],
+            width: 7,
+            height: 9,
+            format: 3,
+            duration: 11,
+            timestamp: 13,
+            private_data: ptr::null_mut(),
+            pos_x: 0,
+            pos_y: 0,
+            dispose: 0,
+            blend: 0,
+            has_alpha: 0,
+        };
+        let mut rows = 5;
+
+        assert!(!decoder.is_null());
+
+        let status =
+            unsafe { wpd_decoder_partial_frame(decoder, &mut frame, &mut rows) };
+
+        assert_eq!(status, WPD_ERR_INVALID_ARG);
+        assert_eq!((frame.width, frame.height, frame.duration), (7, 9, 11));
+        assert_eq!(rows, 5);
+        unsafe { wpd_decoder_free(decoder) };
+    }
 
     /// The ABI's table of descriptions and the core's are written out
     /// separately, because one is NUL-terminated and the other is not. This is
