@@ -247,13 +247,18 @@ mod arch {
         raw_pred4x4!(HorDown4, hor_down4, "ff_pred4x4_hor_down_neon");
 
         raw_pred!(Vert8, vert8, "ff_pred8x8_vert_neon");
+        raw_pred!(Hor8, hor8, "ff_pred8x8_hor_neon");
         raw_pred!(Dc8, dc8, "ff_pred8x8_dc_neon");
         raw_pred!(Tm8, tm8, "ff_pred8x8_tm_neon");
+        raw_pred!(TopDc8, top_dc8, "ff_pred8x8_top_dc_neon");
+        raw_pred!(LeftDc8, left_dc8, "ff_pred8x8_left_dc_neon");
 
         raw_pred!(Vert16, vert16, "ff_pred16x16_vert_neon");
         raw_pred!(Hor16, hor16, "ff_pred16x16_hor_neon");
         raw_pred!(Dc16, dc16, "ff_pred16x16_dc_neon");
         raw_pred!(Tm16, tm16, "ff_pred16x16_tm_neon");
+        raw_pred!(TopDc16, top_dc16, "ff_pred16x16_top_dc_neon");
+        raw_pred!(LeftDc16, left_dc16, "ff_pred16x16_left_dc_neon");
     }
 
     ladder! {
@@ -270,13 +275,18 @@ mod arch {
             pred4x4[HOR_DOWN_PRED] = pred4x4::<neon::HorDown4>;
 
             pred8x8[VERT_PRED8X8] = pred::<neon::Vert8, 8>;
+            pred8x8[HOR_PRED8X8] = pred::<neon::Hor8, 8>;
             pred8x8[DC_PRED8X8] = pred::<neon::Dc8, 8>;
             pred8x8[PLANE_PRED8X8] = pred::<neon::Tm8, 8>;
+            pred8x8[TOP_DC_PRED8X8] = pred::<neon::TopDc8, 8>;
+            pred8x8[LEFT_DC_PRED8X8] = pred::<neon::LeftDc8, 8>;
 
             pred16x16[DC_PRED8X8] = pred::<neon::Dc16, 16>;
             pred16x16[VERT_PRED8X8] = pred::<neon::Vert16, 16>;
             pred16x16[HOR_PRED8X8] = pred::<neon::Hor16, 16>;
             pred16x16[PLANE_PRED8X8] = pred::<neon::Tm16, 16>;
+            pred16x16[TOP_DC_PRED8X8] = pred::<neon::TopDc16, 16>;
+            pred16x16[LEFT_DC_PRED8X8] = pred::<neon::LeftDc16, 16>;
         }
     }
 }

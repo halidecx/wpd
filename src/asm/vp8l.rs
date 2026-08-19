@@ -56,7 +56,6 @@ macro_rules! raw_map_color {
     };
 }
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 macro_rules! raw_color_row {
     ($marker:ident, $inner:ident, $sym:literal) => {
         extern "C" {
@@ -138,7 +137,6 @@ fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
 
 /// The kernel is in place at every call site, and the length is the count, so
 /// there is no region to check beyond what the slice already says.
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
     unsafe {
         let p = row.as_mut_ptr();
@@ -349,6 +347,7 @@ mod arch {
         }
 
         raw_map_color!(MapColor, map_color, "ff_map_color32_neon");
+        raw_color_row!(ColorRow, color_row, "ff_color_row_neon");
         raw_blend_row!(ExtractGreen, extract_green, "ff_extract_green_neon");
         raw_blend_row!(Blend, blend, "ff_blend_row_argb_neon");
         raw_blend_row!(
@@ -362,6 +361,7 @@ mod arch {
         NEON {
             @preds neon;
             map_color32 = map_color32::<neon::MapColor>;
+            color_row = color_row::<neon::ColorRow>;
             extract_green = extract_green::<neon::ExtractGreen>;
             blend_row_argb = blend_row::<neon::Blend>;
             blend_row_argb_premult = blend_row::<neon::BlendPremult>;

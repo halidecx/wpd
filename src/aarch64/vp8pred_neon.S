@@ -103,6 +103,36 @@ function ff_pred8x8_dc_neon, export=1
         ret
 endfunc
 
+function ff_pred8x8_left_dc_neon, export=1
+        sub             x3,  x0,  #1
+        mov             w4,  #4
+    .rept 8
+        ldrb            w5,  [x3]
+        add             x3,  x3,  x1
+        add             w4,  w4,  w5
+    .endr
+        lsr             w4,  w4,  #3
+        dup             v0.8b,  w4
+    .rept 8
+        st1             {v0.8b},  [x0], x1
+    .endr
+        ret
+endfunc
+
+function ff_pred8x8_top_dc_neon, export=1
+        sub             x2,  x0,  x1
+        ld1             {v0.8b},  [x2]
+        uaddlv          h0,  v0.8b
+        umov            w4,  v0.h[0]
+        add             w4,  w4,  #4
+        lsr             w4,  w4,  #3
+        dup             v0.8b,  w4
+    .rept 8
+        st1             {v0.8b},  [x0], x1
+    .endr
+        ret
+endfunc
+
 function ff_pred16x16_dc_neon, export=1
         // Scalar left-column loads avoid serializing vector lane insertion.
         sub             x2,  x0,  x1
@@ -118,6 +148,36 @@ function ff_pred16x16_dc_neon, export=1
     .endr
         add             w4,  w4,  w6
         lsr             w4,  w4,  #5
+        dup             v0.16b, w4
+    .rept 16
+        st1             {v0.16b}, [x0], x1
+    .endr
+        ret
+endfunc
+
+function ff_pred16x16_left_dc_neon, export=1
+        sub             x3,  x0,  #1
+        mov             w4,  #8
+    .rept 16
+        ldrb            w5,  [x3]
+        add             x3,  x3,  x1
+        add             w4,  w4,  w5
+    .endr
+        lsr             w4,  w4,  #4
+        dup             v0.16b, w4
+    .rept 16
+        st1             {v0.16b}, [x0], x1
+    .endr
+        ret
+endfunc
+
+function ff_pred16x16_top_dc_neon, export=1
+        sub             x2,  x0,  x1
+        ld1             {v0.16b}, [x2]
+        uaddlv          h0,  v0.16b
+        umov            w4,  v0.h[0]
+        add             w4,  w4,  #8
+        lsr             w4,  w4,  #4
         dup             v0.16b, w4
     .rept 16
         st1             {v0.16b}, [x0], x1
@@ -363,6 +423,15 @@ function ff_pred8x8_vert_neon, export=1
         sub             x2,  x0,  x1
         ld1             {v0.8b},  [x2]
     .rept 8
+        st1             {v0.8b},  [x0], x1
+    .endr
+        ret
+endfunc
+
+function ff_pred8x8_hor_neon, export=1
+        sub             x2,  x0,  #1
+    .rept 8
+        ld1r            {v0.8b},  [x2], x1
         st1             {v0.8b},  [x0], x1
     .endr
         ret
