@@ -7,6 +7,7 @@
 
 #include "wpd_codec.h"
 
+void checkasm_check_filters(void);
 void checkasm_check_lossless(void);
 void checkasm_check_vp8dsp(void);
 void checkasm_check_vp8pred(void);

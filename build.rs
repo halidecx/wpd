@@ -40,7 +40,7 @@ fn nasm_common(root: &Path, x86_64: bool) -> nasm_rs::Build {
 fn build_x86(root: &Path, x86_64: bool) {
     let mut avx2 = nasm_common(root, x86_64);
     avx2.define("HAVE_AVX2_EXTERNAL", Some("1"));
-    for f in ["vp8l.asm", "vp8dsp.asm", "vp8_intrapred.asm"] {
+    for f in ["vp8l.asm", "vp8dsp.asm", "vp8_intrapred.asm", "filters.asm"] {
         avx2.file(root.join("src/x86").join(f));
     }
     avx2.compile("wpd_asm_avx2").expect("nasm failed");

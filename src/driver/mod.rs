@@ -8,6 +8,7 @@ use crate::bits::rl32;
 use crate::container::{
     Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
 };
+use crate::dsp::filters::FilterDsp;
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::dsp::yuv::YuvDsp;
 use crate::error::Error;
@@ -49,6 +50,7 @@ pub struct Decoder<'a> {
     pub(crate) vp8: Vec<crate::vp8::Decoder>,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
+    pub(crate) fdsp: FilterDsp,
     pub(crate) out_format: OutFormat,
     pub(crate) options: Options,
 
