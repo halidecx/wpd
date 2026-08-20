@@ -192,9 +192,11 @@ impl Default for Probs {
     }
 }
 
+#[derive(Default)]
 #[repr(C, align(16))]
 struct Blocks([[i16; 16]; 24]);
 
+#[derive(Default)]
 #[repr(C, align(16))]
 struct BlockDc([i16; 16]);
 
@@ -208,6 +210,7 @@ struct ResumeState {
     left_nnz: [u8; 9],
 }
 
+#[derive(Default)]
 pub struct Decoder {
     dsp: Vp8Dsp,
     pred: Vp8Pred,
@@ -260,57 +263,9 @@ pub struct Decoder {
     chunk_size: usize,
 }
 
-impl Default for Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Decoder {
     pub fn new() -> Self {
-        Self {
-            dsp: Vp8Dsp::new(),
-            pred: Vp8Pred::new(),
-            picture: Picture::default(),
-            width: 0,
-            height: 0,
-            bypass_filtering: false,
-            mb_width: 0,
-            mb_height: 0,
-            deblock_filter: false,
-            mbskip_enabled: false,
-            segment: 0,
-            chroma_pred_mode: 0,
-            profile: 0,
-            segmentation: Segmentation::default(),
-            filter: Filter::default(),
-            lf_delta: LfDelta::default(),
-            qmat: [QMat::default(); 4],
-            filter_levels: [[FilterStrength::default(); 2]; 4],
-            filter_strength: Vec::new(),
-            intra4x4_pred_mode_top: Vec::new(),
-            intra4x4_pred_mode_left: [0; 4],
-            intra4x4_pred_mode_mb: [0; 16],
-            top_nnz: Vec::new(),
-            left_nnz: [0; 9],
-            top_border: Vec::new(),
-            non_zero_count_cache: [[0; 4]; 6],
-            block: Blocks([[0; 16]; 24]),
-            block_dc: BlockDc([0; 16]),
-            prob: Probs::default(),
-            c: RangeCoder::default(),
-            num_coeff_partitions: 0,
-            coeff_partition: [RangeCoder::default(); MAX_PARTITIONS],
-            partition_start: [0; MAX_PARTITIONS],
-            partition_size: [0; MAX_PARTITIONS],
-            partition_ready: 0,
-            partition_clamped: 0,
-            mb_x: 0,
-            mb_y: 0,
-            mb_rows_done: 0,
-            chunk_avail: 0,
-            chunk_size: 0,
-        }
+        Self::default()
     }
 
     fn linesize(&self) -> usize {

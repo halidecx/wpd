@@ -45,8 +45,9 @@ const ALPHABET_SIZES: [u32; HUFFMAN_CODES_PER_META_CODE] = [
     NUM_DISTANCE_CODES,
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Transform {
+    #[default]
     Predictor,
     Color,
     SubtractGreen,
@@ -205,6 +206,7 @@ fn grow<T: Copy>(buf: &mut Vec<T>, len: usize, fill: T) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
 pub struct Decoder {
     dsp: Vp8lDsp,
     gb: BitReader,
@@ -237,40 +239,9 @@ pub struct Decoder {
     peeked: bool,
 }
 
-impl Default for Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Decoder {
     pub fn new() -> Self {
-        Self {
-            dsp: Vp8lDsp::new(),
-            gb: BitReader::default(),
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            reduced_width: 0,
-            transforms: [Transform::Predictor; 4],
-            nb_transforms: 0,
-            nb_huffman_groups: 0,
-            image: Default::default(),
-            alpha_dst_used: false,
-            argb: Picture::default(),
-            alpha_argb: Picture::default(),
-            out: Picture::default(),
-            indices: Vec::new(),
-            staged: false,
-            scratch: Vec::new(),
-            sorted: Vec::new(),
-            lengths: Vec::new(),
-            active: false,
-            next_try: 0,
-            resume: Resume::default(),
-            rows_out: 0,
-            peeked: false,
-        }
+        Self::default()
     }
 
     pub fn reset(&mut self) {

@@ -44,11 +44,12 @@ pub(crate) struct StillLatch<'a> {
     converted_rows: &'a mut i32,
 }
 
+#[derive(Default)]
 pub struct Decoder<'a> {
     pub(crate) vp8: Vec<crate::vp8::Decoder>,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
-    pub(crate) out_format: i32,
+    pub(crate) out_format: OutFormat,
     pub(crate) options: Options,
 
     pub(crate) input: Input<'a>,
@@ -61,7 +62,7 @@ pub struct Decoder<'a> {
     pub(crate) still_lossy: bool,
     pub(crate) alpha_pending: bool,
     pub(crate) converted_rows: i32,
-    pub(crate) converted_format: i32,
+    pub(crate) converted_format: OutFormat,
     pub(crate) still_lossless: bool,
     pub(crate) canvas_width: i32,
     pub(crate) canvas_height: i32,
@@ -90,7 +91,7 @@ pub struct Decoder<'a> {
     pub(crate) anim_mode: i32,
     pub(crate) anim: AnimState,
     pub(crate) clear_argb: [u8; 4],
-    pub(crate) clear_yuva: [u8; 4],
+    pub(crate) clear_yuva: ClearYuva,
 
     pub(crate) anim_loop_count: i32,
     pub(crate) anim_frame_count: i32,
@@ -122,7 +123,26 @@ const ALPHA_PREPROCESSED_LEVELS: i32 = 1;
 
 const ERROR_MAX: usize = 128;
 
-const CLEAR_YUVA_BLACK: [u8; 4] = [16, 128, 128, 0];
+/* Both carry a default that is not the zero value, so that a derived
+ * Default for the decoder is the same decoder new() hands out. */
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct OutFormat(pub i32);
+
+impl Default for OutFormat {
+    fn default() -> Self {
+        Self(FORMAT_NONE)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ClearYuva(pub [u8; 4]);
+
+impl Default for ClearYuva {
+    fn default() -> Self {
+        Self([16, 128, 128, 0])
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum InputMode {
@@ -205,84 +225,9 @@ pub(crate) fn source_view<'a>(
     }
 }
 
-impl Default for Decoder<'_> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<'a> Decoder<'a> {
     pub fn new() -> Self {
-        Decoder {
-            vp8: Vec::new(),
-            ldsp: Vp8lDsp::new(),
-            ydsp: YuvDsp::new(),
-            out_format: FORMAT_NONE,
-            options: Options::default(),
-
-            input: Input::new(),
-            pos: 0,
-            end: 0,
-            scan: Scan::new(),
-            animation: false,
-            still_done: false,
-            vp8_active: false,
-            still_lossy: false,
-            alpha_pending: false,
-            converted_rows: 0,
-            converted_format: FORMAT_NONE,
-            still_lossless: false,
-            canvas_width: 0,
-            canvas_height: 0,
-
-            has_alpha: false,
-            alpha_compression: ALPHA_COMPRESSION_NONE,
-            alpha_filter: 0,
-            alpha_data_offset: 0,
-            alpha_data_size: 0,
-            alpha_plane: Vec::new(),
-
-            vp8l: crate::vp8l::Decoder::new(),
-            width: 0,
-            height: 0,
-            lossless_has_alpha: false,
-
-            lossless_out: None,
-            converted: Buffer::default(),
-            output: Buffer::default(),
-            transformed: Buffer::default(),
-            rescale: Scratch::default(),
-
-            canvas: Buffer::default(),
-            subframe_out: None,
-            anim_mode: ANIM_COMPOSITED,
-            anim: AnimState::default(),
-            clear_argb: [0; 4],
-            clear_yuva: CLEAR_YUVA_BLACK,
-
-            anim_loop_count: 0,
-            anim_frame_count: 0,
-            anim_background_argb: 0,
-            frame_duration: 0,
-            frame_timestamp: 0,
-
-            info_has_alpha: false,
-            info_coding: Coding::Unknown,
-
-            meta: [None, None, None],
-
-            opened: false,
-            streaming: false,
-            eos: false,
-            headers_valid: false,
-            truncated: false,
-            input_mode: InputMode::Untouched,
-
-            sink: None,
-
-            status: None,
-            error: Vec::new(),
-        }
+        Self::default()
     }
 
     pub fn fail(&mut self, message: &'static str, e: Error) -> Error {
@@ -376,8 +321,8 @@ impl<'a> Decoder<'a> {
 
     pub(crate) fn export_settings(&self) -> ExportSettings {
         ExportSettings {
-            out_format: self.out_format,
-            premultiply: format_is_premultiplied(self.out_format),
+            out_format: self.out_format.0,
+            premultiply: format_is_premultiplied(self.out_format.0),
             animation: self.animation,
             anim_mode: self.anim_mode,
             duration: self.frame_duration,
@@ -511,7 +456,7 @@ impl<'a> Decoder<'a> {
                 converted,
                 ext: sink.as_deref_mut(),
                 converted_rows,
-                converted_format,
+                converted_format: &mut converted_format.0,
             },
             img,
         )
@@ -525,7 +470,7 @@ impl<'a> Decoder<'a> {
         self.still_lossy = false;
         self.alpha_pending = false;
         self.converted_rows = 0;
-        self.converted_format = FORMAT_NONE;
+        self.converted_format = OutFormat::default();
         self.still_lossless = false;
         self.lossless_out = None;
         self.subframe_out = None;
@@ -562,7 +507,7 @@ impl<'a> Decoder<'a> {
         self.anim_frame_count = 0;
         self.anim_background_argb = 0;
         self.clear_argb = [0; 4];
-        self.clear_yuva = CLEAR_YUVA_BLACK;
+        self.clear_yuva = ClearYuva::default();
         self.info_has_alpha = false;
         self.info_coding = Coding::Unknown;
         self.status = None;
@@ -809,13 +754,13 @@ impl Decoder<'_> {
         if format != FORMAT_NONE && !format_valid(format) {
             return Err(self.fail("invalid output format", Error::InvalidArgument));
         }
-        self.out_format = format;
+        self.out_format = OutFormat(format);
         Ok(())
     }
 
     fn drop_converted_rows(&mut self) {
         self.converted_rows = 0;
-        self.converted_format = FORMAT_NONE;
+        self.converted_format = OutFormat::default();
     }
 
     pub fn has_sink(&self) -> bool {
@@ -996,7 +941,7 @@ impl<'a> Decoder<'a> {
         self.still_done = true;
 
         let packed_only =
-            !self.options.transforms() && format_is_packed(self.out_format);
+            !self.options.transforms() && format_is_packed(self.out_format.0);
         let set = self.export_settings();
         let ret = if packed_only {
             let (t, img) = self.row_parts(Source::Lossy);
@@ -1322,14 +1267,14 @@ impl Decoder<'_> {
 
         let mut rows = lossy_rows(decoder);
 
-        if !format_is_packed(decoder.out_format) {
+        if !format_is_packed(decoder.out_format.0) {
             let have = decoder.frame_of(Source::Lossy).format as i32;
-            let format = if decoder.out_format == FORMAT_NONE {
+            let format = if decoder.out_format == OutFormat::default() {
                 have
             } else {
-                decoder.out_format
+                decoder.out_format.0
             };
-            let first = if decoder.converted_format == format {
+            let first = if decoder.converted_format.0 == format {
                 decoder.converted_rows
             } else {
                 0
@@ -1360,7 +1305,7 @@ impl Decoder<'_> {
             }
 
             decoder.converted_rows = rows;
-            decoder.converted_format = format;
+            decoder.converted_format.0 = format;
 
             let ret = {
                 let Decoder {

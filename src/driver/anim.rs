@@ -207,10 +207,10 @@ impl<'a> Decoder<'a> {
                     ..self.anim
                 },
             },
-            premultiply: format_is_premultiplied(self.out_format),
+            premultiply: format_is_premultiplied(self.out_format.0),
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
-            clear_yuva: self.clear_yuva,
+            clear_yuva: self.clear_yuva.0,
         }
     }
 
@@ -341,7 +341,7 @@ impl<'a> Decoder<'a> {
         let mut target = Format::Yuva420p;
 
         if sub_format == argb
-            || format_is_packed(self.out_format)
+            || format_is_packed(self.out_format.0)
             || (!self.anim.key_frame
                 && !self.canvas.is_empty()
                 && self.canvas.format == Some(argb))
@@ -373,9 +373,9 @@ impl<'a> Decoder<'a> {
         }
 
         /* libwebp premultiplies frames before compositing, so this uses ARGB. */
-        if format_is_premultiplied(self.out_format)
+        if format_is_premultiplied(self.out_format.0)
             && !(premultiply_after_pack(self.animation, self.anim_mode)
-                && format_bpp(self.out_format) == 2)
+                && format_bpp(self.out_format.0) == 2)
         {
             let Self {
                 ydsp,
