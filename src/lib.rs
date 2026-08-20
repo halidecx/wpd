@@ -11,6 +11,7 @@ pub mod anim;
 pub mod api;
 pub mod bits;
 pub mod blit;
+pub mod compose;
 pub mod container;
 pub mod convert;
 pub mod cpu;

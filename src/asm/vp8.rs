@@ -473,156 +473,34 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
 
 macro_rules! composed_mb {
     ($set:ident) => {
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn v_simple_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = <$set::VSimple as Raw>::F;
+        $crate::composed_mb!(simple pub v_simple_mb, vert, <$set::VSimple as Raw>::F);
+        $crate::composed_mb!(simple pub h_simple_mb, horiz, <$set::HSimple as Raw>::F);
+        $crate::composed_mb!(luma pub v16_mb, vert,
+            <$set::V16 as Raw>::F, <$set::V16Inner as Raw>::F);
+        $crate::composed_mb!(luma pub h16_mb, horiz,
+            <$set::H16 as Raw>::F, <$set::H16Inner as Raw>::F);
+        $crate::composed_mb!(chroma pub v8uv_mb, vert,
+            <$set::V8uv as Raw>::F, <$set::V8uvInner as Raw>::F);
+        $crate::composed_mb!(chroma pub h8uv_mb, horiz,
+            <$set::H8uv as Raw>::F, <$set::H8uvInner as Raw>::F);
 
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.offset(4 * stride), stride, bedge_lim);
-                f(dst.offset(8 * stride), stride, bedge_lim);
-                f(dst.offset(12 * stride), stride, bedge_lim);
-            }
-        }
+        marker!(VSimpleMb, LfSimpleMbRaw, v_simple_mb);
+        marker!(HSimpleMb, LfSimpleMbRaw, h_simple_mb);
+        marker!(V16Mb, LfMbRaw, v16_mb);
+        marker!(H16Mb, LfMbRaw, h16_mb);
+        marker!(V8uvMb, LfUvMbRaw, v8uv_mb);
+        marker!(H8uvMb, LfUvMbRaw, h8uv_mb);
+    };
+}
 
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn h_simple_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = <$set::HSimple as Raw>::F;
+/* Names a composed filter so the ladder can install it like a raw symbol. */
+macro_rules! marker {
+    ($name:ident, $sig:ty, $f:ident) => {
+        pub struct $name;
 
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.add(4), stride, bedge_lim);
-                f(dst.add(8), stride, bedge_lim);
-                f(dst.add(12), stride, bedge_lim);
-            }
-        }
-
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn v16_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::V16 as Raw>::F, <$set::V16Inner as Raw>::F);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.offset(4 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(8 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(12 * stride), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn h16_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::H16 as Raw>::F, <$set::H16Inner as Raw>::F);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.add(4), stride, bedge_e, flim_i, hev);
-                inner(dst.add(8), stride, bedge_e, flim_i, hev);
-                inner(dst.add(12), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn v8uv_mb(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::V8uv as Raw>::F, <$set::V8uvInner as Raw>::F);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(
-                    dst_u.offset(4 * stride),
-                    dst_v.offset(4 * stride),
-                    stride,
-                    bedge_e,
-                    flim_i,
-                    hev,
-                );
-            }
-        }
-
-        #[allow(clippy::missing_safety_doc)]
-        pub unsafe extern "C" fn h8uv_mb(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::H8uv as Raw>::F, <$set::H8uvInner as Raw>::F);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(dst_u.add(4), dst_v.add(4), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        pub struct VSimpleMb;
-        pub struct HSimpleMb;
-        pub struct V16Mb;
-        pub struct H16Mb;
-        pub struct V8uvMb;
-        pub struct H8uvMb;
-
-        impl Raw for VSimpleMb {
-            type Sig = LfSimpleMbRaw;
-            const F: LfSimpleMbRaw = v_simple_mb;
-        }
-
-        impl Raw for HSimpleMb {
-            type Sig = LfSimpleMbRaw;
-            const F: LfSimpleMbRaw = h_simple_mb;
-        }
-
-        impl Raw for V16Mb {
-            type Sig = LfMbRaw;
-            const F: LfMbRaw = v16_mb;
-        }
-
-        impl Raw for H16Mb {
-            type Sig = LfMbRaw;
-            const F: LfMbRaw = h16_mb;
-        }
-
-        impl Raw for V8uvMb {
-            type Sig = LfUvMbRaw;
-            const F: LfUvMbRaw = v8uv_mb;
-        }
-
-        impl Raw for H8uvMb {
-            type Sig = LfUvMbRaw;
-            const F: LfUvMbRaw = h8uv_mb;
+        impl Raw for $name {
+            type Sig = $sig;
+            const F: $sig = $f;
         }
     };
 }
@@ -857,6 +735,7 @@ mod arch {
     #[repr(C, align(32))]
     pub struct Transposed(pub [u8; 16 * 16]);
 
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe extern "C" fn h16_mb_avx2(
         dst: *mut u8,
         stride: isize,
@@ -878,6 +757,7 @@ mod arch {
         }
     }
 
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe extern "C" fn h8uv_mb_avx2(
         dst_u: *mut u8,
         dst_v: *mut u8,
