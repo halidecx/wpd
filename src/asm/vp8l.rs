@@ -11,7 +11,7 @@ pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_in
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 
-pub use super::Raw;
+pub(crate) use super::Raw;
 
 /* The kind picks the signature alias and its argument list. */
 macro_rules! raw_vp8l {

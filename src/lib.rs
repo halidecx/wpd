@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "asm"), forbid(unsafe_code))]
 #![cfg_attr(feature = "asm", deny(unsafe_code))]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![deny(improper_ctypes)]
 #![warn(clippy::all)]
 
 #[cfg(feature = "asm")]

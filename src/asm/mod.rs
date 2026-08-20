@@ -4,7 +4,7 @@
  * that is what checks each symbol against the signature it is installed as. */
 macro_rules! raw {
     ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),* $(,)?)) => {
-        extern "C" {
+        unsafe extern "C" {
             #[link_name = $sym]
             fn $inner($(_: $arg),*);
         }
@@ -23,7 +23,7 @@ pub mod vp8l;
 pub mod vp8pred;
 pub mod yuv;
 
-pub trait Raw {
+pub(crate) trait Raw {
     type Sig: Copy;
     const F: Self::Sig;
 }
