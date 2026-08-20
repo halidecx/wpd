@@ -483,6 +483,7 @@ if asm_enabled and checkasm_dep.found()
       'tests/checkasm/main.c',
       'tests/checkasm/filters.c',
       'tests/checkasm/lossless.c',
+      'tests/checkasm/rescaler.c',
       'tests/checkasm/vp8dsp.c',
       'tests/checkasm/vp8pred.c',
       'tests/checkasm/yuvdsp.c',

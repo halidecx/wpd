@@ -47,7 +47,7 @@ fn build_x86(root: &Path, x86_64: bool) {
     println!("cargo:rustc-link-lib=static=wpd_asm_avx2");
 
     let mut rest = nasm_common(root, x86_64);
-    for f in ["vp8dsp_loopfilter.asm", "yuvdsp.asm"] {
+    for f in ["vp8dsp_loopfilter.asm", "yuvdsp.asm", "rescaler.asm"] {
         rest.file(root.join("src/x86").join(f));
     }
     rest.compile("wpd_asm_x86").expect("nasm failed");
