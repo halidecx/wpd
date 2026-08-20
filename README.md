@@ -122,11 +122,14 @@ libwebp parity and benchmarking, build the optional harness:
 
 ```sh
 meson compile -C build libwebpdec
+meson compile -C build imagewebpdec
 ./scripts/bench.sh
 ```
 
 The default libwebp is the pinned Meson subproject; `-Dlibwebp=system` or
-`-Dlibwebpdecoder=/path/to/libwebpdecoder.a` overrides it. Other checks include
-`fuzz.sh`, `sanitize.sh`, `rustsan.sh`, `miri.sh`, `rac32.sh`, and
+`-Dlibwebpdecoder=/path/to/libwebpdecoder.a` overrides it. `imagewebpdec` is the
+same harness over the pure-Rust `image-webp` crate, which `bench.sh` includes
+whenever it has been built. Other checks include `fuzz.sh`, `sanitize.sh`,
+`rustsan.sh`, `miri.sh`, `rac32.sh`, and
 `cargo +nightly fuzz run container|vp8l|vp8|e2e`. Decode test outputs into
 `wpd-test-data`; never delete its reference WebP files.

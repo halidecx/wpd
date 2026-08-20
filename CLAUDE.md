@@ -32,6 +32,13 @@ meson compile -C build libwebpdec
 meson setup build -Dlibwebpdecoder=/path/to/libwebpdecoder.a
 ```
 
+Compile the image-webp test harness. It builds from crates.io in its own cargo
+workspace, so nothing else in the tree resolves image-webp:
+
+```sh
+meson compile -C build imagewebpdec
+```
+
 Testdata:
 
 ```sh
@@ -42,7 +49,7 @@ meson test -C build --suite testdata
 Test scripts:
 
 ```sh
-./scripts/bench.sh      # performance, wpd vs libwebpdec
+./scripts/bench.sh      # performance, wpd vs libwebpdec and image-webp
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/clicheck.sh   # correctness, everything else the tool prints

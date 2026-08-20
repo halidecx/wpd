@@ -421,6 +421,21 @@ else
   message('libwebpdec: disabled (libwebp demuxer not found)')
 endif
 
+custom_target(
+  'imagewebpdec',
+  output: 'imagewebpdec',
+  command: [
+    files('tools/cargo_imagewebpdec.sh'),
+    source_root,
+    meson.current_build_dir(),
+    cargo_profile,
+  ],
+  build_always_stale: true,
+  build_by_default: false,
+  install: false,
+)
+message('imagewebpdec: enabled (build explicitly with target imagewebpdec)')
+
 checkasm_dep = dependency(
   'checkasm',
   fallback: ['checkasm', 'checkasm_dep'],
