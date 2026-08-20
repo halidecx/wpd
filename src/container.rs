@@ -163,6 +163,10 @@ pub struct Scan {
     /// do not, and the two shapes are not allowed to mix.
     vp8x_flags: u8,
     anim_chunk: bool,
+    /// Whether a still's own chunk has been seen at the top level, so that an
+    /// ANIM arriving afterwards is refused the way one arriving before it
+    /// refuses the still. The two orderings are the same broken file.
+    still_chunk: bool,
     /// The frame table, built only when `collect_frames` asks for it, so that
     /// reading a file's information keeps its promise not to allocate.
     /// `nb_frames` counts the frames whose payload is all here; a frame whose
@@ -392,11 +396,12 @@ impl Scan {
     /// is an animation: every frame of one lives inside an ANMF, so an image
     /// or alpha chunk at the top level is a file that cannot be read two ways
     /// at once.
-    fn still_chunk_allowed(&self) -> Result<()> {
+    fn still_chunk_allowed(&mut self) -> Result<()> {
         if self.vp8x_flags & VP8X_FLAG_ANIM != 0 || self.anim_chunk {
             log::error("image chunk outside a frame of an animation");
             return Err(Error::InvalidData);
         }
+        self.still_chunk = true;
         Ok(())
     }
 
@@ -640,6 +645,13 @@ impl Scan {
                 TAG_ANIM => {
                     if size < ANIM_CHUNK_SIZE {
                         log::error("ANIM chunk is too short");
+                        return Err(Error::InvalidData);
+                    }
+                    /* The other half of `still_chunk_allowed`: a file that has
+                    already put an image or its alpha at the top level is a
+                    still, and cannot turn into an animation here. */
+                    if self.still_chunk {
+                        log::error("ANIM chunk after a still image chunk");
                         return Err(Error::InvalidData);
                     }
                     /* A second ANIM says nothing the first did not; libwebp
@@ -891,6 +903,34 @@ mod tests {
         anmf[9] = 15;
         anmf.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
         payload.extend_from_slice(&chunk(b"ANMF", &anmf));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn an_anim_chunk_after_a_still_is_refused() {
+        /* No animation flag, a still at the top level, and then an ANIM: the
+        same file the reverse ordering already refuses. */
+        let mut payload = chunk(b"VP8X", &[0x00, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+
+        /* And with a whole-canvas ANMF behind it, which the one-frame-without
+        -the-flag allowance would otherwise let through. */
+        let mut anmf = vec![0u8; 16];
+
+        anmf[6] = 15;
+        anmf[9] = 15;
+        anmf.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANMF", &anmf));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+
+        /* A top-level ALPH is as much a still's chunk as the image is. */
+        let mut payload = chunk(b"VP8X", &[0x10, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"ALPH", &[0, 0, 0, 0]));
+        payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
         assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
     }
 
