@@ -46,6 +46,39 @@ impl WPDDecoder<'_> {
     }
 }
 
+/* Every wpd_decoder_* entry point null-checks the handle, runs under the
+ * panic guard, and reports a c_int. Only the body differs. */
+macro_rules! entry {
+    (fn $name:ident($decoder:ident $(, $arg:ident: $ty:ty)* $(,)?) $body:block) => {
+        entry!(@emit $name, *mut WPDDecoderRaw, as_mut, $decoder $(, $arg: $ty)* $body);
+    };
+    (fn $name:ident(const $decoder:ident $(, $arg:ident: $ty:ty)* $(,)?) $body:block) => {
+        entry!(@emit $name, *const WPDDecoderRaw, cast_mut_as_mut, $decoder
+               $(, $arg: $ty)* $body);
+    };
+    (@emit $name:ident, $ptr:ty, $reach:ident, $decoder:ident
+     $(, $arg:ident: $ty:ty)* $body:block) => {
+        #[no_mangle]
+        #[allow(clippy::missing_safety_doc)]
+        pub unsafe extern "C" fn $name(handle: $ptr $(, $arg: $ty)*) -> c_int {
+            match unsafe { $reach(handle) } {
+                Some($decoder) => $decoder.guarded(WPD_ERR_INTERNAL, |$decoder| $body),
+                None => WPD_ERR_INVALID_ARG,
+            }
+        }
+    };
+}
+
+unsafe fn as_mut<'a>(handle: *mut WPDDecoderRaw) -> Option<&'a mut WPDDecoderRaw> {
+    unsafe { handle.as_mut() }
+}
+
+unsafe fn cast_mut_as_mut<'a>(
+    handle: *const WPDDecoderRaw,
+) -> Option<&'a mut WPDDecoderRaw> {
+    unsafe { handle.cast_mut().as_mut() }
+}
+
 impl<'a> Deref for WPDDecoder<'a> {
     type Target = Decoder<'a>;
 
@@ -225,70 +258,25 @@ unsafe fn set_output_buffer(
     Ok(())
 }
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_set_options(
-    decoder: *mut WPDDecoderRaw,
-    options: *const WPDDecoderOptions,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        let Some(options) = (unsafe { options.as_ref() }) else {
-            return status(
-                decoder.fail("invalid decoder options", Error::InvalidArgument),
-            );
-        };
-
-        reported(set_options(decoder, options).map(|()| WPD_OK))
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
-    decoder: *mut WPDDecoderRaw,
-    mode: c_int,
-) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(decoder.set_animation_mode(mode).map(|()| WPD_OK))
-        }),
-        None => WPD_ERR_INVALID_ARG,
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_set_output_format(
-    decoder: *mut WPDDecoderRaw,
-    format: c_int,
-) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(decoder.set_output_format(format).map(|()| WPD_OK))
-        }),
-        None => WPD_ERR_INVALID_ARG,
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
-    decoder: *mut WPDDecoderRaw,
-    buffer: *const WPDOutputBuffer,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
+entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
+    let Some(options) = (unsafe { options.as_ref() }) else {
+        return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        reported(
-            unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK),
-        )
-    })
-}
+    reported(set_options(decoder, options).map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_set_animation_mode(decoder, mode: c_int) {
+    reported(decoder.set_animation_mode(mode).map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_set_output_format(decoder, format: c_int) {
+    reported(decoder.set_output_format(format).map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_set_output_buffer(decoder, buffer: *const WPDOutputBuffer) {
+    reported(unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK))
+});
 
 unsafe fn lent<'a>(data: *const u8, size: usize) -> &'a [u8] {
     if data.is_null() || size == 0 {
@@ -297,129 +285,53 @@ unsafe fn lent<'a>(data: *const u8, size: usize) -> &'a [u8] {
     unsafe { slice::from_raw_parts(data, size) }
 }
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_open(
-    decoder: *mut WPDDecoderRaw,
-    data: *const u8,
-    size: usize,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        if data.is_null() {
-            return status(decoder.fail("invalid input data", Error::InvalidArgument));
-        }
-        reported(decoder.open(unsafe { lent(data, size) }).map(|()| WPD_OK))
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_open_borrowed(
-    decoder: *mut WPDDecoderRaw,
-    data: *const u8,
-    size: usize,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        if data.is_null() {
-            return status(decoder.fail("invalid input data", Error::InvalidArgument));
-        }
-        reported(
-            decoder
-                .open_borrowed(unsafe { lent(data, size) })
-                .map(|()| WPD_OK),
-        )
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_open_stream(decoder: *mut WPDDecoderRaw) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(decoder.open_stream().map(|()| WPD_OK))
-        }),
-        None => WPD_ERR_INVALID_ARG,
+entry!(fn wpd_decoder_open(decoder, data: *const u8, size: usize) {
+    if data.is_null() {
+        return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-}
+    reported(decoder.open(unsafe { lent(data, size) }).map(|()| WPD_OK))
+});
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_append(
-    decoder: *mut WPDDecoderRaw,
-    data: *const u8,
-    size: usize,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        if data.is_null() {
-            return status(decoder.fail("invalid input data", Error::InvalidArgument));
-        }
-        reported(decoder.append(unsafe { lent(data, size) }).map(|()| WPD_OK))
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_update(
-    decoder: *mut WPDDecoderRaw,
-    data: *const u8,
-    size: usize,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        if data.is_null() {
-            return status(decoder.fail("invalid input data", Error::InvalidArgument));
-        }
-        reported(decoder.update(unsafe { lent(data, size) }).map(|()| WPD_OK))
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_end_of_stream(
-    decoder: *mut WPDDecoderRaw,
-) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(decoder.end_of_stream().map(|()| WPD_OK))
-        }),
-        None => WPD_ERR_INVALID_ARG,
+entry!(fn wpd_decoder_open_borrowed(decoder, data: *const u8, size: usize) {
+    if data.is_null() {
+        return status(decoder.fail("invalid input data", Error::InvalidArgument));
     }
-}
+    reported(
+        decoder
+            .open_borrowed(unsafe { lent(data, size) })
+            .map(|()| WPD_OK),
+    )
+});
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_get_info(
-    decoder: *const WPDDecoderRaw,
-    info: *mut WPDImageInfo,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
+entry!(fn wpd_decoder_open_stream(decoder) {
+    reported(decoder.open_stream().map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_append(decoder, data: *const u8, size: usize) {
+    if data.is_null() {
+        return status(decoder.fail("invalid input data", Error::InvalidArgument));
+    }
+    reported(decoder.append(unsafe { lent(data, size) }).map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_update(decoder, data: *const u8, size: usize) {
+    if data.is_null() {
+        return status(decoder.fail("invalid input data", Error::InvalidArgument));
+    }
+    reported(decoder.update(unsafe { lent(data, size) }).map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_end_of_stream(decoder) {
+    reported(decoder.end_of_stream().map(|()| WPD_OK))
+});
+
+entry!(fn wpd_decoder_get_info(const decoder, info: *mut WPDImageInfo) {
+    let Some(info) = (unsafe { info.as_mut() }) else {
+        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        let Some(info) = (unsafe { info.as_mut() }) else {
-            return status(
-                decoder.fail("invalid decoder state", Error::InvalidArgument),
-            );
-        };
 
-        reported(get_info(decoder, info).map(|()| WPD_OK))
-    })
-}
+    reported(get_info(decoder, info).map(|()| WPD_OK))
+});
 
 fn get_info(
     decoder: &mut WPDDecoder<'_>,
@@ -448,37 +360,17 @@ fn get_info(
     Ok(())
 }
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_rewind(decoder: *mut WPDDecoderRaw) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(decoder.rewind().map(|()| WPD_OK))
-        }),
-        None => WPD_ERR_INVALID_ARG,
-    }
-}
+entry!(fn wpd_decoder_rewind(decoder) {
+    reported(decoder.rewind().map(|()| WPD_OK))
+});
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_frame_info(
-    decoder: *const WPDDecoderRaw,
-    index: c_int,
-    info: *mut WPDFrameInfo,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
+entry!(fn wpd_decoder_frame_info(const decoder, index: c_int, info: *mut WPDFrameInfo) {
+    let Some(info) = (unsafe { info.as_mut() }) else {
+        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     };
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        let Some(info) = (unsafe { info.as_mut() }) else {
-            return status(
-                decoder.fail("invalid decoder state", Error::InvalidArgument),
-            );
-        };
 
-        reported(frame_info(decoder, index, info).map(|()| WPD_OK))
-    })
-}
+    reported(frame_info(decoder, index, info).map(|()| WPD_OK))
+});
 
 fn frame_info(
     decoder: &mut WPDDecoder<'_>,
@@ -517,55 +409,35 @@ fn frame_info(
     Ok(())
 }
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_metadata(
-    decoder: *const WPDDecoderRaw,
+entry!(fn wpd_decoder_metadata(
+    const decoder,
     which: c_int,
     data: *mut *const u8,
     size: *mut usize,
-) -> c_int {
-    let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-        if data.is_null() || size.is_null() {
-            return status(
-                decoder.fail("invalid decoder state", Error::InvalidArgument),
-            );
-        }
-        match decoder.metadata(which) {
-            Err(e) => status(e),
-            Ok(found) => {
-                let (at, len) = match found {
-                    Some(bytes) => (bytes.as_ptr(), bytes.len()),
-                    None => (ptr::null(), 0),
-                };
-
-                unsafe {
-                    data.write(at);
-                    size.write(len);
-                }
-                WPD_OK
-            }
-        }
-    })
-}
-
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_next_frame(
-    decoder: *mut WPDDecoderRaw,
-    frame: *mut WPDFrame,
-) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(unsafe { next_frame(decoder, frame) }.map(c_int::from))
-        }),
-        None => WPD_ERR_INVALID_ARG,
+) {
+    if data.is_null() || size.is_null() {
+        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     }
-}
+    match decoder.metadata(which) {
+        Err(e) => status(e),
+        Ok(found) => {
+            let (at, len) = match found {
+                Some(bytes) => (bytes.as_ptr(), bytes.len()),
+                None => (ptr::null(), 0),
+            };
+
+            unsafe {
+                data.write(at);
+                size.write(len);
+            }
+            WPD_OK
+        }
+    }
+});
+
+entry!(fn wpd_decoder_next_frame(decoder, frame: *mut WPDFrame) {
+    reported(unsafe { next_frame(decoder, frame) }.map(c_int::from))
+});
 
 unsafe fn next_frame(
     decoder: &mut WPDDecoder<'_>,
@@ -589,22 +461,13 @@ unsafe fn next_frame(
     }
 }
 
-#[no_mangle]
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn wpd_decoder_partial_frame(
-    decoder: *mut WPDDecoderRaw,
+entry!(fn wpd_decoder_partial_frame(
+    decoder,
     frame: *mut WPDFrame,
     rows_valid: *mut c_int,
-) -> c_int {
-    match unsafe { decoder.as_mut() } {
-        Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
-            reported(
-                unsafe { partial_frame(decoder, frame, rows_valid) }.map(|()| WPD_OK),
-            )
-        }),
-        None => WPD_ERR_INVALID_ARG,
-    }
-}
+) {
+    reported(unsafe { partial_frame(decoder, frame, rows_valid) }.map(|()| WPD_OK))
+});
 
 unsafe fn partial_frame(
     decoder: &mut WPDDecoder<'_>,
