@@ -13,6 +13,7 @@ use crate::handout::{Handout, Pixels, RowSink};
 use crate::options::Options;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::Scratch;
+use std::ops::Range;
 
 pub struct ExportSettings {
     pub out_format: i32,
@@ -166,6 +167,38 @@ fn export_external_planar(
     export_external_planar_rows(set, ext, img, format, out, 0, height)
 }
 
+/* Rows go out packed, copied when the layout already matches, and are
+ * premultiplied in place afterwards. Four callers want some of that. */
+fn pack_rows(dst: &mut Buffer, src: &Frame<'_>, pack: Option<RowFn>, rows: Range<i32>) {
+    let mut view = dst.frame_mut();
+
+    for y in rows {
+        let row = view.row(0, y);
+
+        match pack {
+            Some(pack) => pack(row, src.row(0, y)),
+            None => row.copy_from_slice(src.row(0, y)),
+        }
+    }
+}
+
+fn premultiply_row(dsp: &YuvDsp, row: &mut [u8], format: i32, packed: fn(&mut [u8])) {
+    if format_bpp(format) == 2 {
+        packed(row);
+    } else {
+        (dsp.premultiply_row)(row, format_layout(format) == LAYOUT_ARGB);
+    }
+}
+
+fn premultiply_rows(dsp: &YuvDsp, dst: &mut Buffer, format: i32, rows: Range<i32>) {
+    let packed = format_premultiplier_4444(dsp, format);
+    let mut view = dst.frame_mut();
+
+    for y in rows {
+        premultiply_row(dsp, view.row(0, y), format, packed);
+    }
+}
+
 enum Route {
     AsIs,
     Upsample,
@@ -272,30 +305,15 @@ pub fn export_packed<'a>(
                 }
                 Route::Pack(pack) => {
                     output.alloc_packed(img.width, img.height, packed.bpp(), packed)?;
-
-                    let mut view = output.frame_mut();
-
-                    for y in 0..img.height {
-                        pack(view.row(0, y), img.row(0, y));
-                    }
+                    pack_rows(output, &img, Some(pack), 0..img.height);
                 }
                 _ => {
                     output.alloc_packed(img.width, img.height, 4, Format::ArgbPre)?;
-
-                    let mut view = output.frame_mut();
-
-                    for y in 0..img.height {
-                        view.row(0, y).copy_from_slice(img.row(0, y));
-                    }
+                    pack_rows(output, &img, None, 0..img.height);
                 }
             }
             if premultiply {
-                let alpha_first = format_layout(format) == LAYOUT_ARGB;
-                let mut view = output.frame_mut();
-
-                for y in 0..view.height {
-                    (dsp.premultiply_row)(view.row(0, y), alpha_first);
-                }
+                premultiply_rows(dsp, output, format, 0..img.height);
             }
             output.frame()
         }
@@ -375,12 +393,7 @@ fn still_packed_direct(
         converted_from = upsample_fancy(dsp, dst, src, layout, first, upto);
     }
     if set.premultiply {
-        let alpha_first = layout == LAYOUT_ARGB;
-        let mut view = dst.frame_mut();
-
-        for y in converted_from..upto {
-            (dsp.premultiply_row)(view.row(0, y), alpha_first);
-        }
+        premultiply_rows(dsp, dst, format, converted_from..upto);
     }
     Ok(converted_from)
 }
@@ -552,20 +565,13 @@ pub fn export_still_lossless<'a>(
     }
 
     let premultiply = format_premultiplier_4444(dsp, format);
-    let alpha_first = format_layout(format) == LAYOUT_ARGB;
     let out_len = img.width as usize * format_bpp(format);
 
     if let Some(ext) = ext {
         export_external_rows(set, dsp, ext, img, format, out, first, upto)?;
         if set.premultiply {
             for y in first..upto {
-                let row = ext.row(0, y, out_len);
-
-                if format_bpp(format) == 2 {
-                    premultiply(row);
-                } else {
-                    (dsp.premultiply_row)(row, alpha_first);
-                }
+                premultiply_row(dsp, ext.row(0, y, out_len), format, premultiply);
             }
         }
         finish();
@@ -586,24 +592,9 @@ pub fn export_still_lossless<'a>(
         output.alloc_packed(img.width, img.height, target.bpp(), target)?;
     }
 
-    {
-        let mut view = output.frame_mut();
-
-        for y in first..upto {
-            let dst = view.row(0, y);
-
-            match pack {
-                Some(pack) => pack(dst, img.row(0, y)),
-                None => dst.copy_from_slice(img.row(0, y)),
-            }
-            if set.premultiply {
-                if format_bpp(format) == 2 {
-                    premultiply(dst);
-                } else {
-                    (dsp.premultiply_row)(dst, alpha_first);
-                }
-            }
-        }
+    pack_rows(output, img, pack, first..upto);
+    if set.premultiply {
+        premultiply_rows(dsp, output, format, first..upto);
     }
 
     export_own(set, output.frame(), format, out);
