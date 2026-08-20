@@ -1,8 +1,16 @@
 # wpd
 
-A fast Rust and hand-written-assembly WebP decoder with a stable C ABI. It
-decodes VP8, VP8L, alpha, and animation; VP8 is intra-only. The public C API is
-[`include/wpd.h`](include/wpd.h).
+A fast Rust and hand-written-assembly WebP decoder with a C ABI.
+
+| Image               | image-webp (0.2.4) | libwebp (523e304) | wpd (latest)        |
+| ------------------- | ------------------ | ----------------- | ------------------- |
+| lossy.webp          | 401.7ms (1.00x)    | 156.1ms (2.57x)   | **137.8ms (2.92x)** |
+| simplelf-lossy.webp | 310.6ms (1.00x)    | 152.2ms (2.04x)   | **130.6ms (2.38x)** |
+| anim_yuv.webp       | 260.5ms (1.00x)    | 131.8ms (1.98x)   | **119.8ms (2.17x)** |
+| lossless.webp       | 226.1ms (1.00x)    | 177.3ms (1.28x)   | **140.5ms (1.61x)** |
+| anim_rgb.webp       | 97.0ms (1.00x)     | 78.6ms (1.23x)    | **42.4ms (2.29x)**  |
+| a_lossy.webp        | 116.4ms (1.00x)    | 36.6ms (3.18x)    | **25.5ms (4.56x)**  |
+| anim_yuva.webp      | 575.7ms (1.00x)    | 308.0ms (1.87x)   | **263.8ms (2.18x)** |
 
 ## Build and CLI
 
