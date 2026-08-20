@@ -43,10 +43,12 @@ nasm-rs = { version = "0.3", features = ["parallel"] }
 [dependencies]
 zerocopy = { version = "0.8", default-features = false }
 
+# No `panic = "abort"`: `wpd-capi` turns a panic into WPD_ERR_INTERNAL rather
+# than into the end of the caller's process, and catching one needs the unwind.
+# Measured at no throughput cost and 17 KB of binary on aarch64.
 [profile.release]
 codegen-units = 1
 lto = "fat"
-panic = "abort"
 
 [profile.minsize]
 inherits = "release"

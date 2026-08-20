@@ -662,8 +662,18 @@ impl Decoder {
 
         let header_size = (rl24(buf) >> 5) as usize;
 
+        /* The container refuses a file whose keyframe says either of these,
+        but a VP8X carries the canvas size, and a canvas the scanner did not
+        have to read the keyframe for is a keyframe the scanner never
+        questioned. So the decoder asks too, where libwebp's `VP8GetHeaders`
+        does, and the two paths agree on what a frame has to be. */
         if self.profile > 3 {
-            crate::log::warning_args(format_args!("Unknown profile {}", self.profile));
+            crate::log::error_args(format_args!("Unknown profile {}", self.profile));
+            return Err(Error::InvalidData);
+        }
+        if buf[0] >> 4 & 1 == 0 {
+            crate::log::error("Frame is not displayable");
+            return Err(Error::Unsupported);
         }
         if header_size > total.saturating_sub(10) {
             crate::log::error("Header size larger than data provided");

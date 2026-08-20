@@ -23,6 +23,18 @@ failed=0
 
 printf 'not a webp\n' > "$tmp/notwebp"
 
+# BSD sed reads the argument after -i as the backup suffix and GNU sed does
+# not, so in-place editing has to name one explicitly to mean the same thing
+# under both. A C locale keeps BSD sed from refusing a line the tool wrote that
+# is not valid UTF-8, which a damaged file's error text can be.
+fold() {
+    local bin="$1" tag="$2" file="$3"
+
+    LC_ALL=C sed -i.bak -e "1s|^wpd by .*\$|wpd by BANNER|" \
+                        -e "s|$bin|BIN|g" -e "s|$tmp/$tag|OUT|g" "$file"
+    rm -f "$file.bak"
+}
+
 # Runs one argument vector and records everything observable about it. @OUT@ in
 # an argument stands for a per-binary output path, so a case can ask the tool to
 # write a file and still have the two runs land somewhere different. A suffix
@@ -38,15 +50,15 @@ capture() {
 
     rm -f "$tmp/$tag.file"*
     set +e
-    "$bin" "${args[@]}" > "$tmp/$tag.stdout" 2> "$tmp/$tag.stderr"
+    "$bin" ${args[@]+"${args[@]}"} > "$tmp/$tag.stdout" 2> "$tmp/$tag.stderr"
     printf 'exit %d\n' "$?" > "$tmp/$tag.status"
     set -e
 
     # The banner carries the revision and usage echoes argv[0], so both name the
     # binary under test. Fold them, or every single case would differ.
-    sed -i -e "1s|^wpd by .*\$|wpd by BANNER|" \
-           -e "s|$bin|BIN|g" -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stderr"
-    sed -i -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stdout"
+    fold "$bin" "$tag" "$tmp/$tag.stderr"
+    LC_ALL=C sed -i.bak -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stdout"
+    rm -f "$tmp/$tag.stdout.bak"
 }
 
 # Runs one argument vector with a reader that goes away after a byte. A closed
@@ -66,8 +78,7 @@ capture_pipe() {
     printf 'exit %d\n' "${PIPESTATUS[0]}" > "$tmp/$tag.status"
     set -e
 
-    sed -i -e "1s|^wpd by .*\$|wpd by BANNER|" \
-           -e "s|$bin|BIN|g" -e "s|$tmp/$tag|OUT|g" "$tmp/$tag.stderr"
+    fold "$bin" "$tag" "$tmp/$tag.stderr"
 }
 
 compare() {

@@ -36,6 +36,16 @@ typedef struct WPDDecoder WPDDecoder;
 
 /**
  * Status codes. Negative values are errors.
+ *
+ * No entry point below can terminate the calling process. A defect inside the
+ * library is caught at the ABI and reported as WPD_ERR_INTERNAL, and the
+ * decoder it happened on refuses every later call with the same status; free
+ * it. The message goes to the log callback, not to wpd_decoder_error(), which
+ * still reports whatever the last real decode failure was.
+ *
+ * The exception is a build compiled to abort on panic rather than unwind,
+ * which is what -Dnightly_size does to reach the size it does. There is no
+ * unwind to catch there and a defect ends the process, as it did in the C.
  */
 typedef enum WPDStatus {
     WPD_OK                   = 0,
@@ -47,6 +57,10 @@ typedef enum WPDStatus {
     WPD_ERR_NO_MEMORY        = -6,
     WPD_ERR_TOO_LARGE        = -7,
     WPD_ERR_BUFFER_TOO_SMALL = -8,
+    /* A defect in the library, not anything the caller or the file did. The
+     * call that returned it had no effect and the decoder it was made on is
+     * finished: free it. Nothing else is meaningful to do with one. */
+    WPD_ERR_INTERNAL = -9,
 } WPDStatus;
 
 /**

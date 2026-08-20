@@ -110,15 +110,21 @@ impl<'a> Decoder<'a> {
             let Self {
                 input, alpha_plane, ..
             } = self;
-            let mut left = input.chunk(offset, size);
+            let raw = input.chunk(offset, size);
 
-            for y in 0..height as usize {
-                let n = width.min(left.len());
-                let (row, rest) = left.split_at(n);
-
-                alpha_plane[y * width..][..n].copy_from_slice(row);
-                left = rest;
+            /* One byte per pixel and no compression to make up a shortfall:
+            a chunk that carries fewer is a chunk that stops inside the plane.
+            Filling the rest with zeros would hand back a picture whose bottom
+            rows are transparent and say nothing went wrong; libwebp's
+            `ALPHInit` fails the decode instead. */
+            if raw.len() < extent {
+                crate::log::error_args(format_args!(
+                    "ALPHA chunk carries {} of {extent} bytes",
+                    raw.len()
+                ));
+                return Err(Error::InvalidData);
             }
+            alpha_plane[..extent].copy_from_slice(&raw[..extent]);
         } else if self.alpha_compression == ALPHA_COMPRESSION_VP8L {
             self.lossless_canvas_in();
 

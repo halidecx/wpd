@@ -11,7 +11,10 @@
 //! below, which return zero past the end of the window. The C could prove its
 //! reads in range by construction; a Rust bounds check that fires on damaged
 //! input would be a denial of service the C did not have, so the reads simply
-//! cannot leave the slice.
+//! cannot leave the slice. That is still the rule, and it is still what makes
+//! the scanner safe to run on a stranger's bytes -- `wpd-capi`'s guard turns a
+//! panic into a status rather than the end of the process, but a guard is a
+//! backstop for a defect, not a licence to index without looking.
 
 use crate::bits;
 use crate::error::{Error, Result};
@@ -28,10 +31,23 @@ pub const MAX_FRAMES: usize = 1 << 20;
 pub const ANMF_FLAG_DISPOSE: u8 = 1 << 0;
 pub const ANMF_FLAG_NO_BLEND: u8 = 1 << 1;
 
+const VP8X_FLAG_ANIM: u8 = 0x02;
 const VP8X_FLAG_XMP: u8 = 0x04;
 const VP8X_FLAG_EXIF: u8 = 0x08;
 const VP8X_FLAG_ICCP: u8 = 0x20;
 const VP8X_FLAG_ALPHA: u8 = 0x10;
+
+/// The five flags the format defines. libwebp's `ALL_VALID_FLAGS`; anything
+/// else in the byte is reserved, and a file that sets one is rejected rather
+/// than read as if the bit meant nothing.
+const VP8X_FLAGS_VALID: u8 =
+    VP8X_FLAG_ANIM | VP8X_FLAG_XMP | VP8X_FLAG_EXIF | VP8X_FLAG_ALPHA | VP8X_FLAG_ICCP;
+
+/// The only payload length a VP8X chunk may declare.
+const VP8X_CHUNK_SIZE: u32 = 10;
+
+/// The only payload length an ANIM chunk may be shorter than.
+const ANIM_CHUNK_SIZE: u32 = 6;
 
 const TAG_RIFF: u32 = u32::from_le_bytes(*b"RIFF");
 const TAG_WEBP: u32 = u32::from_le_bytes(*b"WEBP");
@@ -142,6 +158,15 @@ pub struct Scan {
     riff_end: u64,
     info: Info,
     vp8x: bool,
+    /// What the VP8X flag byte declared, so the chunks that follow can be
+    /// checked against it: an animation's frames all live in ANMFs, a still's
+    /// do not, and the two shapes are not allowed to mix.
+    vp8x_flags: u8,
+    anim_chunk: bool,
+    /// Whether a still's own chunk has been seen at the top level, so that an
+    /// ANIM arriving afterwards is refused the way one arriving before it
+    /// refuses the still. The two orderings are the same broken file.
+    still_chunk: bool,
     /// The frame table, built only when `collect_frames` asks for it, so that
     /// reading a file's information keeps its promise not to allocate.
     /// `nb_frames` counts the frames whose payload is all here; a frame whose
@@ -367,6 +392,51 @@ impl Scan {
         Ok(())
     }
 
+    /// Turns away a chunk that belongs to a still in a file that has said it
+    /// is an animation: every frame of one lives inside an ANMF, so an image
+    /// or alpha chunk at the top level is a file that cannot be read two ways
+    /// at once.
+    fn still_chunk_allowed(&mut self) -> Result<()> {
+        if self.vp8x_flags & VP8X_FLAG_ANIM != 0 || self.anim_chunk {
+            log::error("image chunk outside a frame of an animation");
+            return Err(Error::InvalidData);
+        }
+        self.still_chunk = true;
+        Ok(())
+    }
+
+    /// Checks one ANMF's rectangle against the canvas, so a frame table never
+    /// reports a frame that does not fit. libwebp's `CheckFrameBounds`.
+    fn frame_bounds(&self, p: &[u8]) -> Result<()> {
+        if p.len() < 16 {
+            log::error("ANMF chunk is too short");
+            return Err(Error::InvalidData);
+        }
+        if self.info.width == 0 || self.info.height == 0 {
+            return Ok(());
+        }
+
+        let x = rl24(p, 0) as i32 * 2;
+        let y = rl24(p, 3) as i32 * 2;
+        let w = rl24(p, 6) as i32 + 1;
+        let h = rl24(p, 9) as i32 + 1;
+        let exact = self.vp8x_flags & VP8X_FLAG_ANIM == 0;
+        let fits = if exact {
+            x == 0 && y == 0 && w == self.info.width && h == self.info.height
+        } else {
+            x + w <= self.info.width && y + h <= self.info.height
+        };
+
+        if !fits {
+            log::error_args(format_args!(
+                "frame ({w}x{h} at {x}x{y}) does not fit the canvas ({}x{})",
+                self.info.width, self.info.height
+            ));
+            return Err(Error::InvalidData);
+        }
+        Ok(())
+    }
+
     fn raw_headers(&mut self, data: &[u8], partial: bool) -> Result<()> {
         let size = data.len();
 
@@ -519,6 +589,8 @@ impl Scan {
                     && self.info.images == 0
                     && (tag == TAG_VP8 || tag == TAG_VP8L)
                 {
+                    self.still_chunk_allowed()?;
+
                     let (width, height) = (self.info.width, self.info.height);
 
                     partial_still = true;
@@ -533,58 +605,118 @@ impl Scan {
 
             match tag {
                 TAG_VP8X => {
+                    /* Ten bytes exactly: `WebPGetFeatures` refuses any other
+                    length, and an encoder has never written one. */
+                    if self.vp8x || size != VP8X_CHUNK_SIZE {
+                        log::error("invalid VP8X chunk");
+                        return Err(Error::InvalidData);
+                    }
                     self.vp8x = true;
-                    if size >= 10 {
-                        let flags = byte(buf, at + 8);
 
-                        self.info.has_alpha |= flags & VP8X_FLAG_ALPHA != 0;
-                        for (i, &bit) in META_VP8X_FLAG.iter().enumerate() {
-                            if flags & bit != 0 {
-                                self.info.metadata |= 1 << i;
-                            }
+                    let flags = byte(buf, at + 8);
+
+                    if flags & !VP8X_FLAGS_VALID != 0 {
+                        log::error_args(format_args!(
+                            "VP8X sets reserved flag bits (0x{flags:02x})"
+                        ));
+                        return Err(Error::InvalidData);
+                    }
+                    self.vp8x_flags = flags;
+                    self.info.has_alpha |= flags & VP8X_FLAG_ALPHA != 0;
+                    for (i, &bit) in META_VP8X_FLAG.iter().enumerate() {
+                        if flags & bit != 0 {
+                            self.info.metadata |= 1 << i;
                         }
-                        self.info.width = rl24(buf, at + 12) as i32 + 1;
-                        self.info.height = rl24(buf, at + 15) as i32 + 1;
-                        if u64::from(self.info.width as u32)
-                            * u64::from(self.info.height as u32)
-                            >= 1 << 32
-                        {
-                            return Err(Error::TooLarge);
-                        }
+                    }
+                    self.info.width = rl24(buf, at + 12) as i32 + 1;
+                    self.info.height = rl24(buf, at + 15) as i32 + 1;
+                    if u64::from(self.info.width as u32)
+                        * u64::from(self.info.height as u32)
+                        >= 1 << 32
+                    {
+                        return Err(Error::TooLarge);
                     }
                 }
                 TAG_ALPH => {
+                    self.still_chunk_allowed()?;
                     self.info.has_alpha = true;
                     self.info.image_has_alpha = true;
                 }
                 TAG_ANIM => {
-                    self.info.animation = true;
-                    if size >= 6 {
+                    if size < ANIM_CHUNK_SIZE {
+                        log::error("ANIM chunk is too short");
+                        return Err(Error::InvalidData);
+                    }
+                    /* The other half of `still_chunk_allowed`: a file that has
+                    already put an image or its alpha at the top level is a
+                    still, and cannot turn into an animation here. */
+                    if self.still_chunk {
+                        log::error("ANIM chunk after a still image chunk");
+                        return Err(Error::InvalidData);
+                    }
+                    /* A second ANIM says nothing the first did not; libwebp
+                    keeps the first and steps over the rest. */
+                    if !self.anim_chunk {
+                        self.anim_chunk = true;
+                        self.info.animation = true;
                         self.info.background_argb = rl32(buf, at + 8);
                         self.info.loop_count = rl16(buf, at + 12) as i32;
                     }
                 }
                 TAG_ANMF => {
+                    if !self.anim_chunk {
+                        log::error("ANMF chunk before the ANIM header");
+                        return Err(Error::InvalidData);
+                    }
+                    /* Without the animation flag a file may still carry one
+                    ANMF, and it has to be the whole canvas -- libwebp's
+                    `CheckFrameBounds` with `exact` set. */
+                    if self.vp8x_flags & VP8X_FLAG_ANIM == 0
+                        && self.info.frame_count > 0
+                    {
+                        log::error("more than one frame without the animation flag");
+                        return Err(Error::InvalidData);
+                    }
+                    self.frame_bounds(window(buf, at + 8, size as usize))?;
                     self.info.frame_count = self.info.frame_count.saturating_add(1);
                     if self.collect_frames {
                         self.anmf(window(buf, at + 8, size as usize), true)?;
                     }
                 }
                 TAG_VP8 | TAG_VP8L => {
+                    self.still_chunk_allowed()?;
+
                     let first = self.info.images == 0;
 
                     self.info.images = self.info.images.saturating_add(1);
                     if first {
                         let (width, height) = (self.info.width, self.info.height);
 
+                        self.info.width = 0;
+                        self.info.height = 0;
                         self.still_header(
                             tag,
                             window(buf, at + 8, size as usize),
                             size as usize,
                         );
+                        let (image_w, image_h) = (self.info.width, self.info.height);
+
                         if self.vp8x && width != 0 && height != 0 {
                             self.info.width = width;
                             self.info.height = height;
+                            /* The canvas a still declares twice has to agree
+                            with itself. libwebp calls the disagreement a
+                            bitstream error rather than picking one. */
+                            if image_w != 0
+                                && image_h != 0
+                                && (image_w != width || image_h != height)
+                            {
+                                log::error_args(format_args!(
+                                    "VP8X canvas {width}x{height} does not match \
+                                     the image's {image_w}x{image_h}"
+                                ));
+                                return Err(Error::InvalidData);
+                            }
                         }
                     }
                 }
@@ -619,6 +751,16 @@ impl Scan {
             } else {
                 Error::InvalidData
             });
+        }
+        /* Only once the file has ended: until then the ANIM chunk may still
+        be on its way. */
+        if !partial
+            && !self.info.truncated
+            && self.vp8x_flags & VP8X_FLAG_ANIM != 0
+            && !self.anim_chunk
+        {
+            log::error("VP8X declares an animation with no ANIM chunk");
+            return Err(Error::InvalidData);
         }
         Ok(())
     }
@@ -692,10 +834,10 @@ mod tests {
     }
 
     #[test]
-    fn the_canvas_the_vp8x_declares_outranks_the_frame_header() {
+    fn the_vp8x_alpha_flag_is_reported_without_the_frame_carrying_it() {
         let mut payload = chunk(b"VP8X", &[0x10, 0, 0, 0, 99, 0, 0, 49, 0, 0]);
 
-        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(17, 5, false)));
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(100, 50, false)));
         let info = get_info(&riff(&payload)).unwrap();
 
         assert_eq!((info.width, info.height), (100, 50));
@@ -703,6 +845,111 @@ mod tests {
         still says only what its own header carried. */
         assert!(info.has_alpha);
         assert!(!info.image_has_alpha);
+    }
+
+    #[test]
+    fn a_still_whose_two_declared_canvases_disagree_is_refused() {
+        let mut payload = chunk(b"VP8X", &[0x00, 0, 0, 0, 99, 0, 0, 49, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(17, 5, false)));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn a_vp8x_that_is_not_ten_bytes_is_refused() {
+        for body in [
+            &[0u8, 0, 0, 0, 15, 0, 0, 15, 0][..],
+            &[0, 0, 0, 0, 15, 0, 0, 15, 0, 0, 0][..],
+        ] {
+            let mut payload = chunk(b"VP8X", body);
+
+            payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+            assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+        }
+    }
+
+    #[test]
+    fn a_reserved_vp8x_flag_bit_is_refused() {
+        for flags in [0x01u8, 0x40, 0x80] {
+            let mut payload = chunk(b"VP8X", &[flags, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+            payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+            assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+        }
+    }
+
+    #[test]
+    fn the_animation_flag_and_the_anim_chunk_have_to_agree() {
+        /* Flagged as an animation, but the frames are laid out as a still. */
+        let mut payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+
+        /* Flagged as an animation with nothing to animate. */
+        let payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+        let mut scan = Scan::new();
+
+        assert_eq!(
+            scan.headers(&riff(&payload), 0, false, false),
+            Err(Error::InvalidData)
+        );
+
+        /* A frame before the header that says frames are coming. */
+        let mut payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+        let mut anmf = vec![0u8; 16];
+
+        anmf[6] = 15;
+        anmf[9] = 15;
+        anmf.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANMF", &anmf));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn an_anim_chunk_after_a_still_is_refused() {
+        /* No animation flag, a still at the top level, and then an ANIM: the
+        same file the reverse ordering already refuses. */
+        let mut payload = chunk(b"VP8X", &[0x00, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+
+        /* And with a whole-canvas ANMF behind it, which the one-frame-without
+        -the-flag allowance would otherwise let through. */
+        let mut anmf = vec![0u8; 16];
+
+        anmf[6] = 15;
+        anmf[9] = 15;
+        anmf.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANMF", &anmf));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+
+        /* A top-level ALPH is as much a still's chunk as the image is. */
+        let mut payload = chunk(b"VP8X", &[0x10, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"ALPH", &[0, 0, 0, 0]));
+        payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn a_frame_hanging_off_the_canvas_is_refused_by_the_scan() {
+        let mut payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
+
+        let mut anmf = vec![0u8; 16];
+
+        /* Eight pixels across, starting eight in, on a canvas sixteen wide is
+        exact; one more of either and it hangs off. */
+        anmf[0] = 4;
+        anmf[6] = 8;
+        anmf[9] = 15;
+        anmf.extend_from_slice(&chunk(b"VP8L", &vp8l_header(9, 16, false)));
+        payload.extend_from_slice(&chunk(b"ANMF", &anmf));
+        assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
     }
 
     #[test]

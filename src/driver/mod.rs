@@ -170,6 +170,9 @@ pub struct Decoder<'a> {
 
 pub(crate) const ALPHA_COMPRESSION_NONE: i32 = 0;
 pub(crate) const ALPHA_COMPRESSION_VP8L: i32 = 1;
+/// The highest pre-processing mode the format defines: level quantization,
+/// which only matters to a decoder that dithers the plane back out.
+const ALPHA_PREPROCESSED_LEVELS: i32 = 1;
 
 /// As long a failure message as the C's fixed buffer held.
 const ERROR_MAX: usize = 128;
@@ -1216,7 +1219,25 @@ impl<'a> Decoder<'a> {
     /// is what lets the frame come out without its alpha rather than fail. The
     /// raw path is the one caller that treats it as fatal instead, and says so
     /// before it gets here.
-    pub(crate) fn set_alpha_chunk(&mut self, header: i32, offset: usize, size: usize) {
+    ///
+    /// The two fields above it are not the same kind of unknown, so they are
+    /// not treated the same way: an unread compression is a feature this
+    /// decoder does not have and the frame can still come out without its
+    /// alpha, while a pre-processing mode or a reserved bit the format never
+    /// defined leaves nothing to fall back to. libwebp's `ALPHInit` refuses
+    /// all four; here only the last two are fatal.
+    pub(crate) fn set_alpha_chunk(
+        &mut self,
+        header: i32,
+        offset: usize,
+        size: usize,
+    ) -> Result<(), Error> {
+        if header >> 4 & 3 > ALPHA_PREPROCESSED_LEVELS || header >> 6 != 0 {
+            crate::log::error_args(format_args!(
+                "invalid ALPHA chunk header 0x{header:02x}"
+            ));
+            return Err(Error::InvalidData);
+        }
         self.alpha_data_offset = offset;
         self.alpha_data_size = size;
 
@@ -1224,11 +1245,12 @@ impl<'a> Decoder<'a> {
 
         if compression > ALPHA_COMPRESSION_VP8L {
             crate::log::warning("skipping unsupported ALPHA chunk");
-            return;
+            return Ok(());
         }
         self.has_alpha = true;
         self.alpha_compression = compression;
         self.alpha_filter = header >> 2 & 3;
+        Ok(())
     }
 
     /// A file with no RIFF wrapper: one image chunk, and for the lossy shape
@@ -1277,7 +1299,8 @@ impl<'a> Decoder<'a> {
                 header,
                 hs.raw_alpha_offset + 1,
                 hs.raw_alpha_size - 1,
-            );
+            )
+            .map_err(|e| ("invalid ALPHA chunk", e))?;
         }
         self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size)
             .map_err(|e| ("VP8 decode failed", e))?;
@@ -1362,10 +1385,22 @@ impl Decoder<'_> {
                     if size == 0 {
                         return Err(("invalid ALPHA chunk size", Error::InvalidData));
                     }
+                    /* The walk is driven by chunk order, so an ALPH behind the
+                    image it belongs to would be latched and never read. That
+                    is a file libwebp refuses rather than one it decodes
+                    opaque, so it is refused here too. */
+                    if decoder.still_done || decoder.vp8_active {
+                        return Err((
+                            "ALPHA chunk after the image it belongs to",
+                            Error::InvalidData,
+                        ));
+                    }
                     let header = decoder.file_at(payload_pos)[0] as i32;
 
                     decoder.alpha_pending = true;
-                    decoder.set_alpha_chunk(header, payload_pos + 1, size - 1);
+                    decoder
+                        .set_alpha_chunk(header, payload_pos + 1, size - 1)
+                        .map_err(|e| ("invalid ALPHA chunk", e))?;
                 }
                 TAG_VP8 => {
                     if decoder.animation || decoder.still_done {

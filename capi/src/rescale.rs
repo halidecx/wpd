@@ -33,7 +33,7 @@ pub unsafe extern "C" fn wpd_rescale_plane(
         (height as usize - 1) * stride as usize + width as usize * channels
     };
 
-    unsafe {
+    crate::guard((), || unsafe {
         let mut out = PlaneMut::borrowed(
             slice::from_raw_parts_mut(dst, extent(dst_stride, dst_width, dst_height)),
             dst_stride as usize,
@@ -48,5 +48,5 @@ pub unsafe extern "C" fn wpd_rescale_plane(
             work, &mut out, dst_width, dst_height, &inp, src_width, src_height,
             channels,
         );
-    }
+    });
 }

@@ -689,6 +689,15 @@ impl Decoder {
                 } else {
                     huffman::read_normal_code(gb, buf, &mut plan, lengths)?;
                 }
+                /* A code the reader ran off the end of is a code whose tail
+                came out of the zeros past the chunk rather than the file.
+                Building it would succeed on lengths nobody wrote, so the
+                overrun is the error, not whatever the table came out as.
+                libwebp's `ok = ok && !br->eos` in `ReadHuffmanCode`. */
+                if gb.is_eos(buf) {
+                    crate::log::error("prefix code runs past the end of the data");
+                    return Err(Error::InvalidData);
+                }
                 img.groups[i].trees[j] =
                     huffman::build(&mut img.arena, &mut plan, lengths, sorted)?;
             }

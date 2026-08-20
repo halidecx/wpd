@@ -80,9 +80,11 @@ meson compile -C build-minsize
 ```
 
 For the smallest artifacts, rebuild Rust's standard library with nightly. This
-also removes panic formatting and panic location details, so it is intended for
-production deployments where an internal panic may abort without diagnostics. It
-requires the nightly toolchain and its `rust-src` component:
+also drops panic location details and compiles the library to abort on a panic
+rather than unwind, so it is intended for production deployments where an
+internal panic may end the process without diagnostics -- the one build where
+the C ABI does not turn a defect into `WPD_ERR_INTERNAL`, because there is no
+unwind to catch. It requires the nightly toolchain and its `rust-src` component:
 
 ```sh
 rustup component add rust-src --toolchain nightly
@@ -281,6 +283,15 @@ own.
 The boolean coder has a 64-bit implementation and a 32-bit one, and every 64-bit
 build picks the former, so `./scripts/rac32.sh` runs the whole suite again
 against a `-Dforce_rac32=true` build to keep the latter honest.
+
+Every script above runs on macOS as well as on Linux. That is worth stating
+because it was not true for long: the two toolchains disagree about how to name
+a sanitizer runtime, whether `strip` takes `--strip-all`, whether `ld` will
+dead-strip a partial link, whether `sed -i` wants a backup suffix, and whether
+there is a LeakSanitizer at all. Each of those is handled where it comes up, by
+asking the tool rather than by asking `uname` where that is possible — the
+compiler knows where its own runtimes live, and a flag either works or it does
+not. A change to any of the scripts is worth running on both.
 
 `wpd_decoder_open()` copies input. `wpd_decoder_open_borrowed()` avoids that
 copy when the complete input remains alive and unchanged for the decoder's

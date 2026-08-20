@@ -14,6 +14,7 @@ use wpd::error::Error;
 
 const WPD_OK: c_int = 0;
 const WPD_ERR_INVALID_ARG: c_int = -1;
+const WPD_ERR_INTERNAL: c_int = -9;
 const WPD_ERR_NOT_WEBP: c_int = -2;
 const WPD_ERR_BITSTREAM: c_int = -3;
 const WPD_ERR_TRUNCATED: c_int = -4;
@@ -106,11 +107,11 @@ pub unsafe extern "C" fn wpd_get_info(
 
     let buf = unsafe { slice::from_raw_parts(data, size) };
 
-    match wpd::container::get_info(buf) {
+    crate::guard(WPD_ERR_INTERNAL, || match wpd::container::get_info(buf) {
         Ok(scanned) => {
             fill_info(info, &scanned);
             WPD_OK
         }
         Err(e) => status(e),
-    }
+    })
 }

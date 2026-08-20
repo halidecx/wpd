@@ -20,7 +20,9 @@ cargo_args=()
 built="$OUT_DIR/cargo-$NAME/$PROFILE"
 if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
     target="$(rustc -vV | awk '/^host: / { print $2 }')"
-    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=immediate-abort -Zlocation-detail=none"
+    # -Cpanic=abort, not immediate-abort: see cargo_tool.sh for why a bare
+    # trap instruction is not a reliable way to end a process.
+    export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=abort -Zlocation-detail=none"
     cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
     args+=(--target "$target")
     built="$OUT_DIR/cargo-$NAME/$target/$PROFILE"
@@ -32,13 +34,7 @@ cargo ${cargo_args[@]+"${cargo_args[@]}"} "${args[@]}"
 cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"
 
 if [ "$PROFILE" = release ] || [ "$PROFILE" = minsize ]; then
-    slim="$OUT_DIR/lib$NAME.a.slim"
-    if "${STRIP:-strip}" --strip-unneeded \
-           --remove-section=.llvmbc --remove-section=.llvmcmd \
-           -o "$slim" "$OUT_DIR/lib$NAME.a" 2>/dev/null; then
-        mv -f "$slim" "$OUT_DIR/lib$NAME.a"
-    else
-        rm -f "$slim"
+    . "$(dirname "$0")/strip_artifact.sh"
+    strip_artifact archive "$OUT_DIR/lib$NAME.a" ||
         echo "cargo_build.sh: cannot slim lib$NAME.a, shipping it whole" >&2
-    fi
 fi

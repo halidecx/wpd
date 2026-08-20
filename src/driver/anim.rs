@@ -322,9 +322,15 @@ impl<'a> Decoder<'a> {
                         crate::log::error("invalid ALPHA chunk size");
                         return Err(Error::InvalidData);
                     }
+                    /* Alpha precedes the image it belongs to; behind it there
+                    is nothing left to apply it to. */
+                    if sub.is_some() {
+                        crate::log::error("ALPHA chunk after the image it belongs to");
+                        return Err(Error::InvalidData);
+                    }
                     let header = self.input.chunk(at, 1)[0] as i32;
 
-                    self.set_alpha_chunk(header, at + 1, payload_size - 1);
+                    self.set_alpha_chunk(header, at + 1, payload_size - 1)?;
                 }
                 TAG_VP8 if sub.is_none() => {
                     self.vp8_lossy_decode_frame(at, payload_size)?;
