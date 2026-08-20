@@ -101,34 +101,9 @@ upsample_block_tramp!(upsample_block_bgra_c, LAYOUT_BGRA);
 upsample_block_tramp!(upsample_block_rgb_c, LAYOUT_RGB);
 upsample_block_tramp!(upsample_block_bgr_c, LAYOUT_BGR);
 
-unsafe extern "C" fn dispatch_alpha_first_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::dispatch_alpha_first(
-            slice::from_raw_parts_mut(dst, 4 * n),
-            slice::from_raw_parts(src, n),
-        )
-    }
-}
-
-unsafe extern "C" fn dispatch_alpha_last_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::dispatch_alpha_last(
-            slice::from_raw_parts_mut(dst, 4 * n),
-            slice::from_raw_parts(src, n),
-        )
-    }
-}
-
-macro_rules! pack_tramp {
-    ($name:ident, $kernel:ident, $bpp:literal) => {
+/* dst holds $d bytes per pixel, src $s, and the kernel takes the two rows. */
+macro_rules! row_tramp {
+    ($name:ident, $kernel:ident, $d:literal, $s:literal) => {
         unsafe extern "C" fn $name(dst: *mut u8, src: *const u8, n: c_int) {
             let Some(n) = count(n) else {
                 return;
@@ -136,22 +111,41 @@ macro_rules! pack_tramp {
 
             unsafe {
                 k::$kernel(
-                    slice::from_raw_parts_mut(dst, $bpp * n),
-                    slice::from_raw_parts(src, 4 * n),
+                    slice::from_raw_parts_mut(dst, $d * n),
+                    slice::from_raw_parts(src, $s * n),
                 )
             }
         }
     };
 }
 
-pack_tramp!(pack_rgba_c, pack_rgba, 4);
-pack_tramp!(pack_bgra_c, pack_bgra, 4);
-pack_tramp!(pack_rgb_c, pack_rgb, 3);
-pack_tramp!(pack_bgr_c, pack_bgr, 3);
-pack_tramp!(pack_rgb565_c, pack_rgb565, 2);
-pack_tramp!(pack_bgr565_c, pack_bgr565, 2);
-pack_tramp!(pack_rgba4444_c, pack_rgba4444, 2);
-pack_tramp!(pack_bgra4444_c, pack_bgra4444, 2);
+/* One row in place, plus whatever fixed argument selects the variant. */
+macro_rules! inplace_tramp {
+    ($name:ident, $kernel:ident, $bpp:literal, $extra:expr) => {
+        unsafe extern "C" fn $name(row: *mut u8, n: c_int) {
+            let Some(n) = count(n) else {
+                return;
+            };
+
+            k::$kernel(unsafe { slice::from_raw_parts_mut(row, $bpp * n) }, $extra);
+        }
+    };
+}
+
+row_tramp!(dispatch_alpha_first_c, dispatch_alpha_first, 4, 1);
+row_tramp!(dispatch_alpha_last_c, dispatch_alpha_last, 4, 1);
+row_tramp!(pack_rgba_c, pack_rgba, 4, 4);
+row_tramp!(pack_bgra_c, pack_bgra, 4, 4);
+row_tramp!(pack_rgb_c, pack_rgb, 3, 4);
+row_tramp!(pack_bgr_c, pack_bgr, 3, 4);
+row_tramp!(pack_rgb565_c, pack_rgb565, 2, 4);
+row_tramp!(pack_bgr565_c, pack_bgr565, 2, 4);
+row_tramp!(pack_rgba4444_c, pack_rgba4444, 2, 4);
+row_tramp!(pack_bgra4444_c, pack_bgra4444, 2, 4);
+row_tramp!(argb_to_y_c, argb_to_y, 1, 4);
+
+inplace_tramp!(premultiply_row_4444_c, premultiply_row_4444, 2, false);
+inplace_tramp!(premultiply_row_4444_swap_c, premultiply_row_4444, 2, true);
 
 unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_int) {
     let Some(n) = count(n) else {
@@ -160,37 +154,6 @@ unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_i
     let row = unsafe { slice::from_raw_parts_mut(rgba, 4 * n) };
 
     k::premultiply_row(row, alpha_first != 0);
-}
-
-unsafe extern "C" fn premultiply_row_4444_c(rgba4444: *mut u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-    let row = unsafe { slice::from_raw_parts_mut(rgba4444, 2 * n) };
-
-    k::premultiply_row_4444(row, false);
-}
-
-unsafe extern "C" fn premultiply_row_4444_swap_c(bgra4444: *mut u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-    let row = unsafe { slice::from_raw_parts_mut(bgra4444, 2 * n) };
-
-    k::premultiply_row_4444(row, true);
-}
-
-unsafe extern "C" fn argb_to_y_c(y: *mut u8, argb: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::argb_to_y(
-            slice::from_raw_parts_mut(y, n),
-            slice::from_raw_parts(argb, 4 * n),
-        )
-    }
 }
 
 unsafe extern "C" fn argb_to_yuv444_c(
