@@ -655,7 +655,7 @@ pub unsafe extern "C" fn wpd_decoder_error(
     decoder: *const WPDDecoderRaw,
 ) -> *const c_char {
     match unsafe { decoder.as_ref() } {
-        Some(decoder) if decoder.error_raw()[0] != 0 => {
+        Some(decoder) if !decoder.error_raw().is_empty() => {
             decoder.error_raw().as_ptr().cast()
         }
         _ => c"unknown decoder error".as_ptr(),

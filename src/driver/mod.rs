@@ -113,7 +113,7 @@ pub struct Decoder<'a> {
     pub(crate) sink: Option<Box<dyn RowSink>>,
 
     pub(crate) status: Option<Error>,
-    pub(crate) error: [u8; ERROR_MAX],
+    pub(crate) error: Vec<u8>,
 }
 
 pub(crate) const ALPHA_COMPRESSION_NONE: i32 = 0;
@@ -281,19 +281,17 @@ impl<'a> Decoder<'a> {
             sink: None,
 
             status: None,
-            error: [0; ERROR_MAX],
+            error: Vec::new(),
         }
     }
 
     pub fn fail(&mut self, message: &'static str, e: Error) -> Error {
         self.status = Some(e);
-
-        let text = described((message, e));
-        let bytes = text.as_bytes();
-        let len = bytes.len().min(ERROR_MAX - 1);
-
-        self.error = [0; ERROR_MAX];
-        self.error[..len].copy_from_slice(&bytes[..len]);
+        self.error.clear();
+        self.error
+            .extend_from_slice(described((message, e)).as_bytes());
+        self.error.truncate(ERROR_MAX - 1);
+        self.error.push(0);
         e
     }
 
@@ -568,7 +566,7 @@ impl<'a> Decoder<'a> {
         self.info_has_alpha = false;
         self.info_coding = Coding::Unknown;
         self.status = None;
-        self.error = [0; ERROR_MAX];
+        self.error.clear();
     }
 
     fn file_compact(&mut self) {
@@ -872,7 +870,7 @@ impl Decoder<'_> {
         self.anim_state_reset();
         self.pos = if raw == Raw::No { 12 } else { 0 };
         self.status = None;
-        self.error = [0; ERROR_MAX];
+        self.error.clear();
         Ok(())
     }
 
@@ -1417,12 +1415,10 @@ impl Decoder<'_> {
     }
 
     pub fn error_message(&self) -> &str {
-        if self.error[0] == 0 {
-            return "unknown decoder error";
+        match self.error.split_last() {
+            Some((_nul, text)) => std::str::from_utf8(text).unwrap_or(""),
+            None => "unknown decoder error",
         }
-        let end = self.error.iter().position(|&b| b == 0).unwrap_or(0);
-
-        std::str::from_utf8(&self.error[..end]).unwrap_or("")
     }
 
     pub fn error_raw(&self) -> &[u8] {
