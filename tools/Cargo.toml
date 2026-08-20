@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-exclude = ["*.c", "*.h", "*.sh", "compat/"]
+exclude = ["*.c", "*.h", "*.sh", "compat/", "imagewebpdec/"]
 
 [[bin]]
 name = "wpd"

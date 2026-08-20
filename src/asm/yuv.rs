@@ -7,7 +7,7 @@ use std::ffi::c_int;
 use crate::cpu::CpuFlags;
 use crate::dsp::yuv::{bpp, UpsampleDst, UpsampleSrc, YuvDsp, UPSAMPLE_BLOCK};
 
-pub use super::Raw;
+pub(crate) use super::Raw;
 
 pub type UpsampleBlockRaw = unsafe extern "C" fn(
     *const u8,

@@ -1,4 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
+#![deny(improper_ctypes)]
 #![warn(clippy::all)]
 
 #[cfg(not(panic = "abort"))]

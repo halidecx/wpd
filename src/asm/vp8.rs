@@ -14,23 +14,69 @@ pub type WhtRaw = unsafe extern "C" fn(*mut [[i16; 16]; 4], *mut i16);
 pub type IdctRaw = unsafe extern "C" fn(*mut u8, *mut i16, isize);
 pub type Idct4Raw = unsafe extern "C" fn(*mut u8, *mut [i16; 16], isize);
 
-#[inline(always)]
-fn check_v(p: &[u8], o: usize, s: usize, up: usize, down: usize, n: usize) {
-    assert!(
-        o >= up * s && p.len() >= o + down * s + n,
-        "plane too small"
-    );
+/* A valid loop-filter origin. Only a bounds check can make one; composed
+ * filters can only move one within their already-checked window. */
+#[derive(Clone, Copy)]
+struct Window(*mut u8);
+
+impl Window {
+    #[inline(always)]
+    fn as_mut_ptr(self) -> *mut u8 {
+        self.0
+    }
+
+    /* The caller must have checked a window covering the additional offset. */
+    #[inline(always)]
+    unsafe fn add(self, offset: usize) -> Self {
+        Self(unsafe { self.0.add(offset) })
+    }
 }
 
 #[inline(always)]
-fn check_h(p: &[u8], o: usize, s: usize, left: usize, right: usize, n: usize) {
+fn check_v(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    up: usize,
+    down: usize,
+    n: usize,
+) -> Window {
+    let before = up.checked_mul(s);
+    let end = down
+        .checked_mul(s)
+        .and_then(|down| o.checked_add(down))
+        .and_then(|end| end.checked_add(n));
     assert!(
-        o >= left && p.len() >= o + (n - 1) * s + right,
+        n != 0
+            && before.is_some_and(|before| o >= before)
+            && end.is_some_and(|end| p.len() >= end),
         "plane too small"
     );
+    Window(unsafe { p.as_mut_ptr().add(o) })
 }
 
-pub use super::Raw;
+#[inline(always)]
+fn check_h(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    left: usize,
+    right: usize,
+    n: usize,
+) -> Window {
+    let end = n
+        .checked_sub(1)
+        .and_then(|n| n.checked_mul(s))
+        .and_then(|down| o.checked_add(down))
+        .and_then(|end| end.checked_add(right));
+    assert!(
+        n != 0 && o >= left && end.is_some_and(|end| p.len() >= end),
+        "plane too small"
+    );
+    Window(unsafe { p.as_mut_ptr().add(o) })
+}
+
+pub(crate) use super::Raw;
 
 /* The kind picks the signature alias and the argument list that goes with it.
  * An arm no arch happens to use costs nothing, unlike an unused macro. */
@@ -121,6 +167,16 @@ macro_rules! idct_set {
 }
 
 fn lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
+    w: Window,
+    s: usize,
+    e: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, i, hev) }
+}
+
+fn checked_lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
     p: &mut [u8],
     o: usize,
     s: usize,
@@ -128,11 +184,20 @@ fn lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
     i: i32,
     hev: i32,
 ) {
-    check_v(p, o, s, 4, 3, N);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, i, hev) }
+    lf_v::<T, N>(check_v(p, o, s, 4, 3, N), s, e, i, hev)
 }
 
 fn lf_h<T: Raw<Sig = LfRaw>, const N: usize>(
+    w: Window,
+    s: usize,
+    e: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, i, hev) }
+}
+
+fn checked_lf_h<T: Raw<Sig = LfRaw>, const N: usize>(
     p: &mut [u8],
     o: usize,
     s: usize,
@@ -140,12 +205,23 @@ fn lf_h<T: Raw<Sig = LfRaw>, const N: usize>(
     i: i32,
     hev: i32,
 ) {
-    check_h(p, o, s, 4, 4, N);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, i, hev) }
+    lf_h::<T, N>(check_h(p, o, s, 4, 4, N), s, e, i, hev)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn lf_v_uv<T: Raw<Sig = LfUvRaw>>(
+    u: Window,
+    v: Window,
+    s: usize,
+    e: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, i, hev) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_lf_v_uv<T: Raw<Sig = LfUvRaw>>(
     u: &mut [u8],
     ou: usize,
     v: &mut [u8],
@@ -155,22 +231,30 @@ fn lf_v_uv<T: Raw<Sig = LfUvRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_v(u, ou, s, 4, 3, 8);
-    check_v(v, ov, s, 4, 3, 8);
-    unsafe {
-        (T::F)(
-            u.as_mut_ptr().add(ou),
-            v.as_mut_ptr().add(ov),
-            s as isize,
-            e,
-            i,
-            hev,
-        )
-    }
+    lf_v_uv::<T>(
+        check_v(u, ou, s, 4, 3, 8),
+        check_v(v, ov, s, 4, 3, 8),
+        s,
+        e,
+        i,
+        hev,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn lf_h_uv<T: Raw<Sig = LfUvRaw>>(
+    u: Window,
+    v: Window,
+    s: usize,
+    e: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, i, hev) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_lf_h_uv<T: Raw<Sig = LfUvRaw>>(
     u: &mut [u8],
     ou: usize,
     v: &mut [u8],
@@ -180,22 +264,30 @@ fn lf_h_uv<T: Raw<Sig = LfUvRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_h(u, ou, s, 4, 4, 8);
-    check_h(v, ov, s, 4, 4, 8);
-    unsafe {
-        (T::F)(
-            u.as_mut_ptr().add(ou),
-            v.as_mut_ptr().add(ov),
-            s as isize,
-            e,
-            i,
-            hev,
-        )
-    }
+    lf_h_uv::<T>(
+        check_h(u, ou, s, 4, 4, 8),
+        check_h(v, ov, s, 4, 4, 8),
+        s,
+        e,
+        i,
+        hev,
+    )
 }
 
 #[allow(dead_code)]
 fn lf_v_mb<T: Raw<Sig = LfMbRaw>>(
+    w: Window,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev) }
+}
+
+#[allow(dead_code)]
+fn checked_lf_v_mb<T: Raw<Sig = LfMbRaw>>(
     p: &mut [u8],
     o: usize,
     s: usize,
@@ -204,11 +296,21 @@ fn lf_v_mb<T: Raw<Sig = LfMbRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_v(p, o, s, 4, 15, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be, i, hev) }
+    lf_v_mb::<T>(check_v(p, o, s, 4, 15, 16), s, e, be, i, hev)
 }
 
 fn lf_h_mb<T: Raw<Sig = LfMbRaw>>(
+    w: Window,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev) }
+}
+
+fn checked_lf_h_mb<T: Raw<Sig = LfMbRaw>>(
     p: &mut [u8],
     o: usize,
     s: usize,
@@ -217,13 +319,26 @@ fn lf_h_mb<T: Raw<Sig = LfMbRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_h(p, o, s, 4, 16, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be, i, hev) }
+    lf_h_mb::<T>(check_h(p, o, s, 4, 16, 16), s, e, be, i, hev)
 }
 
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 fn lf_v_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
+    u: Window,
+    v: Window,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, be, i, hev) }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+fn checked_lf_v_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
     u: &mut [u8],
     ou: usize,
     v: &mut [u8],
@@ -234,23 +349,32 @@ fn lf_v_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_v(u, ou, s, 4, 7, 8);
-    check_v(v, ov, s, 4, 7, 8);
-    unsafe {
-        (T::F)(
-            u.as_mut_ptr().add(ou),
-            v.as_mut_ptr().add(ov),
-            s as isize,
-            e,
-            be,
-            i,
-            hev,
-        )
-    }
+    lf_v_uv_mb::<T>(
+        check_v(u, ou, s, 4, 7, 8),
+        check_v(v, ov, s, 4, 7, 8),
+        s,
+        e,
+        be,
+        i,
+        hev,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn lf_h_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
+    u: Window,
+    v: Window,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+) {
+    unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, be, i, hev) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn checked_lf_h_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
     u: &mut [u8],
     ou: usize,
     v: &mut [u8],
@@ -261,52 +385,71 @@ fn lf_h_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
     i: i32,
     hev: i32,
 ) {
-    check_h(u, ou, s, 4, 8, 8);
-    check_h(v, ov, s, 4, 8, 8);
-    unsafe {
-        (T::F)(
-            u.as_mut_ptr().add(ou),
-            v.as_mut_ptr().add(ov),
-            s as isize,
-            e,
-            be,
-            i,
-            hev,
-        )
-    }
+    lf_h_uv_mb::<T>(
+        check_h(u, ou, s, 4, 8, 8),
+        check_h(v, ov, s, 4, 8, 8),
+        s,
+        e,
+        be,
+        i,
+        hev,
+    )
 }
 
-fn lf_v_simple<T: Raw<Sig = LfSimpleRaw>>(p: &mut [u8], o: usize, s: usize, e: i32) {
-    check_v(p, o, s, 2, 1, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e) }
+fn lf_v_simple<T: Raw<Sig = LfSimpleRaw>>(w: Window, s: usize, e: i32) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e) }
 }
 
-fn lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(p: &mut [u8], o: usize, s: usize, e: i32) {
-    check_h(p, o, s, 2, 2, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e) }
+fn checked_lf_v_simple<T: Raw<Sig = LfSimpleRaw>>(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    e: i32,
+) {
+    lf_v_simple::<T>(check_v(p, o, s, 2, 1, 16), s, e)
+}
+
+fn lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(w: Window, s: usize, e: i32) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e) }
+}
+
+fn checked_lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    e: i32,
+) {
+    lf_h_simple::<T>(check_h(p, o, s, 2, 2, 16), s, e)
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-fn lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
-    p: &mut [u8],
-    o: usize,
-    s: usize,
-    e: i32,
-    be: i32,
-) {
-    check_v(p, o, s, 2, 13, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be) }
+fn lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(w: Window, s: usize, e: i32, be: i32) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be) }
 }
 
-fn lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn checked_lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
     p: &mut [u8],
     o: usize,
     s: usize,
     e: i32,
     be: i32,
 ) {
-    check_h(p, o, s, 2, 14, 16);
-    unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be) }
+    lf_v_simple_mb::<T>(check_v(p, o, s, 2, 13, 16), s, e, be)
+}
+
+fn lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(w: Window, s: usize, e: i32, be: i32) {
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be) }
+}
+
+fn checked_lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    e: i32,
+    be: i32,
+) {
+    lf_h_simple_mb::<T>(check_h(p, o, s, 2, 14, 16), s, e, be)
 }
 
 fn mb_from<E, I, const VERT: bool>(
@@ -323,19 +466,16 @@ fn mb_from<E, I, const VERT: bool>(
 {
     let step = if VERT { 4 * s } else { 4 };
 
-    if VERT {
-        check_v(p, o, s, 4, 15, 16);
+    let w = if VERT {
+        check_v(p, o, s, 4, 15, 16)
     } else {
-        check_h(p, o, s, 4, 16, 16);
-    }
-    unsafe {
-        let d = p.as_mut_ptr().add(o);
+        check_h(p, o, s, 4, 16, 16)
+    };
 
-        (E::F)(d, s as isize, e, i, hev);
-        (I::F)(d.add(step), s as isize, be, i, hev);
-        (I::F)(d.add(2 * step), s as isize, be, i, hev);
-        (I::F)(d.add(3 * step), s as isize, be, i, hev);
-    }
+    lf_v::<E, 16>(w, s, e, i, hev);
+    lf_v::<I, 16>(unsafe { w.add(step) }, s, be, i, hev);
+    lf_v::<I, 16>(unsafe { w.add(2 * step) }, s, be, i, hev);
+    lf_v::<I, 16>(unsafe { w.add(3 * step) }, s, be, i, hev);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -355,19 +495,21 @@ fn uv_mb_from<E, I, const VERT: bool>(
 {
     let step = if VERT { 4 * s } else { 4 };
 
-    if VERT {
-        check_v(u, ou, s, 4, 7, 8);
-        check_v(v, ov, s, 4, 7, 8);
+    let (u, v) = if VERT {
+        (check_v(u, ou, s, 4, 7, 8), check_v(v, ov, s, 4, 7, 8))
     } else {
-        check_h(u, ou, s, 4, 8, 8);
-        check_h(v, ov, s, 4, 8, 8);
-    }
-    unsafe {
-        let (du, dv) = (u.as_mut_ptr().add(ou), v.as_mut_ptr().add(ov));
+        (check_h(u, ou, s, 4, 8, 8), check_h(v, ov, s, 4, 8, 8))
+    };
 
-        (E::F)(du, dv, s as isize, e, i, hev);
-        (I::F)(du.add(step), dv.add(step), s as isize, be, i, hev);
-    }
+    lf_v_uv::<E>(u, v, s, e, i, hev);
+    lf_v_uv::<I>(
+        unsafe { u.add(step) },
+        unsafe { v.add(step) },
+        s,
+        be,
+        i,
+        hev,
+    );
 }
 
 fn simple_mb_from<T: Raw<Sig = LfSimpleRaw>, const VERT: bool>(
@@ -379,19 +521,16 @@ fn simple_mb_from<T: Raw<Sig = LfSimpleRaw>, const VERT: bool>(
 ) {
     let step = if VERT { 4 * s } else { 4 };
 
-    if VERT {
-        check_v(p, o, s, 2, 13, 16);
+    let w = if VERT {
+        check_v(p, o, s, 2, 13, 16)
     } else {
-        check_h(p, o, s, 2, 14, 16);
-    }
-    unsafe {
-        let d = p.as_mut_ptr().add(o);
+        check_h(p, o, s, 2, 14, 16)
+    };
 
-        (T::F)(d, s as isize, e);
-        (T::F)(d.add(step), s as isize, be);
-        (T::F)(d.add(2 * step), s as isize, be);
-        (T::F)(d.add(3 * step), s as isize, be);
-    }
+    lf_v_simple::<T>(w, s, e);
+    lf_v_simple::<T>(unsafe { w.add(step) }, s, be);
+    lf_v_simple::<T>(unsafe { w.add(2 * step) }, s, be);
+    lf_v_simple::<T>(unsafe { w.add(3 * step) }, s, be);
 }
 
 fn wht<T: Raw<Sig = WhtRaw>>(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
@@ -524,20 +663,20 @@ pub struct RawTable {
 
 macro_rules! install_lf {
     ($c:expr, $p:ident) => {
-        $c.v_loop_filter_simple = lf_v_simple::<$p::VSimple>;
-        $c.h_loop_filter_simple = lf_h_simple::<$p::HSimple>;
+        $c.v_loop_filter_simple = checked_lf_v_simple::<$p::VSimple>;
+        $c.h_loop_filter_simple = checked_lf_h_simple::<$p::HSimple>;
         $c.v_loop_filter_simple_mb = simple_mb_from::<$p::VSimple, true>;
         $c.h_loop_filter_simple_mb = simple_mb_from::<$p::HSimple, false>;
 
-        $c.v_loop_filter16y = lf_v::<$p::V16, 16>;
-        $c.h_loop_filter16y = lf_h::<$p::H16, 16>;
-        $c.v_loop_filter8uv = lf_v_uv::<$p::V8uv>;
-        $c.h_loop_filter8uv = lf_h_uv::<$p::H8uv>;
+        $c.v_loop_filter16y = checked_lf_v::<$p::V16, 16>;
+        $c.h_loop_filter16y = checked_lf_h::<$p::H16, 16>;
+        $c.v_loop_filter8uv = checked_lf_v_uv::<$p::V8uv>;
+        $c.h_loop_filter8uv = checked_lf_h_uv::<$p::H8uv>;
 
-        $c.v_loop_filter16y_inner = lf_v::<$p::V16Inner, 16>;
-        $c.h_loop_filter16y_inner = lf_h::<$p::H16Inner, 16>;
-        $c.v_loop_filter8uv_inner = lf_v_uv::<$p::V8uvInner>;
-        $c.h_loop_filter8uv_inner = lf_h_uv::<$p::H8uvInner>;
+        $c.v_loop_filter16y_inner = checked_lf_v::<$p::V16Inner, 16>;
+        $c.h_loop_filter16y_inner = checked_lf_h::<$p::H16Inner, 16>;
+        $c.v_loop_filter8uv_inner = checked_lf_v_uv::<$p::V8uvInner>;
+        $c.h_loop_filter8uv_inner = checked_lf_h_uv::<$p::H8uvInner>;
 
         $c.v_loop_filter16y_mb = mb_from::<$p::V16, $p::V16Inner, true>;
         $c.h_loop_filter16y_mb = mb_from::<$p::H16, $p::H16Inner, false>;
@@ -669,7 +808,7 @@ mod arch {
             "ff_vp8_h_loop_filter_simple_mb_avx2"
         );
 
-        extern "C" {
+        unsafe extern "C" {
             #[link_name = "ff_vp8_h_loop_filter16y_mb_transpose_avx2"]
             pub fn h16_transpose(dst: *mut u8, stride: isize, tmp: *mut u8);
             #[link_name = "ff_vp8_h_loop_filter16y_mb_itranspose_avx2"]
@@ -764,10 +903,10 @@ mod arch {
             idct_dc_add = idct::<sse4::DcAdd>;
         }
         AVX2 {
-            v_loop_filter_simple_mb = lf_v_simple_mb::<avx2::VSimpleMb>;
-            h_loop_filter_simple_mb = lf_h_simple_mb::<avx2::HSimpleMb>;
-            h_loop_filter16y_mb = lf_h_mb::<H16MbAvx2>;
-            h_loop_filter8uv_mb = lf_h_uv_mb::<H8uvMbAvx2>;
+            v_loop_filter_simple_mb = checked_lf_v_simple_mb::<avx2::VSimpleMb>;
+            h_loop_filter_simple_mb = checked_lf_h_simple_mb::<avx2::HSimpleMb>;
+            h_loop_filter16y_mb = checked_lf_h_mb::<H16MbAvx2>;
+            h_loop_filter8uv_mb = checked_lf_h_uv_mb::<H8uvMbAvx2>;
         }
     }
 }
@@ -822,9 +961,9 @@ mod arch {
             @lf neon, neon_mb;
             @idct neon_idct;
 
-            h_loop_filter_simple_mb = lf_h_simple_mb::<fused::HSimpleMb>;
-            h_loop_filter16y_mb = lf_h_mb::<fused::H16Mb>;
-            h_loop_filter8uv_mb = lf_h_uv_mb::<fused::H8uvMb>;
+            h_loop_filter_simple_mb = checked_lf_h_simple_mb::<fused::HSimpleMb>;
+            h_loop_filter16y_mb = checked_lf_h_mb::<fused::H16Mb>;
+            h_loop_filter8uv_mb = checked_lf_h_uv_mb::<fused::H8uvMb>;
         }
     }
 }

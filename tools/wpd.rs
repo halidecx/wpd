@@ -1,3 +1,5 @@
+#![deny(improper_ctypes)]
+
 mod md5;
 mod output;
 
@@ -572,7 +574,7 @@ fn restore_sigpipe() {
     const SIGPIPE: i32 = 13;
     const SIG_DFL: usize = 0;
 
-    extern "C" {
+    unsafe extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;
     }
 

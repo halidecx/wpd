@@ -4,7 +4,7 @@ use crate::dsp::vp8pred::*;
 pub type PredRaw = unsafe extern "C" fn(*mut u8, isize);
 pub type Pred4x4Raw = unsafe extern "C" fn(*mut u8, *const u8, isize);
 
-pub use super::Raw;
+pub(crate) use super::Raw;
 
 pub struct RawTable {
     pub pred4x4: [Option<Pred4x4Raw>; PRED4X4_COUNT],

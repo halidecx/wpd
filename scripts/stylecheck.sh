@@ -8,4 +8,8 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
+IWP=tools/imagewebpdec/Cargo.toml
+cargo fmt --manifest-path "$IWP" --all
+cargo clippy --manifest-path "$IWP" --all-targets -- -D warnings
+
 echo "done"
