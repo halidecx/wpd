@@ -284,11 +284,13 @@ pub unsafe extern "C" fn wpd_decoder_set_options(
     let Some(decoder) = (unsafe { decoder.as_mut() }) else {
         return WPD_ERR_INVALID_ARG;
     };
-    let Some(options) = (unsafe { options.as_ref() }) else {
-        return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
-    };
-
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        let Some(options) = (unsafe { options.as_ref() }) else {
+            return status(
+                decoder.fail("invalid decoder options", Error::InvalidArgument),
+            );
+        };
+
         reported(set_options(decoder, options).map(|()| WPD_OK))
     })
 }
@@ -373,10 +375,10 @@ pub unsafe extern "C" fn wpd_decoder_open(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if data.is_null() {
-        return status(decoder.fail("invalid input data", Error::InvalidArgument));
-    }
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        if data.is_null() {
+            return status(decoder.fail("invalid input data", Error::InvalidArgument));
+        }
         reported(decoder.open(unsafe { lent(data, size) }).map(|()| WPD_OK))
     })
 }
@@ -395,10 +397,10 @@ pub unsafe extern "C" fn wpd_decoder_open_borrowed(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if data.is_null() {
-        return status(decoder.fail("invalid input data", Error::InvalidArgument));
-    }
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        if data.is_null() {
+            return status(decoder.fail("invalid input data", Error::InvalidArgument));
+        }
         reported(
             decoder
                 .open_borrowed(unsafe { lent(data, size) })
@@ -433,10 +435,10 @@ pub unsafe extern "C" fn wpd_decoder_append(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if data.is_null() {
-        return status(decoder.fail("invalid input data", Error::InvalidArgument));
-    }
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        if data.is_null() {
+            return status(decoder.fail("invalid input data", Error::InvalidArgument));
+        }
         reported(decoder.append(unsafe { lent(data, size) }).map(|()| WPD_OK))
     })
 }
@@ -455,10 +457,10 @@ pub unsafe extern "C" fn wpd_decoder_update(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if data.is_null() {
-        return status(decoder.fail("invalid input data", Error::InvalidArgument));
-    }
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        if data.is_null() {
+            return status(decoder.fail("invalid input data", Error::InvalidArgument));
+        }
         reported(decoder.update(unsafe { lent(data, size) }).map(|()| WPD_OK))
     })
 }
@@ -490,11 +492,13 @@ pub unsafe extern "C" fn wpd_decoder_get_info(
     let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
         return WPD_ERR_INVALID_ARG;
     };
-    let Some(info) = (unsafe { info.as_mut() }) else {
-        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
-    };
-
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        let Some(info) = (unsafe { info.as_mut() }) else {
+            return status(
+                decoder.fail("invalid decoder state", Error::InvalidArgument),
+            );
+        };
+
         reported(get_info(decoder, info).map(|()| WPD_OK))
     })
 }
@@ -553,11 +557,13 @@ pub unsafe extern "C" fn wpd_decoder_frame_info(
     let Some(decoder) = (unsafe { decoder.cast_mut().as_mut() }) else {
         return WPD_ERR_INVALID_ARG;
     };
-    let Some(info) = (unsafe { info.as_mut() }) else {
-        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
-    };
-
     decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        let Some(info) = (unsafe { info.as_mut() }) else {
+            return status(
+                decoder.fail("invalid decoder state", Error::InvalidArgument),
+            );
+        };
+
         reported(frame_info(decoder, index, info).map(|()| WPD_OK))
     })
 }
@@ -620,22 +626,26 @@ pub unsafe extern "C" fn wpd_decoder_metadata(
         return WPD_ERR_INVALID_ARG;
     };
 
-    if data.is_null() || size.is_null() {
-        return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
-    }
-    decoder.guarded(WPD_ERR_INTERNAL, |decoder| match decoder.metadata(which) {
-        Err(e) => status(e),
-        Ok(found) => {
-            let (at, len) = match found {
-                Some(bytes) => (bytes.as_ptr(), bytes.len()),
-                None => (ptr::null(), 0),
-            };
+    decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
+        if data.is_null() || size.is_null() {
+            return status(
+                decoder.fail("invalid decoder state", Error::InvalidArgument),
+            );
+        }
+        match decoder.metadata(which) {
+            Err(e) => status(e),
+            Ok(found) => {
+                let (at, len) = match found {
+                    Some(bytes) => (bytes.as_ptr(), bytes.len()),
+                    None => (ptr::null(), 0),
+                };
 
-            unsafe {
-                data.write(at);
-                size.write(len);
+                unsafe {
+                    data.write(at);
+                    size.write(len);
+                }
+                WPD_OK
             }
-            WPD_OK
         }
     })
 }
