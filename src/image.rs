@@ -4,10 +4,11 @@ pub const FILE_PADDING: usize = 64;
 
 pub const MAX_SCALED: i32 = 16384;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Format {
     Yuv420p,
     Yuva420p,
+    #[default]
     Argb,
     Rgba,
     Bgra,

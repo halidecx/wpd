@@ -857,7 +857,7 @@ impl Decoder<'_> {
             duration: entry.duration,
             dispose_to_background: entry.dispose
                 == crate::container::Dispose::Background,
-            blend: entry.blend == crate::container::Blend::Alpha,
+            no_blend: entry.blend != crate::container::Blend::Alpha,
             has_alpha: entry.has_alpha,
             complete: entry.complete,
         })

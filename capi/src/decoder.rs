@@ -403,7 +403,7 @@ fn frame_info(
     info.height = entry.height;
     info.duration = entry.duration;
     info.dispose = c_int::from(entry.dispose_to_background);
-    info.blend = c_int::from(!entry.blend);
+    info.blend = c_int::from(entry.no_blend);
     info.has_alpha = c_int::from(entry.has_alpha);
     info.complete = c_int::from(entry.complete);
     Ok(())

@@ -13,7 +13,7 @@ pub struct ImageInfo {
     pub metadata: i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FrameInfo {
     pub pos_x: i32,
     pub pos_y: i32,
@@ -21,25 +21,9 @@ pub struct FrameInfo {
     pub height: i32,
     pub duration: i32,
     pub dispose_to_background: bool,
-    pub blend: bool,
+    pub no_blend: bool,
     pub has_alpha: bool,
     pub complete: bool,
-}
-
-impl Default for FrameInfo {
-    fn default() -> Self {
-        FrameInfo {
-            pos_x: 0,
-            pos_y: 0,
-            width: 0,
-            height: 0,
-            duration: 0,
-            dispose_to_background: false,
-            blend: true,
-            has_alpha: false,
-            complete: false,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -51,7 +35,7 @@ mod tests {
     fn a_frame_that_declares_nothing_is_blended() {
         let d = FrameInfo::default();
 
-        assert_eq!(d.blend, Blend::default() == Blend::Alpha);
+        assert_eq!(d.no_blend, Blend::default() != Blend::Alpha);
         assert_eq!(
             d.dispose_to_background,
             Dispose::default() == Dispose::Background

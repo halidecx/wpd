@@ -463,7 +463,7 @@ fn print_image_info(decoder: &mut Decoder<'_>, printed: &mut bool) {
             entry.pos_y,
             entry.duration,
             i32::from(entry.dispose_to_background),
-            i32::from(!entry.blend),
+            i32::from(entry.no_blend),
             i32::from(entry.has_alpha),
             i32::from(entry.complete)
         );

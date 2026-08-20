@@ -64,7 +64,7 @@ pub(crate) fn export_frame(
     out.pos_x = set.pos_x;
     out.pos_y = set.pos_y;
     out.dispose_to_background = flags & ANMF_FLAG_DISPOSE != 0;
-    out.blend = flags & ANMF_FLAG_NO_BLEND == 0;
+    out.no_blend = flags & ANMF_FLAG_NO_BLEND != 0;
     out.has_alpha = set.has_alpha;
 }
 

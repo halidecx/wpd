@@ -1,12 +1,15 @@
 use crate::image::Format;
 use crate::picture::Frame;
 
+#[derive(Default)]
 pub enum Pixels<'a> {
     Own(Frame<'a>),
     Sink,
+    #[default]
     None,
 }
 
+#[derive(Default)]
 pub struct Handout<'a> {
     pub pixels: Pixels<'a>,
     pub format: Format,
@@ -17,26 +20,8 @@ pub struct Handout<'a> {
     pub pos_x: i32,
     pub pos_y: i32,
     pub dispose_to_background: bool,
-    pub blend: bool,
+    pub no_blend: bool,
     pub has_alpha: bool,
-}
-
-impl Default for Handout<'_> {
-    fn default() -> Self {
-        Handout {
-            pixels: Pixels::None,
-            format: Format::Argb,
-            width: 0,
-            height: 0,
-            duration: 0,
-            timestamp: 0,
-            pos_x: 0,
-            pos_y: 0,
-            dispose_to_background: false,
-            blend: true,
-            has_alpha: false,
-        }
-    }
 }
 
 impl<'a> Handout<'a> {

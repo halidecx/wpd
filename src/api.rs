@@ -67,7 +67,7 @@ impl<'a> Picture<'a> {
     }
 
     pub fn blend(&self) -> bool {
-        self.out.blend
+        !self.out.no_blend
     }
 
     pub fn planes(&self) -> usize {

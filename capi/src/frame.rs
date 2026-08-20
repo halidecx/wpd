@@ -141,10 +141,10 @@ pub(crate) unsafe fn write_frame(
     } else {
         WPD_DISPOSE_NONE
     };
-    out.blend = if handout.blend {
-        WPD_BLEND_ALPHA
-    } else {
+    out.blend = if handout.no_blend {
         WPD_BLEND_NONE
+    } else {
+        WPD_BLEND_ALPHA
     };
     out.has_alpha = c_int::from(handout.has_alpha);
 }
