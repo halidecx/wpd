@@ -31,6 +31,9 @@ pub type ArgbToYuv444Fn =
     unsafe extern "C" fn(*mut u8, *mut u8, *mut u8, *const u8, c_int);
 pub type ArgbToUvFn =
     unsafe extern "C" fn(*mut u8, *mut u8, *const u8, isize, c_int, c_int);
+/* Forward direction only; the inverse divides per pixel and stays scalar. */
+pub type MultiplyRowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
+pub type MultiplyArgbFn = unsafe extern "C" fn(*mut u8, c_int);
 
 #[repr(C)]
 #[allow(clippy::upper_case_acronyms)]
@@ -52,6 +55,8 @@ pub struct WPDYUVDSP {
     pub argb_to_y: ArgbToYFn,
     pub argb_to_yuv444: ArgbToYuv444Fn,
     pub argb_to_uv: ArgbToUvFn,
+    pub multiply_row: MultiplyRowFn,
+    pub premultiply_argb_row: MultiplyArgbFn,
 }
 
 macro_rules! upsample_block_tramp {
@@ -156,6 +161,29 @@ unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_i
     k::premultiply_row(row, alpha_first != 0);
 }
 
+unsafe extern "C" fn multiply_row_c(plane: *mut u8, alpha: *const u8, n: c_int) {
+    let Some(n) = count(n) else {
+        return;
+    };
+
+    unsafe {
+        k::multiply_row(
+            slice::from_raw_parts_mut(plane, n),
+            slice::from_raw_parts(alpha, n),
+            false,
+        )
+    }
+}
+
+unsafe extern "C" fn premultiply_argb_row_c(argb: *mut u8, n: c_int) {
+    let Some(n) = count(n) else {
+        return;
+    };
+    let row = unsafe { slice::from_raw_parts_mut(argb, 4 * n) };
+
+    k::premultiply_argb_row(row, false);
+}
+
 unsafe extern "C" fn argb_to_yuv444_c(
     y: *mut u8,
     u: *mut u8,
@@ -257,6 +285,12 @@ fn init_asm(dsp: &mut WPDYUVDSP) {
     if let Some(v) = t.argb_to_uv {
         dsp.argb_to_uv = v;
     }
+    if let Some(v) = t.multiply_row {
+        dsp.multiply_row = v;
+    }
+    if let Some(v) = t.premultiply_argb_row {
+        dsp.premultiply_argb_row = v;
+    }
 }
 
 impl WPDYUVDSP {
@@ -286,6 +320,8 @@ impl WPDYUVDSP {
             argb_to_y: argb_to_y_c,
             argb_to_yuv444: argb_to_yuv444_c,
             argb_to_uv: argb_to_uv_c,
+            multiply_row: multiply_row_c,
+            premultiply_argb_row: premultiply_argb_row_c,
         };
 
         #[cfg(all(

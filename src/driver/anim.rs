@@ -16,7 +16,6 @@ use crate::bits::{rl24, rl32};
 use crate::container::{TAG_ALPH, TAG_VP8, TAG_VP8L};
 use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
-use crate::rescale::premultiply_argb_row;
 
 pub struct CPlacement {
     pub geom: Placement,
@@ -100,7 +99,7 @@ fn reconcile_alpha(pl: &CPlacement, ydsp: &YuvDsp, canvas: &mut Buffer) {
             if pl.premultiply {
                 (ydsp.premultiply_row)(row, true);
             } else {
-                premultiply_argb_row(row, true);
+                (ydsp.premultiply_argb_row)(row, true);
             }
         }
     }

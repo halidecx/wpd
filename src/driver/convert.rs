@@ -83,6 +83,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
 }
 
 fn scale_image(
+    dsp: &YuvDsp,
     scratch: &mut Scratch,
     dst: &mut Buffer,
     src: &Frame<'_>,
@@ -127,6 +128,7 @@ fn scale_image(
 
         if premult || (weight_luma && p == 0) {
             rescale_plane_weighted(
+                dsp,
                 scratch,
                 plane,
                 dw,
@@ -153,13 +155,13 @@ fn scale_image(
 
     if premult {
         for y in 0..height {
-            crate::rescale::premultiply_argb_row(out.row(0, y), true);
+            (dsp.premultiply_argb_row)(out.row(0, y), true);
         }
     } else if weight_luma {
         for y in 0..height {
             let (luma, alpha) = out.row_pair(0, 3, y);
 
-            crate::rescale::multiply_row(luma, alpha, true);
+            (dsp.multiply_row)(luma, alpha, true);
         }
     }
 
@@ -172,6 +174,7 @@ fn scale_image(
 }
 
 pub fn transform_image<'a>(
+    dsp: &YuvDsp,
     options: &Options,
     scratch: &mut Scratch,
     scaled: &'a mut Buffer,
@@ -195,6 +198,7 @@ pub fn transform_image<'a>(
     let (width, height) = scaled_size(options, view.width, view.height)?;
 
     scale_image(
+        dsp,
         scratch,
         scaled,
         &view,

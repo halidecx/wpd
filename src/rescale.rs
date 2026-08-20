@@ -158,54 +158,7 @@ pub fn export_row_direct(dst: &mut [u8], irow: &mut [u32]) {
     }
 }
 
-const MFIX: u32 = 24;
-const MHALF: u32 = 1 << (MFIX - 1);
-const KINV_255: u32 = (1 << MFIX) / 255;
-
-fn alpha_mult(x: u8, scale: u32) -> u8 {
-    ((u32::from(x).wrapping_mul(scale).wrapping_add(MHALF)) >> MFIX) as u8
-}
-
-fn alpha_scale(a: u8, inverse: bool) -> u32 {
-    if inverse {
-        (255 << MFIX) / u32::from(a)
-    } else {
-        u32::from(a) * KINV_255
-    }
-}
-
-pub fn premultiply_argb_row(argb: &mut [u8], inverse: bool) {
-    for p in argb.chunks_exact_mut(4) {
-        let a = p[0];
-
-        if a == 0xFF {
-            continue;
-        }
-        if a == 0 {
-            p[1..4].fill(0);
-            continue;
-        }
-
-        let scale = alpha_scale(a, inverse);
-
-        for v in &mut p[1..4] {
-            *v = alpha_mult(*v, scale);
-        }
-    }
-}
-
-pub fn multiply_row(plane: &mut [u8], alpha: &[u8], inverse: bool) {
-    for (p, &a) in plane.iter_mut().zip(alpha) {
-        if a == 255 {
-            continue;
-        }
-        *p = if a != 0 {
-            alpha_mult(*p, alpha_scale(a, inverse))
-        } else {
-            0
-        };
-    }
-}
+pub use crate::dsp::yuv::{multiply_row, premultiply_argb_row};
 
 #[derive(Default)]
 pub struct Scratch {
@@ -436,6 +389,7 @@ pub fn rescale_plane(
 
 #[allow(clippy::too_many_arguments)]
 pub fn rescale_plane_weighted(
+    dsp: &crate::dsp::yuv::YuvDsp,
     scratch: &mut Scratch,
     dst: &mut PlaneMut<'_>,
     dst_width: i32,
@@ -464,9 +418,9 @@ pub fn rescale_plane_weighted(
             row.copy_from_slice(src.row(y, 0, len));
             match alpha {
                 Some(alpha) => {
-                    multiply_row(row, alpha.row(y, 0, src_width as usize), false)
+                    (dsp.multiply_row)(row, alpha.row(y, 0, src_width as usize), false)
                 }
-                None => premultiply_argb_row(row, false),
+                None => (dsp.premultiply_argb_row)(row, false),
             }
             r.import_row(work, row);
             y += 1;

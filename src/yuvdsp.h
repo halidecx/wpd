@@ -45,6 +45,12 @@ typedef void (*argb_to_uv_func)(uint8_t *u, uint8_t *v, const uint8_t *argb,
                                 ptrdiff_t argb_stride, int num_pixels,
                                 int weight_alpha);
 
+/* Forward alpha multiplies only; the inverse divides per pixel and stays
+ * scalar. */
+typedef void (*multiply_row_func)(uint8_t *plane, const uint8_t *alpha,
+                                  int num_pixels);
+typedef void (*multiply_argb_row_func)(uint8_t *argb, int num_pixels);
+
 extern const uint16_t wpd_gamma_to_linear_tab[257];
 extern const uint16_t wpd_linear_to_gamma_tab[33];
 
@@ -66,6 +72,8 @@ typedef struct WPDYUVDSP {
     argb_to_y_func            argb_to_y;
     argb_to_yuv444_func       argb_to_yuv444;
     argb_to_uv_func           argb_to_uv;
+    multiply_row_func         multiply_row;
+    multiply_argb_row_func    premultiply_argb_row;
 } WPDYUVDSP;
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);

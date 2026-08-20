@@ -27,6 +27,9 @@ pub type ArgbToYuv444Raw =
     unsafe extern "C" fn(*mut u8, *mut u8, *mut u8, *const u8, c_int);
 pub type ArgbToUvRaw =
     unsafe extern "C" fn(*mut u8, *mut u8, *const u8, isize, c_int, c_int);
+/* Forward direction only; the inverse divides per pixel and stays scalar. */
+pub type MultiplyRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
+pub type MultiplyArgbRaw = unsafe extern "C" fn(*mut u8, c_int);
 
 macro_rules! raw_upsample {
     ($marker:ident, $inner:ident, $sym:literal) => {
@@ -123,6 +126,27 @@ fn premultiply_row_4444<T: Raw<Sig = Premultiply4444Raw>>(row: &mut [u8]) {
     unsafe { (T::F)(row.as_mut_ptr(), n as c_int) }
 }
 
+fn multiply_row<T: Raw<Sig = MultiplyRowRaw>>(
+    plane: &mut [u8],
+    alpha: &[u8],
+    inverse: bool,
+) {
+    if inverse {
+        return crate::dsp::yuv::multiply_row(plane, alpha, true);
+    }
+
+    let n = plane.len().min(alpha.len());
+
+    unsafe { (T::F)(plane.as_mut_ptr(), alpha.as_ptr(), n as c_int) }
+}
+
+fn premultiply_argb_row<T: Raw<Sig = MultiplyArgbRaw>>(argb: &mut [u8], inverse: bool) {
+    if inverse {
+        return crate::dsp::yuv::premultiply_argb_row(argb, true);
+    }
+    unsafe { (T::F)(argb.as_mut_ptr(), (argb.len() / 4) as c_int) }
+}
+
 fn argb_to_y<T: Raw<Sig = RowRaw>>(y: &mut [u8], argb: &[u8]) {
     let n = y.len().min(argb.len() / 4);
 
@@ -184,6 +208,8 @@ pub struct RawTable {
     pub premultiply_row: Option<PremultiplyRaw>,
     pub premultiply_row_4444: Option<Premultiply4444Raw>,
     pub premultiply_row_4444_swap: Option<Premultiply4444Raw>,
+    pub multiply_row: Option<MultiplyRowRaw>,
+    pub premultiply_argb_row: Option<MultiplyArgbRaw>,
     pub argb_to_y: Option<RowRaw>,
     pub argb_to_yuv444: Option<ArgbToYuv444Raw>,
     pub argb_to_uv: Option<ArgbToUvRaw>,
@@ -251,6 +277,25 @@ macro_rules! premultiply_syms {
             PremultiplyRaw,
             $row,
             (*mut u8, c_int, c_int)
+        );
+    };
+}
+
+macro_rules! multiply_syms {
+    ($row:literal, $argb:literal) => {
+        raw!(
+            MultiplyRow,
+            multiply_row,
+            MultiplyRowRaw,
+            $row,
+            (*mut u8, *const u8, c_int)
+        );
+        raw!(
+            MultiplyArgb,
+            multiply_argb,
+            MultiplyArgbRaw,
+            $argb,
+            (*mut u8, c_int)
         );
     };
 }
@@ -364,6 +409,7 @@ mod arch {
             "ff_premultiply_row_4444_sse2",
             "ff_premultiply_row_4444_swap_sse2"
         );
+        multiply_syms!("ff_multiply_row_sse2", "ff_premultiply_argb_row_sse2");
 
         #[cfg(target_arch = "x86_64")]
         upsample_syms!(
@@ -429,6 +475,7 @@ mod arch {
             "ff_premultiply_row_4444_avx2",
             "ff_premultiply_row_4444_swap_avx2"
         );
+        multiply_syms!("ff_multiply_row_avx2", "ff_premultiply_argb_row_avx2");
         raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_avx2");
 
         #[cfg(target_arch = "x86_64")]
@@ -468,6 +515,8 @@ mod arch {
             premultiply_row_4444 = premultiply_row_4444::<sse2::Premultiply4444>;
             premultiply_row_4444_swap =
                 premultiply_row_4444::<sse2::Premultiply4444Swap>;
+            multiply_row = multiply_row::<sse2::MultiplyRow>;
+            premultiply_argb_row = premultiply_argb_row::<sse2::MultiplyArgb>;
         }
         #[cfg(target_arch = "x86_64")]
         SSSE3 {
@@ -496,6 +545,8 @@ mod arch {
             premultiply_row_4444 = premultiply_row_4444::<avx2::Premultiply4444>;
             premultiply_row_4444_swap =
                 premultiply_row_4444::<avx2::Premultiply4444Swap>;
+            multiply_row = multiply_row::<avx2::MultiplyRow>;
+            premultiply_argb_row = premultiply_argb_row::<avx2::MultiplyArgb>;
             dispatch_alpha_first = dispatch_alpha::<avx2::DispatchFirst>;
             dispatch_alpha_last = dispatch_alpha::<avx2::DispatchLast>;
             argb_to_y = argb_to_y::<avx2::ArgbToY>;

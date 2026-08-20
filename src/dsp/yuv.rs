@@ -284,6 +284,58 @@ pub fn premultiply_row_4444(rgba4444: &mut [u8], swap: bool) {
     }
 }
 
+/* libwebp's WebPMultRow and WebPMultARGBRow: multiply a plane row by its
+ * alpha row, or an ARGB row's colour channels by its own alpha. The inverse
+ * undoes it with a division per pixel, which no lane arithmetic reaches. */
+const MFIX: u32 = 24;
+const MHALF: u32 = 1 << (MFIX - 1);
+const KINV_255: u32 = (1 << MFIX) / 255;
+
+fn alpha_mult(x: u8, scale: u32) -> u8 {
+    ((u32::from(x).wrapping_mul(scale).wrapping_add(MHALF)) >> MFIX) as u8
+}
+
+fn alpha_scale(a: u8, inverse: bool) -> u32 {
+    if inverse {
+        (255 << MFIX) / u32::from(a)
+    } else {
+        u32::from(a) * KINV_255
+    }
+}
+
+pub fn premultiply_argb_row(argb: &mut [u8], inverse: bool) {
+    for p in argb.chunks_exact_mut(4) {
+        let a = p[0];
+
+        if a == 0xFF {
+            continue;
+        }
+        if a == 0 {
+            p[1..4].fill(0);
+            continue;
+        }
+
+        let scale = alpha_scale(a, inverse);
+
+        for v in &mut p[1..4] {
+            *v = alpha_mult(*v, scale);
+        }
+    }
+}
+
+pub fn multiply_row(plane: &mut [u8], alpha: &[u8], inverse: bool) {
+    for (p, &a) in plane.iter_mut().zip(alpha) {
+        if a == 255 {
+            continue;
+        }
+        *p = if a != 0 {
+            alpha_mult(*p, alpha_scale(a, inverse))
+        } else {
+            0
+        };
+    }
+}
+
 const GAMMA_FIX: u32 = 12;
 const GAMMA_TAB_FIX: u32 = 7;
 const GAMMA_TAB_SIZE: usize = 1 << (GAMMA_FIX - GAMMA_TAB_FIX);
@@ -553,6 +605,8 @@ pub struct YuvDsp {
     pub premultiply_row: fn(&mut [u8], bool),
     pub premultiply_row_4444: fn(&mut [u8]),
     pub premultiply_row_4444_swap: fn(&mut [u8]),
+    pub multiply_row: fn(&mut [u8], &[u8], bool),
+    pub premultiply_argb_row: fn(&mut [u8], bool),
     pub argb_to_y: RowFn,
     pub argb_to_yuv444: ArgbToYuv444Fn,
     pub argb_to_uv: ArgbToUvFn,
@@ -589,6 +643,8 @@ impl YuvDsp {
             premultiply_row,
             premultiply_row_4444: premultiply_row_4444_plain,
             premultiply_row_4444_swap: premultiply_row_4444_swapped,
+            multiply_row,
+            premultiply_argb_row,
             argb_to_y,
             argb_to_yuv444,
             argb_to_uv,

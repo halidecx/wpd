@@ -222,7 +222,7 @@ pub fn export_packed<'a>(
         ext,
     } = t;
     let format = set.out_format;
-    let img = transform_image(options, rescale, transformed, img, format)?;
+    let img = transform_image(dsp, options, rescale, transformed, img, format)?;
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
