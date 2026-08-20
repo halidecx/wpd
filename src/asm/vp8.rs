@@ -30,35 +30,15 @@ fn check_h(p: &[u8], o: usize, s: usize, left: usize, right: usize, n: usize) {
     );
 }
 
-pub trait Raw {
-    type Sig: Copy;
-    const F: Self::Sig;
-}
+pub use super::Raw;
 
-macro_rules! raw {
-    ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),*)) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner($(_: $arg),*);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = $sig;
-            const F: $sig = $inner;
-        }
-    };
-}
-
-macro_rules! raw_lf {
-    ($m:ident, $i:ident, $sym:literal) => {
+/* The kind picks the signature alias and the argument list that goes with it.
+ * An arm no arch happens to use costs nothing, unlike an unused macro. */
+macro_rules! raw_vp8 {
+    ($m:ident, $i:ident, lf, $sym:literal) => {
         raw!($m, $i, LfRaw, $sym, (*mut u8, isize, c_int, c_int, c_int));
     };
-}
-
-macro_rules! raw_lf_uv {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_uv, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -67,11 +47,7 @@ macro_rules! raw_lf_uv {
             (*mut u8, *mut u8, isize, c_int, c_int, c_int)
         );
     };
-}
-
-#[allow(unused_macros)]
-macro_rules! raw_lf_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_mb, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -80,11 +56,7 @@ macro_rules! raw_lf_mb {
             (*mut u8, isize, c_int, c_int, c_int, c_int)
         );
     };
-}
-
-#[allow(unused_macros)]
-macro_rules! raw_lf_uv_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_uv_mb, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -93,34 +65,19 @@ macro_rules! raw_lf_uv_mb {
             (*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int)
         );
     };
-}
-
-macro_rules! raw_lf_simple {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_simple, $sym:literal) => {
         raw!($m, $i, LfSimpleRaw, $sym, (*mut u8, isize, c_int));
     };
-}
-
-macro_rules! raw_lf_simple_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_simple_mb, $sym:literal) => {
         raw!($m, $i, LfSimpleMbRaw, $sym, (*mut u8, isize, c_int, c_int));
     };
-}
-
-macro_rules! raw_wht {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, wht, $sym:literal) => {
         raw!($m, $i, WhtRaw, $sym, (*mut [[i16; 16]; 4], *mut i16));
     };
-}
-
-macro_rules! raw_idct {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, idct, $sym:literal) => {
         raw!($m, $i, IdctRaw, $sym, (*mut u8, *mut i16, isize));
     };
-}
-
-macro_rules! raw_idct4 {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, idct4, $sym:literal) => {
         raw!($m, $i, Idct4Raw, $sym, (*mut u8, *mut [i16; 16], isize));
     };
 }
@@ -133,16 +90,16 @@ macro_rules! lf_set {
         pub mod $p {
             use super::*;
 
-            raw_lf_simple!(VSimple, v_simple, $v_simple);
-            raw_lf_simple!(HSimple, h_simple, $h_simple);
-            raw_lf!(V16, v16, $v16);
-            raw_lf!(H16, h16, $h16);
-            raw_lf_uv!(V8uv, v8uv, $v8uv);
-            raw_lf_uv!(H8uv, h8uv, $h8uv);
-            raw_lf!(V16Inner, v16_inner, $v16i);
-            raw_lf!(H16Inner, h16_inner, $h16i);
-            raw_lf_uv!(V8uvInner, v8uv_inner, $v8uvi);
-            raw_lf_uv!(H8uvInner, h8uv_inner, $h8uvi);
+            raw_vp8!(VSimple, v_simple, lf_simple, $v_simple);
+            raw_vp8!(HSimple, h_simple, lf_simple, $h_simple);
+            raw_vp8!(V16, v16, lf, $v16);
+            raw_vp8!(H16, h16, lf, $h16);
+            raw_vp8!(V8uv, v8uv, lf_uv, $v8uv);
+            raw_vp8!(H8uv, h8uv, lf_uv, $h8uv);
+            raw_vp8!(V16Inner, v16_inner, lf, $v16i);
+            raw_vp8!(H16Inner, h16_inner, lf, $h16i);
+            raw_vp8!(V8uvInner, v8uv_inner, lf_uv, $v8uvi);
+            raw_vp8!(H8uvInner, h8uv_inner, lf_uv, $h8uvi);
         }
     };
 }
@@ -154,11 +111,11 @@ macro_rules! idct_set {
         pub mod $p {
             use super::*;
 
-            raw_wht!(Wht, wht, $wht);
-            raw_idct!(Add, add, $add);
-            raw_idct!(DcAdd, dc_add, $dc_add);
-            raw_idct4!(DcAdd4y, dc_add4y, $dc_add4y);
-            raw_idct4!(DcAdd4uv, dc_add4uv, $dc_add4uv);
+            raw_vp8!(Wht, wht, wht, $wht);
+            raw_vp8!(Add, add, idct, $add);
+            raw_vp8!(DcAdd, dc_add, idct, $dc_add);
+            raw_vp8!(DcAdd4y, dc_add4y, idct4, $dc_add4y);
+            raw_vp8!(DcAdd4uv, dc_add4uv, idct4, $dc_add4uv);
         }
     };
 }
@@ -682,31 +639,33 @@ mod arch {
     pub mod sse2_idct {
         use super::*;
 
-        raw_wht!(Wht, wht, "ff_vp8_luma_dc_wht_sse2");
-        raw_idct!(Add, add, "ff_vp8_idct_add_sse2");
-        raw_idct!(DcAdd, dc_add, "ff_vp8_idct_dc_add_sse2");
-        raw_idct4!(DcAdd4y, dc_add4y, "ff_vp8_idct_dc_add4y_sse2");
-        raw_idct4!(DcAdd4uv, dc_add4uv, "ff_vp8_idct_dc_add4uv_sse2");
+        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse2");
+        raw_vp8!(Add, add, idct, "ff_vp8_idct_add_sse2");
+        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse2");
+        raw_vp8!(DcAdd4y, dc_add4y, idct4, "ff_vp8_idct_dc_add4y_sse2");
+        raw_vp8!(DcAdd4uv, dc_add4uv, idct4, "ff_vp8_idct_dc_add4uv_sse2");
     }
 
     pub mod sse4 {
         use super::*;
 
-        raw_wht!(Wht, wht, "ff_vp8_luma_dc_wht_sse4");
-        raw_idct!(DcAdd, dc_add, "ff_vp8_idct_dc_add_sse4");
+        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse4");
+        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse4");
     }
 
     pub mod avx2 {
         use super::*;
 
-        raw_lf_simple_mb!(
+        raw_vp8!(
             VSimpleMb,
             v_simple_mb,
+            lf_simple_mb,
             "ff_vp8_v_loop_filter_simple_mb_avx2"
         );
-        raw_lf_simple_mb!(
+        raw_vp8!(
             HSimpleMb,
             h_simple_mb,
+            lf_simple_mb,
             "ff_vp8_h_loop_filter_simple_mb_avx2"
         );
 
@@ -848,13 +807,14 @@ mod arch {
     pub mod fused {
         use super::*;
 
-        raw_lf_simple_mb!(
+        raw_vp8!(
             HSimpleMb,
             h_simple_mb,
+            lf_simple_mb,
             "ff_vp8_h_loop_filter_simple_mb_neon"
         );
-        raw_lf_mb!(H16Mb, h16_mb, "ff_vp8_h_loop_filter16y_mb_neon");
-        raw_lf_uv_mb!(H8uvMb, h8uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
+        raw_vp8!(H16Mb, h16_mb, lf_mb, "ff_vp8_h_loop_filter16y_mb_neon");
+        raw_vp8!(H8uvMb, h8uv_mb, lf_uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
     }
 
     ladder! {
@@ -923,7 +883,7 @@ mod arch {
     pub mod armv6_wht_dc {
         use super::*;
 
-        raw_wht!(WhtDc, wht_dc, "ff_vp8_luma_dc_wht_dc_armv6");
+        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_armv6");
     }
 
     pub mod neon_mb {

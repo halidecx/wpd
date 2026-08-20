@@ -1,3 +1,7 @@
+/* Which macro families an arch reaches for varies; several are dead on
+ * targets whose assembly does not cover this DSP at all. */
+#![allow(unused_macros)]
+
 use crate::cpu::CpuFlags;
 use crate::dsp::vp8l::Vp8lDsp;
 use std::ffi::c_int;
@@ -7,69 +11,39 @@ pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_in
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 
-pub use super::vp8::Raw;
+pub use super::Raw;
 
-macro_rules! raw_pred_add {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *const u32, _: *const u32, _: c_int, _: *mut u32);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = PredAddRaw;
-            const F: PredAddRaw = $inner;
-        }
+/* The kind picks the signature alias and its argument list. */
+macro_rules! raw_vp8l {
+    ($m:ident, $i:ident, pred_add, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            PredAddRaw,
+            $sym,
+            (*const u32, *const u32, c_int, *mut u32)
+        );
     };
-}
-
-macro_rules! raw_map_color {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *mut u8, _: *const u8, _: *const u32, _: c_int);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = MapColorRaw;
-            const F: MapColorRaw = $inner;
-        }
+    ($m:ident, $i:ident, map_color, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            MapColorRaw,
+            $sym,
+            (*mut u8, *const u8, *const u32, c_int)
+        );
     };
-}
-
-macro_rules! raw_color_row {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *mut u32, _: *const u32, _: c_int, _: u32);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = ColorRowRaw;
-            const F: ColorRowRaw = $inner;
-        }
+    ($m:ident, $i:ident, color_row, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            ColorRowRaw,
+            $sym,
+            (*mut u32, *const u32, c_int, u32)
+        );
     };
-}
-
-macro_rules! raw_blend_row {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *mut u8, _: *const u8, _: c_int);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = BlendRowRaw;
-            const F: BlendRowRaw = $inner;
-        }
+    ($m:ident, $i:ident, blend_row, $sym:literal) => {
+        raw!($m, $i, BlendRowRaw, $sym, (*mut u8, *const u8, c_int));
     };
 }
 
@@ -190,7 +164,6 @@ macro_rules! pred_slot {
     };
 }
 
-#[allow(unused_macros)]
 macro_rules! pred_raw {
     ($set:ident, 0) => {
         <$set::Pred0 as Raw>::F
@@ -238,11 +211,10 @@ macro_rules! pred_raw {
 
 macro_rules! preds {
     ($($marker:ident, $inner:ident, $sym:literal;)*) => {
-        $(raw_pred_add!($marker, $inner, $sym);)*
+        $(raw_vp8l!($marker, $inner, pred_add, $sym);)*
     };
 }
 
-#[allow(unused_macros)]
 macro_rules! ladder {
     ($(
         $flag:ident {
@@ -296,10 +268,11 @@ mod arch {
     pub mod ssse3 {
         use super::*;
 
-        raw_color_row!(ColorRow, color_row, "ff_color_row_ssse3");
-        raw_blend_row!(
+        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_ssse3");
+        raw_vp8l!(
             BlendPremult,
             blend_premult,
+            blend_row,
             "ff_blend_row_argb_premult_ssse3"
         );
     }
@@ -318,13 +291,19 @@ mod arch {
             Pred11, pred11, "ff_pred_add_11_avx2";
         }
 
-        raw_map_color!(MapColor, map_color, "ff_map_color32_avx2");
-        raw_color_row!(ColorRow, color_row, "ff_color_row_avx2");
-        raw_blend_row!(ExtractGreen, extract_green, "ff_extract_green_avx2");
-        raw_blend_row!(Blend, blend, "ff_blend_row_argb_avx2");
-        raw_blend_row!(
+        raw_vp8l!(MapColor, map_color, map_color, "ff_map_color32_avx2");
+        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_avx2");
+        raw_vp8l!(
+            ExtractGreen,
+            extract_green,
+            blend_row,
+            "ff_extract_green_avx2"
+        );
+        raw_vp8l!(Blend, blend, blend_row, "ff_blend_row_argb_avx2");
+        raw_vp8l!(
             BlendPremult,
             blend_premult,
+            blend_row,
             "ff_blend_row_argb_premult_avx2"
         );
     }
@@ -375,13 +354,19 @@ mod arch {
             Pred13, pred13, "ff_pred_add_13_neon";
         }
 
-        raw_map_color!(MapColor, map_color, "ff_map_color32_neon");
-        raw_color_row!(ColorRow, color_row, "ff_color_row_neon");
-        raw_blend_row!(ExtractGreen, extract_green, "ff_extract_green_neon");
-        raw_blend_row!(Blend, blend, "ff_blend_row_argb_neon");
-        raw_blend_row!(
+        raw_vp8l!(MapColor, map_color, map_color, "ff_map_color32_neon");
+        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_neon");
+        raw_vp8l!(
+            ExtractGreen,
+            extract_green,
+            blend_row,
+            "ff_extract_green_neon"
+        );
+        raw_vp8l!(Blend, blend, blend_row, "ff_blend_row_argb_neon");
+        raw_vp8l!(
             BlendPremult,
             blend_premult,
+            blend_row,
             "ff_blend_row_argb_premult_neon"
         );
     }

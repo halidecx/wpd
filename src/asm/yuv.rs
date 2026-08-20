@@ -1,9 +1,13 @@
+/* Which macro families an arch reaches for varies; several are dead on
+ * targets whose assembly does not cover this DSP at all. */
+#![allow(unused_macros)]
+
 use std::ffi::c_int;
 
 use crate::cpu::CpuFlags;
 use crate::dsp::yuv::{bpp, UpsampleDst, UpsampleSrc, YuvDsp, UPSAMPLE_BLOCK};
 
-pub use super::vp8::Raw;
+pub use super::Raw;
 
 pub type UpsampleBlockRaw = unsafe extern "C" fn(
     *const u8,
@@ -23,22 +27,6 @@ pub type ArgbToYuv444Raw =
     unsafe extern "C" fn(*mut u8, *mut u8, *mut u8, *const u8, c_int);
 pub type ArgbToUvRaw =
     unsafe extern "C" fn(*mut u8, *mut u8, *const u8, isize, c_int, c_int);
-
-macro_rules! raw {
-    ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),*)) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner($(_: $arg),*);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = $sig;
-            const F: $sig = $inner;
-        }
-    };
-}
 
 macro_rules! raw_upsample {
     ($marker:ident, $inner:ident, $sym:literal) => {
@@ -201,7 +189,6 @@ pub struct RawTable {
     pub argb_to_uv: Option<ArgbToUvRaw>,
 }
 
-#[allow(unused_macros)]
 macro_rules! raw_packers {
     ($set:ident) => {
         [
@@ -217,7 +204,6 @@ macro_rules! raw_packers {
     };
 }
 
-#[allow(unused_macros)]
 macro_rules! raw_upsample_table {
     ($set:ident) => {
         [
@@ -310,7 +296,6 @@ macro_rules! upsample_syms {
     };
 }
 
-#[allow(unused_macros)]
 macro_rules! ladder {
     ($(
         $(#[$attr:meta])*
