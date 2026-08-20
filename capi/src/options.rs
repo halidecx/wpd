@@ -1,16 +1,8 @@
-//! `WPDDecoderOptions`.
-//!
-//! The versioned C struct a caller asks for cropping, scaling and flipping
-//! with, and the one thing it does that the decoder's own options cannot: say
-//! a field is present with a `use_` flag beside it rather than with an
-//! `Option`.
-
 use std::ffi::c_int;
 use std::mem;
 
 use wpd::options::Options;
 
-/// `WPDDecoderOptions` from `include/wpd.h`.
 #[repr(C)]
 pub struct WPDDecoderOptions {
     pub struct_size: usize,
@@ -28,18 +20,10 @@ pub struct WPDDecoderOptions {
 }
 
 impl WPDDecoderOptions {
-    /// The oldest revision this build accepts, and equally how much of a
-    /// caller's struct it reads.
     pub(crate) fn v1() -> usize {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
     }
 
-    /// The versioned C struct as the decoder's own options.
-    ///
-    /// Read field by field rather than copied whole: the caller's struct may
-    /// be a shorter revision than this build's, and its `struct_size` is not
-    /// ours to keep. The `use_` flags become the `Option`s they were standing
-    /// in for.
     pub(crate) fn to_core(&self) -> Options {
         Options {
             bypass_filtering: self.bypass_filtering != 0,

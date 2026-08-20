@@ -1,15 +1,3 @@
-//! Driving the lossy frame decoder, as `src/lossy.c` did.
-//!
-//! Three things happen here that the VP8 decoder itself knows nothing about:
-//! the alpha plane a WebP file carries beside the luma, the planar view handed
-//! out for it, and the in-loop filter a scaled decode drops. The pixels are
-//! [`crate::vp8`]; what is here is the WebP container's idea of a lossy frame.
-//!
-//! The alpha plane is the decoder's own `Vec`, and the chunk it is decoded
-//! from is a slice of the input, so every call below destructures the decoder
-//! to take both at once. The C reached for each through the decoder pointer
-//! and the aliasing rule was the reader's to reconstruct.
-
 use crate::error::{Error, Result, Status};
 use crate::picture::PlaneMut;
 use crate::vp8l::{AlphaDst, Target};
@@ -30,10 +18,6 @@ fn vp8_decoder(vp8: &mut Vec<crate::vp8::Decoder>) -> Result<&mut crate::vp8::De
     Ok(&mut vp8[0])
 }
 
-/// Undoes the per-row prediction an ALPH chunk's filter applied.
-///
-/// The first row and the first column are predicted from their one neighbour
-/// whatever the mode is, so they are walked before the mode is looked at.
 fn alpha_inverse_prediction(
     plane: &mut PlaneMut<'_>,
     width: usize,
@@ -55,8 +39,6 @@ fn alpha_inverse_prediction(
         row[0] = row[0].wrapping_add(above[0]);
     }
 
-    /* The mode is chosen once, not per pixel: it cannot change inside a frame,
-    and a branch in the innermost loop is one the C did not have. */
     match mode {
         ALPHA_FILTER_HORIZONTAL => {
             for y in 1..height {
@@ -92,14 +74,12 @@ fn alpha_inverse_prediction(
 }
 
 impl<'a> Decoder<'a> {
-    /// What the last VP8 frame header declared.
     fn vp8_size(&self) -> (i32, i32) {
         self.vp8
             .first()
             .map_or((0, 0), |vp8| (vp8.width, vp8.height))
     }
 
-    /// Fills the alpha plane in from the ALPH chunk the decoder latched.
     fn decode_alpha(&mut self) -> Result<()> {
         let (offset, size) = (self.alpha_data_offset, self.alpha_data_size);
         let width = self.width.max(0) as usize;
@@ -112,11 +92,7 @@ impl<'a> Decoder<'a> {
             } = self;
             let raw = input.chunk(offset, size);
 
-            /* One byte per pixel and no compression to make up a shortfall:
-            a chunk that carries fewer is a chunk that stops inside the plane.
-            Filling the rest with zeros would hand back a picture whose bottom
-            rows are transparent and say nothing went wrong; libwebp's
-            `ALPHInit` fails the decode instead. */
+            /* Match libwebp: a short uncompressed alpha plane is invalid. */
             if raw.len() < extent {
                 crate::log::error_args(format_args!(
                     "ALPHA chunk carries {} of {extent} bytes",
@@ -177,7 +153,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// Sizes and clears the alpha plane, then fills it in.
     fn alpha_plane_decode(&mut self) -> Result<()> {
         let Some(alpha_size) =
             (self.width.max(0) as usize).checked_mul(self.height.max(0) as usize)
@@ -203,11 +178,7 @@ impl<'a> Decoder<'a> {
         ret
     }
 
-    /* libwebp drops the in-loop filter once a scaled decode shrinks the frame
-    past three quarters in both directions, on the grounds that nothing
-    survives the downscale, so a scaled lossy frame only matches it if the
-    filter goes too. The threshold is measured against the whole frame, not the
-    cropped part. */
+    /* Match libwebp's whole-frame threshold for skipping the loop filter. */
     fn filter_bypass(&self) -> bool {
         if self.options.bypass_filtering {
             return true;
@@ -227,8 +198,6 @@ impl<'a> Decoder<'a> {
         width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4
     }
 
-    /// Returns whether the frame is complete; `false` means more of the chunk
-    /// is needed.
     pub(crate) fn vp8_lossy_step(
         &mut self,
         offset: usize,
@@ -240,9 +209,6 @@ impl<'a> Decoder<'a> {
             let Self { vp8, input, .. } = self;
             let vp8 = vp8_decoder(vp8)?;
 
-            /* Latched with the frame header, as the C's `vp8_decode_frame_init`
-            read it out of the codec context: a mid-frame options change does
-            not reach the rows already being filtered. */
             vp8.bypass_filtering = bypass;
 
             match vp8.frame_init(input.chunk(offset, avail), avail, size)? {

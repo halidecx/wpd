@@ -1,17 +1,3 @@
-//! The row-at-a-time area rescaler, matching libwebp's `WebPRescaler` bit for
-//! bit.
-//!
-//! The arithmetic is unsigned and deliberately wrapping in several places —
-//! `left - right` in the expanding importer, `sum * x_sub - frac` in the
-//! shrinking one — so every operation here is spelled out as wrapping rather
-//! than left to the profile's overflow checks.
-//!
-//! [`Rescaler`] drives the kernels. The C carried its two accumulator rows as
-//! two pointers and swapped them; they are one [`Scratch`] allocation split in
-//! half here, with a flag saying which half is which, because a swap of two
-//! borrows of the same slice is not a thing the borrow checker will hold still
-//! for and does not need to be.
-
 use crate::error::{Error, Result};
 use crate::picture::{PlaneMut, PlaneRef};
 
@@ -27,12 +13,10 @@ fn mult_fix_floor(x: u32, y: u32) -> u32 {
     ((u64::from(x) * u64::from(y)) >> RFIX) as u32
 }
 
-/// `x / y` in 32.32 fixed point.
 pub fn frac(x: u32, y: u32) -> u32 {
     ((u64::from(x) << RFIX) / u64::from(y)) as u32
 }
 
-/// What the importers need from the rescaler state.
 #[derive(Clone, Copy)]
 pub struct Import {
     pub num_channels: usize,
@@ -43,7 +27,6 @@ pub struct Import {
     pub fx_scale: u32,
 }
 
-/// What the exporters need from it.
 #[derive(Clone, Copy)]
 pub struct Export {
     pub y_accum: i32,
@@ -60,7 +43,6 @@ fn clip8(v: u32) -> u8 {
     }
 }
 
-/// Widens one source row into `frow`.
 pub fn import_row_expand(frow: &mut [u32], src: &[u8], p: Import) {
     let stride = p.num_channels;
     let x_out_max = p.dst_width * stride;
@@ -96,7 +78,6 @@ pub fn import_row_expand(frow: &mut [u32], src: &[u8], p: Import) {
     }
 }
 
-/// Narrows one source row into `frow`, accumulating the fractional tail.
 pub fn import_row_shrink(frow: &mut [u32], src: &[u8], p: Import) {
     let stride = p.num_channels;
     let x_out_max = p.dst_width * stride;
@@ -127,14 +108,12 @@ pub fn import_row_shrink(frow: &mut [u32], src: &[u8], p: Import) {
     }
 }
 
-/// Adds the just-imported row into the accumulator, for the shrinking case.
 pub fn accumulate(irow: &mut [u32], frow: &[u32]) {
     for (i, f) in irow.iter_mut().zip(frow) {
         *i = i.wrapping_add(*f);
     }
 }
 
-/// Emits one output row, interpolating between the two buffered rows.
 pub fn export_row_expand(dst: &mut [u8], irow: &[u32], frow: &[u32], p: Export) {
     if p.y_accum == 0 {
         for (d, &f) in dst.iter_mut().zip(frow) {
@@ -154,8 +133,6 @@ pub fn export_row_expand(dst: &mut [u8], irow: &[u32], frow: &[u32], p: Export) 
     }
 }
 
-/// Emits one output row, leaving the part of the accumulator that belongs to
-/// the next one behind in `irow`.
 pub fn export_row_shrink(dst: &mut [u8], irow: &mut [u32], frow: &[u32], p: Export) {
     let yscale = p.fy_scale.wrapping_mul((-p.y_accum) as u32);
 
@@ -174,8 +151,6 @@ pub fn export_row_shrink(dst: &mut [u8], irow: &mut [u32], frow: &[u32], p: Expo
     }
 }
 
-/// The degenerate case where the ratio does not fit in 32.32: `src_width == 1`
-/// with `dst_width <= 2`.
 pub fn export_row_direct(dst: &mut [u8], irow: &mut [u32]) {
     for (d, i) in dst.iter_mut().zip(irow.iter_mut()) {
         *d = *i as u8;
@@ -199,7 +174,6 @@ fn alpha_scale(a: u8, inverse: bool) -> u32 {
     }
 }
 
-/// Multiplies alpha into an ARGB row, or divides it back out.
 pub fn premultiply_argb_row(argb: &mut [u8], inverse: bool) {
     for p in argb.chunks_exact_mut(4) {
         let a = p[0];
@@ -220,7 +194,6 @@ pub fn premultiply_argb_row(argb: &mut [u8], inverse: bool) {
     }
 }
 
-/// The same against a separate alpha plane.
 pub fn multiply_row(plane: &mut [u8], alpha: &[u8], inverse: bool) {
     for (p, &a) in plane.iter_mut().zip(alpha) {
         if a == 255 {
@@ -234,16 +207,12 @@ pub fn multiply_row(plane: &mut [u8], alpha: &[u8], inverse: bool) {
     }
 }
 
-/// The two accumulator rows and the one source row a weighted scale builds,
-/// kept across frames so a scaled animation does not reallocate per frame.
 #[derive(Default)]
 pub struct Scratch {
     work: Vec<u32>,
     row: Vec<u8>,
 }
 
-/// Grows `v` to `need`, discarding what was there: nothing in the scratch
-/// lives across a call, so there is no reason to copy it forward.
 fn grow<T: Clone + Default>(v: &mut Vec<T>, need: usize) -> Result<()> {
     if v.len() >= need {
         return Ok(());
@@ -281,20 +250,15 @@ impl Scratch {
         self.row = Vec::new();
     }
 
-    /// The two accumulator rows on their own, which an unweighted scale is
-    /// all that needs.
     pub fn work_mut(&mut self) -> &mut [u32] {
         &mut self.work
     }
 
-    /// The accumulators and the source row, separately borrowed, which the
-    /// weighted scale needs at the same time.
     fn split(&mut self) -> (&mut [u32], &mut [u8]) {
         (&mut self.work, &mut self.row)
     }
 }
 
-/// One plane's worth of rescaler state.
 pub struct Rescaler {
     x_expand: bool,
     y_expand: bool,
@@ -311,14 +275,10 @@ pub struct Rescaler {
     dst_width: usize,
     dst_height: i32,
     dst_y: i32,
-    /// Which half of the work slice is the accumulator. The expanding path
-    /// swaps the two rows per imported line; the C swapped pointers.
     swapped: bool,
 }
 
 impl Rescaler {
-    /// `work` must hold `2 * num_channels * dst_width` words, which
-    /// [`Scratch::grow`] arranges, and is zeroed here.
     pub fn new(
         work: &mut [u32],
         src_width: i32,
@@ -375,7 +335,6 @@ impl Rescaler {
         self.num_channels * self.dst_width
     }
 
-    /// The accumulator and the just-imported row, in that order.
     fn rows<'a>(&self, work: &'a mut [u32]) -> (&'a mut [u32], &'a mut [u32]) {
         let width = self.width();
         let (a, b) = work[..2 * width].split_at_mut(width);
@@ -387,13 +346,10 @@ impl Rescaler {
         }
     }
 
-    /// Whether another source row can go in before the next one has to come
-    /// out. The two alternate, and the caller drives both.
     pub fn wants_row(&self) -> bool {
         !(self.dst_y < self.dst_height && self.y_accum <= 0)
     }
 
-    /// Takes one source row, which must be `src_width * num_channels` long.
     pub fn import_row(&mut self, work: &mut [u32], src: &[u8]) {
         let p = Import {
             num_channels: self.num_channels,
@@ -421,7 +377,6 @@ impl Rescaler {
         self.y_accum -= self.y_sub;
     }
 
-    /// Emits every output row the imported ones have made ready.
     pub fn export(&mut self, work: &mut [u32], dst: &mut PlaneMut<'_>) {
         let width = self.width();
 
@@ -448,7 +403,6 @@ impl Rescaler {
     }
 }
 
-/// One plane end to end, which is what an unweighted scale of a channel is.
 #[allow(clippy::too_many_arguments)]
 pub fn rescale_plane(
     work: &mut [u32],
@@ -480,14 +434,6 @@ pub fn rescale_plane(
     }
 }
 
-/// One plane with alpha weighted in, which is what libwebp carries across a
-/// scale so a transparent edge does not bleed into an opaque one.
-///
-/// Each row is weighted into scratch rather than in place: the decoded image
-/// is blended onto by the next animation frame and a still may be exported
-/// more than once, so it has to survive the scale unchanged. `alpha` is the
-/// plane to weight by, or none to take the weight from the source's own alpha
-/// byte, which is what a packed ARGB source carries.
 #[allow(clippy::too_many_arguments)]
 pub fn rescale_plane_weighted(
     scratch: &mut Scratch,

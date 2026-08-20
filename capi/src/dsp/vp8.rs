@@ -1,10 +1,3 @@
-//! C ABI for the lossy DSP table, as declared by `src/vp8dsp.h`.
-//!
-//! Each instruction set gets a module whose function names are the same, with
-//! `#[link_name]` pointing at that variant's symbol. The macroblock-edge
-//! filters are then composed once per module, as the `VP8_*_LOOP_FILTER*_MB`
-//! macros in `src/vp8dsp.h` do for the C.
-
 use std::ffi::c_int;
 use std::slice;
 
@@ -185,11 +178,6 @@ macro_rules! v_uv_mb {
     };
 }
 
-/// # Safety
-///
-/// `dst` must be the edge sample of a plane with four rows above it and four
-/// below at `stride`, and `size` columns to its right. That is what every
-/// caller of the C prototype already guarantees.
 unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
     dst: *mut u8,
     stride: isize,
@@ -204,10 +192,6 @@ unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
     k::loop_filter::<SIZE, true, INNER>(buf, s, flim_e, flim_i, hev);
 }
 
-/// # Safety
-///
-/// As [`lf_v`], transposed: four samples either side of `dst` in each of
-/// `size` rows.
 unsafe fn lf_h<const SIZE: usize, const INNER: bool>(
     dst: *mut u8,
     stride: isize,
@@ -364,11 +348,6 @@ unsafe extern "C" fn idct_dc_add4uv_c(
     }
 }
 
-/// Overlays whatever [`wpd::asm::vp8::raw_table`] selected for the running
-/// CPU. The symbols, the macroblock-edge compositions and the instruction-set
-/// ladder all live in the core, so this table and the decoder's cannot pick
-/// different kernels. The scalar entries above stay here, since they compose
-/// this table's own fallbacks.
 #[cfg(all(
     feature = "asm",
     any(
@@ -415,12 +394,8 @@ fn init_asm(c: &mut VP8DSPContext) {
     }
 }
 
-/// Fills in `c` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `c` must point to a writable, aligned `VP8DSPContext`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
     #[allow(unused_mut)]
     let mut table = VP8DSPContext {

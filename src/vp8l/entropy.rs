@@ -1,18 +1,3 @@
-//! The VP8L pixel loop.
-//!
-//! Every pixel is either a literal, a backward reference into what has already
-//! been decoded, or an index into the colour cache. This is the hot loop of the
-//! lossless decoder, so the shapes here are chosen for what they compile to:
-//!
-//! - The picture is a flat `&mut [u32]` exactly `width * height` long, indexed
-//!   by pixel. `pos < total` is the loop condition, so every write the loop
-//!   makes is one LLVM can prove in bounds.
-//! - The five prefix codes of the current meta-block are resolved against the
-//!   arena once, when the block changes, rather than per symbol.
-//! - Whether the decode can suspend is a const parameter, so the still path's
-//!   end-of-chunk checks cost the one-shot path nothing. This is what
-//!   `wpd_always_inline` plus a literal argument bought the C.
-
 use super::bitreader::{BitReader, TAIL_MARGIN};
 use super::huffman::Tree;
 use super::{
@@ -22,15 +7,12 @@ use super::{
 };
 use crate::error::{Error, Result, Status};
 
-/// The sub-image saying which meta prefix code covers which block.
 pub struct Entropy<'a> {
     pub data: &'a [u32],
     pub stride: usize,
     pub bits: u32,
 }
 
-/// The meta prefix-code index one pixel of the entropy image carries: the red
-/// and green bytes of the `[A, R, G, B]` the C read with `rb32`.
 #[inline(always)]
 pub fn group_index(pixel: u32) -> u32 {
     let b = pixel.to_ne_bytes();
@@ -38,15 +20,9 @@ pub fn group_index(pixel: u32) -> u32 {
     u32::from(b[1]) << 8 | u32::from(b[2])
 }
 
-/// Which meta prefix code covers a given pixel.
-///
-/// One group over the whole image is the common case and the one worth the
-/// branch: `bits` is zero there, so [`Self::mask`] never lets the pixel loops
-/// call [`Self::at`] past the first column.
 struct GroupMap<'a> {
     entropy: Option<Entropy<'a>>,
     bits: u32,
-    /// ANDed with x by the caller; zero means "look the group up again".
     mask: i32,
 }
 
@@ -86,16 +62,12 @@ pub struct Args<'a, 'e> {
     pub arena: &'a [u32],
     pub cache: &'a mut [u32],
     pub cache_bits: u32,
-    /// Set for the ARGB image, where a packed palette makes the rows narrower
-    /// than the picture they will be expanded into.
     pub reduced_width: Option<i32>,
     pub entropy: Option<Entropy<'e>>,
     pub st: &'a mut Resume,
     pub resumable: bool,
 }
 
-/// The 120 backward references that are coded as a nearby (x, y) offset rather
-/// than as a distance in pixels.
 const LZ77_DISTANCE_OFFSETS: [[i8; 2]; NUM_SHORT_DISTANCES as usize] = [
     [0, 1],
     [1, 0],
@@ -219,21 +191,16 @@ const LZ77_DISTANCE_OFFSETS: [[i8; 2]; NUM_SHORT_DISTANCES as usize] = [
     [8, 7],
 ];
 
-/// The cache slot a pixel belongs in. The multiplier and the shift are part of
-/// the format, not a choice.
 #[inline(always)]
 fn cache_slot(value: u32, bits: u32) -> usize {
     (0x1E35_A7BDu32.wrapping_mul(value) >> (32 - bits)) as usize
 }
 
-/// A pixel as the colour cache holds it: the bytes `[A, R, G, B]` read big-end
-/// first, which is what `rb32` gave the C.
 #[inline(always)]
 fn cache_value(pixel: u32) -> u32 {
     u32::from_be_bytes(pixel.to_ne_bytes())
 }
 
-/// Puts every pixel the loop has produced since the last call into the cache.
 #[inline(always)]
 fn cache_fill(
     cache: &mut [u32],
@@ -253,16 +220,6 @@ fn cache_fill(
     to
 }
 
-/// The backward reference copy.
-///
-/// Three cases, all of them expressed as disjoint slices so none of them needs
-/// to reason about an overlapping copy: a reference that reaches back further
-/// than it is long is one `copy_from_slice`; a run of one pixel is a `fill`;
-/// anything else advances in `dist`-sized steps, each of which reads only
-/// what earlier steps have already finished writing.
-///
-/// The element type is a parameter because an alpha chunk's pixels are one
-/// byte, not four; see [`decode_alpha_pixels`].
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
@@ -288,8 +245,6 @@ fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize)
     }
 }
 
-/// The five prefix codes of one meta-block, resolved against the arena once so
-/// the per-symbol path is a plain masked table index.
 #[inline(always)]
 fn resolve<'a>(
     hg: &HTreeGroup,
@@ -332,7 +287,6 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
     if let Some(reduced) = reduced_width {
         let reduced = reduced.max(0) as usize;
 
-        /* Packed palette rows are decoded contiguously; expansion re-strides. */
         if reduced < width {
             width = reduced;
             pic.stride = width;
@@ -381,9 +335,6 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
         if !RESUMABLE && gb.is_eos(buf) {
             return Err(Error::InvalidData);
         }
-        /* One pixel reads at most 108 bits, which draws the reader no more
-        than 20 bytes further in, so the margin leaves the loop nothing to
-        save or check until the end really is in sight. */
         if RESUMABLE {
             near = gb.left(buf) <= TAIL_MARGIN;
             if near {
@@ -503,10 +454,7 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
             }
         }
     }
-    /* Every pixel is out, but the last one may have been assembled from bits
-    the chunk never carried. An incremental decode that reached the end of the
-    picture is finished either way -- libwebp asserts as much -- so only a
-    whole-chunk decode calls the overrun an error. */
+    /* Match libwebp: only complete-input overruns are errors here. */
     if !RESUMABLE && gb.is_eos(buf) {
         crate::log::error("image data runs past the end of the chunk");
         return Err(Error::InvalidData);
@@ -515,12 +463,9 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
     Ok(Status::Done)
 }
 
-/// What an alpha chunk's pixel loop needs, which is less than [`Args`]: no
-/// colour cache, no red, blue or alpha tree, and no suspending.
 pub struct AlphaArgs<'a, 'e> {
     pub gb: &'a mut BitReader,
     pub buf: &'a [u8],
-    /// Exactly `width * height` bytes, one palette index each.
     pub pixels: &'a mut [u8],
     pub width: usize,
     pub groups: &'a [HTreeGroup],
@@ -528,14 +473,6 @@ pub struct AlphaArgs<'a, 'e> {
     pub entropy: Option<Entropy<'e>>,
 }
 
-/// The pixel loop for an alpha chunk that carries nothing but a palette.
-///
-/// Everything an ALPH image says lives in the green channel, and the caller has
-/// checked that the other three trees hold one symbol each — so the loop reads
-/// only green, and one byte per pixel is the whole picture. That is a quarter
-/// of the memory the ARGB canvas took, and it is the buffer the palette is
-/// looked up out of, so the canvas is never allocated and the pass that
-/// extracted green from it is gone. `DecodeAlphaData` in libwebp.
 pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
     let AlphaArgs {
         gb,
@@ -618,9 +555,6 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
             return Err(Error::InvalidData);
         }
     }
-    /* As in [`run`]: the plane is full, but not if its last byte came out of
-    the zeros past the chunk. An alpha chunk is never decoded incrementally,
-    so there is no resumable case to spare here. */
     if gb.is_eos(buf) {
         crate::log::error("alpha data runs past the end of the chunk");
         return Err(Error::InvalidData);
@@ -628,9 +562,6 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
     Ok(())
 }
 
-/// The length or distance a prefix code stands for: the four shortest are the
-/// code itself, and the rest name a range plus the extra bits that pick out of
-/// it.
 #[inline(always)]
 fn extend(gb: &mut BitReader, buf: &[u8], prefix: u32) -> u32 {
     if prefix < 4 {

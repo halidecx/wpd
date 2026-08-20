@@ -24,11 +24,7 @@ typedef enum PixelFormat {
     PIX_FMT_PACKED,
 } PixelFormat;
 
-/* Byte offset of A, R, G and B within a pixel; -1 when the channel is
-   absent. WebPAnimDecoder only accepts RGBA, BGRA, rgbA and bgrA, so the
-   other layouts are decoded in the closest one it does accept and permuted
-   here. Permuting is lossless, but dropping alpha for rgb and bgr is our
-   definition, not libwebp's: it has no RGB animation mode. */
+/* libwebp has no RGB animation mode, so RGB/BGR discard alpha after conversion. */
 typedef struct Layout {
     const char   *name;
     WEBP_CSP_MODE still_mode;

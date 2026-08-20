@@ -1,15 +1,3 @@
-//! The public decoder, as declared by `include/wpd.h`.
-//!
-//! Every entry point the header declares is here, and each is the same three
-//! steps: check what only a raw pointer can get wrong, ask [`wpd::driver`],
-//! and turn what comes back into a `WPDStatus` and a versioned struct.
-//!
-//! [`WPDDecoder`] is that decoder plus the one thing the ABI needs and it does
-//! not: the planes a caller supplied. The decoder writes its rows through a
-//! sink built over them and never learns what they are, but a `WPDFrame` has
-//! to name them, because naming where the pixels went is what the header says
-//! it does.
-
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ops::{Deref, DerefMut};
 use std::{alloc, mem, ptr, slice};
@@ -26,23 +14,9 @@ use crate::frame::{
 };
 use crate::options::WPDDecoderOptions;
 
-/// The decoder, with the lifetime of the file it was pointed at.
-///
-/// `wpd_decoder_open_borrowed` and `wpd_decoder_update` promise the caller's
-/// bytes will outlive the decode; the C ABI cannot say so, so
-/// [`WPDDecoderRaw`] is what crosses it and the promise is checked nowhere.
-/// The safe API in [`wpd::api`] hands out a real `'a` instead.
 pub struct WPDDecoder<'a> {
     decoder: Decoder<'a>,
-    /// Set while a call is running and left set if that call panicked, since
-    /// unwinding out of the middle of a decode leaves the decoder part way
-    /// through whatever it was doing. Every entry point below refuses a
-    /// poisoned decoder rather than build on what the unwind left.
     poisoned: bool,
-    /// The planes `wpd_decoder_set_output_buffer` named, kept beside the sink
-    /// built over them. Only the ABI needs these: a decode reports where its
-    /// pixels went, and for a caller's own buffer that is the caller's own
-    /// pointers, which the decoder itself never sees.
     planes: [WPDOutputPlane; 4],
 }
 
@@ -55,11 +29,6 @@ impl WPDDecoder<'_> {
         }
     }
 
-    /// Runs `body` on this decoder with a panic turned into `fallback`, and
-    /// refuses to run it at all once one has happened. See [`crate::guard`].
-    ///
-    /// The flag goes up for the duration rather than only on the way out, so
-    /// the unwind has nothing to do to leave it up.
     fn guarded<T>(&mut self, fallback: T, body: impl FnOnce(&mut Self) -> T) -> T {
         if self.poisoned {
             wpd::log::error("decoder used after an internal error");
@@ -119,7 +88,6 @@ pub const WPD_ERR_TOO_LARGE: c_int = -7;
 pub const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
 pub const WPD_ERR_INTERNAL: c_int = -9;
 
-/// `WPDFrameInfo` from `include/wpd.h`.
 #[repr(C)]
 pub struct WPDFrameInfo {
     pub struct_size: usize,
@@ -134,7 +102,6 @@ pub struct WPDFrameInfo {
     pub complete: c_int,
 }
 
-/// `WPDOutputBuffer` from `include/wpd.h`.
 #[repr(C)]
 pub struct WPDOutputBuffer {
     pub struct_size: usize,
@@ -149,10 +116,8 @@ fn output_buffer_v1() -> usize {
     mem::offset_of!(WPDOutputBuffer, plane) + mem::size_of::<[WPDOutputPlane; 4]>()
 }
 
-/// What the C ABI passes around, since a `*mut` cannot carry a lifetime.
 pub type WPDDecoderRaw = WPDDecoder<'static>;
 
-/// What the core's failures are called at the ABI.
 pub(crate) fn status(e: Error) -> c_int {
     match e {
         Error::InvalidArgument => WPD_ERR_INVALID_ARG,
@@ -166,8 +131,6 @@ pub(crate) fn status(e: Error) -> c_int {
     }
 }
 
-/// What a driver call reports at the ABI: a status, and how many rows or
-/// pictures it produced.
 fn reported(ret: Result<c_int, Error>) -> c_int {
     match ret {
         Ok(n) => n,
@@ -206,18 +169,14 @@ pub extern "C" fn wpd_decoder_create() -> *mut WPDDecoderRaw {
     })
 }
 
-/// # Safety
-///
-/// `decoder` must come from [`wpd_decoder_create`] and not have been freed.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_free(decoder: *mut WPDDecoderRaw) {
     if !decoder.is_null() {
         crate::guard((), || drop(unsafe { Box::from_raw(decoder) }));
     }
 }
 
-/// The versioned C struct: check what only its encoding can get wrong, then
-/// hand the rest to [`WPDDecoder::set_core_options`].
 fn set_options(
     decoder: &mut WPDDecoder<'_>,
     options: &WPDDecoderOptions,
@@ -236,9 +195,6 @@ fn set_options(
     decoder.set_core_options(options.to_core())
 }
 
-/// # Safety
-///
-/// The buffer's planes must be as it declares them.
 unsafe fn set_output_buffer(
     decoder: &mut WPDDecoder<'_>,
     buffer: Option<&WPDOutputBuffer>,
@@ -260,9 +216,6 @@ unsafe fn set_output_buffer(
             return Err(decoder.fail("invalid output buffer", Error::InvalidArgument));
         }
     }
-    /* The same planes named twice keeps the rows already converted, which is
-    what lets a caller ask for a partial frame repeatedly without redoing the
-    ones it has. */
     if !decoder.has_sink() || decoder.planes != buffer.plane {
         let sink = try_box(External(buffer.plane))?;
 
@@ -272,11 +225,8 @@ unsafe fn set_output_buffer(
     Ok(())
 }
 
-/// # Safety
-///
-/// `options`, when not null, must point to a `WPDDecoderOptions` of at least
-/// its own declared `struct_size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_set_options(
     decoder: *mut WPDDecoderRaw,
     options: *const WPDDecoderOptions,
@@ -295,10 +245,8 @@ pub unsafe extern "C" fn wpd_decoder_set_options(
     })
 }
 
-/// # Safety
-///
-/// `decoder` must be live.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
     decoder: *mut WPDDecoderRaw,
     mode: c_int,
@@ -311,10 +259,8 @@ pub unsafe extern "C" fn wpd_decoder_set_animation_mode(
     }
 }
 
-/// # Safety
-///
-/// `decoder` must be live.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_set_output_format(
     decoder: *mut WPDDecoderRaw,
     format: c_int,
@@ -327,11 +273,8 @@ pub unsafe extern "C" fn wpd_decoder_set_output_format(
     }
 }
 
-/// # Safety
-///
-/// `buffer`, when not null, must point to a `WPDOutputBuffer` of at least its
-/// own declared `struct_size` bytes, whose planes are as they were declared.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
     decoder: *mut WPDDecoderRaw,
     buffer: *const WPDOutputBuffer,
@@ -347,14 +290,6 @@ pub unsafe extern "C" fn wpd_decoder_set_output_buffer(
     })
 }
 
-/// The caller's bytes as a slice, with the one lifetime extension the C ABI
-/// forces: `wpd_decoder_open_borrowed` and `wpd_decoder_update` promise the
-/// memory outlives the decoder, and nothing on this side can check it.
-///
-/// # Safety
-///
-/// `data` must be readable for `size` bytes, and for the two borrowing entry
-/// points must stay so until the decoder is reopened or freed.
 unsafe fn lent<'a>(data: *const u8, size: usize) -> &'a [u8] {
     if data.is_null() || size == 0 {
         return &[];
@@ -362,10 +297,8 @@ unsafe fn lent<'a>(data: *const u8, size: usize) -> &'a [u8] {
     unsafe { slice::from_raw_parts(data, size) }
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_open(
     decoder: *mut WPDDecoderRaw,
     data: *const u8,
@@ -383,11 +316,8 @@ pub unsafe extern "C" fn wpd_decoder_open(
     })
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes and stay unchanged until the
-/// decoder is reopened or freed, which is what the header asks of it.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_open_borrowed(
     decoder: *mut WPDDecoderRaw,
     data: *const u8,
@@ -409,10 +339,8 @@ pub unsafe extern "C" fn wpd_decoder_open_borrowed(
     })
 }
 
-/// # Safety
-///
-/// `decoder` must be live.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_open_stream(decoder: *mut WPDDecoderRaw) -> c_int {
     match unsafe { decoder.as_mut() } {
         Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
@@ -422,10 +350,8 @@ pub unsafe extern "C" fn wpd_decoder_open_stream(decoder: *mut WPDDecoderRaw) ->
     }
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_append(
     decoder: *mut WPDDecoderRaw,
     data: *const u8,
@@ -443,11 +369,8 @@ pub unsafe extern "C" fn wpd_decoder_append(
     })
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes and stay valid until the next
-/// update or the decoder is freed.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_update(
     decoder: *mut WPDDecoderRaw,
     data: *const u8,
@@ -465,10 +388,8 @@ pub unsafe extern "C" fn wpd_decoder_update(
     })
 }
 
-/// # Safety
-///
-/// `decoder` must be live.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_end_of_stream(
     decoder: *mut WPDDecoderRaw,
 ) -> c_int {
@@ -480,11 +401,8 @@ pub unsafe extern "C" fn wpd_decoder_end_of_stream(
     }
 }
 
-/// # Safety
-///
-/// `info`, when not null, must point to a `WPDImageInfo` of at least its own
-/// declared `struct_size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_get_info(
     decoder: *const WPDDecoderRaw,
     info: *mut WPDImageInfo,
@@ -503,7 +421,6 @@ pub unsafe extern "C" fn wpd_decoder_get_info(
     })
 }
 
-/// Fills the caller's versioned struct in from what the decoder reports.
 fn get_info(
     decoder: &mut WPDDecoder<'_>,
     info: &mut WPDImageInfo,
@@ -531,10 +448,8 @@ fn get_info(
     Ok(())
 }
 
-/// # Safety
-///
-/// `decoder` must be live.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_rewind(decoder: *mut WPDDecoderRaw) -> c_int {
     match unsafe { decoder.as_mut() } {
         Some(decoder) => decoder.guarded(WPD_ERR_INTERNAL, |decoder| {
@@ -544,11 +459,8 @@ pub unsafe extern "C" fn wpd_decoder_rewind(decoder: *mut WPDDecoderRaw) -> c_in
     }
 }
 
-/// # Safety
-///
-/// `info`, when not null, must point to a `WPDFrameInfo` of at least its own
-/// declared `struct_size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_frame_info(
     decoder: *const WPDDecoderRaw,
     index: c_int,
@@ -568,11 +480,6 @@ pub unsafe extern "C" fn wpd_decoder_frame_info(
     })
 }
 
-/// Fills the caller's versioned struct in from what the decoder reports.
-///
-/// The struct is cleared once the state checks have passed and before the
-/// frame is looked up, which is the order the C's did it in: asking for a
-/// frame that is not there leaves a zeroed struct behind, not the last one.
 fn frame_info(
     decoder: &mut WPDDecoder<'_>,
     index: c_int,
@@ -583,8 +490,6 @@ fn frame_info(
     }
     decoder.headers_ready()?;
 
-    /* Everything past `struct_size`, which is the caller's, survives; the head
-    is the size itself. */
     let size = info.struct_size;
 
     info.pos_x = 0;
@@ -612,10 +517,8 @@ fn frame_info(
     Ok(())
 }
 
-/// # Safety
-///
-/// `data` and `size` must be writable.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_metadata(
     decoder: *const WPDDecoderRaw,
     which: c_int,
@@ -650,11 +553,8 @@ pub unsafe extern "C" fn wpd_decoder_metadata(
     })
 }
 
-/// # Safety
-///
-/// `frame` must point to a `WPDFrame` of at least its own declared
-/// `struct_size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_next_frame(
     decoder: *mut WPDDecoderRaw,
     frame: *mut WPDFrame,
@@ -667,9 +567,6 @@ pub unsafe extern "C" fn wpd_decoder_next_frame(
     }
 }
 
-/// # Safety
-///
-/// As [`wpd_decoder_next_frame`].
 unsafe fn next_frame(
     decoder: &mut WPDDecoder<'_>,
     frame: *mut WPDFrame,
@@ -678,9 +575,6 @@ unsafe fn next_frame(
         return Err(decoder.fail("invalid frame", Error::InvalidArgument));
     }
 
-    /* The handout borrows the decoder, so everything the shim needs from it
-    besides the pixels is taken first, and a failure carries a message rather
-    than setting one -- `set_error` wants the decoder back. */
     let ext = decoder.planes;
     let mut out = Handout::default();
 
@@ -695,11 +589,8 @@ unsafe fn next_frame(
     }
 }
 
-/// # Safety
-///
-/// `frame` must be as [`wpd_decoder_next_frame`] requires, and `rows_valid`,
-/// when not null, writable.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_partial_frame(
     decoder: *mut WPDDecoderRaw,
     frame: *mut WPDFrame,
@@ -715,9 +606,6 @@ pub unsafe extern "C" fn wpd_decoder_partial_frame(
     }
 }
 
-/// # Safety
-///
-/// As [`wpd_decoder_partial_frame`].
 unsafe fn partial_frame(
     decoder: &mut WPDDecoder<'_>,
     frame: *mut WPDFrame,
@@ -726,8 +614,6 @@ unsafe fn partial_frame(
     if !unsafe { frame_valid(frame) } {
         return Err(decoder.fail("invalid frame", Error::InvalidArgument));
     }
-    /* Asked before the frame is cleared, not left to `partial_picture`: a
-    rejected call leaves the caller's frame and row count as it found them. */
     if let Err((message, e)) = decoder.require_open() {
         return Err(decoder.fail(message, e));
     }
@@ -754,10 +640,8 @@ unsafe fn partial_frame(
     ret
 }
 
-/// # Safety
-///
-/// `decoder` must be live or null.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_status(decoder: *const WPDDecoderRaw) -> c_int {
     match unsafe { decoder.as_ref() } {
         Some(decoder) => decoder.status().map_or(WPD_OK, status),
@@ -765,11 +649,8 @@ pub unsafe extern "C" fn wpd_decoder_status(decoder: *const WPDDecoderRaw) -> c_
     }
 }
 
-/// # Safety
-///
-/// As [`wpd_decoder_status`]. The string belongs to the decoder and stays
-/// valid until its next failure.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decoder_error(
     decoder: *const WPDDecoderRaw,
 ) -> *const c_char {
@@ -781,18 +662,10 @@ pub unsafe extern "C" fn wpd_decoder_error(
     }
 }
 
-/// The memory behind a frame `wpd_decode` handed out, released by
-/// `wpd_frame_free`.
 struct WPDFrameOwner {
     plane: [Vec<u8>; 4],
 }
 
-/// Runs a one-shot decode of `data` into `frame`, leaving the decoder for the
-/// caller to take what it needs out of.
-///
-/// # Safety
-///
-/// As [`wpd_decode`].
 unsafe fn decode_once(
     data: *const u8,
     size: usize,
@@ -830,11 +703,8 @@ unsafe fn decode_once(
     (decoder, ret)
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes, and `frame` must point to a
-/// `WPDFrame` of at least its own declared `struct_size` bytes.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decode_into(
     data: *const u8,
     size: usize,
@@ -843,10 +713,6 @@ pub unsafe extern "C" fn wpd_decode_into(
     buffer: *const WPDOutputBuffer,
     frame: *mut WPDFrame,
 ) -> c_int {
-    /* Whole-body rather than per-step: the two one-shot entry points do work
-    of their own between the guarded calls they are built out of, and a panic
-    escaping the middle of one leaks the decoder it had open. A leak is what
-    is left to trade against an abort. */
     crate::guard(WPD_ERR_INTERNAL, || {
         if data.is_null() || buffer.is_null() || !unsafe { frame_valid(frame) } {
             return WPD_ERR_INVALID_ARG;
@@ -870,10 +736,8 @@ pub unsafe extern "C" fn wpd_decode_into(
     })
 }
 
-/// # Safety
-///
-/// As [`wpd_decode_into`].
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_decode(
     data: *const u8,
     size: usize,
@@ -970,8 +834,6 @@ pub unsafe extern "C" fn wpd_decode(
     })
 }
 
-/// Copies past `struct_size` rather than assigning: the caller's frame may be
-/// a newer, longer revision of the struct, and its own size has to survive.
 fn frame_copy(dst: *mut WPDFrame, src: &WPDFrame) {
     let head = crate::frame::frame_head();
     let extent = unsafe { crate::frame::frame_extent(dst) }
@@ -986,11 +848,8 @@ fn frame_copy(dst: *mut WPDFrame, src: &WPDFrame) {
     }
 }
 
-/// # Safety
-///
-/// `frame`, when not null, must be one [`wpd_decode`] filled in, or a frame
-/// that owns nothing.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
     if !unsafe { frame_valid(frame) } {
         return;
@@ -1023,18 +882,12 @@ mod tests {
         );
         assert!(decoder.poisoned);
 
-        /* And every call after it is turned away rather than built on what
-        the unwind left behind. */
         assert_eq!(
             decoder.guarded(WPD_ERR_INTERNAL, |_| WPD_OK),
             WPD_ERR_INTERNAL
         );
     }
 
-    /// A rejected call must leave the caller's frame and row count as it found
-    /// them: `wpd_decoder_partial_frame` clears the frame, so the one rejection
-    /// that can follow the clear has to come before it. Reusing a `WPDFrame`
-    /// across calls is what makes the difference visible.
     #[test]
     fn a_rejected_partial_frame_leaves_the_caller_s_frame_alone() {
         let decoder = wpd_decoder_create();
@@ -1067,9 +920,6 @@ mod tests {
         unsafe { wpd_decoder_free(decoder) };
     }
 
-    /// The ABI's table of descriptions and the core's are written out
-    /// separately, because one is NUL-terminated and the other is not. This is
-    /// what says they still describe the same failures.
     #[test]
     fn every_core_failure_crosses_the_abi_under_its_own_name() {
         for e in [

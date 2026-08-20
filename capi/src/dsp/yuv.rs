@@ -1,13 +1,3 @@
-//! C ABI for the YUV DSP table and its row drivers, as declared by
-//! `src/yuvdsp.h`.
-//!
-//! The assembly entries are the raw symbols, so `checkasm --bench` measures
-//! the assembly and nothing else. The fallbacks are trampolines that rebuild
-//! slices for the safe kernels in [`wpd::dsp::yuv`].
-//!
-//! The row drivers moved to [`wpd::convert`]; what is left of them here are
-//! three entry points the C harnesses in `tests/` and the tool still call.
-
 use std::ffi::c_int;
 
 use super::count;
@@ -64,10 +54,6 @@ pub struct WPDYUVDSP {
     pub argb_to_uv: ArgbToUvFn,
 }
 
-/// Builds the row an upsample block entry point reads, given the pair count.
-///
-/// For `n` blocks the kernel walks pairs `1..=16n`, so it touches luma and
-/// output pixels `0..32n` and chroma `0..=16n`.
 macro_rules! upsample_block_tramp {
     ($name:ident, $layout:expr) => {
         unsafe extern "C" fn $name(
@@ -256,9 +242,6 @@ unsafe extern "C" fn argb_to_uv_c(
     }
 }
 
-/// Overlays whatever [`wpd::asm::yuv::raw_table`] selected for the running
-/// CPU. The symbols and the instruction-set ladder both live in the core, so
-/// this table and the decoder's cannot pick different kernels.
 #[cfg(all(
     feature = "asm",
     any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
@@ -314,7 +297,6 @@ fn init_asm(dsp: &mut WPDYUVDSP) {
 }
 
 impl WPDYUVDSP {
-    /// The best implementation the running CPU allows.
     pub(crate) fn new() -> Self {
         #[allow(unused_mut)]
         let mut table = WPDYUVDSP {
@@ -353,31 +335,15 @@ impl WPDYUVDSP {
     }
 }
 
-/// Fills in `dsp` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `dsp` must point to a writable, aligned `WPDYUVDSP`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
     unsafe { dsp.write(WPDYUVDSP::new()) }
 }
 
-/// Fancy-upsamples rows `[row_start, row_end)`, returning the first row
-/// written.
-///
-/// This entry point and its two siblings exist for the harnesses in `tests/`;
-/// the decoder calls [`wpd::convert`] directly. They take no table, because
-/// the one the core builds from the current CPU flags is the one under test —
-/// `checkasm` sets those flags before it asks for either.
-///
-/// # Safety
-///
-/// The planes must hold `height` rows of `width` samples at the given strides,
-/// and `dst` the same in the packed layout. Every stride must be positive;
-/// a negative one is rejected, since the row walk here is unsigned.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     layout: c_int,
     dst: *mut u8,
@@ -439,11 +405,9 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     }
 }
 
-/// # Safety
-///
-/// As [`wpd_yuv420_to_packed_rows`].
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed(
     layout: c_int,
     dst: *mut u8,

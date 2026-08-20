@@ -22,7 +22,6 @@ static void put32(uint8_t *p, uint32_t v) {
     p[3] = v >> 24 & 0xff;
 }
 
-/* RIFF/WEBP wrapper around a lone VP8L header with the alpha bit set. */
 static size_t make_vp8l(uint8_t *out, int width, int height, int alpha) {
     const uint32_t bits = (uint32_t)(width - 1) | (uint32_t)(height - 1) << 14 |
         (uint32_t)(alpha != 0) << 28;
@@ -56,7 +55,6 @@ static size_t make_vp8x(uint8_t *out, int width, int height, int flags) {
     return 30;
 }
 
-/* A complete VP8X canvas followed by a VP8L chunk whose payload is cut short. */
 static size_t make_truncated_chunk(uint8_t *out) {
     size_t size = make_vp8x(out, 8, 8, 0);
 
@@ -78,10 +76,6 @@ static size_t put_chunk(uint8_t *out, const char *tag, const uint8_t *payload,
     return 8 + size + (size & 1);
 }
 
-/* A decodable VP8L payload: no transforms, no colour cache and five prefix
-   codes carrying one symbol each, so every pixel comes out zero without any
-   symbol costing a bit. The alpha bit of the header is a hint the scanner
-   reads and the decode itself ignores, so it may be set either way. */
 static size_t make_vp8l_blank(uint8_t *out, int width, int height, int alpha) {
     out[0] = 0x2f;
     put32(out + 1,
@@ -93,8 +87,6 @@ static size_t make_vp8l_blank(uint8_t *out, int width, int height, int alpha) {
     return 8;
 }
 
-/* A VP8X canvas, an ALPH chunk using a compression method the decoder skips
-   with a warning, and an image for it to skip past. */
 static size_t make_unsupported_alph(uint8_t *out) {
     uint8_t image[8];
     size_t  size = make_vp8x(out, 8, 8, 0x10);
@@ -110,10 +102,6 @@ static size_t make_unsupported_alph(uint8_t *out) {
     return size;
 }
 
-/* A one-frame animation whose ANMF payload is an odd number of bytes, so the
-   chunk carries a pad byte the declared size does not count. The trailing byte
-   inside the payload is what makes it odd; decode_anmf() stops at it because
-   fewer than eight bytes are left, so the frame still decodes. */
 static size_t make_odd_anmf(uint8_t *out) {
     uint8_t image[8], anmf[33];
     size_t  size = make_vp8x(out, 8, 8, 0x02);
@@ -139,15 +127,9 @@ enum {
     ANMF_SUB_VP8L_OPAQUE,
 };
 
-/* The bytes make_anmf_subchunks() writes for 'frames' of 'pad_chunks'. */
 #define ANMF_SUBCHUNKS_SIZE(pad_chunks, frames) \
     (30 + 14 + (size_t)(frames) * (8 + 16 + 8 * (size_t)(pad_chunks) + 10 + 16))
 
-/* One ANMF that hides the chunk deciding its alpha behind 'pad_chunks' empty
-   sub-chunks, which decode_anmf() skips. Streaming these is what makes the
-   scanner's walk of that list observable: it has to resume where the last
-   delivery left it rather than start over, and start over rather than resume
-   once it reaches the next frame. */
 static size_t put_anmf_subchunks(uint8_t *out, int pad_chunks, int kind) {
     uint8_t        image[8], alph[2];
     uint8_t *const anmf    = out + 8;
@@ -187,8 +169,6 @@ static size_t make_anmf_subchunks(uint8_t *out, int pad_chunks,
     return size;
 }
 
-/* ICCP, a VP8L image and trailing EXIF and XMP, as a muxer would lay them
-   out. The odd sizes exercise the padding byte. */
 static size_t make_metadata_file(uint8_t *out, const uint8_t *iccp,
                                  size_t iccp_size, const uint8_t *exif,
                                  size_t exif_size, const uint8_t *xmp,
@@ -240,7 +220,6 @@ static void test_metadata(void) {
     CHECK(info.metadata ==
           (WPD_METADATA_ICCP | WPD_METADATA_EXIF | WPD_METADATA_XMP));
 
-    /* Nothing is readable before a file is open. */
     CHECK(wpd_decoder_metadata(decoder, WPD_METADATA_EXIF, &data, &n) ==
           WPD_ERR_INVALID_ARG);
 
@@ -252,7 +231,6 @@ static void test_metadata(void) {
     check_metadata(decoder, WPD_METADATA_EXIF, exif, sizeof(exif));
     check_metadata(decoder, WPD_METADATA_XMP, xmp, sizeof(xmp) - 1);
 
-    /* 'which' has to name exactly one chunk. */
     CHECK(wpd_decoder_metadata(decoder, 0, &data, &n) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_status(decoder) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_metadata(
@@ -267,8 +245,6 @@ static void test_metadata(void) {
     CHECK(wpd_decoder_metadata(decoder, WPD_METADATA_EXIF, NULL, &n) ==
           WPD_ERR_INVALID_ARG);
 
-    /* One byte at a time: the trailing chunks only turn up at the end, and
-       the flags advertise them well before that. */
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
     for (size_t offset = 0; offset < size; offset++) {
         CHECK(wpd_decoder_append(decoder, file + offset, 1) == WPD_OK);
@@ -284,7 +260,6 @@ static void test_metadata(void) {
     check_metadata(decoder, WPD_METADATA_EXIF, exif, sizeof(exif));
     check_metadata(decoder, WPD_METADATA_XMP, xmp, sizeof(xmp) - 1);
 
-    /* Reopening a file without metadata forgets the old file's. */
     size = make_vp8l(file, 8, 8, 0);
     CHECK(wpd_decoder_open(decoder, file, size) == WPD_OK);
     CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
@@ -359,10 +334,6 @@ static void test_get_info(void) {
     CHECK(wpd_get_info(file, 10, &info) == WPD_ERR_BITSTREAM);
     file[0] = 0;
     CHECK(wpd_get_info(file, 10, &info) == WPD_ERR_BITSTREAM);
-    /* A first partition reaching past the bytes in hand is short data, not a
-       bad bitstream: the keyframe header has already given the dimensions, so
-       reading the headers succeeds and only opening the file judges it
-       complete. */
     file[0] = 0x30;
     CHECK(wpd_get_info(file, 10, &info) == WPD_OK);
     CHECK(info.width == 8 && info.height == 8);
@@ -385,7 +356,6 @@ static void test_get_info(void) {
     CHECK(wpd_get_info(NULL, size, &info) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_get_info(file, size, NULL) == WPD_ERR_INVALID_ARG);
 
-    /* Truncated before and inside the chunk list. */
     CHECK(wpd_get_info(file, 8, &info) == WPD_ERR_TRUNCATED);
     CHECK(wpd_get_info(file, 20, &info) == WPD_ERR_TRUNCATED);
 
@@ -463,9 +433,7 @@ static void test_decoder_errors(void) {
     CHECK(wpd_decoder_get_info(decoder, &info) == WPD_OK);
     CHECK(info.width == 8 && info.coding == WPD_CODING_LOSSLESS);
 
-    /* Headers complete, image chunk short. wpd_get_info() reports what the
-       canvas header promised, as libwebp does, but the file itself is not
-       decodable and opening it says so. */
+    /* Match libwebp: incomplete image data can still expose canvas info. */
     size = make_truncated_chunk(file);
     CHECK(wpd_get_info(file, size, &info) == WPD_OK);
     CHECK(info.width == 8 && info.height == 8);
@@ -475,7 +443,6 @@ static void test_decoder_errors(void) {
     CHECK(wpd_decoder_next_frame(decoder, &(WPDFrame)WPD_FRAME_INIT) ==
           WPD_ERR_INVALID_ARG);
 
-    /* A canvas header and nothing else carries no image to decode. */
     size = make_vp8x(file, 8, 8, 0);
     put32(file + 4, (uint32_t)size - 8);
     CHECK(wpd_decoder_open(decoder, file, size) == WPD_ERR_BITSTREAM);
@@ -484,13 +451,10 @@ static void test_decoder_errors(void) {
               file, size, WPD_PIX_FMT_RGBA, NULL, &(WPDFrame)WPD_FRAME_INIT) ==
           WPD_ERR_BITSTREAM);
 
-    /* A RIFF size larger than the bytes handed over is truncation too. */
     size = make_vp8l(file, 8, 8, 0);
     put32(file + 4, (uint32_t)size);
     CHECK(wpd_decoder_open(decoder, file, size) == WPD_ERR_TRUNCATED);
 
-    /* No headers at all past the RIFF wrapper. A failed open must also drop
-       the previously opened file rather than leave it decodable. */
     size = make_vp8l(file, 8, 8, 0);
     CHECK(wpd_decoder_open(decoder, file, size - 4) == WPD_ERR_TRUNCATED);
     CHECK(wpd_decoder_get_info(decoder, &info) == WPD_ERR_INVALID_ARG);
@@ -563,7 +527,6 @@ static int packed_bpp(WPDPixelFormat format) {
     }
 }
 
-/* Decodes every frame into one contiguous buffer the caller owns. */
 static uint8_t *decode_internal(const uint8_t *data, size_t size,
                                 WPDPixelFormat format, int *width, int *height,
                                 int *frames, size_t *row_bytes) {
@@ -608,7 +571,6 @@ static uint8_t *decode_internal(const uint8_t *data, size_t size,
     return out;
 }
 
-/* A real file's metadata must read the same whole as it does streamed. */
 static void test_file_metadata(const char *path, int expect,
                                size_t expect_size) {
     size_t       size;
@@ -688,7 +650,6 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
         return;
     }
 
-    /* Tight stride, padded stride, and a negative stride that flips. */
     for (int variant = 0; variant < 3; variant++) {
         const size_t    pad     = variant == 1 ? 37 : 0;
         const size_t    advance = row + pad;
@@ -744,7 +705,6 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
         wpd_decoder_free(decoder);
     }
 
-    /* One byte short of a full canvas, and a stride narrower than a row. */
     {
         uint8_t        *buffer  = malloc(row * (size_t)height);
         WPDDecoder     *decoder = wpd_decoder_create();
@@ -777,7 +737,6 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
     free(data);
 }
 
-/* Planar output requires all of its external planes. */
 static void test_output_buffer_incomplete_yuv(const char *path) {
     size_t   size;
     uint8_t *data = read_file(path, &size);
@@ -803,10 +762,6 @@ static void test_output_buffer_incomplete_yuv(const char *path) {
     free(data);
 }
 
-/* Feeds a still lossy file in pieces and checks that the rows reported
-   finished by wpd_decoder_partial_frame() already hold their final values,
-   that the count only grows, and that some of the image is readable before the
-   last byte arrives. */
 static void test_partial_frame(const char *path, WPDPixelFormat format,
                                size_t chunk, int use_ext) {
     size_t   size, row;
@@ -841,8 +796,6 @@ static void test_partial_frame(const char *path, WPDPixelFormat format,
         return;
     }
     CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
-    /* Sized to the pixels and no more, so a row written wider than the format
-       asks for lands outside the allocation rather than in slack. */
     if (use_ext) {
         const size_t need = row * (size_t)height;
 
@@ -871,8 +824,6 @@ static void test_partial_frame(const char *path, WPDPixelFormat format,
         last_rows = rows;
         if (rows > 0) {
             CHECK(frame.width == width && frame.height == height);
-            /* decode_internal() lays planar output out with a packed row
-               pitch, so only the leading bytes of each row are the image. */
             if (frame.format == WPD_PIX_FMT_YUV420P ||
                 frame.format == WPD_PIX_FMT_YUVA420P)
                 cmp = (size_t)width;
@@ -897,7 +848,6 @@ static void test_partial_frame(const char *path, WPDPixelFormat format,
     while (wpd_decoder_next_frame(decoder, &frame) > 0) seen++;
     CHECK(seen == 1);
 
-    /* Rows must have been readable well before the file finished. */
     CHECK(rows_at_half > 0);
     CHECK(rows_at_half < height);
 
@@ -921,10 +871,7 @@ static void test_partial_frame(const char *path, WPDPixelFormat format,
     free(data);
 }
 
-/* A plain still carries no VP8X, so its dimensions live in the frame header
-   at the front of the image chunk. Cutting the file anywhere past that header
-   still leaves them readable, and libwebp's WebPGetFeatures() reports them, so
-   wpd_get_info() has to as well rather than refusing the whole file. */
+/* Match libwebp: a partial still can expose dimensions from its frame header. */
 static void test_info_truncated_still(const char *path) {
     size_t   size;
     uint8_t *data  = read_file(path, &size);
@@ -959,9 +906,6 @@ static uint32_t rl32(const uint8_t *p) {
         (uint32_t)p[3] << 24;
 }
 
-/* Lifts a lossless frame that carries alpha out of an animation and rewraps it
-   as a standalone still, so the progressive still paths can be exercised on
-   one without keeping a separate file around for it. */
 static uint8_t *extract_lossless_alpha_still(const uint8_t *data, size_t size,
                                              size_t *out_size) {
     size_t pos = 12;
@@ -976,7 +920,6 @@ static uint8_t *extract_lossless_alpha_still(const uint8_t *data, size_t size,
         if (total > size - pos)
             return NULL;
         if (!memcmp(data + pos, "ANMF", 4)) {
-            /* Step into the frame header and keep walking its sub-chunks. */
             pos += 8 + 16;
             continue;
         }
@@ -998,11 +941,6 @@ static uint8_t *extract_lossless_alpha_still(const uint8_t *data, size_t size,
     return NULL;
 }
 
-/* Switching the output format part way through a progressive decode has to
-   land the same pixels as decoding in the target format from the start.
-   'peek_again' asks for the rows a second time straight after the switch,
-   before any more input arrives, which is the case that used to leave the
-   already converted rows behind. */
 static void check_partial_format_change(const uint8_t *data, size_t size,
                                         size_t chunk, WPDPixelFormat from,
                                         WPDPixelFormat to, int peek_again) {
@@ -1064,10 +1002,6 @@ static void check_partial_format_change(const uint8_t *data, size_t size,
     free(reference);
 }
 
-/* Swapping the output buffer part way through a progressive decode has to fill
-   the new one from the top, since the rows handed out so far went to the old
-   one. Every row the decoder then claims is finished must be in the buffer it
-   points the caller at. */
 static void check_partial_buffer_change(const uint8_t *data, size_t size,
                                         size_t chunk, WPDPixelFormat format) {
     size_t          row;
@@ -1175,13 +1109,7 @@ static void test_partial_buffer_change(const char *path, size_t chunk,
     free(still);
 }
 
-/* Scaling reads the decoded frame, so it must not write to it. libwebp carries
-   alpha-weighted samples across the rescaler and takes the weighting back off
-   afterwards, and doing that in place would spend the frame: an animation
-   blends its next frame onto the same canvas, and a still can be asked for its
-   pixels more than once. Exporting, changing format, and exporting again in
-   the first format runs the scale three times over one decode; all three must
-   see the same source. */
+/* Scaling must preserve decoded pixels for repeated exports and animation. */
 static void check_scale_keeps_source(const uint8_t *data, size_t size,
                                      WPDPixelFormat other, int width,
                                      int height) {
@@ -1255,8 +1183,6 @@ static void test_scale_keeps_source(const char *path, WPDPixelFormat other,
     free(still);
 }
 
-/* Every frame of a decode, rows packed one after another, with 'flip' either
-   set or not. */
 static uint8_t *decode_flipped(const uint8_t *data, size_t size,
                                WPDPixelFormat format, int flip, size_t *bytes,
                                size_t *row_bytes, int *height) {
@@ -1296,11 +1222,6 @@ static uint8_t *decode_flipped(const uint8_t *data, size_t size,
     return out;
 }
 
-/* Flipping is the last pass over finished rows, so a flipped decode has to be
-   the row-reversal of an unflipped one. That holds for an animation as much as
-   a still, and needs no second decoder to agree, which matters because the
-   parity harness skips animations and leaves the transformed animation paths
-   with no oracle of their own. */
 static void test_flip_reverses_rows(const char *path, WPDPixelFormat format) {
     size_t   size;
     uint8_t *data = read_file(path, &size);
@@ -1342,8 +1263,6 @@ static void test_partial_format_change(const char *path, size_t chunk,
     free(data);
 }
 
-/* The same switch on a lossless still that actually carries alpha, which is
-   what makes the premultiplied formats do any work. */
 static void test_partial_format_change_alpha(const char *path, size_t chunk) {
     size_t   size, still_size;
     uint8_t *data = read_file(path, &size);
@@ -1369,9 +1288,6 @@ static void test_partial_format_change_alpha(const char *path, size_t chunk) {
     free(still);
 }
 
-/* Feeds the file in fixed-size pieces and checks the frames come out identical
-   to a whole-file decode, and that they arrive as the bytes do rather than all
-   at the end. */
 static void test_stream(const char *path, WPDPixelFormat format, size_t chunk,
                         int expect_progressive) {
     size_t   size, row;
@@ -1404,7 +1320,6 @@ static void test_stream(const char *path, WPDPixelFormat format, size_t chunk,
     CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
 
-    /* Nothing is available, but that is not an error and not end of stream. */
     CHECK(wpd_decoder_next_frame(decoder, &frame) == 0);
     CHECK(wpd_decoder_get_info(decoder, &(WPDImageInfo)WPD_IMAGE_INFO_INIT) ==
           WPD_ERR_TRUNCATED);
@@ -1447,9 +1362,7 @@ static void test_stream(const char *path, WPDPixelFormat format, size_t chunk,
     CHECK(ret == 0);
     CHECK(seen == frames);
 
-    /* An animation must not withhold frames until the file is complete: by the
-       halfway point roughly half of them should already have been handed
-       over, and more must still follow. */
+    /* Streaming animation must expose frames before end of input. */
     if (expect_progressive) {
         CHECK(seen_before_last_append > 0);
         CHECK(seen_at_half >= frames / 3);
@@ -1458,7 +1371,6 @@ static void test_stream(const char *path, WPDPixelFormat format, size_t chunk,
 
     CHECK(wpd_decoder_get_info(decoder, &(WPDImageInfo)WPD_IMAGE_INFO_INIT) ==
           WPD_OK);
-    /* The stream is closed: no more input accepted. */
     CHECK(wpd_decoder_append(decoder, data, 1) == WPD_ERR_INVALID_ARG);
 
     wpd_decoder_free(decoder);
@@ -1479,19 +1391,16 @@ static void test_stream_errors(const char *path) {
         return;
     }
 
-    /* Streaming calls are rejected until a stream is open. */
     CHECK(wpd_decoder_append(decoder, data, size) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_end_of_stream(decoder) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_open(decoder, data, size) == WPD_OK);
     CHECK(wpd_decoder_append(decoder, data, size) == WPD_ERR_INVALID_ARG);
 
-    /* A stream cut short mid-chunk is only detectable at end of stream. */
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
     CHECK(wpd_decoder_append(decoder, data, size / 2) == WPD_OK);
     CHECK(wpd_decoder_next_frame(decoder, &frame) >= 0);
     CHECK(wpd_decoder_end_of_stream(decoder) == WPD_ERR_TRUNCATED);
 
-    /* Garbage is rejected as soon as the RIFF header is complete. */
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
     CHECK(wpd_decoder_append(decoder, (const uint8_t *)"RIF", 3) == WPD_OK);
     CHECK(wpd_decoder_append(decoder, (const uint8_t *)"XnotWEBPxxxx", 12) ==
@@ -1578,11 +1487,6 @@ static int frame_equal(const WPDFrame *a, const WPDFrame *b) {
     return 1;
 }
 
-/* Every progressive path converts a row once and keeps it, so polling
-   wpd_decoder_partial_frame() after each append has to arrive at exactly the
-   pixels one decode of the whole file gives. The point-sampled upsampler and
-   planar output into a caller buffer both resume part way down the image, and
-   only comparing every plane at the end catches a row left behind. */
 static void check_partial_matches_whole(const uint8_t *data, size_t size,
                                         WPDPixelFormat format, size_t chunk,
                                         const WPDDecoderOptions *options,
@@ -1693,7 +1597,6 @@ static void test_structs_and_limits(void) {
     CHECK(wpd_decoder_set_options(
               decoder, &(WPDDecoderOptions){.struct_size = sizeof(size_t)}) ==
           WPD_ERR_INVALID_ARG);
-    /* A rejected call has to leave its reason behind, not the last success. */
     CHECK(wpd_decoder_status(decoder) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_set_options(decoder, NULL) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_status(decoder) == WPD_ERR_INVALID_ARG);
@@ -1748,8 +1651,7 @@ static void test_borrowed_and_update(const uint8_t *data, size_t size,
     wpd_decoder_free(decoder);
     free(owned);
 
-    /* A rejected update must not leave the decoder holding the caller's
-       memory, so that freeing it straight away is safe. */
+    /* A rejected update must not retain caller memory. */
     decoder = wpd_decoder_create();
     CHECK(decoder != NULL);
     if (!decoder)
@@ -1773,12 +1675,10 @@ static void test_borrowed_and_update(const uint8_t *data, size_t size,
 
 static void test_transforms(const uint8_t *data, size_t size,
                             const WPDFrame *reference, int lossless) {
-    WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
-    WPDFrame          frame   = WPD_FRAME_INIT;
-    /* A lossy frame is cropped in subsampled YUV and rounds the origin down to
-       an even pixel; a lossless one is cropped in ARGB and takes it exactly. */
-    const int origin_x = lossless ? 3 : 2;
-    const int origin_y = lossless ? 5 : 4;
+    WPDDecoderOptions options  = WPD_DECODER_OPTIONS_INIT;
+    WPDFrame          frame    = WPD_FRAME_INIT;
+    const int         origin_x = lossless ? 3 : 2;
+    const int         origin_y = lossless ? 5 : 4;
 
     options.use_cropping = 1;
     options.crop_left    = 3;
@@ -1814,10 +1714,7 @@ static void test_transforms(const uint8_t *data, size_t size,
     CHECK(frame.width == 37 && frame.height == 31);
     wpd_frame_free(&frame);
 
-    /* The area rescaler is an identity at 1:1. That only shows through for a
-       lossless source: asking a lossy one to scale sends chroma through the
-       rescaler rather than the fancy upsampler, as it does in libwebp, so its
-       result is legitimately not the unscaled one. */
+    /* libwebp scales lossy chroma instead of fancy-upsampling it. */
     if (lossless) {
         options               = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
         options.use_scaling   = 1;
@@ -1905,12 +1802,7 @@ static void test_16bit(const uint8_t *data, size_t size,
     wpd_frame_free(&rgba4444pre);
 }
 
-/* The bgr 16-bit formats differ from their rgb counterparts by nothing but
-   the order the two bytes of each unit are written in, so pairing them off is
-   the whole specification. The rgb side is already held to libwebp by
-   tests/parity.c, which is where the absolute values are pinned; libwebp only
-   produces the swapped ones when built with WEBP_SWAP_16BIT_CSP, which the
-   pinned subproject is not. */
+/* BGR 16-bit output differs from RGB only in byte order. */
 static void test_16bit_swapped(const uint8_t *data, size_t size) {
     static const struct {
         WPDPixelFormat stock, swapped;
@@ -1943,10 +1835,7 @@ static void test_16bit_swapped(const uint8_t *data, size_t size) {
     }
 }
 
-/* An independent, floating-point rendering of the RGB-to-YUV conversion
-   libwebp applies to a lossless image: chroma is averaged over a 2x2 block in
-   linear light, weighted by alpha when the block is partly transparent. The
-   decoder does it with fixed-point tables, so this keeps those honest. */
+/* Floating-point reference for libwebp's lossless RGB-to-YUV conversion. */
 static double gamma_to_linear_ref(int v) {
     const int scale = (1 << 12) - 1;
 
@@ -1994,8 +1883,6 @@ static void test_lossless_yuv_reference(const uint8_t *data, size_t size,
             const uint8_t *p[4] = {
                 top + 4 * x, top + 4 * x1, bot + 4 * x, bot + 4 * x1};
             const int last_col = x1 == x, last_row = y1 == y;
-            /* Folding a missing column or row repeats the pixel, so every
-               block always averages four samples. */
             const int weight[4] = {1 + last_col + 2 * last_row * (1 + last_col),
                                    last_col ? 0 : 1 + 2 * last_row,
                                    last_row ? 0 : 1 + last_col,
@@ -2121,8 +2008,6 @@ static void test_alph_vp8_raw(const uint8_t *data, size_t size,
     CHECK(frame_equal(&frame, reference));
     wpd_frame_free(&frame);
 
-    /* A reserved compression method leaves the alpha plane unread, so it must
-       be refused rather than handed back as a transparent image. */
     raw[8] |= 3;
     CHECK(wpd_decode(raw,
                      alpha_chunk_size + vp8_chunk_size,
@@ -2132,10 +2017,6 @@ static void test_alph_vp8_raw(const uint8_t *data, size_t size,
     free(raw);
 }
 
-/* A bare stream carries no chunk header, so nothing declares how long its
-   payload is. Only the keyframe's own first partition bounds it, and even that
-   is a lower bound, so an incomplete prefix has to stay pending rather than be
-   called a bad bitstream. */
 static void test_raw_stream(const uint8_t *data, size_t size, const char tag[4],
                             int alpha_raw) {
     size_t         payload_size, alpha_chunk_size = 0, vp8_chunk_size = 0;
@@ -2197,8 +2078,6 @@ static void test_raw_stream(const uint8_t *data, size_t size, const char tag[4],
         wpd_decoder_free(decoder);
     }
 
-    /* The header alone is pending while the stream is open and truncated once
-       the caller says no more is coming. */
     {
         WPDDecoder *decoder = wpd_decoder_create();
         const int   bounded = alpha_raw || !memcmp(tag, "VP8 ", 4);
@@ -2211,8 +2090,6 @@ static void test_raw_stream(const uint8_t *data, size_t size, const char tag[4],
             if (bounded) {
                 CHECK(wpd_decoder_end_of_stream(decoder) == WPD_ERR_TRUNCATED);
             } else {
-                /* A bare lossless payload states no length anywhere, so a
-                   short prefix only gives itself away once it is decoded. */
                 CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
                 CHECK(wpd_decoder_next_frame(decoder, &frame) < 0);
             }
@@ -2220,8 +2097,6 @@ static void test_raw_stream(const uint8_t *data, size_t size, const char tag[4],
         }
     }
 
-    /* A first partition that overruns a complete buffer is still a bad
-       bitstream; streamed, the same overrun only shows up at end of stream. */
     if (!alpha_raw && !memcmp(tag, "VP8 ", 4)) {
         uint8_t    *bad     = malloc(raw_size);
         WPDDecoder *decoder = wpd_decoder_create();
@@ -2303,11 +2178,6 @@ static uint8_t premultiply_8(unsigned value, unsigned alpha) {
                          : (uint8_t)((value * (alpha * 32897u)) >> 23);
 }
 
-/* The canvas carries an alpha convention chosen by the output format, so a
-   format change between frames has to convert what is already composited.
-   Colour under a fully transparent pixel means nothing and the two conventions
-   do not agree on it, so the error is weighed by the alpha it is seen through;
-   what remains is the loss of dividing alpha back out in eight bits. */
 static void check_animation_format_switch(const uint8_t *data, size_t size,
                                           WPDPixelFormat from,
                                           WPDPixelFormat to, int at) {
@@ -2373,10 +2243,6 @@ static void test_animation_format_switch(const char *path) {
     free(data);
 }
 
-/* The area rescaler is an identity at 1:1, so scaling a premultiplied canvas
-   to its own size has to hand back exactly what not scaling it does. This
-   pins the premultiplied path with no tolerance at all: weighting the canvas
-   by alpha and dividing it out again would not survive it. */
 static void test_scaled_premultiply_identity(const char *path) {
     size_t            size;
     uint8_t          *data    = read_file(path, &size);
@@ -2416,10 +2282,7 @@ static void test_scaled_premultiply_identity(const char *path) {
     free(data);
 }
 
-/* An animation composites into a canvas that is already premultiplied when the
-   output format is, so scaling it must not weight it by alpha a second time.
-   Premultiplying the straight-alpha scale by hand reaches the same pixels, up
-   to the rounding the two routes do not share. */
+/* A premultiplied animation canvas must not be alpha-weighted twice. */
 static void test_scaled_premultiply(const char *path) {
     size_t      size;
     uint8_t    *data = read_file(path, &size);
@@ -2508,11 +2371,6 @@ static void test_replacement_animation(const char *path) {
     free(data);
 }
 
-/* Premultiplied 'src over dst', which is what a host compositing wpd's
-   sub-frames writes. Over a transparent destination it reduces to a copy,
-   which is why this test asks for a premultiplied format: the decoder's own
-   compositor copies wherever it knows the canvas is clear, and the two agree
-   bit for bit only in that convention. */
 static void blend_over_premult(uint8_t *dst, const uint8_t *src, int pixels) {
     for (int x = 0; x < pixels; x++, dst += 4, src += 4) {
         const unsigned scale = 256 - src[0];
@@ -2526,10 +2384,6 @@ static void blend_over_premult(uint8_t *dst, const uint8_t *src, int pixels) {
     }
 }
 
-/* Decodes an animation twice, once composited and once as sub-frames the test
-   composites itself out of pos_x, pos_y, dispose and blend alone, and requires
-   the two canvases to be identical at every frame. This is the consumer's use
-   case run end to end. */
 static void test_subframe_composite(const char *path) {
     size_t       size;
     uint8_t     *data         = read_file(path, &size);
@@ -2565,7 +2419,6 @@ static void test_subframe_composite(const char *path) {
         if (got_reference <= 0 || got_sub <= 0)
             break;
 
-        /* The previous frame's own dispose flag decides what survives it. */
         if (prev_dispose == WPD_DISPOSE_BACKGROUND)
             for (int y = 0; y < prev_h; y++)
                 memset(
@@ -2622,11 +2475,6 @@ done:
     free(data);
 }
 
-/* A sub-frame is composited by the host, not the decoder, so a premultiplied
-   4444 sub-frame is quantized first and multiplied in the four-bit domain
-   afterwards, exactly as a still is. Weighting the eight-bit pixel first and
-   quantizing the product rounds differently: ARGB (127, 255, 165, 0) comes out
-   as 74 07 the one way and 75 07 the other. */
 static void test_subframe_4444_premultiply(const char *path) {
     size_t      size;
     uint8_t    *data     = read_file(path, &size);
@@ -2694,11 +2542,7 @@ done:
     free(data);
 }
 
-/* The composited canvas is the one exception: libwebp weights each frame by
-   alpha in eight bits before blending it, so the finished canvas is already
-   premultiplied and packing it must not weight it again. Nothing else holds
-   this down, since animcheck.sh has no 4444 mode and parity.c skips
-   animations. */
+/* libwebp's composited canvas is already premultiplied before packing. */
 static void test_composited_4444_premultiply(const char *path) {
     size_t      size;
     uint8_t    *data   = read_file(path, &size);
@@ -2750,8 +2594,6 @@ done:
     free(data);
 }
 
-/* Sub-frame mode owns no canvas, so the canvas-relative transforms have to be
-   refused in whichever order the two are set. */
 static void test_subframe_rejects_transforms(void) {
     WPDDecoder       *decoder = wpd_decoder_create();
     WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
@@ -2786,9 +2628,6 @@ static void test_subframe_rejects_transforms(void) {
     wpd_decoder_free(decoder);
 }
 
-/* A rewound decoder has to produce the very same bytes again, and has to say
-   so plainly when the input it was given cannot be replayed. 'format' has to
-   be one of the packed ones, since the comparison flattens plane zero alone. */
 static void test_rewind(const char *path, WPDPixelFormat format, int mode) {
     size_t       size;
     uint8_t     *data    = read_file(path, &size);
@@ -2872,7 +2711,6 @@ static void test_rewind_errors(const char *path) {
     CHECK(wpd_decoder_rewind(NULL) == WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_rewind(decoder) == WPD_ERR_INVALID_ARG);
 
-    /* An appended stream may already have dropped the bytes a replay needs. */
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
     for (size_t off = 0; off < size; off += 4096) {
         const size_t n = size - off < 4096 ? size - off : 4096;
@@ -2883,7 +2721,6 @@ static void test_rewind_errors(const char *path) {
     CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
     CHECK(wpd_decoder_rewind(decoder) == WPD_ERR_UNSUPPORTED);
 
-    /* One fed through update() keeps the caller's whole prefix, so it can. */
     CHECK(wpd_decoder_open_stream(decoder) == WPD_OK);
     CHECK(wpd_decoder_update(decoder, data, size) == WPD_OK);
     CHECK(wpd_decoder_end_of_stream(decoder) == WPD_OK);
@@ -2895,8 +2732,6 @@ static void test_rewind_errors(const char *path) {
     free(data);
 }
 
-/* Every entry of the table has to agree with the frame decoding actually
-   produces, which is the promise a host lays its cache out on. */
 static void test_frame_table(const char *path) {
     size_t       size;
     uint8_t     *data    = read_file(path, &size);
@@ -2958,10 +2793,6 @@ static int frame_info_equal(const WPDFrameInfo *a, const WPDFrameInfo *b) {
         a->complete == b->complete;
 }
 
-/* Fed a piece at a time, the table has to grow an entry as soon as each ANMF
-   header lands and flip its 'complete' once the payload follows. A settled
-   entry has to say what opening the whole file says, which is the part the
-   scanner's resumed walk of an ANMF's sub-chunks could get wrong. */
 static void test_frame_table_stream(const char *path, size_t chunk,
                                     int use_append) {
     size_t       size;
@@ -2993,8 +2824,6 @@ static void test_frame_table_stream(const char *path, size_t chunk,
 
             if (wpd_decoder_frame_info(decoder, available, &entry) != WPD_OK)
                 break;
-            /* Only the last entry may be incomplete, and only ever from
-               incomplete towards complete. */
             saw_incomplete |= !entry.complete;
             if (entry.complete) {
                 CHECK(wpd_decoder_frame_info(whole, available, &want) ==
@@ -3003,7 +2832,6 @@ static void test_frame_table_stream(const char *path, size_t chunk,
             }
             available++;
         }
-        /* The table never shrinks and never rewrites a settled entry. */
         CHECK(available >= seen);
         seen = available;
     }
@@ -3016,10 +2844,6 @@ static void test_frame_table_stream(const char *path, size_t chunk,
     free(data);
 }
 
-/* The scanner keeps its place inside an ANMF that has not all arrived, rather
-   than walking that frame's sub-chunk list again on every delivery. Its
-   answers must still be the ones a scan from scratch over the very same
-   prefix gives, at every prefix, or the retained place has gone stale. */
 static void test_anmf_subchunk_scan(int pad_chunks, const int *kinds,
                                     int nb_kinds) {
     uint8_t     *file   = malloc(ANMF_SUBCHUNKS_SIZE(pad_chunks, nb_kinds));
@@ -3072,8 +2896,6 @@ static void test_anmf_subchunk_scan(int pad_chunks, const int *kinds,
         CHECK(entry.has_alpha == (kinds[i] != ANMF_SUB_VP8L_OPAQUE));
         alph |= kinds[i] == ANMF_SUB_ALPH;
     }
-    /* The ALPH of that variant belongs to a lossy image the file does not
-       carry, so only the two VP8L ones can be held to the decoded frame. */
     if (!alph)
         for (int i = 0; i < nb_kinds; i++) {
             WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
@@ -3087,10 +2909,6 @@ static void test_anmf_subchunk_scan(int pad_chunks, const int *kinds,
     free(file);
 }
 
-/* The same shape, long enough that walking that sub-chunk list again on every
-   one of the deliveries it takes to fill would cost quadratically more than
-   walking it once. Nothing here asserts a time; a scanner that lost its place
-   simply overruns the test timeout by orders of magnitude. */
 static void test_anmf_subchunk_scan_stress(void) {
     static const int kind       = ANMF_SUB_VP8L_ALPHA;
     const int        pad_chunks = 80000;
@@ -3121,10 +2939,7 @@ static void test_anmf_subchunk_scan_stress(void) {
     free(file);
 }
 
-/* An ANMF of odd declared size is buffered in full one byte before the scan
-   may step over it, since the pad byte is not counted. The entry must stay
-   partial until then, or the frame lands in the table twice: once on the scan
-   that sees every declared byte and again on the one that walks past. */
+/* An odd-sized ANMF stays partial until its uncounted pad byte arrives. */
 static void test_frame_table_odd_anmf(void) {
     uint8_t      file[128];
     const size_t size    = make_odd_anmf(file);
@@ -3142,8 +2957,6 @@ static void test_frame_table_odd_anmf(void) {
         WPDFrameInfo entry = WPD_FRAME_INFO_INIT;
 
         CHECK(wpd_decoder_update(decoder, file, prefix) == WPD_OK);
-        /* There is one ANMF in the file, so a second entry is a duplicate
-           however much of it has arrived. */
         CHECK(wpd_decoder_frame_info(decoder, 1, &entry) != WPD_OK);
         if (wpd_decoder_frame_info(decoder, 0, &entry) == WPD_OK)
             CHECK(entry.complete == (prefix >= size));
@@ -3156,9 +2969,6 @@ static void test_frame_table_odd_anmf(void) {
     wpd_decoder_free(decoder);
 }
 
-/* A VP8X may declare alpha the image itself does not carry. WPDImageInfo
-   reports the declaration, the frame table the image, and the table is what a
-   decoded frame has to agree with. */
 static void test_frame_table_declared_alpha(void) {
     uint8_t      file[64];
     uint8_t      image[8];
@@ -3241,8 +3051,6 @@ static void test_frame_table_still_completion(void) {
     wpd_decoder_free(decoder);
 }
 
-/* The composited canvas is state sub-frame mode never builds, so the two
-   cannot be exchanged part-way through an animation. */
 static void test_animation_mode_switch(const char *path) {
     size_t      size;
     uint8_t    *data    = read_file(path, &size);
@@ -3255,17 +3063,14 @@ static void test_animation_mode_switch(const char *path) {
         return;
     }
     CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
-    /* Before the first frame either mode is still free to be chosen. */
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_COMPOSITED) ==
           WPD_OK);
     CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) ==
           WPD_ERR_INVALID_ARG);
-    /* Re-stating the mode in force is not a change. */
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_COMPOSITED) ==
           WPD_OK);
-    /* Rewinding drops the canvas and reopens the choice. */
     CHECK(wpd_decoder_rewind(decoder) == WPD_OK);
     CHECK(wpd_decoder_set_animation_mode(decoder, WPD_ANIM_SUBFRAME) == WPD_OK);
     CHECK(wpd_decoder_next_frame(decoder, &frame) > 0);
@@ -3286,8 +3091,6 @@ int main(int argc, char **argv) {
     test_frame_table_declared_alpha();
     test_frame_table_still_completion();
     {
-        /* Frames whose answers differ, so a place kept from the frame before
-           is caught, and a run of them in either order. */
         static const int mixed[]        = {ANMF_SUB_VP8L_ALPHA,
                                            ANMF_SUB_VP8L_OPAQUE,
                                            ANMF_SUB_ALPH,
@@ -3330,9 +3133,6 @@ int main(int argc, char **argv) {
 
         snprintf(path, sizeof(path), "%s/anim_yuva.webp", dir);
         test_file_info(path, 422, 480, 1, 1, 14, WPD_CODING_UNKNOWN);
-        /* ARGB_PRE over a composited canvas is the one packed output that is
-           relabelled rather than converted, and flipping it is the only way
-           that branch is reached twice in a row. */
         test_flip_reverses_rows(path, WPD_PIX_FMT_ARGB_PRE);
         test_flip_reverses_rows(path, WPD_PIX_FMT_RGBA);
         test_replacement_animation(path);
@@ -3480,10 +3280,6 @@ int main(int argc, char **argv) {
             snprintf(path, sizeof(path), "%s/palette_rgb.webp", dir);
             test_partial_frame(path, WPD_PIX_FMT_BGRA, 53, 0);
 
-            /* The rightmost predictor tile of this one is TR, whose top-right
-               neighbour is the leftmost pixel of the row being written, so it
-               only comes out right if the row above stays reachable across a
-               batch boundary. */
             snprintf(path, sizeof(path), "%s/predict_topright.webp", dir);
             test_partial_frame(path, WPD_PIX_FMT_RGBA, 1021, 0);
             test_partial_frame(path, WPD_PIX_FMT_NONE, 337, 0);
@@ -3492,10 +3288,6 @@ int main(int argc, char **argv) {
             test_partial_matches_whole(
                 path, WPD_PIX_FMT_YUVA420P, 1021, NULL, 0);
 
-            /* This one declares the predictor, cross colour and subtract
-               green all before the palette, so the palette is unpacked first
-               and the other three then have to run over the full canvas width
-               rather than the packed one. */
             snprintf(
                 path, sizeof(path), "%s/transforms_before_palette.webp", dir);
             test_partial_frame(path, WPD_PIX_FMT_ARGB, 13, 0);
@@ -3523,9 +3315,6 @@ int main(int argc, char **argv) {
             test_scale_keeps_source(path, WPD_PIX_FMT_YUVA420P, 300, 300, 0);
             test_scale_keeps_source(path, WPD_PIX_FMT_BGR, 700, 200, 0);
 
-            /* The single-purpose animations, which between them cover every
-               dispose and blend combination and every way two sub-frames can
-               overlap. Sub-frame mode has to survive all of them. */
             {
                 static const char *const anims[] = {
                     "dispose_bg_blend",

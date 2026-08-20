@@ -1,12 +1,3 @@
-//! The `wpd` command-line decoder.
-//!
-//! Option parsing reproduces what `getopt_long` gave the C tool — clustered
-//! short options, `--name value` and `--name=value`, `--` to stop — because
-//! `scripts/md5check.sh`, `scripts/testdata.sh` and the testdata suite all
-//! drive this binary and its output has to stay byte for byte what it was. A
-//! positional `-` extends the C tool: it names stdin as input and stdout as
-//! output.
-
 mod md5;
 mod output;
 
@@ -35,8 +26,6 @@ const CPU_MASK_NAMES: &str = "neon, none";
 )))]
 const CPU_MASK_NAMES: &str = "none";
 
-/// Named CPU masks, each including everything it implies, as `tools/wpd.c`
-/// spelled them out.
 fn cpu_masks() -> Vec<(&'static str, u32)> {
     #[allow(unused_mut)]
     let mut masks: Vec<(&'static str, u32)> = Vec::new();
@@ -149,7 +138,6 @@ fn parse_format(value: &str) -> Option<(Option<&'static str>, Option<Format>)> {
         .map(|(name, format)| (Some(*name), Some(*format)))
 }
 
-/// `strtoul(value, &end, 0)`: decimal, or `0x`-prefixed hex, or octal.
 fn parse_cpumask(value: &str) -> Option<u32> {
     if let Some((_, mask)) = cpu_masks().iter().find(|(name, _)| *name == value) {
         return Some(*mask);
@@ -241,7 +229,6 @@ fn long_option(name: &str) -> Option<&'static str> {
     }
 }
 
-/// The short spelling of an option, as the canonical long name.
 fn short_option(opt: char) -> Option<&'static str> {
     match opt {
         'h' => Some("help"),
@@ -251,11 +238,6 @@ fn short_option(opt: char) -> Option<&'static str> {
     }
 }
 
-/// Applies an option that takes a value, given its canonical long name.
-///
-/// `-r` and `--repeat` are one option, so this is where it is parsed: written
-/// out in both arms, the two spellings were two copies of the same body down
-/// to the error string, and free to drift apart.
 fn set_valued(o: &mut Options, name: &str, value: &str) -> Result<(), &'static str> {
     match name {
         "repeat" => o.repeat = parse_repeat(value).ok_or(BAD_REPEAT)?,
@@ -270,9 +252,6 @@ fn set_valued(o: &mut Options, name: &str, value: &str) -> Result<(), &'static s
     Ok(())
 }
 
-/// Reproduces `getopt_long` with `opterr = 0`: options and operands may be
-/// interleaved, `--` ends the options, and a long option takes its value
-/// either after `=` or as the next argument.
 #[inline(never)]
 fn parse_args(argv: &[OsString]) -> Parsed {
     let mut o = Options {
@@ -313,8 +292,6 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                 }
             };
 
-            // An option whose value is simply absent is what getopt reported as
-            // an unknown option, not as a bad value, so it says so first.
             macro_rules! value {
                 () => {
                     match value() {
@@ -385,7 +362,6 @@ fn parse_args(argv: &[OsString]) -> Parsed {
             continue;
         }
 
-        // A short-option cluster: -r5, -r 5, -hf argb.
         let cluster: Vec<char> = arg[1..].chars().collect();
         let mut c = 0;
 
@@ -420,8 +396,6 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                 return Parsed::Bad(MISSING);
             };
 
-            /* -h asks for help wherever it appears, so -hf needs no value for
-            the f; --help=x, which has one, is an error. */
             if name == "help" {
                 return Parsed::Help;
             }
@@ -441,8 +415,6 @@ const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 
-/// Renders an I/O error the way `strerror` did for the C tool: the message on
-/// its own, without the `(os error N)` tail Rust appends.
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
 
@@ -514,8 +486,6 @@ fn print_metadata(decoder: &mut Decoder<'_>) {
     }
 }
 
-/// Pulls every frame currently available. Returns 0 when the decoder has
-/// nothing more for now, or negative on error.
 fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
     loop {
         let Ok(next) = decoder.next_frame() else {
@@ -593,8 +563,6 @@ fn decode_stream(
     drain_frames(decoder, ctx)
 }
 
-/// Builds a decoder with the output format and animation mode the options ask
-/// for.
 fn new_decoder(
     out_format: Option<Format>,
     pixel_format: Option<&str>,
@@ -626,9 +594,6 @@ fn read_file(name: &OsStr) -> std::io::Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Rust's runtime ignores `SIGPIPE` before `main`, which would turn a closed
-/// reader into a write error or a panic out of `println!`. The C tool died of
-/// the signal, so a truncated pipe has to keep exiting 141.
 #[cfg(unix)]
 fn restore_sigpipe() {
     const SIGPIPE: i32 = 13;
@@ -799,7 +764,6 @@ fn run(
         let mut ret = 0;
 
         if opts.stream != 0 {
-            // A stream cannot be rewound, so a replay reopens instead.
             for loop_index in 0..opts.loops {
                 if loop_index > 0 {
                     let Some(next) =

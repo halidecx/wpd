@@ -1,35 +1,15 @@
-//! The bytes that have arrived, and the geometry of where they sit.
-//!
-//! A stream is described by two offsets rather than by pointers: how far it
-//! has been seen, and how much of the front has been dropped. Everything the
-//! decoder remembers about a position is an offset into the stream, so
-//! compaction can move the bytes without invalidating any of it.
-//!
-//! [`Input`] holds the bytes themselves in one of two ways. A stream is copied
-//! into a growing `Vec`; a whole file the caller promises not to touch is
-//! borrowed, and the borrow is what the promise becomes. The C had a pointer
-//! and a `borrowed` flag, and nothing but the flag said which of the two it
-//! was pointing at.
-
 use crate::error::{Error, Result};
 use crate::image::FILE_PADDING;
 
-/// Below this, a compaction moves more bytes than it frees.
 pub const COMPACT_THRESHOLD: usize = 1 << 16;
 
-/// The first capacity a growing buffer takes, and the step it doubles from.
 pub const INITIAL_CAPACITY: usize = 1 << 16;
 
-/// The most a buffer may hold. The decoder hands chunk sizes to the codecs as
-/// `int`, so a stream that grew past this could not be described to them.
 pub const MAX_BUFFERED: usize = i32::MAX as usize - FILE_PADDING;
 
-/// Where a stream has got to, in stream offsets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Window {
-    /// How far the stream has been seen.
     pub size: usize,
-    /// How much of the front has been dropped.
     pub discarded: usize,
 }
 
@@ -38,8 +18,6 @@ impl Window {
         self.size.saturating_sub(self.discarded)
     }
 
-    /// Where `offset` lands in the buffer, or `None` when it names a byte that
-    /// has been dropped or has not arrived.
     pub fn index_of(&self, offset: usize) -> Option<usize> {
         if offset < self.discarded || offset > self.size {
             return None;
@@ -48,11 +26,6 @@ impl Window {
     }
 }
 
-/// The capacity a buffer needs to take `size` more bytes, or `None` when what
-/// it has is already enough.
-///
-/// The padding every kernel is allowed to read past the end is counted in, and
-/// the growth doubles so that appending a stream byte by byte is still linear.
 pub fn grow_to(capacity: usize, buffered: usize, size: usize) -> Result<Option<usize>> {
     if size > MAX_BUFFERED || buffered > MAX_BUFFERED - size {
         return Err(Error::TooLarge);
@@ -74,12 +47,6 @@ pub fn grow_to(capacity: usize, buffered: usize, size: usize) -> Result<Option<u
     Ok(Some(grown))
 }
 
-/// Whether dropping everything before `keep` is worth the move, and how many
-/// bytes would have to be moved if it is.
-///
-/// A `keep` behind what has already been dropped is not an error: the decoder
-/// asks to keep the chunk it is working on, and a compaction may already have
-/// stopped short of it.
 pub fn compact(window: Window, keep: usize) -> Option<usize> {
     if keep < window.discarded || keep - window.discarded < COMPACT_THRESHOLD {
         return None;
@@ -87,14 +54,8 @@ pub fn compact(window: Window, keep: usize) -> Option<usize> {
     Some(window.size - keep + FILE_PADDING)
 }
 
-/// The buffered part of a stream.
-///
-/// The lifetime is the caller's file, for the borrowed shape only; a stream
-/// that is appended to owns every byte it holds and `'a` never appears in it.
 #[derive(Default)]
 pub struct Input<'a> {
-    /// Kept across a reset, so a decoder reused for a second file does not
-    /// give the allocation back and take it again.
     owned: Vec<u8>,
     borrowed: Option<&'a [u8]>,
     window: Window,
@@ -105,7 +66,6 @@ impl<'a> Input<'a> {
         Self::default()
     }
 
-    /// Forgets the input, keeping the allocation for the next file.
     pub fn reset(&mut self) {
         self.borrowed = None;
         self.window = Window::default();
@@ -119,8 +79,6 @@ impl<'a> Input<'a> {
         self.window.discarded
     }
 
-    /// Everything currently held, which starts at stream offset
-    /// [`Self::discarded`].
     pub fn bytes(&self) -> &[u8] {
         match self.borrowed {
             Some(data) => data,
@@ -128,8 +86,6 @@ impl<'a> Input<'a> {
         }
     }
 
-    /// The stream from `offset` on, or nothing when that byte has been dropped
-    /// or has not arrived.
     pub fn at(&self, offset: usize) -> &[u8] {
         match self.window.index_of(offset) {
             Some(i) => &self.bytes()[i.min(self.bytes().len())..],
@@ -137,20 +93,12 @@ impl<'a> Input<'a> {
         }
     }
 
-    /// The `size` bytes at `offset`, or as many of them as have arrived.
     pub fn chunk(&self, offset: usize, size: usize) -> &[u8] {
         let bytes = self.at(offset);
 
         &bytes[..size.min(bytes.len())]
     }
 
-    /// Grows the owned buffer to take `size` more bytes, padding included.
-    ///
-    /// The capacity doubles, so appending a stream a byte at a time stays
-    /// linear; the length only reaches what is actually used, because
-    /// lengthening a `Vec` zeroes what it adds and the C's `realloc` did not.
-    /// Sizing the length to the capacity instead costs a 64 KiB memset on
-    /// every decoder, which is most of the work for a small file.
     fn reserve(&mut self, size: usize) -> Result<()> {
         let buffered = self.window.buffered();
 
@@ -167,7 +115,6 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// Takes a copy of a whole file, which is what `wpd_decoder_open` does.
     pub fn own(&mut self, data: &[u8]) -> Result<()> {
         self.borrowed = None;
         self.window = Window::default();
@@ -181,8 +128,6 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// Points at a whole file the caller keeps, which is the promise
-    /// `wpd_decoder_open_borrowed` asks for made into a borrow.
     pub fn borrow(&mut self, data: &'a [u8]) {
         self.borrowed = Some(data);
         self.window = Window {
@@ -216,9 +161,6 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// Drops everything before `keep`, if there is enough of it to be worth
-    /// the move. A borrowed file keeps every byte, since holding them costs
-    /// nothing.
     pub fn compact(&mut self, keep: usize) {
         if self.borrowed.is_some() {
             return;
@@ -255,8 +197,6 @@ mod tests {
         );
     }
 
-    /// Appending one byte at a time must not be quadratic: every growth at
-    /// least doubles, so the number of them is logarithmic in the total.
     #[test]
     fn appending_a_byte_at_a_time_grows_a_logarithmic_number_of_times() {
         let mut capacity = 0;
@@ -293,8 +233,6 @@ mod tests {
         );
     }
 
-    /// The decoder asks to keep the chunk it is working on, which an earlier
-    /// compaction may already have stopped short of.
     #[test]
     fn a_keep_behind_what_was_already_dropped_is_declined_not_wrapped() {
         let w = Window {
@@ -331,8 +269,6 @@ mod tests {
         assert_eq!(input.size(), 5);
     }
 
-    /// Compaction moves the bytes; the offsets the decoder remembers must
-    /// still name the same ones.
     #[test]
     fn compaction_keeps_offsets_pointing_at_the_same_bytes() {
         let mut input = Input::new();
@@ -349,8 +285,6 @@ mod tests {
         assert_eq!(input.at(at), &[7, 8, 9]);
     }
 
-    /// A dropped byte has no index, and asking for one is how the decoder
-    /// learns it cannot go back.
     #[test]
     fn a_discarded_offset_reads_back_as_nothing() {
         let mut input = Input::new();
@@ -361,8 +295,6 @@ mod tests {
         assert!(input.at(COMPACT_THRESHOLD - 1).is_empty());
     }
 
-    /// A borrowed file is never copied and never compacted, so every offset
-    /// stays reachable however far the decoder has gone.
     #[test]
     fn a_borrowed_file_keeps_every_byte() {
         let file = vec![9u8; COMPACT_THRESHOLD * 2];
@@ -374,8 +306,6 @@ mod tests {
         assert_eq!(input.bytes().len(), file.len());
     }
 
-    /// Reset keeps the allocation but forgets the stream, which is what
-    /// reopening a decoder does.
     #[test]
     fn a_reset_forgets_the_stream_but_not_the_allocation() {
         let mut input = Input::new();

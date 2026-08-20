@@ -232,8 +232,6 @@ function ff_vp8_idct_dc_add4y_neon, export=1
         ret
 endfunc
 
-// Computing the four row addresses up front keeps each row an independent
-// ldr/str pair; lane inserts serialize and lane stores cost extra.
 function ff_vp8_idct_dc_add_neon, export=1
         ld1r            {v2.8h},  [x1]
         add             x3,  x0,  x2
@@ -549,8 +547,6 @@ endfunc
 vp8_h_loop_filter16
 vp8_h_loop_filter16 _inner,  inner=1
 
-// The simple filter only reads p1..q1 and only writes p0/q0, so load 4 columns
-// per row and transpose 16x4 instead of touching and transposing an 8x16 block.
 function ff_vp8_h_loop_filter16_simple_neon, export=1
         dup             v22.16b, w2
         sub             x0,  x0,  #2
@@ -614,7 +610,6 @@ function ff_vp8_h_loop_filter16_simple_neon, export=1
         ret
 endfunc
 
-// Transposes the 16x16 byte block held in v0-v15, clobbering v16-v31.
 .macro  transpose_16x16B
         trn1            v16.16b, v0.16b,  v1.16b
         trn2            v17.16b, v0.16b,  v1.16b
@@ -685,8 +680,6 @@ endfunc
         trn2            v15.2d,  v23.2d,  v31.2d
 .endm
 
-// One vertical edge, with the four columns already transposed into rows.
-// v16 = 0x80, v17 = #4, v18 = #3.
 .macro  vp8_simple_filter p1, p0, q0, q1, flim, t0, t1, t2
         uabd            \t0\().16b, \p0\().16b, \q0\().16b
         uabd            \t1\().16b, \p1\().16b, \q1\().16b
@@ -700,8 +693,6 @@ endfunc
         eor             \q0\().16b, \q0\().16b, v16.16b
         eor             \q1\().16b, \q1\().16b, v16.16b
 
-        // 3*(q0-p0) saturates monotonically, so the byte-wise chain matches
-        // clamping the widened sum
         sqsub           \t1\().16b, \q0\().16b, \p0\().16b
         sqsub           \t2\().16b, \p1\().16b, \q1\().16b
         sqadd           \t2\().16b, \t2\().16b, \t1\().16b
@@ -722,9 +713,6 @@ endfunc
         eor             \q1\().16b, \q1\().16b, v16.16b
 .endm
 
-// Filters all four vertical edges of a luma macroblock in one pass: the
-// four edges cover columns -2..13, so the whole block is read and written
-// full width instead of four strided lane-wise passes over it.
 function ff_vp8_h_loop_filter_simple_mb_neon, export=1
         stp             d8,  d9,  [sp, #-64]!
         stp             d10, d11, [sp, #16]

@@ -1,18 +1,3 @@
-//! The intra prediction assembly.
-//!
-//! Laid out as [`super::vp8`]: the symbols are declared once and exported raw
-//! for the C ABI table, and the core crate gets safe wrappers.
-//!
-//! # Regions
-//!
-//! Every predictor reads the row above the block and the column to its left,
-//! so a block at `o` needs `o >= stride + 1`, and writes an `n` by `n` square,
-//! so the plane must reach `o + (n - 1) * stride + n`. Three of the 4x4 modes
-//! also read four samples above and to the right; those live in the row the
-//! block already needs, except in the last macroblock of a row, where the
-//! decoder passes a replicated sample instead and the assembly reads it from
-//! the pointer rather than the plane.
-
 use crate::cpu::CpuFlags;
 use crate::dsp::vp8pred::*;
 
@@ -21,10 +6,6 @@ pub type Pred4x4Raw = unsafe extern "C" fn(*mut u8, *const u8, isize);
 
 pub use super::vp8::Raw;
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
-/// the instruction-set selection with the decoder's own table without sharing
-/// the safe wrappers, which the C ABI cannot use.
 pub struct RawTable {
     pub pred4x4: [Option<Pred4x4Raw>; PRED4X4_COUNT],
     pub pred8x8: [Option<PredRaw>; PRED8X8_COUNT],
@@ -88,8 +69,6 @@ fn pred4x4<T: Raw<Sig = Pred4x4Raw>>(p: &mut [u8], o: usize, s: usize, tr: &[u8;
     unsafe { (T::F)(p.as_mut_ptr().add(o), tr.as_ptr(), s as isize) }
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
 #[allow(unused_macros)]
 macro_rules! ladder {
     ($(

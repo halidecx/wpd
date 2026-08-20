@@ -1,11 +1,3 @@
-//! Walking rows between the decoder's two internal picture shapes and the
-//! output formats.
-//!
-//! The kernels are [`crate::dsp::yuv`]; what is here is the loop around them —
-//! which rows a partial decode has already done, which chroma row a luma pair
-//! belongs to, and where the fancy upsampler has to restart to rewrite a row
-//! it had folded onto its neighbour.
-
 use crate::dsp::yuv::{
     bpp, upsample_row, yuv420_row, yuv444_row, UpsampleDst, UpsampleSrc, YuvDsp,
     LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_RGB, LAYOUT_RGBA,
@@ -13,10 +5,6 @@ use crate::dsp::yuv::{
 use crate::dsp::yuv::{extract_alpha, RowFn};
 use crate::picture::{PlaneMut, PlaneRef};
 
-/// The three or four planes of a planar picture, as the row drivers take them.
-///
-/// `a` is absent for a frame coded without alpha, which is what the C passed a
-/// null pointer for.
 pub struct YuvPlanes<'a> {
     pub y: PlaneRef<'a>,
     pub u: PlaneRef<'a>,
@@ -24,7 +12,6 @@ pub struct YuvPlanes<'a> {
     pub a: Option<PlaneRef<'a>>,
 }
 
-/// The pair index the upsampler must restart from to rewrite `row_start`.
 const fn first_pair(row_start: usize) -> usize {
     if row_start != 0 {
         row_start.div_ceil(2)
@@ -33,7 +20,6 @@ const fn first_pair(row_start: usize) -> usize {
     }
 }
 
-/// The first row [`yuv420_to_packed_rows`] actually writes.
 const fn first_row(row_start: usize) -> usize {
     if row_start != 0 {
         2 * first_pair(row_start) - 1
@@ -42,8 +28,6 @@ const fn first_row(row_start: usize) -> usize {
     }
 }
 
-/// Folds a row onto itself, which is what the first and last rows of a picture
-/// get instead of a neighbour to interpolate against.
 fn lone_row<'a, const L: usize>(
     dsp: &YuvDsp,
     dst: &mut PlaneMut<'_>,
@@ -133,7 +117,6 @@ fn upsample_rows<const L: usize>(
     }
 }
 
-/// Runs `$body` with `L` bound to a layout the packers know.
 macro_rules! by_layout {
     ($layout:expr, $run:ident) => {
         match $layout {
@@ -146,7 +129,6 @@ macro_rules! by_layout {
     };
 }
 
-/// Writes the alpha plane into rows `[from, to)` of an already packed image.
 fn dispatch_alpha_rows(
     dispatch: RowFn,
     dst: &mut PlaneMut<'_>,
@@ -163,8 +145,6 @@ fn dispatch_alpha_rows(
     }
 }
 
-/// Fancy-upsamples rows `[row_start, row_end)` and returns the first row
-/// written, which is one above `row_start` when it starts on an even row.
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420_to_packed_rows(
     dsp: &YuvDsp,
@@ -196,9 +176,6 @@ pub fn yuv420_to_packed_rows(
     first
 }
 
-/// Point sampling, which libwebp uses when fancy upsampling is turned off.
-/// Every output row stands alone here, so `[row_start, row_end)` may be cut
-/// anywhere.
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420_to_packed_simple(
     dsp: &YuvDsp,
@@ -231,8 +208,6 @@ pub fn yuv420_to_packed_simple(
     }
 }
 
-/// Point conversion from full-resolution planes, which is what libwebp uses
-/// once the rescaler has brought chroma up to the output size.
 pub fn yuv444_to_packed(
     layout: usize,
     dst: &mut PlaneMut<'_>,
@@ -256,11 +231,6 @@ pub fn yuv444_to_packed(
     }
 }
 
-/// Converts rows `[row_start, row_end)` of a packed ARGB image to planar
-/// 4:2:0.
-///
-/// Chroma is averaged weighted by alpha only when an alpha plane is being
-/// written too, which is what libwebp does for its YUV colorspace.
 pub fn argb_to_yuva(
     dsp: &YuvDsp,
     dst: &mut [PlaneMut<'_>; 4],
@@ -275,8 +245,6 @@ pub fn argb_to_yuva(
     let mut row = row_start;
 
     while row < row_end {
-        /* The last row of an odd-height picture is averaged against itself,
-        which a stride of zero is how the kernel is told. */
         let pair = row + 1 < row_end;
         let span = if pair { 4 * width + stride } else { 4 * width };
         let src = argb.row(row, 0, span);
@@ -305,7 +273,6 @@ pub fn argb_to_yuva(
     }
 }
 
-/// As [`argb_to_yuva`], to full-resolution chroma.
 pub fn argb_to_yuv444(
     dsp: &YuvDsp,
     dst: &mut [PlaneMut<'_>; 4],
@@ -331,8 +298,6 @@ mod tests {
     use crate::image::Format;
     use crate::picture::Buffer;
 
-    /// A picture whose chroma is flat upsamples flat, whichever way the rows
-    /// are cut — which is the property the partial-decode path depends on.
     #[test]
     fn splitting_the_row_range_gives_the_same_picture() {
         let dsp = YuvDsp::new();
@@ -404,8 +369,6 @@ mod tests {
         }
     }
 
-    /// Grey stays grey through ARGB and back, which is the only property the
-    /// two directions share exactly.
     #[test]
     fn a_flat_picture_survives_the_round_trip_to_planar() {
         let dsp = YuvDsp::new();

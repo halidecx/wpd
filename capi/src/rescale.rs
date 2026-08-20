@@ -1,21 +1,11 @@
-//! C ABI for the rescaler, as declared by `src/rescaler.h`.
-//!
-//! One entry point, and it exists for `tests/parity.c`: the decoder reaches
-//! [`wpd::rescale`] directly. The rescaler state used to be a C struct the
-//! caller drove field by field; it is [`wpd::rescale::Rescaler`] now, and
-//! nothing outside the core crate holds one.
-
 use std::ffi::c_int;
 use std::slice;
 
 use wpd::picture::{PlaneMut, PlaneRef};
 
-/// # Safety
-///
-/// `src` and `dst` must have their stated dimensions, and `work` room for
-/// `2 * num_channels * dst_width` words.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_rescale_plane(
     dst: *mut u8,
     dst_stride: c_int,

@@ -1,25 +1,3 @@
-//! The lossy DSP assembly.
-//!
-//! Every symbol the hand-written assembly exports is declared here once. The
-//! raw declaration is public, because `wpd-capi` builds its C ABI table out of
-//! the same items and has to put the bare symbol in the table so that
-//! `checkasm --bench` times the assembly and not a wrapper.
-//!
-//! What the core crate sees instead is [`init`], which fills a [`Vp8Dsp`] with
-//! safe functions. Each one checks that the plane really does extend as far as
-//! the kernel reads before handing over a pointer, so the only thing outside
-//! this module that has to be true is what the type system already says.
-//!
-//! # Regions
-//!
-//! `o` is the offset of the position a filter acts on and `s` the stride, both
-//! in bytes. A filter that works across a horizontal edge reads `up` rows above
-//! `o` and writes as far as `down` rows below it, over `n` columns; one working
-//! across a vertical edge reads `left` bytes before `o` and writes as far as
-//! `right - 1` bytes after it, in each of `n` rows. The macroblock variants
-//! fold in the three subblock edges inside the macroblock, which is why their
-//! `down` and `right` reach a whole macroblock further than the plain ones.
-
 use std::ffi::c_int;
 
 use crate::cpu::CpuFlags;
@@ -52,11 +30,6 @@ fn check_h(p: &[u8], o: usize, s: usize, left: usize, right: usize, n: usize) {
     );
 }
 
-/// One assembly entry point, named so it can be used as a type parameter.
-///
-/// A table field is a plain `fn` pointer with nowhere to keep the symbol, so
-/// the symbol travels as an associated constant and each wrapper is
-/// monomorphised into its own function item.
 pub trait Raw {
     type Sig: Copy;
     const F: Self::Sig;
@@ -152,8 +125,6 @@ macro_rules! raw_idct4 {
     };
 }
 
-/// Declares the ten loop filter symbols one instruction set provides, under
-/// marker names prefixed with `$p`.
 macro_rules! lf_set {
     ($p:ident,
      $v_simple:literal, $h_simple:literal,
@@ -176,7 +147,6 @@ macro_rules! lf_set {
     };
 }
 
-/// Declares the five transform symbols one instruction set provides.
 #[allow(unused_macros)]
 macro_rules! idct_set {
     ($p:ident, $wht:literal, $add:literal, $dc_add:literal,
@@ -192,9 +162,6 @@ macro_rules! idct_set {
         }
     };
 }
-
-// The safe wrappers. Each is generic over the symbol it calls, so one body
-// serves every instruction set.
 
 fn lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
     p: &mut [u8],
@@ -385,9 +352,6 @@ fn lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
     unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be) }
 }
 
-/// Composes a macroblock edge filter out of an edge kernel and an inner one,
-/// for the instruction sets that do not provide a fused entry point. The C
-/// spelled this out per set with its `VP8_*_LOOP_FILTER*_MB` macros.
 fn mb_from<E, I, const VERT: bool>(
     p: &mut [u8],
     o: usize,
@@ -507,16 +471,9 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
     unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
 }
 
-/// The same four compositions as [`mb_from`], [`uv_mb_from`] and
-/// [`simple_mb_from`], but producing raw entry points for the C ABI table,
-/// which cannot call the safe wrappers. The step arithmetic is stated once
-/// here rather than once per crate.
 macro_rules! composed_mb {
     ($set:ident) => {
-        /// # Safety
-        ///
-        /// As the C prototype: `dst` is the horizontal edge of a plane with
-        /// two rows before it and fourteen from it, sixteen columns wide.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn v_simple_mb(
             dst: *mut u8,
             stride: isize,
@@ -533,10 +490,7 @@ macro_rules! composed_mb {
             }
         }
 
-        /// # Safety
-        ///
-        /// As [`v_simple_mb`], transposed: two columns before `dst` and
-        /// fourteen from it, in each of sixteen rows.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn h_simple_mb(
             dst: *mut u8,
             stride: isize,
@@ -553,10 +507,7 @@ macro_rules! composed_mb {
             }
         }
 
-        /// # Safety
-        ///
-        /// As the C prototype: `dst` is the horizontal edge of a plane with
-        /// four rows before it and sixteen from it, sixteen columns wide.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn v16_mb(
             dst: *mut u8,
             stride: isize,
@@ -575,10 +526,7 @@ macro_rules! composed_mb {
             }
         }
 
-        /// # Safety
-        ///
-        /// As [`v16_mb`], transposed: four columns before `dst` and sixteen
-        /// from it, in each of sixteen rows.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn h16_mb(
             dst: *mut u8,
             stride: isize,
@@ -597,9 +545,7 @@ macro_rules! composed_mb {
             }
         }
 
-        /// # Safety
-        ///
-        /// As [`v16_mb`], for the two chroma planes: eight columns wide.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn v8uv_mb(
             dst_u: *mut u8,
             dst_v: *mut u8,
@@ -624,9 +570,7 @@ macro_rules! composed_mb {
             }
         }
 
-        /// # Safety
-        ///
-        /// As [`h16_mb`], for the two chroma planes: eight rows.
+        #[allow(clippy::missing_safety_doc)]
         pub unsafe extern "C" fn h8uv_mb(
             dst_u: *mut u8,
             dst_v: *mut u8,
@@ -683,8 +627,6 @@ macro_rules! composed_mb {
     };
 }
 
-/// The raw counterpart of [`install_lf`]: every slot one instruction set's
-/// loop filters cover, for the C ABI table.
 macro_rules! raw_install_lf {
     ($t:expr, $p:ident, $mb:ident) => {
         $t.v_loop_filter_simple = Some($p::VSimple::F);
@@ -709,7 +651,6 @@ macro_rules! raw_install_lf {
     };
 }
 
-/// The raw counterpart of [`install_idct`].
 macro_rules! raw_install_idct {
     ($t:expr, $p:ident) => {
         $t.luma_dc_wht = Some($p::Wht::F);
@@ -720,10 +661,6 @@ macro_rules! raw_install_idct {
     };
 }
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
-/// the instruction-set selection with the decoder's own table without sharing
-/// the safe wrappers, which the C ABI cannot use.
 #[derive(Default)]
 pub struct RawTable {
     pub luma_dc_wht: Option<WhtRaw>,
@@ -750,8 +687,6 @@ pub struct RawTable {
     pub h_loop_filter8uv_mb: Option<LfUvMbRaw>,
 }
 
-/// Installs everything one instruction set's ten loop filters cover, composing
-/// the four macroblock entries from the edge and inner kernels.
 macro_rules! install_lf {
     ($c:expr, $p:ident) => {
         $c.v_loop_filter_simple = lf_v_simple::<$p::VSimple>;
@@ -786,13 +721,6 @@ macro_rules! install_idct {
     };
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
-///
-/// `@lf` and `@idct` stand for whole instruction sets rather than single
-/// slots, and take the composed-macroblock module the raw table needs beside
-/// the set the wrappers compose for themselves. The `@` is what keeps them
-/// from looking like field names to the matcher.
 #[allow(unused_macros)]
 macro_rules! ladder {
     ($(
@@ -926,15 +854,9 @@ mod arch {
         }
     }
 
-    /// The AVX2 horizontal macroblock filters transpose into this, run the
-    /// vertical SSSE3 kernels over it, and transpose back.
     #[repr(C, align(32))]
     pub struct Transposed(pub [u8; 16 * 16]);
 
-    /// # Safety
-    ///
-    /// As the C prototype: `dst` is the edge of a plane with four columns
-    /// before it and sixteen from it, in each of sixteen rows.
     pub unsafe extern "C" fn h16_mb_avx2(
         dst: *mut u8,
         stride: isize,
@@ -956,9 +878,6 @@ mod arch {
         }
     }
 
-    /// # Safety
-    ///
-    /// As [`h16_mb_avx2`], for the two chroma planes.
     pub unsafe extern "C" fn h8uv_mb_avx2(
         dst_u: *mut u8,
         dst_v: *mut u8,

@@ -1,19 +1,7 @@
-//! The VP8L bit reader: least-significant bit first, refilling a 64-bit window
-//! that always leaves at least 32 usable bits.
-//!
-//! Like the VP56 range coder in [`crate::vp8::rac`], this holds an offset into
-//! the chunk rather than a pointer to it, and takes the chunk as an argument.
-//! A streaming append that reallocates the buffer therefore cannot invalidate
-//! anything the reader tracks — which is what `br_extend` in the C relied on
-//! its fields being offsets to get away with.
-
 pub const MAX_BITS: u32 = 24;
 const LBITS: i32 = 64;
 const WBITS: i32 = 32;
 
-/// How close to the end of the chunk the pixel loop starts checking whether it
-/// has run out. One pixel reads at most 108 bits, which draws the reader no
-/// more than 20 bytes further in.
 pub const TAIL_MARGIN: usize = 64;
 
 const BIT_MASK: [u32; MAX_BITS as usize + 1] = [
@@ -46,8 +34,6 @@ impl BitReader {
         }
     }
 
-    /// How much of the chunk the reader has not drawn on yet. The pixel loop
-    /// watches this to know when the end is close enough to be worth checking.
     #[inline(always)]
     pub fn left(&self, buf: &[u8]) -> usize {
         buf.len() - self.pos
@@ -58,7 +44,6 @@ impl BitReader {
         self.eos || (self.pos == buf.len() && self.bit_pos > LBITS)
     }
 
-    /// Resets `bit_pos` as well, so later prefetch shifts stay defined.
     #[inline(always)]
     fn set_eos(&mut self) {
         self.eos = true;
@@ -83,7 +68,6 @@ impl BitReader {
         (self.val >> (self.bit_pos & (LBITS - 1))) as u32
     }
 
-    /// Consumes bits already accounted for by [`Self::prefetch`].
     #[inline(always)]
     pub fn advance(&mut self, n: i32) {
         self.bit_pos += n;
@@ -151,9 +135,6 @@ mod tests {
         for _ in 0..16 {
             assert_eq!(br.bit(&buf), 1);
         }
-        /* The window is 64 bits wide and reads as zeros past the chunk, so
-        having consumed every real bit is not yet the end: the reader calls
-        it only once it has drawn past the whole window. */
         assert!(!br.is_eos(&buf));
         for _ in 0..64 {
             br.bit(&buf);

@@ -1,7 +1,3 @@
-//! The lossy decoder, driven as a whole frame and as a partial one.
-//!
-//! `decode_rows` is reached through the resumable path, which is where the
-//! decoder is asked to produce rows from a chunk that stops part way.
 
 #![no_main]
 

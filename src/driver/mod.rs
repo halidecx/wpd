@@ -1,14 +1,3 @@
-//! The decoder, and the walk over a file that drives it.
-//!
-//! This is the assembly: the container scanner, the two frame decoders, the
-//! compositor and the export are pieces, and what is here decides which of
-//! them a chunk belongs to and hands each the part of the decoder it needs.
-//!
-//! Nothing here is the C ABI. A caller's memory arrives as a
-//! [`crate::handout::RowSink`] and a finished picture leaves as a
-//! [`Handout`]; the versioned structs `include/wpd.h` declares, and the
-//! pointers in them, belong to whoever crosses that boundary.
-
 pub mod anim;
 pub mod convert;
 pub mod export;
@@ -39,48 +28,23 @@ use self::export::{
     export_still_packed, ExportSettings, ExportTargets, RowTargets,
 };
 
-/// What `out_format` holds when no output format has been asked for, which is
-/// `WPD_PIX_FMT_NONE` where the C ABI names it.
 pub const FORMAT_NONE: i32 = -1;
 
-/// The two ways an animation is handed out, as `WPD_ANIM_*` numbers them: the
-/// composited canvas, or each sub-frame on its own at its own position.
 pub const ANIM_COMPOSITED: i32 = 0;
 pub const ANIM_SUBFRAME: i32 = 1;
 
-/// A failure, and what was being done when it happened.
-///
-/// A picture borrows the decoder that produced it, so a decode that fails
-/// part way cannot record its own message: the decoder is still lent out
-/// until the caller drops what it asked for. The message travels back with
-/// the failure instead, and whoever receives it calls [`Decoder::fail`].
 pub type Failure = (&'static str, Error);
 
-/// How a failure reads once it is written down: what was being done, and what
-/// went wrong with it.
 pub fn described((message, e): Failure) -> String {
     format!("{message} ({})", e.message())
 }
 
-/// The two fields a completed lossless still latches, borrowed apart from the
-/// picture an export reads so that the export can go first.
 pub(crate) struct StillLatch<'a> {
     still_lossless: &'a mut bool,
     converted_rows: &'a mut i32,
 }
 
-/// The decoder, with the lifetime of the file it was pointed at.
-///
-/// Everything a decode builds up is owned here, and released by [`Drop`]
-/// rather than by a sequence a new field can be left out of. Two habits from
-/// the C are kept deliberately. Positions in the stream are offsets, never
-/// pointers, because appending to a stream may move or drop the bytes under
-/// them. And nothing reaches into the decoder from the modules it drives:
-/// what the export and the compositor need is gathered into a struct at the
-/// call, so neither can read a field that has moved on since.
 pub struct Decoder<'a> {
-    /// Built on the first lossy frame, as the C's `vp8_decode_init` was: a
-    /// file with no VP8 chunk in it never pays for the lossy decoder.
     pub(crate) vp8: Vec<crate::vp8::Decoder>,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
@@ -105,7 +69,6 @@ pub struct Decoder<'a> {
     pub(crate) has_alpha: bool,
     pub(crate) alpha_compression: i32,
     pub(crate) alpha_filter: i32,
-    /// An offset, not a pointer: appending to a stream can move the bytes.
     pub(crate) alpha_data_offset: usize,
     pub(crate) alpha_data_size: usize,
     pub(crate) alpha_plane: Vec<u8>,
@@ -115,12 +78,8 @@ pub struct Decoder<'a> {
     pub(crate) height: i32,
     pub(crate) lossless_has_alpha: bool,
 
-    /// Which of the lossless decoder's pictures the last decode filled in, so
-    /// that the borrow handed out for it is named rather than latched as a
-    /// pointer the way the C's `WebPImage` was.
     pub(crate) lossless_out: Option<Lossless>,
 
-    /// Plane memory the decoder owns, released when it drops.
     pub(crate) converted: Buffer,
     pub(crate) output: Buffer,
     pub(crate) transformed: Buffer,
@@ -129,9 +88,6 @@ pub struct Decoder<'a> {
     pub(crate) canvas: Buffer,
     pub(crate) subframe_out: Option<Source>,
     pub(crate) anim_mode: i32,
-    /// Where the frame being decoded goes and what the one before it left
-    /// behind, which is all of what [`Self::anim_state_reset`] clears and all
-    /// of what the compositor is handed.
     pub(crate) anim: AnimState,
     pub(crate) clear_argb: [u8; 4],
     pub(crate) clear_yuva: [u8; 4],
@@ -154,71 +110,37 @@ pub struct Decoder<'a> {
     pub(crate) truncated: bool,
     pub(crate) input_mode: InputMode,
 
-    /// Where a decode's rows go when the caller supplied its own memory.
-    ///
-    /// The decoder knows only that it is somewhere it can ask for a row of;
-    /// what the memory actually is belongs to whoever handed it over, which
-    /// for the C ABI is a pointer, a length and a stride that may run
-    /// backwards.
     pub(crate) sink: Option<Box<dyn RowSink>>,
 
     pub(crate) status: Option<Error>,
-    /// A fixed buffer rather than a `String`: `wpd_decoder_error` hands out a
-    /// pointer into it, and the C's was good for the decoder's whole life.
     pub(crate) error: [u8; ERROR_MAX],
 }
 
 pub(crate) const ALPHA_COMPRESSION_NONE: i32 = 0;
 pub(crate) const ALPHA_COMPRESSION_VP8L: i32 = 1;
-/// The highest pre-processing mode the format defines: level quantization,
-/// which only matters to a decoder that dithers the plane back out.
 const ALPHA_PREPROCESSED_LEVELS: i32 = 1;
 
-/// As long a failure message as the C's fixed buffer held.
 const ERROR_MAX: usize = 128;
 
-/// Black in the CCIR range the YUVA canvas is cleared to, which is what
-/// `RGB_TO_Y_CCIR(0, 0, 0)` and its two companions came to.
 const CLEAR_YUVA_BLACK: [u8; 4] = [16, 128, 128, 0];
 
-/// How a stream has been fed so far.
-///
-/// The two ways of growing a stream cannot be mixed — one appends bytes the
-/// decoder then owns and may drop, the other hands over a longer prefix of the
-/// same file — and which one has been used is what the mixing and rewind
-/// guards ask about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum InputMode {
-    /// Nothing added since the stream was opened.
     #[default]
     Untouched,
     Append,
     Update,
 }
 
-/// Which picture an export reads.
-///
-/// Naming it rather than passing a borrow is what lets the decoder hand out
-/// the source and the scratch from one destructuring; naming it rather than
-/// latching a pointer is what stops a sub-frame decode handing out a view of
-/// memory a later frame has moved on from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
-    /// The VP8 decoder's planes, with the alpha plane beside them.
     Lossy,
-    /// Whichever lossless picture [`Decoder::lossless_out`] names.
     Lossless,
-    /// The decoder's own conversion buffer, which an animation sub-frame is
-    /// brought to ARGB in.
     Converted,
-    /// The composited animation canvas.
     Canvas,
-    /// Nothing, which is what a sub-frame decode that produced no image has.
     None,
 }
 
-/// The VP8 decoder's picture, with the alpha plane the container keeps beside
-/// it, as a borrowed view.
 pub(crate) fn lossy_view<'a>(
     vp8: Option<&'a crate::vp8::Decoder>,
     alpha: &'a [u8],
@@ -261,12 +183,6 @@ pub(crate) fn empty_view<'a>() -> Frame<'a> {
     Frame::packed(&[], 0, 0, 0, Format::Argb)
 }
 
-/// The picture a [`Source`] names, assembled from borrows the caller has
-/// already split off the decoder.
-///
-/// The two buffers come in optional because a caller that has lent one out
-/// mutably for the same call has nothing to offer here — and cannot be naming
-/// it as its source either, or the compositor would be reading what it writes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn source_view<'a>(
     which: Source,
@@ -369,8 +285,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Records a failure and hands it straight back, so that noting it and
-    /// returning it are one expression.
     pub fn fail(&mut self, message: &'static str, e: Error) -> Error {
         self.status = Some(e);
 
@@ -383,27 +297,14 @@ impl<'a> Decoder<'a> {
         e
     }
 
-    /// What the last scan found. Read back rather than copied out, so nothing
-    /// can be looking at an older answer than the scanner has.
     pub(crate) fn scanned(&self) -> Info {
         *self.scan.info()
     }
 
-    /// The stream from `offset` on, which is empty when those bytes have been
-    /// dropped or have not arrived.
     pub(crate) fn file_at(&self, offset: usize) -> &[u8] {
         self.input.at(offset)
     }
 
-    /// Fails unless a file has been opened.
-    ///
-    /// Public because the C ABI has to make this check itself rather than let
-    /// [`Self::partial_picture`] make it: `wpd_decoder_partial_frame` clears
-    /// the caller's `WPDFrame` before it asks for anything, and a decoder with
-    /// no file open has to be turned away before that, with the frame left as
-    /// it was. Having the one caller that needs it early share the message
-    /// with the calls that make it themselves is what keeps the two from
-    /// drifting.
     #[inline]
     pub fn require_open(&self) -> Result<(), Failure> {
         if !self.opened {
@@ -412,11 +313,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// The named picture, which is what an export reads.
-    ///
-    /// The C latched a `WebPImage` of pointers into a codec's memory at the
-    /// end of every decode; these are all fields of the same struct, so a
-    /// borrow says the same thing and cannot go stale.
     pub(crate) fn frame_of(&self, which: Source) -> Frame<'_> {
         source_view(
             which,
@@ -449,9 +345,6 @@ impl<'a> Decoder<'a> {
         self.height = h;
     }
 
-    /* The canvas is negotiated between the container and the lossless module:
-    the container knows what the file declared, the module knows what the frame
-    header said, and either may be the first to learn it. */
     pub(crate) fn lossless_canvas_in(&mut self) {
         self.vp8l.set_canvas(self.width, self.height);
     }
@@ -462,7 +355,6 @@ impl<'a> Decoder<'a> {
         self.lossless_has_alpha = self.vp8l.has_alpha;
     }
 
-    /// Decodes a whole VP8L chunk at `offset` into the decoder's ARGB canvas.
     pub(crate) fn lossless_decode(
         &mut self,
         offset: usize,
@@ -484,9 +376,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /* The decoder's answers to the questions the export asks, gathered at the
-    call rather than reached for: the export owns no decoder state, so nothing
-    it sees can drift from what the frame was decoded as. */
     pub(crate) fn export_settings(&self) -> ExportSettings {
         ExportSettings {
             out_format: self.out_format,
@@ -497,9 +386,6 @@ impl<'a> Decoder<'a> {
             pos_x: self.anim.pos_x,
             pos_y: self.anim.pos_y,
             anmf_flags: self.anim.anmf_flags,
-            /* An animation latches each sub-frame's alpha as it decodes it; a
-            still has only the one image, whose two decoders report it
-            separately. */
             has_alpha: if self.animation {
                 self.anim.frame_has_alpha
             } else {
@@ -509,13 +395,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// The scratch a whole-frame export writes through, and the picture it
-    /// reads.
-    ///
-    /// The two come out of one destructuring because they are borrows of the
-    /// same decoder, and that is what proves the source is not one of the
-    /// buffers being written into — which is the whole of what the C's
-    /// pointers were asserting silently.
     pub(crate) fn export_parts(
         &mut self,
         which: Source,
@@ -525,12 +404,6 @@ impl<'a> Decoder<'a> {
         (targets, img)
     }
 
-    /// As [`Self::export_parts`], with the two fields a finished lossless
-    /// still latches handed back beside them.
-    ///
-    /// They come out of the same destructuring as the export's own borrows,
-    /// which is what proves they are not part of what the export reads — and
-    /// so what lets them be written after the export rather than before it.
     fn export_parts_latched(
         &mut self,
         which: Source,
@@ -585,17 +458,6 @@ impl<'a> Decoder<'a> {
         )
     }
 
-    /// Finishes a lossless still that decoded in one go, which is the one
-    /// sequence both the raw file and the RIFF walk end on.
-    ///
-    /// The flags go up last, so that an export that fails leaves the decoder
-    /// claiming no finished picture rather than one whose rows were never
-    /// written. That is the RIFF walk's rule; the headerless path in
-    /// [`Self::decode_raw`] raises them itself beforehand, and this raising
-    /// them again on the way out writes the same two values.
-    /// [`Self::export_parts_latched`] is what makes either orderable: neither
-    /// field is in [`ExportTargets`], so neither is borrowed by the export
-    /// they have to outlive.
     #[inline(never)]
     fn export_complete_still_lossless<'o>(
         &'o mut self,
@@ -612,9 +474,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// As [`Self::export_parts`], for the resumable row exports, which convert
-    /// a codec's own picture into the decoder's buffers rather than reading
-    /// one of them.
     pub(crate) fn row_parts(&mut self, which: Source) -> (RowTargets<'_>, Frame<'_>) {
         let Self {
             ydsp,
@@ -660,10 +519,6 @@ impl<'a> Decoder<'a> {
         )
     }
 
-    /// Everything a decode builds up as it walks the frames, which both
-    /// opening a new file and rewinding the current one have to put back. The
-    /// buffers the frames are decoded into are kept: they are sized on use and
-    /// reused.
     fn anim_state_reset(&mut self) {
         self.vp8l.reset();
         self.canvas.release();
@@ -685,8 +540,6 @@ impl<'a> Decoder<'a> {
         self.frame_timestamp = 0;
     }
 
-    /// Clears everything derived from a file but keeps the input allocation,
-    /// which a stream grows across many calls.
     fn reset(&mut self) {
         self.meta = [None, None, None];
         self.anim_state_reset();
@@ -718,9 +571,6 @@ impl<'a> Decoder<'a> {
         self.error = [0; ERROR_MAX];
     }
 
-    /// Drops input the decoder can no longer look at. The chunk at `pos` is
-    /// kept whole: a VP8 chunk decoded row by row keeps range coders pointing
-    /// into it until the frame is done, and those are rebased on the next step.
     fn file_compact(&mut self) {
         let mut keep = self.pos;
 
@@ -730,8 +580,6 @@ impl<'a> Decoder<'a> {
         self.input.compact(keep);
     }
 
-    /// Takes a copy of each metadata chunk the scanner has reached, since the
-    /// buffer it sits in is dropped as the stream moves past it.
     fn capture_metadata(&mut self) -> Result<(), Error> {
         let hs = self.scanned();
         let (discarded, size) = (self.input.discarded(), self.input.size());
@@ -762,8 +610,6 @@ impl<'a> Decoder<'a> {
         let walked = self
             .scan
             .headers(self.input.bytes(), base, self.streaming, true);
-        /* Read back whatever the walk reached, error or not: a stream whose
-        headers are merely incomplete keeps decoding from what has arrived. */
         let meta = self.capture_metadata();
 
         walked?;
@@ -788,8 +634,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// No more input is coming, so a chunk list that stops short of what it
-    /// promised, or that never carried an image, cannot be completed.
     fn check_final_headers(&mut self, message: &'static str) -> Result<(), Error> {
         let hs = self.scanned();
 
@@ -802,8 +646,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// What both opens do once the bytes are in: read the headers, and undo
-    /// the open if they are not a whole file's worth.
     fn opened_headers(&mut self) -> Result<(), Error> {
         let read = match self.rescan_headers() {
             Err(e) => Err(self.fail("cannot read headers", e)),
@@ -820,7 +662,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// Opens a file the decoder takes a copy of.
     pub fn open(&mut self, data: &[u8]) -> Result<(), Error> {
         self.reset();
         if let Err(e) = self.input.own(data) {
@@ -829,7 +670,6 @@ impl<'a> Decoder<'a> {
         self.opened_headers()
     }
 
-    /// Opens a file the decoder reads in place, for as long as `'a` lasts.
     pub fn open_borrowed(&mut self, data: &'a [u8]) -> Result<(), Error> {
         self.reset();
         self.input.borrow(data);
@@ -862,15 +702,12 @@ impl<'a> Decoder<'a> {
             return Err(self.fail("cannot buffer input", e));
         }
 
-        /* Headers that are merely incomplete are the normal state of a stream. */
         match self.rescan_headers() {
             Err(Error::Truncated) | Ok(()) => Ok(()),
             Err(e) => Err(self.fail("cannot read headers", e)),
         }
     }
 
-    /// Replaces the stream with a longer prefix of the same file, which the
-    /// decoder reads in place.
     pub fn update(&mut self, data: &'a [u8]) -> Result<(), Error> {
         self.update_with(data.len(), |input| input.borrow(data))
     }
@@ -879,10 +716,6 @@ impl<'a> Decoder<'a> {
         self.update_with(data.len(), move |input| input.replace_owned(data))
     }
 
-    /// The body of both updates: they differ only in whether the longer prefix
-    /// is borrowed or owned, and the C ABI takes one while the safe API takes
-    /// the other — so the guards and the error recovery are shared rather than
-    /// left to agree.
     fn update_with(
         &mut self,
         len: usize,
@@ -932,8 +765,6 @@ impl<'a> Decoder<'a> {
 }
 
 impl Decoder<'_> {
-    /// A crop that names no pixels and a scale that names no size are the two
-    /// things the type cannot rule out on its own.
     pub fn set_core_options(&mut self, options: Options) -> Result<(), Error> {
         let bad_crop = options
             .crop
@@ -966,10 +797,6 @@ impl Decoder<'_> {
                 Error::InvalidArgument,
             ));
         }
-        /* Sub-frame mode never builds the canvas the composited one carries
-        from frame to frame, so the two cannot be swapped part-way through an
-        animation. wpd_decoder_rewind() clears the frame index and reopens the
-        choice. */
         if mode != self.anim_mode && self.animation && self.anim.frame_index != 0 {
             return Err(self.fail(
                 "the animation mode cannot change mid-animation",
@@ -988,22 +815,11 @@ impl Decoder<'_> {
         Ok(())
     }
 
-    /// Rows already handed out live in whichever buffer was current at the
-    /// time, so a new destination has to be filled from the top again.
     fn drop_converted_rows(&mut self) {
         self.converted_rows = 0;
         self.converted_format = FORMAT_NONE;
     }
 
-    /// Points the decode at somewhere to put its rows, or back at the
-    /// decoder's own memory.
-    ///
-    /// Rows already handed out live in whichever destination was current at
-    /// the time, so a new one has to be filled from the top again. Naming the
-    /// same destination twice is the caller's business, not the decoder's:
-    /// this cannot tell one sink from another, so it takes every call as a
-    /// change and whoever can compare them does not call it.
-    /// Whether a destination has been named.
     pub fn has_sink(&self) -> bool {
         self.sink.is_some()
     }
@@ -1017,7 +833,6 @@ impl Decoder<'_> {
 }
 
 impl Decoder<'_> {
-    /// The two checks every question about the file's shape shares.
     pub fn headers_ready(&mut self) -> Result<(), Error> {
         if !self.opened {
             return Err(self.fail("invalid decoder state", Error::InvalidArgument));
@@ -1047,8 +862,6 @@ impl Decoder<'_> {
         if !self.opened || !self.headers_valid {
             return Err(self.fail("invalid decoder state", Error::InvalidArgument));
         }
-        /* wpd_decoder_append() is free to drop bytes the decoder has moved
-        past, so the head of the file may simply no longer be there. */
         if self.input_mode == InputMode::Append {
             return Err(
                 self.fail("an appended stream cannot be rewound", Error::Unsupported)
@@ -1068,8 +881,7 @@ impl Decoder<'_> {
 
         let hs = self.scanned();
 
-        /* A still image is one frame covering the whole canvas, which is what
-        libwebp's demuxer reports for it too. */
+        /* Match libwebp: a still is one canvas-sized frame. */
         if !self.animation {
             if index != 0 {
                 return Err(self.fail("no such frame", Error::InvalidArgument));
@@ -1077,9 +889,6 @@ impl Decoder<'_> {
             return Ok(FrameInfo {
                 width: self.canvas_width,
                 height: self.canvas_height,
-                /* The image's own alpha, not the VP8X declaration the image
-                info reports, so that this agrees with the frame decoding
-                produces. */
                 has_alpha: hs.image_has_alpha,
                 complete: if hs.raw == Raw::No {
                     hs.images != 0
@@ -1111,7 +920,6 @@ impl Decoder<'_> {
         })
     }
 
-    /// The named metadata chunk. `Ok(None)` means the file carries none.
     pub fn metadata(&mut self, which: i32) -> Result<Option<&[u8]>, Error> {
         if !self.opened {
             return Err(self.fail("invalid decoder state", Error::InvalidArgument));
@@ -1132,11 +940,6 @@ impl<'a> Decoder<'a> {
         chunk_type == TAG_VP8L && !self.animation && !self.still_done
     }
 
-    /// The resumable lossless path, plus the copy the container keeps of what
-    /// it left behind: which picture is being filled in.
-    ///
-    /// Returns whether the image is complete; `false` means more of the chunk
-    /// is needed.
     fn lossless_step(
         &mut self,
         offset: usize,
@@ -1212,20 +1015,6 @@ impl<'a> Decoder<'a> {
         Ok(true)
     }
 
-    /// Takes apart the byte an ALPH chunk opens with and records where the rest
-    /// of the chunk is.
-    ///
-    /// A compression this decoder does not know leaves `has_alpha` alone, which
-    /// is what lets the frame come out without its alpha rather than fail. The
-    /// raw path is the one caller that treats it as fatal instead, and says so
-    /// before it gets here.
-    ///
-    /// The two fields above it are not the same kind of unknown, so they are
-    /// not treated the same way: an unread compression is a feature this
-    /// decoder does not have and the frame can still come out without its
-    /// alpha, while a pre-processing mode or a reserved bit the format never
-    /// defined leaves nothing to fall back to. libwebp's `ALPHInit` refuses
-    /// all four; here only the last two are fatal.
     pub(crate) fn set_alpha_chunk(
         &mut self,
         header: i32,
@@ -1253,8 +1042,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// A file with no RIFF wrapper: one image chunk, and for the lossy shape
-    /// possibly an ALPH chunk ahead of it.
     fn decode_raw<'o>(&'o mut self, out: &mut Handout<'o>) -> Result<bool, Failure> {
         let hs = self.scanned();
 
@@ -1274,12 +1061,6 @@ impl<'a> Decoder<'a> {
             self.lossless_decode(hs.raw_image_offset, hs.raw_image_size)
                 .map_err(|e| ("VP8L decode failed", e))?;
             self.still_done = true;
-            /* Raised before the export, not after it as the RIFF walk does:
-            a headerless file whose export fails -- a caller's buffer that was
-            too small, say -- still holds a finished picture, and this is what
-            lets `wpd_decoder_partial_frame` hand it over once the buffer is
-            fixed. The two shapes disagreed in the C and the disagreement is
-            observable, so it is written down rather than smoothed over. */
             self.still_lossless = true;
             self.converted_rows = self.frame_of(Source::Lossless).height;
             self.export_complete_still_lossless(out)
@@ -1315,8 +1096,6 @@ impl<'a> Decoder<'a> {
 }
 
 impl Decoder<'_> {
-    /// Decodes the next frame into `out`. Returns whether a picture came out;
-    /// `false` means the file is finished or the stream has not caught up.
     pub fn next_picture<'o>(
         &'o mut self,
         out: &mut Handout<'o>,
@@ -1385,10 +1164,7 @@ impl Decoder<'_> {
                     if size == 0 {
                         return Err(("invalid ALPHA chunk size", Error::InvalidData));
                     }
-                    /* The walk is driven by chunk order, so an ALPH behind the
-                    image it belongs to would be latched and never read. That
-                    is a file libwebp refuses rather than one it decodes
-                    opaque, so it is refused here too. */
+                    /* Match libwebp: an ALPH after its image is invalid. */
                     if decoder.still_done || decoder.vp8_active {
                         return Err((
                             "ALPHA chunk after the image it belongs to",
@@ -1407,13 +1183,9 @@ impl Decoder<'_> {
                         continue;
                     }
                     let ret = if decoder.vp8_active {
-                        decoder
-                            .vp8_lossy_step(payload_pos, size, size)
-                            /* A whole chunk that leaves the frame unfinished is
-                            a frame that ends inside the data it declared. */
-                            .and_then(|done| {
-                                done.then_some(()).ok_or(Error::InvalidData)
-                            })
+                        decoder.vp8_lossy_step(payload_pos, size, size).and_then(
+                            |done| done.then_some(()).ok_or(Error::InvalidData),
+                        )
                     } else {
                         decoder.width = 0;
                         decoder.height = 0;
@@ -1483,9 +1255,6 @@ impl Decoder<'_> {
 }
 
 impl Decoder<'_> {
-    /// As much of the frame in progress as is finished. Returns whether a
-    /// picture was produced, and fills `rows` in with how many of its rows
-    /// are valid.
     pub fn partial_picture<'o>(
         &'o mut self,
         out: &mut Handout<'o>,
@@ -1628,8 +1397,6 @@ impl Decoder<'_> {
             return Ok(true);
         }
 
-        /* The fancy upsampler pairs a row with the one below it, so the last
-        finished row cannot be converted until the row after it exists. */
         if rows != 0 && rows < decoder.height {
             rows -= 1;
         }
@@ -1645,12 +1412,10 @@ impl Decoder<'_> {
 }
 
 impl Decoder<'_> {
-    /// What the last decode stopped on, or nothing if it did not stop.
     pub fn status(&self) -> Option<Error> {
         self.status
     }
 
-    /// The last failure's message, which says more than the status does.
     pub fn error_message(&self) -> &str {
         if self.error[0] == 0 {
             return "unknown decoder error";
@@ -1660,8 +1425,6 @@ impl Decoder<'_> {
         std::str::from_utf8(&self.error[..end]).unwrap_or("")
     }
 
-    /// The message as it sits in memory, NUL-terminated, which is what
-    /// `wpd_decoder_error` hands a pointer to.
     pub fn error_raw(&self) -> &[u8] {
         &self.error
     }
@@ -1671,21 +1434,10 @@ impl Decoder<'_> {
 mod tests {
     use super::*;
 
-    /// A 2x2 headerless lossless still, hand-written: the whole image is
-    /// sixty-three bits of header and no pixel data at all, because five
-    /// one-symbol prefix codes leave the pixel loop nothing to read.
-    ///
-    /// The fields, least-significant bit first: `2f`, then 14 bits of width
-    /// minus one and 14 of height minus one, an alpha flag, three version bits,
-    /// a zero to end the transform list, a zero for the colour cache and one
-    /// for the meta prefix code, then five times `1, 0, 0, 0` — a simple code
-    /// of one symbol, that symbol being zero.
     const RAW_LOSSLESS: &[u8] = &[
         0x2f, 0x01, 0x40, 0x00, 0x00, 0x88, 0x88, 0x08, 0x00, 0x00, 0x00, 0x00,
     ];
 
-    /// The same image inside the RIFF container, which is the other of the two
-    /// paths that end on [`Decoder::export_complete_still_lossless`].
     fn riff_lossless() -> Vec<u8> {
         let mut out = Vec::new();
 
@@ -1697,8 +1449,6 @@ mod tests {
         out
     }
 
-    /// A caller's buffer with no room in it, which is what turns an export into
-    /// the `BufferTooSmall` these two tests are about.
     struct NeverFits;
 
     impl RowSink for NeverFits {
@@ -1726,10 +1476,6 @@ mod tests {
         decoder
     }
 
-    /// A headerless file raises the completion flags before it exports, so a
-    /// caller whose buffer was too small can still ask for the picture. This is
-    /// what `main`'s `decode_raw` did, and it is the half of the pair that is
-    /// easy to lose to a shared helper.
     #[test]
     fn a_headerless_lossless_still_latches_before_its_export() {
         let decoder = failed_export(RAW_LOSSLESS);
@@ -1738,8 +1484,6 @@ mod tests {
         assert_eq!(decoder.converted_rows, 2);
     }
 
-    /// The RIFF walk raises them after, so the same failure leaves the decoder
-    /// claiming nothing finished.
     #[test]
     fn a_riff_lossless_still_latches_after_its_export() {
         let data = riff_lossless();
@@ -1749,9 +1493,6 @@ mod tests {
         assert_eq!(decoder.converted_rows, 0);
     }
 
-    /// `wpd_decoder_partial_frame` clears the caller's frame before it asks for
-    /// anything, so the one rejection that can follow it has to be reachable on
-    /// its own.
     #[test]
     fn a_decoder_with_no_file_open_is_turned_away() {
         let decoder = Decoder::new();

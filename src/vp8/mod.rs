@@ -1,23 +1,3 @@
-//! The lossy (VP8) frame decoder.
-//!
-//! A port of `src/vp8.c`, which is itself a WebP-only descendant of FFmpeg's
-//! VP8 decoder: keyframes only, no inter prediction, no motion vectors.
-//!
-//! Two things are shaped differently from the C.
-//!
-//! The picture is one flat `Vec<u8>` holding all three planes, each addressed
-//! by offset into its own slice of it. The decoder deliberately reads and
-//! writes outside the visible frame — the left border column at `dst[-1]`, the
-//! row above the first macroblock, the four samples above and to the right of a
-//! subblock — and in the C those are negative indices off an interior pointer.
-//! Against a flat allocation they are ordinary indices, which is what lets the
-//! whole macroblock loop be safe code.
-//!
-//! The range coders hold offsets rather than pointers, so
-//! `wpd_vp56_save_offsets` and `wpd_vp56_restore_offsets` have no counterpart
-//! here: a streaming append that reallocates the chunk cannot invalidate them.
-//! See [`rac`].
-
 pub mod rac;
 pub mod tables;
 
@@ -30,8 +10,6 @@ use tables::*;
 const NUM_DCT_TOKENS: usize = 12;
 const MAX_PARTITIONS: usize = 8;
 
-/// The padding `wpd_alloc_picture` puts around a plane: 32 rows above and
-/// below, 64 bytes to the left of every row.
 const PLANE_ROW_PAD: usize = 32;
 const PLANE_COL_PAD: usize = 64;
 const ALIGN: usize = 64;
@@ -42,16 +20,8 @@ fn clip_uintp2(value: i32, bits: u32) -> i32 {
     value.clamp(0, (1 << bits) - 1)
 }
 
-/// The three planes of the picture being decoded, split out of its one
-/// allocation for the length of a frame.
 type Planes<'a> = [&'a mut [u8]; 3];
 
-/// Moves eight bytes between the saved macroblock border and a plane, in
-/// whichever direction `swap` asks for. `WPD_SWAP64`/`WPD_COPY64` in the C.
-///
-/// The border and the plane arrive already borrowed, because the caller has
-/// split all three planes out of the one allocation and would otherwise pay
-/// for that split once per call rather than once per macroblock.
 #[inline(always)]
 fn xchg8(
     border: &mut [[u8; 32]],
@@ -71,30 +41,18 @@ fn xchg8(
     data[po..po + 8].copy_from_slice(&saved);
 }
 
-/// Where one plane sits inside the picture's allocation, with the padding the
-/// assembly and the border logic rely on.
-///
-/// `origin` is the offset of the visible top-left sample *within the plane's
-/// own slice*; every access the decoder makes is expressed relative to it.
-/// Keeping the planes at separate slices rather than at offsets into one is
-/// what leaves every bounds check as tight as it was when each plane had its
-/// own `Vec`: a kernel that walks off the end of the luma still trips an
-/// assertion instead of scribbling on the chroma.
 #[derive(Clone, Copy, Default)]
 pub struct Plane {
     pub stride: usize,
     pub origin: usize,
-    /// Offset of the plane inside [`Picture::data`], and how far it runs.
     base: usize,
     len: usize,
 }
 
 impl Plane {
-    /// The stride a plane of `width` samples is allocated at.
     fn stride_for(width: usize) -> usize {
         let stride = (width + PLANE_COL_PAD + ALIGN - 1) & !(ALIGN - 1);
 
-        // Strides that are a multiple of 1024 alias in L1/L2; pad them.
         if stride % 1024 == 0 {
             stride + ALIGN
         } else {
@@ -102,38 +60,24 @@ impl Plane {
         }
     }
 
-    /// The offset of the sample at `(x, y)` in the visible frame.
     #[inline(always)]
     fn at(&self, x: usize, y: usize) -> usize {
         self.origin + y * self.stride + x
     }
 }
 
-/// The three planes of a decoded frame, in one allocation.
-///
-/// The C asked the allocator three times per frame and gave all three back
-/// when the frame size changed. Doing it once, and keeping the block when the
-/// next frame fits in it, is what the sizes make natural — the three planes
-/// are always allocated and freed together, and their sum sits either side of
-/// glibc's mmap threshold, so an animation that reallocates per sub-frame pays
-/// an mmap and a munmap for every frame. Each plane still ends up 64-byte
-/// aligned, because every plane's extent is rounded up to that.
 #[derive(Default)]
 pub struct Picture {
     data: Vec<u8>,
     pub planes: [Plane; 3],
-    /// Whether [`Self::planes`] describes the frame about to be decoded.
     ready: bool,
 }
 
 impl Picture {
-    /// Lays the three planes out for a `width` by `height` frame and clears
-    /// them, reusing the block when what is there is already big enough.
     fn alloc(&mut self, width: usize, height: usize) -> Result<()> {
         let cw = width.div_ceil(2);
         let ch = height.div_ceil(2);
         let mut planes = [Plane::default(); 3];
-        // Room to bring the first plane up to a 64-byte boundary.
         let mut total = ALIGN;
 
         for (p, &(w, h)) in [(width, height), (cw, ch), (cw, ch)].iter().enumerate() {
@@ -154,8 +98,6 @@ impl Picture {
         }
 
         if self.data.len() < total {
-            /* Growing already zeroes what it adds, and dropping what was there
-            first means it zeroes the whole buffer exactly once. */
             self.data.clear();
             self.data
                 .try_reserve_exact(total)
@@ -165,9 +107,6 @@ impl Picture {
             self.data[..total].fill(0);
         }
 
-        // Vec only promises byte alignment, and the C handed the assembly a
-        // 64-byte aligned row start. Casting the pointer to an integer to find
-        // the padding needed is not a dereference, so this stays safe.
         let pad = self.data.as_ptr() as usize % ALIGN;
         let pad = (ALIGN - pad) % ALIGN;
 
@@ -179,8 +118,6 @@ impl Picture {
         Ok(())
     }
 
-    /// Drops the layout without giving the memory back, which is what a frame
-    /// size change does: the next frame lays itself out over the same block.
     fn invalidate(&mut self) {
         self.planes = [Plane::default(); 3];
         self.ready = false;
@@ -190,7 +127,6 @@ impl Picture {
         self.ready
     }
 
-    /// Plane `p`'s own slice, which its offsets are relative to.
     #[inline(always)]
     pub fn plane(&self, p: usize) -> &[u8] {
         &self.data[self.planes[p].base..][..self.planes[p].len]
@@ -256,16 +192,12 @@ impl Default for Probs {
     }
 }
 
-/// The 24 coefficient blocks of a macroblock: sixteen luma then four each of
-/// the two chroma planes, in the one array the assembly expects.
 #[repr(C, align(16))]
 struct Blocks([[i16; 16]; 24]);
 
 #[repr(C, align(16))]
 struct BlockDc([i16; 16]);
 
-/// The macroblock state a resumable decode has to be able to put back when a
-/// partition turns out to have run past the end of what has arrived.
 #[derive(Clone, Copy)]
 struct ResumeState {
     c: RangeCoder,
@@ -298,11 +230,6 @@ pub struct Decoder {
     filter: Filter,
     lf_delta: LfDelta,
     qmat: [QMat; 4],
-    /// Per segment, then per "is this macroblock split into 4x4 blocks". Both
-    /// inputs come out of the frame header, so the strength is settled once a
-    /// frame rather than recomputed for every macroblock, as libwebp's
-    /// `PrecomputeFilterStrengths` does. `inner_filter` also reads `skip`, so
-    /// that bit alone stays per macroblock.
     filter_levels: [[FilterStrength; 2]; 4],
 
     filter_strength: Vec<FilterStrength>,
@@ -395,10 +322,6 @@ impl Decoder {
     }
 
     fn update_dimensions(&mut self, width: i32, height: i32) -> Result<()> {
-        /* A keyframe header that declares a size the decoder will not allocate
-        is a damaged bitstream, not a caller asking for too much: the size came
-        out of the file. Only VP8L, whose canvas size the container may also
-        have declared, reports the limit as such. */
         check_image_size(width, height).map_err(|_| Error::InvalidData)?;
 
         if width == self.width
@@ -471,7 +394,6 @@ impl Decoder {
         }
     }
 
-    /// Consumes all eight coded deltas, even though keyframes apply only two.
     fn update_lf_deltas(&mut self, buf: &[u8]) {
         for i in 0..8 {
             if self.c.get(buf) != 0 {
@@ -529,19 +451,13 @@ impl Decoder {
         Ok(Status::Done)
     }
 
-    /// Opens, or widens, a range coder over each coefficient partition that has
-    /// enough of its bytes present to be started.
     fn open_partitions(&mut self, buf: &[u8]) {
         let init_bytes: i64 = if rac::RAC_64 { 0 } else { 3 };
 
         for i in 0..self.num_coeff_partitions {
             let start = self.partition_start[i];
             let size = self.partition_size[i];
-            /* Signed, as the C's was: a partition whose first byte has not
-            arrived is short by a negative amount, and must stay unopened.
-            Saturating the subtraction to zero would open it over an empty
-            window instead, and let the row loop run against a range coder
-            with nothing in it. */
+            /* Keep this signed so an unavailable partition stays unopened. */
             let have = self.chunk_avail as i64 - start as i64;
             let win = if have >= size as i64 {
                 size
@@ -603,8 +519,6 @@ impl Decoder {
         }
     }
 
-    /// The companion of [`Self::get_quants`]: the other per-segment table the
-    /// frame header settles.
     fn get_filter_strengths(&mut self) {
         for segment in 0..4 {
             let base = if self.segmentation.enabled {
@@ -662,11 +576,7 @@ impl Decoder {
 
         let header_size = (rl24(buf) >> 5) as usize;
 
-        /* The container refuses a file whose keyframe says either of these,
-        but a VP8X carries the canvas size, and a canvas the scanner did not
-        have to read the keyframe for is a keyframe the scanner never
-        questioned. So the decoder asks too, where libwebp's `VP8GetHeaders`
-        does, and the two paths agree on what a frame has to be. */
+        /* Check the keyframe too, as libwebp's VP8GetHeaders does. */
         if self.profile > 3 {
             crate::log::error_args(format_args!("Unknown profile {}", self.profile));
             return Err(Error::InvalidData);
@@ -864,9 +774,6 @@ impl Decoder {
             luma_ctx = 0;
         }
 
-        /* The indices address three things at once — the two contexts and
-        the block at 4 * y + x — so an iterator over any one of them would put
-        the other two back as indexing anyway. */
         #[allow(clippy::needless_range_loop)]
         for y in 0..4 {
             for x in 0..4 {
@@ -916,7 +823,6 @@ impl Decoder {
         self.top_nnz[mb_x] = t_nnz;
         self.left_nnz = l_nnz;
 
-        // An empty coefficient block skips both IDCT and the inner loop filter.
         if nnz_total == 0 {
             mb.skip = true;
         }
@@ -1012,8 +918,6 @@ impl Decoder {
 
             let mut ptr = off[0];
             let luma = &mut *planes[0];
-            // The four samples above and to the right of the macroblock, which
-            // the last column of macroblocks has to fabricate.
             let tr_right: [u8; 4] = if last {
                 [luma[off[0] - ls + 15]; 4]
             } else {
@@ -1323,8 +1227,6 @@ impl Decoder {
         let inner = f.inner_filter;
         let y = luma;
 
-        // The fused filter reads dst[-2..13], so it needs a macroblock to the
-        // left.
         if mb_x != 0 && inner {
             (self.dsp.h_loop_filter_simple_mb)(y, off, ls, mbedge_lim, bedge_lim);
         } else {
@@ -1338,7 +1240,6 @@ impl Decoder {
             }
         }
 
-        // The fused filter reads rows -2..13, so it needs a macroblock above.
         if mb_y != 0 && inner {
             (self.dsp.v_loop_filter_simple_mb)(y, off, ls, mbedge_lim, bedge_lim);
         } else {
@@ -1406,7 +1307,6 @@ impl Decoder {
         self.block_dc.0 = [0; 16];
     }
 
-    /// Starts a frame: parses the header and sets up the macroblock loop.
     pub fn frame_init(
         &mut self,
         chunk: &[u8],
@@ -1455,18 +1355,15 @@ impl Decoder {
         Ok(Status::Done)
     }
 
-    /// Takes note that more of the chunk has arrived.
     pub fn extend(&mut self, chunk: &[u8], avail: usize) {
         self.chunk_avail = avail;
         self.open_partitions(chunk);
     }
 
-    /// Decodes as many macroblock rows as the chunk allows.
     pub fn decode_rows(&mut self, chunk: &[u8]) -> Result<Status> {
         self.decode_rows_tmpl(chunk, true)
     }
 
-    /// Decodes a whole frame from a chunk that is known to be complete.
     pub fn decode_frame(&mut self, chunk: &[u8]) -> Result<()> {
         if self.frame_init(chunk, chunk.len(), chunk.len())? == Status::NeedMore {
             return Err(Error::InvalidData);
@@ -1475,18 +1372,7 @@ impl Decoder {
         Ok(())
     }
 
-    /// Splits the picture into its three planes and runs the macroblock loop
-    /// over them.
-    ///
-    /// The buffer is moved out of the decoder for the duration, which is what
-    /// lets the split happen once per frame rather than once per access: the
-    /// slices borrow a local, so every helper below still takes `&mut self`.
-    /// The geometry stays behind, so `linesize` and friends keep working.
     fn decode_rows_tmpl(&mut self, chunk: &[u8], resumable: bool) -> Result<Status> {
-        /* `frame_init` lays the planes out, and until it has said `Done` there
-        is nowhere for a row to go: the offsets are all zero, so even the left
-        border column ahead of the first sample is off the front of the plane.
-        The driver waits for it; a caller of the module need not. */
         if !self.picture.allocated() {
             return Err(Error::InvalidData);
         }
@@ -1622,8 +1508,6 @@ impl Decoder {
         Ok(Status::Done)
     }
 
-    /// How many output rows are final, given how far the macroblock loop has
-    /// got: the loop filter of the next row still reaches back into this one.
     pub fn rows_finalized(&self) -> i32 {
         const EXTRA: [i32; 3] = [0, 2, 8];
 
@@ -1662,14 +1546,6 @@ fn check_intra_pred8x8_mode(mode: usize, mb_x: usize, mb_y: usize) -> usize {
     }
 }
 
-/// Reads the coefficients of one block, returning the index one past the last
-/// non-zero one.
-///
-/// The C reached this through a `goto` into the middle of a `do`-`while`, to
-/// skip the end-of-block test on entry and after each run of zeros. The two
-/// nested loops here have the same shape: the inner one is the zero run and
-/// falls through to a coefficient, and the outer one tests for end of block
-/// only after a coefficient has been read.
 fn decode_coeffs_inner<'p>(
     c: &mut RangeCoder,
     buf: &[u8],
@@ -1777,8 +1653,6 @@ mod tests {
         }
     }
 
-    /// One allocation, three disjoint plane slices: what plane `p` hands out
-    /// must not reach into plane `p + 1`.
     #[test]
     fn the_planes_do_not_overlap() {
         let mut pic = Picture::default();
@@ -1793,8 +1667,6 @@ mod tests {
         assert!(pic.planes[2].base + pic.planes[2].len <= pic.data.len());
     }
 
-    /// A frame that shrinks reuses the block, and must not be handed the
-    /// previous frame's samples with it.
     #[test]
     fn laying_the_planes_out_again_starts_from_zero() {
         let mut pic = Picture::default();
@@ -1858,18 +1730,12 @@ mod tests {
         );
     }
 
-    /// A 16 x 16 keyframe header, enough for `frame_init` to want more of the
-    /// chunk than the fuzzer hands it.
     const SHORT: &[u8] = &[
         0xd0, 0x00, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x10, 0x04, 0x9d, 0x01, 0x2a, 0x00,
         0x01, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x99, 0x00, 0x0a, 0x00, 0x00, 0x0a, 0x0a,
     ];
 
-    /// `frame_init` lays the planes out, so a caller that decodes rows without
-    /// waiting for it to finish has none: the left border column sits one
-    /// sample ahead of the first, which is off the front of a plane whose
-    /// offsets are still zero.
     #[test]
     fn rows_cannot_be_decoded_before_the_planes_exist() {
         let mut dec = Decoder::new();

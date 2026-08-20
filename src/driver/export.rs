@@ -1,22 +1,3 @@
-//! Handing a decoded picture out.
-//!
-//! This is the last place a picture passes through, and it is all plumbing:
-//! which conversion the output format needs, which rows have already been
-//! done, and whether the bytes go into the decoder's memory or the caller's.
-//! The arithmetic that a caller's buffer sizes drive is [`crate::image`]; what
-//! is here walks rows of a [`Frame`] that may already be a crop or a flip.
-//!
-//! The scratch an export writes through arrives as borrows of the decoder's
-//! own fields, which is why there are two sets of them. A whole-frame export
-//! may be handed the conversion buffer as its *source* — that is how sub-frame
-//! mode returns a converted animation frame — while the resumable row exports
-//! write into it. The C passed one struct of pointers to both and the rule
-//! that they are never the same buffer at the same time was written nowhere.
-//!
-//! Nothing here knows where a caller's own memory is. A destination that is
-//! not the decoder's own arrives as a [`RowSink`], which hands back one row at
-//! a time; what those rows are made of belongs to whoever supplied them.
-
 use crate::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
 use crate::dsp::yuv::LAYOUT_ARGB;
 use crate::image::Format;
@@ -33,8 +14,6 @@ use crate::options::Options;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::Scratch;
 
-/// What the decoder was asked for, gathered at the call rather than reached
-/// for, so nothing here can read a field that has moved on since.
 pub struct ExportSettings {
     pub out_format: i32,
     pub premultiply: bool,
@@ -48,26 +27,15 @@ pub struct ExportSettings {
     pub timestamp: i64,
 }
 
-/// The scratch a whole-frame export writes through.
-///
-/// The conversion buffer is not here: a whole-frame export may be handed it as
-/// its source.
 pub struct ExportTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub options: &'a Options,
     pub rescale: &'a mut Scratch,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
-    /// Where the rows go when the caller supplied its own memory. `None` is
-    /// what says the decoder hands out its own instead, which is why there is
-    /// no separate flag: the destination and the choice are one value.
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
 }
 
-/// The scratch a resumable row export writes through, plus how far it has got.
-///
-/// These paths read the codec's own picture and convert into the decoder's
-/// buffers, so the conversion buffer is theirs to write.
 pub struct RowTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub options: &'a Options,
@@ -78,7 +46,6 @@ pub struct RowTargets<'a> {
     pub converted_format: &'a mut i32,
 }
 
-/// Describes `img` as the picture a decode hands back.
 pub(crate) fn export_frame(
     set: &ExportSettings,
     img: &Frame<'_>,
@@ -100,8 +67,6 @@ pub(crate) fn export_frame(
     out.has_alpha = set.has_alpha;
 }
 
-/// As [`export_frame`], keeping the picture itself, which is what a caller
-/// that supplied no buffer of its own reads.
 pub(crate) fn export_own<'a>(
     set: &ExportSettings,
     img: Frame<'a>,
@@ -112,7 +77,6 @@ pub(crate) fn export_own<'a>(
     out.pixels = Pixels::Own(img);
 }
 
-/// Packs rows `[row_start, row_end)` of `img` into the caller's own plane.
 #[allow(clippy::too_many_arguments)]
 fn export_external_rows(
     set: &ExportSettings,
@@ -139,8 +103,6 @@ fn export_external_rows(
     }
 
     for y in row_start..row_end {
-        /* The caller's plane may have a negative stride, so it is asked for a
-        row at a time rather than borrowed whole. */
         let dst = ext.row(0, y, row);
 
         match pack {
@@ -154,7 +116,6 @@ fn export_external_rows(
     Ok(())
 }
 
-/// As [`export_external_rows`], for a planar format's three or four planes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn export_external_planar_rows(
     set: &ExportSettings,
@@ -205,28 +166,14 @@ fn export_external_planar(
     export_external_planar_rows(set, ext, img, format, out, 0, height)
 }
 
-/// Which conversion the output format needs, decided before anything is
-/// written so that the buffer it writes into is borrowed exactly once.
 enum Route {
-    /// The picture is already in the output format.
     AsIs,
-    /// Upsample, or go through ARGB for a two-byte format.
     Upsample,
-    /// Repack a four-byte format into another.
     Pack(RowFn),
-    /// Premultiplied ARGB over an animation canvas whose colour is already
-    /// weighted, which is a relabelling.
     Relabel,
-    /// The same, for a still, which the caller may hold past the next decode.
     Copy,
 }
 
-/// Hands out a whole frame: crop, scale, convert, premultiply, flip, and then
-/// either the decoder's own memory or the caller's.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_packed<'a>(
     set: &ExportSettings,
     t: ExportTargets<'a>,
@@ -300,10 +247,6 @@ pub fn export_packed<'a>(
     } else {
         Route::AsIs
     };
-    /* Premultiplying only ever goes with a route through `output`: no picture
-    the decoder holds is premultiplied, so a format that is cannot be `AsIs`,
-    and the relabelling is only reached for an animation, which premultiplies
-    each frame before compositing it instead. */
     let premultiply = set.premultiply && !set.animation && format_bpp(format) != 2;
     let mut img = match route {
         Route::AsIs => img,
@@ -368,12 +311,6 @@ pub fn export_packed<'a>(
     Ok(())
 }
 
-/// Converts and hands out rows `[0, upto)` of the still lossy frame,
-/// converting each row exactly once however many times it is asked for.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_still_packed<'a>(
     set: &ExportSettings,
     t: RowTargets<'a>,
@@ -400,8 +337,6 @@ pub fn export_still_packed<'a>(
         still_packed_direct(set, dsp, options, converted, src, first, upto)?
     };
 
-    /* Bound only now: both helpers may have grown the image, and a view taken
-    before that would be of the memory as it was. */
     let dst = converted.frame();
 
     if let Some(ext) = ext {
@@ -416,7 +351,6 @@ pub fn export_still_packed<'a>(
     Ok(())
 }
 
-/// Upsamples straight into the output format. Returns the first row written.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_direct(
     set: &ExportSettings,
@@ -451,10 +385,6 @@ fn still_packed_direct(
     Ok(converted_from)
 }
 
-/// The two-byte formats are packed from ARGB, so the intermediate has to be
-/// carried between calls too, rather than rebuilt for the whole frame.
-///
-/// Returns the first row it wrote.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_2byte(
     set: &ExportSettings,
@@ -542,8 +472,6 @@ fn upsample_simple(
     );
 }
 
-/// Returns the first row the fancy upsampler actually wrote, which is one
-/// above `first` when it starts on an even row.
 fn upsample_fancy(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -568,12 +496,6 @@ fn upsample_fancy(
     ) as i32
 }
 
-/// Hands out rows `[0, upto)` of the still lossless frame, premultiplying and
-/// packing each row exactly once however many times it is asked for.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_still_lossless<'a>(
     set: &ExportSettings,
     t: RowTargets<'a>,

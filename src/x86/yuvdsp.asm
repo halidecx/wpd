@@ -18,7 +18,6 @@ pw_1:       times 16 dw 1
 pd_alpha:   times  8 dd 0x000000ff
 pd_alpha3:  times  8 dd 0xff000000
 
-; ARGB -> RGBA, BGRA, RGB and BGR byte selectors.
 shuf_rgba:  db 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12
             db 1, 2, 3, 0, 5, 6, 7, 4, 9, 10, 11, 8, 13, 14, 15, 12
 shuf_bgra:  db 3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12
@@ -27,11 +26,8 @@ shuf_rgb:   db 1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, -1, -1, -1, -1
             db 1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15, -1, -1, -1, -1
 shuf_bgr:   db 3, 2, 1, 7, 6, 5, 11, 10, 9, 15, 14, 13, -1, -1, -1, -1
             db 3, 2, 1, 7, 6, 5, 11, 10, 9, 15, 14, 13, -1, -1, -1, -1
-; Drops the trailing alpha byte of four RGBA or BGRA pixels.
 shuf_drop_a: db 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1
              db 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1
-; The same, without pshufb: keep the low three bytes of each half, then merge
-; in the other three that a byte-granular right shift has moved into place.
 pq_lo3: times 2 db 255, 255, 255,   0,   0,   0, 0, 0
 pq_hi3: times 2 db   0,   0,   0, 255, 255, 255, 0, 0
 pb_lo6: times 6 db 255
@@ -39,39 +35,25 @@ pb_lo6: times 6 db 255
 pb_hi6: times 6 db 0
         times 6 db 255
         times 4 db 0
-; Gathers the six dwords each 256-bit shuffle leaves valid into 24 contiguous
-; bytes; the _hi variant also parks its first two dwords in the upper lane so a
-; blend can append them to the preceding group.
 permd_rgb:    dd 0, 1, 2, 4, 5, 6, 0, 0
 permd_rgb_hi: dd 2, 4, 5, 6, 0, 0, 0, 1
-; Broadcasts each pixel's alpha over its four bytes.
 shuf_bcasta: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
              db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
 shuf_bcasta3: db 3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15
               db 3, 3, 3, 3, 7, 7, 7, 7, 11, 11, 11, 11, 15, 15, 15, 15
 
-; The 4444 packer wants RGBA order, where the two nibble pairs it merges are
-; already neighbours; pmaddubsw then folds each pair into one word.
 %define shuf_rgba4444 shuf_rgba
 mask_rgba4444: times 32 db 0xf0
 mul_rgba4444:  times 16 db 16, 1
-; A swapped layout lays the very same two bytes down the other way round, so it
-; only exchanges the two field pairs the shuffle gathers; the mask and the
-; multiplier are per-pair and ride along unchanged.
 shuf_bgra4444: db 3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14
                db 3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14
 %define mask_bgra4444 mask_rgba4444
 %define mul_bgra4444  mul_rgba4444
-; 565 needs the green byte twice, once per output byte. Weighting the masked
-; fields by 32/1 and 64/1 lines them up for a right shift of 5 and 3, which
-; pmulhuw does in one instruction with 2^11 and 2^13.
 shuf_rgb565: db 1, 2, 2, 3, 5, 6, 6, 7, 9, 10, 10, 11, 13, 14, 14, 15
              db 1, 2, 2, 3, 5, 6, 6, 7, 9, 10, 10, 11, 13, 14, 14, 15
 mask_rgb565: times 8 db 0xf8, 0xe0, 0x1c, 0xf8
 mul_rgb565:  times 8 db 32, 1, 64, 1
 pw_565scale: times 8 dw 2048, 8192
-; The two 565 pairs carry a shift of their own, so exchanging them exchanges
-; the mask, the multiplier and the scale with them.
 shuf_bgr565: db 2, 3, 1, 2, 6, 7, 5, 6, 10, 11, 9, 10, 14, 15, 13, 14
              db 2, 3, 1, 2, 6, 7, 5, 6, 10, 11, 9, 10, 14, 15, 13, 14
 mask_bgr565: times 8 db 0x1c, 0xf8, 0xf8, 0xe0
@@ -83,8 +65,6 @@ pw_17:   times 16 dw 17
 pw_240:  times 16 dw 240
 pw_4369: times 16 dw 4369
 
-; (R, G) and (G, B) pairs for pmaddwd. 33059 overflows a signed word, so it is
-; split as 16675 on the first pair and 16384 on the second.
 shuf_y_rg: db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
            db 1, -1, 2, -1, 5, -1, 6, -1, 9, -1, 10, -1, 13, -1, 14, -1
 shuf_y_gb: db 2, -1, 3, -1, 6, -1, 7, -1, 10, -1, 11, -1, 14, -1, 15, -1
@@ -96,7 +76,6 @@ shuf_uv_b: db 3, -1, -1, -1, 7, -1, -1, -1
 pw_y_rg:  times 8 dw 16839, 16675
 pw_y_gb:  times 8 dw 16384, 6420
 pd_y_rnd: times 8 dd 1081344
-; Undoes the lane interleave the two packssdw and the packuswb leave behind.
 permd_y:  dd 0, 4, 1, 5, 2, 6, 3, 7
 
 pd_255:   times 8 dd 255
@@ -107,11 +86,6 @@ pd_1020:  times 8 dd 1020
 pd_65535: times 8 dd 65535
 pd_1:     times 8 dd 1
 ps_1_19:  times 8 dd 524288.0
-; U = (-9719 R - 19081 G + 28800 B) and V = (28800 R - 24116 G - 4684 B), each
-; rounded by half an output step plus the 128 offset. R and G ride in one word
-; pair; B keeps a lane of its own, its second word being the zero the sums
-; never carry into. The 4:2:0 path feeds sums of a 2x2 block and folds the
-; average into a shift of 18; the 4:4:4 path feeds one pixel and shifts by 16.
 pw_u_rg:      times 8 dw -9719, -19081
 pw_u_b:       times 8 dw 28800, 0
 pw_v_rg:      times 8 dw 28800, -24116
@@ -126,10 +100,6 @@ SECTION .text
 
 %if ARCH_X86_64
 
-; Reconstructs 32 chroma samples for each of the two output rows out of 17
-; input samples, using the byte-domain identities from libwebp's SSE2
-; upsampler: with s = (a+d+1)/2, t = (b+c+1)/2 and k = (a+b+c+d)/4,
-; (9a+3b+3c+d+8)/16 collapses to avg(a, m) for m = (a+3b+3c+d)/8.
 %macro RECON_UV 4 ; top, cur, top_scratch, bottom_scratch
     movu      xmm0, [%1]
     movu      xmm1, [%1 + 1]
@@ -183,8 +153,6 @@ SECTION .text
     por       %1, m7
 %endmacro
 
-; Drops the alpha byte of each pixel, leaving three quarters of the register
-; live, and squeezes the halves back together so every store is full width.
 %macro STORE_RGB24 2 ; dst, offset
 %if cpuflag(avx2)
     pshufb    m7, [shuf_drop_a]
@@ -212,7 +180,6 @@ SECTION .text
 %endif
 %endmacro
 
-; Interleaves the two packed channel pairs into whole pixels and stores them.
 %macro STORE_PIXELS 5 ; first_pair, second_pair, dst, offset, bpp
     punpcklbw m0, %1, %2
     punpckhbw %1, %2
@@ -233,10 +200,6 @@ SECTION .text
 %endif
 %endmacro
 
-; R = (19077 . y             + 26149 . v - 14234) >> 6
-; G = (19077 . y -  6419 . u - 13320 . v +  8708) >> 6
-; B = (19077 . y + 33050 . u             - 17685) >> 6
-; where a . b is mulhi_epu16(a << 8, b), i.e. (a * b) >> 8 for a byte a.
 %macro CONVERT_GROUP 7 ; y, dst, u_scratch, v_scratch, offset, layout, bpp
 %if cpuflag(avx2)
     pmovzxbw  m3, [%1 + %5]
@@ -268,7 +231,6 @@ SECTION .text
     paddw     m1, m3, [pw_8708]
     psubw     m1, m0
     psraw     m1, 6                     ; G
-    ; 33050 does not fit in a signed word; keep the saturation unsigned.
     pmulhuw   m4, [pw_33050]
     paddusw   m4, m3
     psubusw   m4, [pw_17685]
@@ -342,8 +304,6 @@ UPSAMPLE_ARGB_BLOCK bgra, 4
 UPSAMPLE_ARGB_BLOCK rgb, 3
 UPSAMPLE_ARGB_BLOCK bgr, 3
 
-; Splits sixteen ARGB columns of both rows into the four samples every output
-; pixel averages: even and odd column of the top row, then of the bottom one.
 %macro ARGB_TO_UV_COLUMNS 2 ; src, stride
     movu      m0, [%1]
     movu      m1, [%1 + 32]
@@ -383,11 +343,6 @@ UPSAMPLE_ARGB_BLOCK bgr, 3
 %endif
 %endmacro
 
-; One channel of eight output pixels. A gather with a scale of two lands the
-; wanted entry in the low word of each dword and its neighbour in the high one,
-; which the four-sample sum can ignore: the sum of four 12-bit entries never
-; carries into bit 16. The same overlap is what makes the interpolation of the
-; inverse table a single pmaddwd, its two entries arriving in one dword.
 %macro ARGB_TO_UV_CHANNEL 2 ; channel shift, dst
     ARGB_TO_UV_IDX %1
     pcmpeqd    m7, m7, m7
@@ -444,17 +399,12 @@ UPSAMPLE_ARGB_BLOCK bgr, 3
     pcmpeqd   m4, m5, m6
     pcmpeqd   m7, m5, [pd_1020]
     por       m4, m7
-    ; A block that is opaque, fully transparent, or whose alpha the caller does
-    ; not want kept is averaged unweighted; when none of the eight need the
-    ; weighted average, which is every block of an opaque image, skip it.
     pandn     m10, m4, m11
     pmovmskb  r5d, m10
     pmaxsd    m5, [pd_1]
     cvtdq2ps  m5, m5
     mova      m9, [ps_1_19]
     divps     m9, m5
-    ; 2^19 / total_a is never within a float rounding error of an integer from
-    ; below, so truncating agrees with the integer divide.
     cvttps2dq m9, m9
     ARGB_TO_UV_CHANNEL  8, m8
     ARGB_TO_UV_CHANNEL 16, m14
@@ -501,9 +451,6 @@ cglobal argb_to_uv, 6, 10, 16, 288, u, v, argb, argb_stride, n, weight_alpha
 .tail:
     and       nd, 15
     jz        .end
-    ; Fewer than sixteen columns left: gather them into a zeroed block, with
-    ; the last column doubled up when the width is odd, which is exactly how
-    ; the scalar path folds a lone column onto itself.
     pxor      m0, m0
     mova      [rsp + 128], m0
     mova      [rsp + 160], m0
@@ -575,10 +522,6 @@ cglobal pack_%1, 3, 3, 2, dst, src, n
     RET
 %endmacro
 
-; Four pixels at a time, storing 16 bytes for the 12 that matter. The vector
-; loop stops eight pixels short so the overhang always lands inside the row.
-; The 256-bit pass gathers the six live dwords of a shuffle into 24 contiguous
-; bytes and stops sixteen pixels short, for the same reason.
 %macro PACK24 1
 cglobal pack_%1, 3, 4, 3, dst, src, n
     mova      m1, [shuf_%1]
@@ -637,10 +580,6 @@ cglobal pack_%1, 3, 4, 3, dst, src, n
 %endif
 %endmacro
 
-; Two bytes out per pixel. The shuffle puts the fields of each output byte side
-; by side, the mask clears the bits that would carry into the neighbouring
-; field, and pmaddubsw merges the pair into one word that the scale shifts back
-; down; packuswb then lays the words out as the little-endian byte pairs.
 %macro PACK16 1
 cglobal pack_%1, 3, 4, 5, dst, src, n
     mova      m2, [shuf_%1]
@@ -688,10 +627,6 @@ cglobal pack_%1, 3, 4, 5, dst, src, n
     RET
 %endmacro
 
-; Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16, never leaving
-; [16, 235], so neither pack saturates.
-; The load is a parameter so the one-pixel tail can take its four bytes with a
-; movd rather than reading a whole group past the end of the row.
 %macro ARGB_TO_Y_GROUP 4-5 movu ; dst, scratch, src, offset, load
     %5        %2, [%3 + %4]
     pshufb    %1, %2, [shuf_y_rg]
@@ -838,12 +773,6 @@ cglobal argb_to_yuv444, 5, 6, 6, y, u, v, argb, n, tmp
     RET
 %endmacro
 
-; Every channel is a nibble expanded to eight bits by a multiply by 17, and
-; the alpha multiplier is the same expansion doubled up, so the truncating
-; divide by 255 the C does with a 32-bit product is exactly pmulhuw here.
-; Alpha keeps its nibble untouched and blue shares alpha's byte in either
-; layout, so a swap only moves which of the two bytes that pair lands in, and
-; with it the four nibble positions the extraction reads.
 %macro PREMULTIPLY_4444 7 ; word, scratch, a, b, r, g, swap
 %if %7
     pand      %3, %1, [pw_15]
@@ -908,8 +837,6 @@ cglobal %1, 2, 3, 6, rgba, n
     RET
 %endmacro
 
-; c * a / 255 truncated, as (p + (p >> 8) + 1) >> 8. Giving the alpha lane a
-; multiplier of 255 leaves it untouched, so no channel needs masking out.
 %macro PREMULTIPLY_ROW 0
 cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
     test      alpha_firstd, alpha_firstd
@@ -973,8 +900,6 @@ cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
     RET
 %endmacro
 
-; The 4444 premultipliers are word arithmetic and a few masks, so they sit a
-; tier below the packers they are grouped with everywhere else.
 INIT_XMM sse2
 PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
@@ -1010,11 +935,6 @@ ARGB_TO_Y
 ARGB_TO_YUV444
 %endif
 
-; Rewrites one byte of every pixel, reading back the other three and storing
-; them again unchanged. 'dst' is the start of the pixel, never the alpha byte
-; inside it: sixteen pixels are a whole 64-byte read-modify-write, so a 'dst'
-; biased by the alpha offset would make the last group of a row carry that
-; bias past the end of the row and into the row below.
 %macro DISPATCH_ALPHA 2 ; name, alpha offset within the pixel
 %if cpuflag(avx2)
 cglobal %1, 3, 4, 4, dst, src, n

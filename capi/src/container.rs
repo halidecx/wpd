@@ -1,11 +1,3 @@
-//! `WPDImageInfo`, and the one public entry point that is nothing but a scan.
-//!
-//! The struct is versioned by `struct_size`, and the caller's copy may be a
-//! longer revision than this build knows about. Nothing here writes it whole:
-//! the fields are assigned one at a time, so the tail padding a future field
-//! would occupy is left alone, which is what `WPD_FIELD_END` was guarding in
-//! the C.
-
 use std::ffi::c_int;
 use std::{mem, slice};
 
@@ -23,7 +15,6 @@ const WPD_ERR_NO_MEMORY: c_int = -6;
 const WPD_ERR_TOO_LARGE: c_int = -7;
 const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
 
-/// `WPDImageInfo` from `include/wpd.h`.
 #[repr(C)]
 pub struct WPDImageInfo {
     pub struct_size: usize,
@@ -39,8 +30,6 @@ pub struct WPDImageInfo {
 }
 
 impl WPDImageInfo {
-    /// How much of a caller's struct this build may touch: through the last
-    /// field it knows about, and no further.
     pub(crate) fn v1() -> usize {
         mem::offset_of!(WPDImageInfo, metadata) + mem::size_of::<c_int>()
     }
@@ -79,18 +68,13 @@ fn fill_info(info: &mut WPDImageInfo, from: &Info) {
     info.metadata = from.metadata;
 }
 
-/// Zeroes everything this build knows about, leaving the caller's
-/// `struct_size` and any field a newer revision added.
 pub(crate) fn info_clear(info: &mut WPDImageInfo) {
     fill_info(info, &Info::default());
     info.coding = coding(Coding::Unknown);
 }
 
-/// # Safety
-///
-/// `data` must be readable for `size` bytes, and `info` writable as
-/// `info_clear` requires.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_get_info(
     data: *const u8,
     size: usize,

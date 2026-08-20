@@ -1,18 +1,3 @@
-//! The lossless DSP assembly.
-//!
-//! Laid out as [`super::vp8`]: the symbols are declared once and exported raw
-//! for the C ABI table, and the core crate gets safe wrappers.
-//!
-//! # Regions
-//!
-//! A predictor writes `n` pixels at `out` and reads `n` at `up`, plus, for the
-//! ones whose fallback wrapper asks for them, `out[-1]` and `up[-1]`. The three
-//! that use the top-right neighbour read one past the end of the row above,
-//! which is the first pixel of the row being written when the picture is
-//! contiguous, and a slot the caller has filled in when it is not. Either way
-//! the read lands inside the picture, so the check is the same for all of them:
-//! `up + n` must be a valid index.
-
 use crate::cpu::CpuFlags;
 use crate::dsp::vp8l::Vp8lDsp;
 use std::ffi::c_int;
@@ -88,11 +73,6 @@ macro_rules! raw_blend_row {
     };
 }
 
-/// `UP` is false for the two predictors that run on the first row of a picture,
-/// where there is no row above and the caller passes no offset for one. `LEFT`
-/// and `TL` say which out-of-row neighbours the kernel reads, the same split the
-/// scalar table encodes: a predictor that reads one has to be given a row it can
-/// read it from.
 fn pred_add<
     T: Raw<Sig = PredAddRaw>,
     const UP: bool,
@@ -135,8 +115,6 @@ fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
     }
 }
 
-/// The kernel is in place at every call site, and the length is the count, so
-/// there is no region to check beyond what the slice already says.
 fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
     unsafe {
         let p = row.as_mut_ptr();
@@ -145,25 +123,18 @@ fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
     }
 }
 
-/// The kernel reads and writes whole pixels, so the shorter of the two rows
-/// bounds the run — which is what the scalar `zip` does too.
 fn blend_row<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len()) / 4;
 
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
-/// Green comes out one byte per four, so the destination bounds the run.
 fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len() / 4);
 
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. The C table holds the raw symbols, so it
-/// cannot share the safe wrappers above — but it shares the selection, which
-/// is the part that has to agree with what the decoder actually runs.
 #[derive(Default)]
 pub struct RawTable {
     pub pred_add: [Option<PredAddRaw>; 14],
@@ -174,14 +145,6 @@ pub struct RawTable {
     pub color_row: Option<ColorRowRaw>,
 }
 
-/// One predictor, by its index in the table. The flags after each marker are
-/// `UP`, `LEFT`, `TL`, and they match the `l`/`tl` pair the scalar table
-/// passes to its own kernels.
-///
-/// A tier names the indices it fills rather than handing over a whole table:
-/// the widest kernels are the ones that need the widest instruction set, and
-/// the six that run a serial left chain in an xmm register do not, so they
-/// arrive two tiers earlier than the rest.
 macro_rules! pred_slot {
     ($set:ident, 0) => {
         pred_add::<$set::Pred0, false, false, false>
@@ -227,7 +190,6 @@ macro_rules! pred_slot {
     };
 }
 
-/// The same, unwrapped, for the C ABI table.
 #[allow(unused_macros)]
 macro_rules! pred_raw {
     ($set:ident, 0) => {
@@ -280,12 +242,6 @@ macro_rules! preds {
     };
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
-///
-/// `@preds` stands for the fourteen predictors, which are a whole table on
-/// both sides rather than a field; the `@` is what keeps it from looking like
-/// a field name to the matcher.
 #[allow(unused_macros)]
 macro_rules! ladder {
     ($(

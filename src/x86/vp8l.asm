@@ -6,26 +6,14 @@ SECTION_RODATA 32
 eg_perm: dd 0, 4, 1, 5, 2, 6, 3, 7
 
 pw_256: times 16 dw 256
-; Broadcasts each pixel's alpha over its four bytes.
 bcast_alpha: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
              db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
 
-; A pixel is [A, R, G, B] in memory order, so a 16-bit lane pair is
-; (R:A, B:G): the two channels the cross-colour transform writes sit in the
-; high byte of a lane, and the green it predicts them from in the low byte of
-; the second. Both masks move a source byte into a lane's high half and zero
-; everything else, which is what lets pmulhw's >> 16 absorb the transform's
-; >> 5 and leaves the product's low byte already in place for paddb.
-;
-; ct_green: green into both lanes' high halves.
 ct_green: db -1, 2, -1, 2, -1, 6, -1, 6, -1, 10, -1, 10, -1, 14, -1, 14
           db -1, 2, -1, 2, -1, 6, -1, 6, -1, 10, -1, 10, -1, 14, -1, 14
-; ct_red: the freshly corrected red into the high half of the lane that holds
-; blue, and zero into the other, so one multiply does the second stage.
 ct_red:   db -1, -1, -1, 1, -1, -1, -1, 5, -1, -1, -1, 9, -1, -1, -1, 13
           db -1, -1, -1, 1, -1, -1, -1, 5, -1, -1, -1, 9, -1, -1, -1, 13
 
-; blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
 blend_scale:
     dd 0
 %assign bsi 1
@@ -36,7 +24,6 @@ blend_scale:
 
 SECTION .text
 
-; pavgb rounds up; subtracting (a ^ b) & 1 yields VP8L's floor average.
 %macro AVG2 5
     pxor       %4, %2, %3
     pand       %4, %4, %5
@@ -60,7 +47,6 @@ SECTION .text
 
 INIT_YMM avx2
 cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
-    ; Load residuals before storing because in and out may alias.
     pcmpeqd    m0, m0
     psrld      m0, 24
     cmp        nd, 16
@@ -106,7 +92,6 @@ cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
 
 INIT_XMM avx2
 cglobal pred_add_1, 4, 4, 3, src, upper, n, dst
-    ; Keeping left in a register avoids a loop-carried store-to-load hop.
     vpbroadcastd m0, [dstq-4]
     cmp        nd, 4
     jl .tail1
@@ -282,7 +267,6 @@ cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
 %endmacro
 
 
-; 5: avg3(l, t, tr).
 %macro PRED_AVG3 0
 cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
     test       nd, nd
@@ -308,7 +292,6 @@ cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
 %endmacro
 
 
-; 10: avg4(l, tl, t, tr).
 %macro PRED_AVG4 0
 cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
     test       nd, nd
@@ -337,9 +320,6 @@ cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
 %endmacro
 
 
-; 11: select(t, l, tl). AVX2-only, unlike its neighbours: the blend takes the
-; mask in a register, and SSE4.1's pblendvb reads it from xmm0 alone, which
-; this kernel has no spare register to free up.
 INIT_XMM avx2
 cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     test       nd, nd
@@ -370,7 +350,6 @@ cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     paddb      m7, m3, m5             ; top candidate for the next one
     psadbw     m8, m2, m1
     psadbw     m9, m3, m2
-    ; The next pixel, assuming this one takes top: independent of left.
     psadbw     m12, m6, m2
     pcmpgtd    m12, m12, m9
     paddb      m14, m6, m5
@@ -397,7 +376,6 @@ cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     RET
 
 
-; 12: clamped_add_sub_full(l, t, tl).
 %macro PRED_CLAMP_FULL 0
 cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
     test       nd, nd
@@ -421,7 +399,6 @@ cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
 %endmacro
 
 
-; 13: clamped_add_sub_half(l, t, tl).
 %macro PRED_CLAMP_HALF 0
 cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
     test       nd, nd
@@ -456,14 +433,6 @@ cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
 %endmacro
 
 
-; These six are xmm-wide because a serial left chain cannot be any wider, and
-; nothing about that needs AVX2 -- so each is built once, at the lowest tier its
-; instructions allow, and every tier above runs the same copy. 11 is the one
-; exception, for the reason given above it.
-;
-; A VEX build of these was measured and dropped: the two-operand forms cost one
-; to four register copies per kernel, which rename eliminates, so the AVX2
-; encoding came out level on 5 and 12 and 2-5% behind on the rest.
 INIT_XMM sse2
 PRED_AVGLEFT 6, -4
 PRED_AVGLEFT 7, 0
@@ -471,14 +440,12 @@ PRED_AVG3
 PRED_AVG4
 PRED_CLAMP_FULL
 
-; pmovzxbw is what keeps this one off the SSE2 tier.
 INIT_XMM sse4
 PRED_CLAMP_HALF
 
 
 INIT_YMM avx2
 cglobal extract_green, 3, 4, 6, dst, src, n
-    ; Keep the tail narrow: alpha rows cannot be written past num_pixels.
     pcmpeqd    m4, m4
     psrld      m4, 24
     mova       m5, [eg_perm]
@@ -549,7 +516,6 @@ cglobal map_color32, 4, 5, 5, dst, src, pal, n
     movu       m0, [srcq]
     psrld      m0, 16
     pand       m0, m0, m3
-    ; vpgatherdd clears its mask operand, so rebuild it every iteration.
     pcmpeqd    m4, m4
     vpgatherdd m1, [palq+m0*4], m4
     movu       [dstq], m1
@@ -688,8 +654,6 @@ cglobal blend_row_argb, 3, 5, 16, dst, src, n
 .ret:
     RET
 
-; dst = src + ((dst * (256 - src_a)) >> 8) per channel. An opaque src leaves
-; a scale of 1, which already reproduces src, so no branch is needed.
 %macro BLEND_ROW_ARGB_PREMULT 0
 cglobal blend_row_argb_premult, 3, 3, 10, dst, src, n
     mova      m5, [bcast_alpha]
@@ -749,18 +713,6 @@ BLEND_ROW_ARGB_PREMULT
 INIT_YMM avx2
 BLEND_ROW_ARGB_PREMULT
 
-; ff_color_row(uint32_t *dst, const uint32_t *src, int n, uint32_t mult)
-;
-; Undoes the cross-colour transform over one tile's worth of a row:
-;
-;   red  += (green_to_red  * (int8_t)green) >> 5
-;   blue += (green_to_blue * (int8_t)green) >> 5
-;   blue += (red_to_blue   * (int8_t)red')  >> 5
-;
-; 'mult' packs the three signed multipliers at bytes 3, 2 and 1. Scaling each
-; by 8 up front turns pmulhw's >> 16 into the >> 5 the transform asks for,
-; because the shuffles leave the colour byte in a lane's high half — that is,
-; already multiplied by 256.
 %macro COLOR_ROW 0
 cglobal color_row, 4, 6, 6, dst, src, n, mult
     mov        r4d, multd
@@ -810,9 +762,6 @@ cglobal color_row, 4, 6, 6, dst, src, n, mult
     add        nd, mmsize / 4
     jz         .end
 %if mmsize == 32
-    ; A colour-transform tile can be as narrow as four pixels, so the whole
-    ; call lands here; going one pixel at a time would spend eight vector ops
-    ; on each of them.
     cmp        nd, 4
     jl         .tail1
     movu       xm0, [srcq]

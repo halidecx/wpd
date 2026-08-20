@@ -1,12 +1,3 @@
-//! Format policy, cropping, scaling and format conversion.
-//!
-//! The decision-making — which format packs how, what a crop resolves to, what
-//! a scale rounds to — is [`crate::image`]; the row walking is [`crate::convert`]
-//! and [`crate::rescale`]. What is here is the picture-level plumbing: every
-//! source is a borrowed [`Frame`] and every destination a [`Buffer`] the
-//! decoder owns, so a crop is a `window` and a flip a reading order rather
-//! than arithmetic on a pointer.
-
 use super::ANIM_SUBFRAME;
 use crate::convert::YuvPlanes;
 use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
@@ -32,18 +23,10 @@ pub fn format_valid(format: i32) -> bool {
     Format::from_raw(format).is_some()
 }
 
-/// The planes a format hands out: three or four for planar, one for packed.
 pub fn format_planes(format: i32) -> usize {
     Format::from_raw(format).map_or(1, Format::nb_components)
 }
 
-/// The row width in bytes and the height of plane `p` of a `w` by `h` picture
-/// in `format`.
-///
-/// A packed format has the one plane, whose row is `bpp` bytes to the pixel; a
-/// planar one gives its chroma pair half the picture each way. Anything that
-/// sizes a plane answers both questions at once, so they are answered here
-/// rather than at each caller.
 pub fn format_plane_dims(format: i32, p: usize, w: i32, h: i32) -> (usize, usize) {
     if format_planes(format) == 1 {
         return (w.max(0) as usize * format_bpp(format), h.max(0) as usize);
@@ -82,7 +65,6 @@ pub fn scaled_size(
     image::scaled_size(w, h, src_width, src_height).map_err(|_| Error::TooLarge)
 }
 
-/// The crop rectangle inside `src`, or `src` itself when cropping is off.
 pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     let Some((left, top, width, height)) = options.crop else {
         return Ok(src);
@@ -100,12 +82,6 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     Ok(src.window(left, top, crop.width, crop.height))
 }
 
-/// Scales the way libwebp does: an area rescaler over each plane, with the
-/// colour channels premultiplied across it.
-///
-/// `chroma_full` brings U and V up to the output size instead of half it,
-/// which is what libwebp feeds its point converter when a scaled lossy frame
-/// is going to a packed format.
 fn scale_image(
     scratch: &mut Scratch,
     dst: &mut Buffer,
@@ -118,9 +94,6 @@ fn scale_image(
     let format = src.format;
     let packed = format.is_packed();
     let bpp = if packed { format.bpp() } else { 1 };
-    /* An already premultiplied source resamples correctly on its own: the
-    weighted average of alpha-weighted colour is what the rescaler outputs
-    directly, so weighting it a second time would skew it. */
     let premult = packed && format == Format::Argb && !src.premultiplied;
     let alloc = if packed {
         dst.alloc_packed(width, height, bpp, format)
@@ -198,8 +171,6 @@ fn scale_image(
     Ok(())
 }
 
-/// Resolves the crop and the scale, returning the picture the output should be
-/// read from — a window on `src`, or the whole of `scaled`.
 pub fn transform_image<'a>(
     options: &Options,
     scratch: &mut Scratch,
@@ -215,9 +186,7 @@ pub fn transform_image<'a>(
 
     let planar = !src.format.is_packed();
     let target_packed = format_is_packed(format);
-    /* Going to a packed format, libwebp brings U and V all the way up to the
-    output size and point-converts; staying planar, it keeps them half size
-    and weights the luma by alpha across the rescaler. */
+    /* libwebp point-converts full-resolution chroma for packed output. */
     let chroma_full = planar && target_packed;
     let weight_luma = planar
         && !target_packed
@@ -237,7 +206,6 @@ pub fn transform_image<'a>(
     Ok(scaled.frame())
 }
 
-/// The planar source of a conversion, as the row drivers take it.
 pub fn yuv_planes<'a>(src: &Frame<'a>) -> YuvPlanes<'a> {
     YuvPlanes {
         y: src.plane[0],
@@ -295,8 +263,6 @@ pub fn convert_to_packed(
     Ok(())
 }
 
-/// The two-byte formats are packed from ARGB, so a source that is not already
-/// ARGB is converted through a scratch image first.
 fn convert_to_packed_2byte(
     dsp: &YuvDsp,
     dst: &mut Buffer,

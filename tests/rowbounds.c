@@ -1,11 +1,3 @@
-/* Every row function is handed a row and a pixel count, and must touch only
-   the bytes that row owns. Assembly that reads a group of pixels back, edits
-   one byte of each and stores the group again writes bytes it did not change:
-   comparing its output against the C reference cannot see that, because the
-   bytes it puts back are the ones it found, and no sanitizer instruments hand
-   written assembly either. What does see it is the access itself failing, so
-   each row here ends against a page that is not mapped, source and
-   destination alike. */
 
 #if defined(__APPLE__)
 #define _DARWIN_C_SOURCE
@@ -48,7 +40,6 @@ static void on_fault(int sig) {
     siglongjmp(escape, 1);
 }
 
-/* A buffer of 'bytes' whose last byte is the last one of a mapping. */
 static uint8_t *guarded(uint8_t **map, size_t *map_size, size_t bytes) {
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
     const size_t body = (bytes + page - 1) / page * page;
@@ -211,8 +202,6 @@ int main(void) {
     wpd_init_cpu();
     have = wpd_get_cpu_flags();
 
-    /* The flags are ordered by feature set, so everything below a level is
-       what a machine with that level has. */
     for (size_t i = 0; i < sizeof(levels) / sizeof(*levels); i++) {
         WPDYUVDSP dsp;
 

@@ -1,9 +1,3 @@
-//! MD5, for the `md5` muxer and `--verify`.
-//!
-//! Not a security primitive here: it is a compact way to say "these decoded
-//! bytes are the ones libwebp produced", which is what `scripts/md5check.sh`
-//! and the testdata suite compare.
-
 const S: [u32; 64] = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14,
     20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11,

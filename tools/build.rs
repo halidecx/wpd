@@ -1,6 +1,3 @@
-//! Stamps the binary with the source revision, as meson's `vcs_tag` did for
-//! the C tool.
-
 use std::path::PathBuf;
 use std::process::Command;
 use std::{env, fs};
@@ -13,9 +10,6 @@ fn main() {
         .canonicalize()
         .unwrap();
 
-    /* In a worktree `.git` is a file naming the real directory, and HEAD and
-    packed-refs live apart from each other, so ask git where each one is rather
-    than assuming the layout of a plain checkout. */
     let git_path = |f: &str| -> Option<PathBuf> {
         let out = Command::new("git")
             .args(["-C", root.to_str()?, "rev-parse", "--git-path", f])

@@ -35,13 +35,10 @@
 #include "src/x86/cpu.h"
 #endif
 
-/* Implemented in Rust; see src/cpu.rs. */
 void     wpd_init_cpu(void);
 void     wpd_set_cpu_flags_mask(unsigned mask);
 unsigned wpd_get_cpu_flags_raw(void);
 
-/* Feature set the compiler was told to target. Detection starts from these,
- * so a build with e.g. -march=native can constant-fold the dispatch away. */
 static wpd_always_inline unsigned wpd_get_default_cpu_flags(void) {
     unsigned flags = 0;
 
@@ -56,8 +53,6 @@ static wpd_always_inline unsigned wpd_get_default_cpu_flags(void) {
 #ifdef __ARM_FEATURE_MATMUL_INT8
     flags |= WPD_ARM_CPU_FLAG_I8MM;
 #endif
-    /* The ARMv6 asm is only assembled when the target baseline supports it,
-     * so this is a compile-time property rather than a runtime one. */
 #ifdef WPD_ARM_ARMV6_ASM
     flags |= WPD_ARM_CPU_FLAG_ARMV6;
 #endif
@@ -86,10 +81,6 @@ static wpd_always_inline unsigned wpd_get_cpu_flags(void) {
     unsigned flags = wpd_get_cpu_flags_raw();
 
 #if WPD_TRIM_DSP_FUNCTIONS
-    /* Since this function is inlined into the DSP init functions, which are in
-     * turn inlined into their caller, unconditionally setting the compile-time
-     * flags here lets the compiler drop every fallback the build target can
-     * never reach. A binary cannot run on a CPU below its own target anyway. */
     flags |= wpd_get_default_cpu_flags();
 #endif
 

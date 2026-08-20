@@ -311,11 +311,6 @@ endfunc
 pack24 rgb, 1, 2, 3
 pack24 bgr, 3, 2, 1
 
-// Both output bytes of these two formats are a high field of one input byte
-// and the top bits of the next, which is what sri does in one instruction:
-// it keeps the destination's leading bits and shifts the source in beneath
-// them. 565 needs green twice, its two fields landing at different shifts, so
-// the second one gets a shl first.
 .macro  pack16_rgb565 sz, a, r, g, b
         shl             v\a\().\sz,  v\g\().\sz, #3
         sri             v\r\().\sz,  v\g\().\sz, #5
@@ -329,10 +324,6 @@ pack24 bgr, 3, 2, 1
         sri             v\g\().\sz,  v\a\().\sz, #4
 .endm
 
-// The swapped variants lay the very same two bytes down the other way round,
-// so they reuse the field macros and only reverse the store. st2 wants an
-// ascending register pair, hence the copy into v3, which the pack has already
-// finished with.
 .macro  pack16_store sz, bytes, swap
     .if \swap
         mov             v3.16b, v1.16b
@@ -378,11 +369,6 @@ pack16 rgba4444, rgba4444, 0
 pack16 bgr565,   rgb565,   1
 pack16 bgra4444, rgba4444, 1
 
-// Every channel is a nibble expanded to eight bits by a multiply by 17, and
-// the alpha multiplier is that expansion doubled up. Folding the 257 out of
-// it leaves a product that stays inside sixteen bits, so libwebp's truncating
-// divide by 255 -- a 32-bit product shifted down by 16 -- becomes
-// (p + (p >> 8)) >> 8, which is one usra and the narrowing shift.
 .macro  premultiply_mulhi ch, alpha, wide
         umull           v18.8h,  v\ch\().8b,  v\alpha\().8b
     .if \wide
@@ -396,10 +382,6 @@ pack16 bgra4444, rgba4444, 1
     .endif
 .endm
 
-// 'rg' and 'ba' name the two byte streams ld2 has separated and 'org'/'oba'
-// where each one's result goes, so the swapped layout is the same work with
-// the two exchanged: alpha still rides the low nibble of the ba byte either
-// way, and st2 still writes the lower-numbered register first.
 .macro  premultiply4444 sz, wide, rg, ba, org, oba
         and             v2.16b,  v\ba\().16b, v16.16b
         mul             v3.16b,  v2.16b, v17.16b
@@ -447,10 +429,6 @@ endfunc
 premultiply_row_4444 , 0, 1, 4, 5
 premultiply_row_4444 _swap, 1, 0, 5, 4
 
-// Y = (16839 R + 33059 G + 6420 B + 32768 + (16 << 16)) >> 16. Splitting each
-// coefficient as 256 * hi + lo keeps either partial sum inside sixteen bits,
-// so the whole dot product is umlal on bytes; the rounding term divides evenly
-// into the high half as 4224, and the low half folds back in through usra.
 .macro  argb_to_y_group sz, wide
         umull           v4.8h,   v1.8b,  v20.8b
         umlal           v4.8h,   v2.8b,  v21.8b
@@ -542,10 +520,6 @@ endconst
         argb_to_uv444_calc 7, 3, 4, 5
 .endm
 
-// Scaling the inputs by four and shifting by YUV_FIX + 2, as clip_uv does, is
-// the same as leaving them alone and shifting by YUV_FIX, so the rounding and
-// the 128 offset collapse into one constant of 32768 + (128 << 16). The sum
-// stays within [16, 240] for any input, so neither narrowing saturates.
 function ff_argb_to_yuv444_neon, export=1
         str             d8,  [sp, #-16]!
         movi            v20.16b, #65
@@ -655,9 +629,6 @@ const argb_to_uv_consts, align=4
         .short          -9719, -19081, 28800, 28800, -24116, -4684, 0, 0
 endconst
 
-// Eight gamma_to_linear entries. NEON has no gather, so the indices leave the
-// vector in one umov and ubfx picks them apart; packing four results into an x
-// register keeps this down to two stores per group.
 .macro  gamma8  src, half, off
         umov            x7,  v\src\().d[\half]
 .irp    quad, 0, 1
@@ -681,12 +652,6 @@ endconst
         gamma8          \src, 1, (\off + 16)
 .endm
 
-// One channel of eight output pixels: the four samples each averages are two
-// neighbouring columns of both rows, so addp folds them without ever splitting
-// even from odd columns. linear_to_gamma then interpolates between two entries
-// of a table whose values are bytes, which tbl reaches directly once the
-// differences are precomputed alongside it; 512 * v0 is a multiple of the
-// rounding step, so only the interpolated part goes through the shift.
 .macro  uv_channel  off_top, off_bot, dst
         ldp             q1,  q2,  [sp, #(\off_top)]
         ldp             q3,  q5,  [sp, #(\off_bot)]
@@ -742,10 +707,6 @@ endconst
         sqxtun          \dst\().8b,  v2.8h
 .endm
 
-// Sixteen columns of both rows, eight output pixels. A block that is opaque,
-// fully transparent, or whose alpha the caller does not want kept is averaged
-// unweighted; when no lane of the eight needs the weighted average, which is
-// every block of an opaque image, the whole of it is skipped.
 .macro  argb_to_uv_body src, stride
         ld4             {v0.16b-v3.16b}, [\src]
         add             x11, \src, \stride
@@ -774,9 +735,6 @@ endconst
         ucvtf           v20.4s,  v20.4s
         ucvtf           v21.4s,  v21.4s
         ldr             q22, [x14, #16]
-        // 2^19 over a total in [1, 1020] is never within a float rounding
-        // error of an integer from below, so truncating agrees with the
-        // integer divide the C does.
         fdiv            v20.4s,  v22.4s, v20.4s
         fdiv            v21.4s,  v22.4s, v21.4s
         fcvtzu          v20.4s,  v20.4s
@@ -798,9 +756,6 @@ function ff_argb_to_uv_neon, export=1
         sub             sp,  sp,  #UV_FRAME
         movrel          x12, X(wpd_gamma_to_linear_tab)
         movrel          x14, argb_to_uv_consts
-        // The inverse table is 33 byte-sized entries; loading it twice, one
-        // entry apart, builds both the values and their differences, which is
-        // what the interpolation wants and what tbl can index.
         movrel          x6,  X(wpd_linear_to_gamma_tab)
         ld1             {v16.8h-v19.8h}, [x6]
         xtn             v24.8b,  v16.8h
@@ -829,9 +784,6 @@ function ff_argb_to_uv_neon, export=1
         b.gt            1b
 3:      ands            w4,  w4,  #15
         b.eq            9f
-        // Fewer than sixteen columns left: gather them into a zeroed block,
-        // with the last column doubled up when the width is odd, which is
-        // exactly how the scalar path folds a lone column onto itself.
         movi            v0.16b,  #0
         stp             q0,  q0,  [sp, #(UV_BLOCK)]
         stp             q0,  q0,  [sp, #(UV_BLOCK + 32)]

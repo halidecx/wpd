@@ -1,5 +1,4 @@
 #!/bin/bash -eu
-# usage: cargo_build.sh SOURCE_ROOT OUT_DIR NAME PROFILE [FEATURE...]
 
 SOURCE_ROOT="${1:?source root}"
 OUT_DIR="${2:?out dir}"
@@ -20,15 +19,12 @@ cargo_args=()
 built="$OUT_DIR/cargo-$NAME/$PROFILE"
 if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
     target="$(rustc -vV | awk '/^host: / { print $2 }')"
-    # -Cpanic=abort, not immediate-abort: see cargo_tool.sh for why a bare
-    # trap instruction is not a reliable way to end a process.
     export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=abort -Zlocation-detail=none"
     cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
     args+=(--target "$target")
     built="$OUT_DIR/cargo-$NAME/$target/$PROFILE"
 fi
 
-# ${var[@]+...} keeps macOS bash 3.2 from tripping set -u on an empty array.
 cargo ${cargo_args[@]+"${cargo_args[@]}"} "${args[@]}"
 
 cp -f "$built/libwpd_capi.a" "$OUT_DIR/lib$NAME.a"

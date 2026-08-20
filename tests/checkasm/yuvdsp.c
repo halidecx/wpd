@@ -75,10 +75,6 @@ static void check_upsample_block(WPDYUVDSP *dsp, int layout, const char *name) {
     }
 }
 
-/* This only sees a byte that comes back with the wrong value in it. The row
-   is rewritten a group of pixels at a time, so a group that reaches past the
-   row puts back the bytes it found there and no comparison against the C
-   reference can tell; tests/rowbounds.c is what covers that. */
 static void check_dispatch_alpha(dispatch_alpha_func func, const char *name) {
     static const int lengths[] = {1, 3, 8, 15, 16, 17, 31, 63, 64, MAX_PIXELS};
     LOCAL_ALIGNED_16(uint8_t, src, [MAX_PIXELS]);
@@ -123,7 +119,6 @@ static void check_pack_row(pack_row_func func, const char *name, int bpp) {
 
             call_ref(dst0, src, n);
             call_new(dst1, src, n);
-            /* The packers may overwrite up to a pixel past the row. */
             if (memcmp(dst0, dst1, (size_t)n * bpp) ||
                 memcmp(dst0 + (size_t)n * bpp + 4,
                        dst1 + (size_t)n * bpp + 4,
@@ -134,8 +129,6 @@ static void check_pack_row(pack_row_func func, const char *name, int bpp) {
     }
 }
 
-/* 'alpha_byte' is which of a pixel's two bytes carries alpha in its low
-   nibble: the second for the rgba layout, the first for the swapped one. */
 static void check_premultiply_row_4444(premultiply_4444_row_func func,
                                        const char *name, int alpha_byte) {
     LOCAL_ALIGNED_16(uint8_t, rgba0, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
@@ -149,7 +142,6 @@ static void check_premultiply_row_4444(premultiply_4444_row_func func,
 
             for (int x = 0; x < 2 * (MAX_PIXELS + GUARD_PIXELS); x++)
                 rgba0[x] = rgba1[x] = (uint8_t)rnd();
-            /* Opaque and fully transparent pixels bound the multiply. */
             rgba0[alpha_byte] = rgba1[alpha_byte] = (uint8_t)(rnd() | 0x0f);
             if (n > 1)
                 rgba0[2 + alpha_byte] = rgba1[2 + alpha_byte] =
@@ -238,8 +230,6 @@ static void check_argb_to_uv(WPDYUVDSP *dsp) {
             for (int weight = 0; weight < 2; weight++)
                 for (int alpha = 0; alpha < 3; alpha++)
                     for (int pair = 0; pair < 2; pair++) {
-                        /* A stride of 0 is how the last row of an odd-height
-                           image is folded onto itself. */
                         const ptrdiff_t stride = pair ? 4 * MAX_PIXELS : 0;
                         const int       uv     = (n + 1) / 2;
 
@@ -276,7 +266,6 @@ static void check_premultiply_row(WPDYUVDSP *dsp) {
 
                 for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
                     argb0[x] = argb1[x] = (uint8_t)rnd();
-                /* Opaque and fully transparent pixels take different paths. */
                 argb0[off] = argb1[off] = 0xff;
                 if (n > 1)
                     argb0[4 + off] = argb1[4 + off] = 0;
@@ -467,9 +456,6 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
             if (memcmp(dst0, dst1, 4 * MAX_W * MAX_H))
                 fail();
 
-            /* step 2 walks the (odd, even) pair boundaries the upsampler
-               prefers; step 1 and 3 land row_start on even rows, which split a
-               pair and make it rewrite the row below. */
             for (int step = 1; step <= 3; step++) {
                 int seen = 0;
 
@@ -495,8 +481,6 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
                                                      h,
                                                      split,
                                                      end);
-                    /* It may reach one row below row_start to finish a pair,
-                       but never further, and never above it. */
                     if (from > split || from < (split ? split - 1 : 0))
                         fail();
                     seen  = end;

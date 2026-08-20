@@ -1,17 +1,5 @@
-//! Runtime CPU feature detection and the dispatch mask.
-//!
-//! The bit values match the C `WpdX86CpuFlags` / `WpdArmCpuFlags` enums, because
-//! `tools/wpd.c --cpumask` and checkasm both name them on the command line.
-//!
-//! Detection itself goes through `std`'s `is_*_feature_detected!` macros, which
-//! are safe and already do the awkward parts correctly — the OSXSAVE and XCR0
-//! checks on x86, `getauxval` on Linux, `sysctl` on Apple. Where `std` has no
-//! stable detection (32-bit arm), `/proc/self/auxv` is parsed directly, which
-//! is a file read rather than a libc call and so stays safe too.
-
 use core::sync::atomic::{AtomicU32, Ordering};
 
-/// Feature bits, matching the C enums bit for bit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct CpuFlags(u32);
 
@@ -51,23 +39,15 @@ impl CpuFlags {
         Self(self.0 & other.0)
     }
 
-    /// Whether every bit of `other` is set.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
-    /// The feature set the compiler was told to target.
-    ///
-    /// Detection starts from these so that a build with, say, `-C
-    /// target-cpu=native` can constant-fold the dispatch away; see
-    /// [`flags`] and the `trim_dsp` feature.
     pub const fn compile_time() -> Self {
         let mut f = Self::NONE;
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            // Listed high to low: each level implies the ones below it, exactly
-            // as wpd_get_default_cpu_flags() does in src/cpu.h.
             if cfg!(target_feature = "avx2") {
                 f = f.union(Self::AVX2);
             }
@@ -96,9 +76,6 @@ impl CpuFlags {
             if cfg!(target_feature = "i8mm") {
                 f = f.union(Self::I8MM);
             }
-            // The ARMv6 assembly is only assembled when the target baseline
-            // supports it, so this is a compile-time property, not a runtime
-            // one. The build script sets the cfg.
             if cfg!(wpd_asm_armv6) {
                 f = f.union(Self::ARMV6);
             }
@@ -118,8 +95,6 @@ impl CpuFlags {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            // std checks OSXSAVE and XCR0 before reporting AVX2, which is the
-            // part the equivalent C in src/x86/cpu.c had to spell out.
             if std::arch::is_x86_feature_detected!("sse") {
                 f = f.union(Self::SSE);
             }
@@ -132,7 +107,6 @@ impl CpuFlags {
             if std::arch::is_x86_feature_detected!("sse4.1") {
                 f = f.union(Self::SSE41);
             }
-            // The assembly assumes BMI1/BMI2 alongside AVX2, as the C did.
             if std::arch::is_x86_feature_detected!("avx2")
                 && std::arch::is_x86_feature_detected!("bmi1")
                 && std::arch::is_x86_feature_detected!("bmi2")
@@ -163,11 +137,6 @@ impl CpuFlags {
     }
 }
 
-/// Detection on 32-bit arm, where `std` has no stable feature detection.
-///
-/// `/proc/self/auxv` is the same table `getauxval` reads, as pairs of
-/// pointer-sized words terminated by an `AT_NULL` key, so parsing it needs no
-/// libc call and stays within safe Rust.
 #[cfg(all(target_arch = "arm", feature = "asm"))]
 mod auxv {
     use super::CpuFlags;
@@ -218,21 +187,14 @@ mod auxv {
 static DETECTED: AtomicU32 = AtomicU32::new(0);
 static MASK: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Runs feature detection. Idempotent, and safe to call from anywhere.
 pub fn init() {
     DETECTED.store(CpuFlags::detect().bits(), Ordering::Release);
 }
 
-/// Restricts dispatch to `mask`, for checkasm and `wpd --cpumask`.
 pub fn set_mask(mask: u32) {
     MASK.store(mask, Ordering::Relaxed);
 }
 
-/// What detection found, less anything [`set_mask`] removed.
-///
-/// This is the plain answer, without the `trim_dsp` union; the C ABI wrapper
-/// needs it separately because `wpd_get_cpu_flags()` in `src/cpu.h` applies
-/// that union itself, where it stays a compile-time constant.
 #[inline]
 pub fn detected_and_masked() -> CpuFlags {
     let detected = CpuFlags::from_bits(DETECTED.load(Ordering::Acquire));
@@ -240,12 +202,6 @@ pub fn detected_and_masked() -> CpuFlags {
     detected.intersection(mask)
 }
 
-/// The features dispatch may use.
-///
-/// With `trim_dsp` the compile-time feature set is unioned in, so that a DSP
-/// init this is inlined into can drop the fallbacks the build target could
-/// never have reached. A binary cannot run on a CPU below its own target
-/// anyway.
 #[inline]
 pub fn flags() -> CpuFlags {
     let flags = detected_and_masked();
@@ -283,7 +239,6 @@ mod tests {
 
     #[test]
     fn detection_is_a_superset_of_the_compile_time_baseline() {
-        // The binary is running, so every feature it was built for exists.
         init();
         let detected = CpuFlags::from_bits(DETECTED.load(Ordering::Acquire));
         if cfg!(feature = "asm") {
@@ -295,7 +250,6 @@ mod tests {
     fn mask_removes_features() {
         init();
         set_mask(0);
-        // trim_dsp unions the compile-time set back in on purpose.
         let expected = if cfg!(feature = "trim_dsp") {
             CpuFlags::compile_time()
         } else {

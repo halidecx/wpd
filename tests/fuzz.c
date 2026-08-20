@@ -6,10 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Feeds damaged and truncated files through every decoding path there is,
-   looking for a crash rather than for particular output. Built to be run
-   under a sanitizer; scripts/fuzz.sh does that. */
-
 static const WPDPixelFormat formats[] = {
     WPD_PIX_FMT_NONE,
     WPD_PIX_FMT_RGBA,
@@ -38,10 +34,6 @@ static void free_planes(uint8_t *planes[4]) {
     }
 }
 
-/* Points the decoder at caller-owned output sized from headers that damaged
-   input makes unreliable, which is the point: a buffer that cannot hold the
-   frame has to be refused rather than written past. Plane 0 is sized for four
-   bytes per pixel so one buffer serves the packed and the planar formats. */
 static int attach_output(WPDDecoder *decoder, const WPDImageInfo *info,
                          uint8_t *planes[4]) {
     WPDOutputBuffer buffer = WPD_OUTPUT_BUFFER_INIT;
@@ -71,8 +63,6 @@ static int attach_output(WPDDecoder *decoder, const WPDImageInfo *info,
     return 1;
 }
 
-/* Whole file at once, then the same bytes streamed in pieces with the
-   progressive row query interleaved, then the zero-copy variants. */
 static void decode_every_way(const uint8_t *data, size_t size,
                              WPDPixelFormat format, size_t chunk) {
     WPDDecoder       *decoder;
@@ -101,8 +91,6 @@ static void decode_every_way(const uint8_t *data, size_t size,
         while (wpd_decoder_next_frame(decoder, &frame) > 0) continue;
     wpd_decoder_free(decoder);
 
-    /* Uncomposited sub-frames, the frame table and a replay, all of which read
-       geometry straight out of a damaged ANMF header. */
     decoder = wpd_decoder_create();
     if (!decoder)
         return;
@@ -151,9 +139,6 @@ static void decode_every_way(const uint8_t *data, size_t size,
     wpd_decoder_free(decoder);
     free_planes(planes);
 
-    /* wpd_decoder_update() hands over a growing prefix instead of copying,
-       so each step needs its own exactly sized buffer for a sanitizer to see
-       a read past the end. */
     decoder = wpd_decoder_create();
     if (!decoder) {
         return;
@@ -171,8 +156,6 @@ static void decode_every_way(const uint8_t *data, size_t size,
             if (!next)
                 break;
             memcpy(next, data, have);
-            /* The decoder borrows this until it is freed or replaced, so it
-               has to stay alive for the whole stream, not just this call. */
             held[n_held++] = next;
             if (wpd_decoder_update(decoder, next, have) < 0)
                 break;
@@ -200,8 +183,6 @@ static void decode_every_way(const uint8_t *data, size_t size,
     if (wpd_decode(data, size, format, &options, &frame) == WPD_OK)
         wpd_frame_free(&frame);
 
-    /* The point-sampled converter has a row-range path of its own, which only
-       a progressive still reaches, and only without the geometry options. */
     options                     = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
     options.no_fancy_upsampling = (int)(rnd() & 1);
     options.bypass_filtering    = (int)(rnd() & 1);
@@ -252,9 +233,6 @@ int main(int argc, char **argv) {
             continue;
         }
         for (int trial = 0; trial < trials; trial++) {
-            /* Truncate somewhere, then flip a few bits in what is left. An
-               undamaged prefix is a valid case too, so the cut alone is
-               sometimes the only change. */
             const size_t cut  = 1 + rnd() % size;
             uint8_t     *copy = malloc(cut);
             const int    bits = (int)(rnd() % 6);
@@ -264,9 +242,6 @@ int main(int argc, char **argv) {
             memcpy(copy, original, cut);
             for (int i = 0; i < bits; i++)
                 copy[rnd() % cut] ^= (uint8_t)(1u << (rnd() % 8));
-            /* Walk the formats rather than drawing them, so every one gets an
-               even share of the trials and the choice does not run in lockstep
-               with the other draws made from the same generator. */
             decode_every_way(
                 copy,
                 cut,

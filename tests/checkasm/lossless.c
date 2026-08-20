@@ -91,7 +91,6 @@ static void check_map_color32(WPDLosslessDSP *dsp) {
             if (memcmp(dst0, dst1, sizeof(dst0)))
                 fail();
 
-            /* dst may alias src. */
             memcpy(dst0, src, sizeof(dst0));
             memcpy(dst1, src, sizeof(dst1));
             call_ref(dst0, dst0, palette, n);
@@ -110,7 +109,6 @@ static void check_blend_row_argb(WPDLosslessDSP *dsp) {
     declare_func(void, uint8_t *, const uint8_t *, int);
 
     if (check_func(dsp->blend_row_argb, "blend_row_argb")) {
-        /* 0: fully random, 1: mostly opaque, 2: mostly transparent. */
         for (int mode = 0; mode < 3; mode++) {
             for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
                 const int n = lengths[i];
@@ -132,7 +130,6 @@ static void check_blend_row_argb(WPDLosslessDSP *dsp) {
             }
         }
 
-        /* Bench on sprite-like content: long uniform runs, mixed edges. */
         for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
             WPD_WN32A(src + x, rnd());
             WPD_WN32A(dst1 + x, rnd());
@@ -149,7 +146,6 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
     declare_func(void, uint8_t *, const uint8_t *, int);
 
     if (check_func(dsp->blend_row_argb_premult, "blend_row_argb_premult")) {
-        /* 0: fully random, 1: mostly opaque, 2: mostly transparent. */
         for (int mode = 0; mode < 3; mode++) {
             for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
                 const int n = lengths[i];
@@ -182,10 +178,7 @@ static void check_color_row(WPDLosslessDSP *dsp) {
 
     if (check_func(dsp->color_row, "color_row")) {
         for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-            const int n = lengths[i];
-            /* Every multiplier is signed, so the sign of each of the three has
-               to be exercised; a random word covers all eight combinations
-               over the length list. */
+            const int      n    = lengths[i];
             const uint32_t mult = (uint32_t)rnd();
 
             for (int x = 0; x < BUF_PIXELS; x++) {
@@ -198,7 +191,6 @@ static void check_color_row(WPDLosslessDSP *dsp) {
             if (memcmp(dst0, dst1, sizeof(dst0)))
                 fail();
 
-            /* dst may alias src, which is how the decoder calls it. */
             memcpy(dst0, src, sizeof(dst0));
             memcpy(dst1, src, sizeof(dst1));
             call_ref(dst0, dst0, n, mult);

@@ -90,7 +90,6 @@ function ff_blend_row_argb_premult_neon, export=1
 endfunc
 
 function ff_pred_add_1_neon, export=1
-        // Retain left in a lane; its recurrence prevents wider independent work.
         ldur            s0,  [x3, #-4]
         dup             v0.4s,   v0.s[0]
         movi            v3.16b,  #0
@@ -404,7 +403,6 @@ function ff_pred_add_12_neon, export=1
 9:      ret
 endfunc
 
-// Bias TL before uhsub so its rounded difference matches C's truncation toward zero.
 .macro  pred13_pixel
         uhadd           v16.8b,  v0.8b,   v2.8b
         cmhi            v17.8b,  v3.8b,   v16.8b
@@ -458,9 +456,6 @@ function ff_extract_green_neon, export=1
 9:      ret
 endfunc
 
-// Both the multiplier byte and the colour byte are signed, so the products
-// use smull; shrn #5 then keeps bits 5..13 of the i16 product, which is the
-// scalar (i16 >> 5) as u8 exactly, for either shift signedness.
 function ff_color_row_neon, export=1
         lsr             w4,  w3,  #24           // green_to_red
         lsr             w5,  w3,  #16           // green_to_blue
@@ -470,14 +465,12 @@ function ff_color_row_neon, export=1
         dup             v30.16b, w6
         cmp             w2,  #16
         b.lt            2f
-        // dst may alias src, so every load of a block precedes its stores.
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
         smull           v4.8h,   v2.8b,  v28.8b
         smull2          v5.8h,   v2.16b, v28.16b
         shrn            v4.8b,   v4.8h,  #5
         shrn2           v4.16b,  v5.8h,  #5
         add             v1.16b,  v1.16b, v4.16b
-        // Blue's red term reads the red just updated, not the input red.
         smull           v6.8h,   v2.8b,  v29.8b
         smull2          v7.8h,   v2.16b, v29.16b
         smull           v16.8h,  v1.8b,  v30.8b
@@ -509,12 +502,9 @@ function ff_color_row_neon, export=1
 9:      ret
 endfunc
 
-// NEON has no gather, so index in general registers; ubfx beats a per-pixel
-// byte load, and pairing results into stp halves the stores.
 function ff_map_color32_neon, export=1
         cmp             w3,  #8
         b.lt            2f
-        // dst may alias src, so every load of a block precedes its stores.
 1:      ldp             x4,  x5,  [x1]
         ldp             x6,  x7,  [x1, #16]
         ubfx            x8,  x4,  #16, #8
@@ -554,7 +544,6 @@ function ff_map_color32_neon, export=1
 9:      ret
 endfunc
 
-// blend_scale[a] = (1 << 24) / a; entry 0 is never selected.
 const blend_scale
         .long           0
         .set            bsi, 1
@@ -564,8 +553,6 @@ const blend_scale
         .endr
 endconst
 
-// Blend one plane of 8 pixels. v0 = src alpha, v24 = dst factor,
-// v26/v27 = 2^24/blend_alpha, v16 = transparent lanes.
 .macro  blend_ch        dc, sc
         umull           v28.8h,  \sc\().8b,  v0.8b
         umull           v29.8h,  \dc\().8b,  v24.8b
@@ -606,7 +593,6 @@ function ff_blend_row_argb_neon, export=1
         movi            v17.8b,  #255
         cmp             w2,  #8
         b.lt            4f
-        // Planar lanes keep the per-pixel alpha broadcast-free.
 1:      ld4             {v0.8b-v3.8b}, [x1], #32
         ld4             {v4.8b-v7.8b}, [x0]
         cmeq            v16.8b,  v0.8b,  #0
@@ -632,7 +618,6 @@ function ff_blend_row_argb_neon, export=1
         xtn             v28.8b,  v23.8h
         bit             v28.8b,  v4.8b,  v16.8b
         mov             v4.8b,   v28.8b
-        // Opaque lanes take src verbatim; a no-op on the blended lanes.
 2:      bit             v4.8b,   v0.8b,   v18.8b
         bit             v5.8b,   v1.8b,   v18.8b
         bit             v6.8b,   v2.8b,   v18.8b
