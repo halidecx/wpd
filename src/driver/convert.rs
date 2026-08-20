@@ -82,6 +82,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     Ok(src.window(left, top, crop.width, crop.height))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scale_image(
     dsp: &YuvDsp,
     scratch: &mut Scratch,
