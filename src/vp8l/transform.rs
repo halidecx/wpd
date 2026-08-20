@@ -1,24 +1,7 @@
-//! The four VP8L transforms, undone.
-//!
-//! Each one works over a range of rows of a flat picture, addressed by the
-//! offset of its first row and a stride, because the predictor reads the row
-//! above the one it is writing and the two have to live in the same
-//! allocation for that to be an ordinary index — see [`super`].
-//!
-//! Three of the four are per-pixel byte arithmetic on the `[A, R, G, B]` a
-//! `u32` holds; the predictor and the cross-colour transform go through the
-//! DSP table, because those are the two with assembly.
-
 use super::AlphaDst;
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{Error, Result};
 
-/// Undoes the spatial predictor over rows `y0..y1`.
-///
-/// `base` is the offset of row `y0`, and `upper0` the offset of the row above
-/// it, which is not simply `base - stride` when the caller keeps that row
-/// somewhere else. For `y0 == 0` there is no row above and the first row is
-/// coded against its own left neighbour instead.
 #[allow(clippy::too_many_arguments)]
 pub fn predictor_rows(
     dsp: &Vp8lDsp,
@@ -61,9 +44,6 @@ pub fn predictor_rows(
         let modes_row = (y >> tile_bits) as usize * modes_stride;
 
         (dsp.pred_add[2])(plane, row, up, 1);
-        /* The top-right of the last pixel in a row is the leftmost pixel of
-        that same row, which falls out of the layout only while the row
-        above is physically adjacent. */
         if up + width != row {
             plane[up + width] = plane[row];
         }
@@ -92,8 +72,6 @@ pub fn predictor_rows(
     Ok(())
 }
 
-/// Undoes the cross-colour transform, which predicts red from green and blue
-/// from both.
 #[allow(clippy::too_many_arguments)]
 pub fn color_rows(
     dsp: &Vp8lDsp,
@@ -129,7 +107,6 @@ pub fn color_rows(
     }
 }
 
-/// Adds green back into red and blue.
 pub fn subtract_green_rows(
     plane: &mut [u32],
     base: usize,
@@ -151,12 +128,6 @@ pub fn subtract_green_rows(
     }
 }
 
-/// Replaces each palette index by the colour it stands for.
-///
-/// When the palette is small enough that several indices were packed into one
-/// pixel, the row also widens, which is why the source and destination strides
-/// are separate: the rows are rewritten bottom-up and right-to-left so every
-/// write lands at or past the index it derives from.
 #[allow(clippy::too_many_arguments)]
 pub fn color_indexing_rows(
     dsp: &Vp8lDsp,
@@ -175,9 +146,6 @@ pub fn color_indexing_rows(
     palette[..pal.len()].copy_from_slice(pal);
 
     if size_reduction > 0 {
-        /* Specialised on the group size so both the expansion table and the
-        copy out of it are fixed-width, as the C's switch over an
-        always-inline helper made them. */
         match 1usize << size_reduction {
             2 => expand_palette_rows::<2>(
                 plane, base, dst_stride, src_stride, width, height, &palette,
@@ -211,15 +179,8 @@ pub fn color_indexing_rows(
     }
 }
 
-/// How many groups a row is expanded in at a time. Small enough that the
-/// scratch stays in L1 and costs nothing to keep on the stack.
 const BLOCK: usize = 128;
 
-/// Rewrites rows whose pixels each pack `PPB` palette indices.
-///
-/// The expansion table is built per group rather than per index, so a whole
-/// group is one copy; it is indexed by a whole byte, which puts the lookup
-/// unconditionally in bounds.
 fn expand_palette_rows<const PPB: usize>(
     plane: &mut [u32],
     base: usize,
@@ -258,11 +219,6 @@ fn expand_palette_rows<const PPB: usize>(
             row[off + full * PPB..][..tail].copy_from_slice(&expand[index][..tail]);
         }
 
-        /* The indices of a block are lifted out before it is written, which is
-        what lets the write walk forwards over a slice taken once. Writing them
-        in place instead costs two bounds checks per group that no amount of
-        rearranging persuades LLVM to drop, because the relation between `off`,
-        `full` and the row length is not one it can see. */
         let mut b = full;
 
         while b > 0 {
@@ -283,11 +239,6 @@ fn expand_palette_rows<const PPB: usize>(
     }
 }
 
-/// The palette index a source pixel carries, which is its green channel.
-///
-/// An alpha chunk decoded through the ARGB canvas holds one index per `u32`;
-/// one decoded eight bits wide holds it as the byte it is. Naming the two the
-/// same way is what lets the expansion below serve both.
 pub trait Indexed: Copy {
     fn palette_index(self) -> usize;
 }
@@ -306,9 +257,6 @@ impl Indexed for u8 {
     }
 }
 
-/// The palette transform when the picture is an alpha plane and nothing else
-/// was applied to it, so the green channel can be looked up straight into the
-/// caller's plane instead of being expanded to ARGB first.
 pub fn color_indexing_alpha<T: Indexed>(
     src: &[T],
     src_stride: usize,
@@ -351,13 +299,6 @@ pub fn color_indexing_alpha<T: Indexed>(
     }
 }
 
-/// The packed-palette case of [`color_indexing_alpha`], specialised on the
-/// group size the way [`expand_palette_rows`] is.
-///
-/// Without the specialisation the group size, the shift and the mask are all
-/// runtime values, which costs a variable-count shift per pixel and a
-/// `chunks_exact_mut` whose stride the compiler cannot fold. Expanding a whole
-/// group in one table lookup makes the inner loop a fixed-width copy.
 fn expand_alpha_rows<const PPB: usize, T: Indexed>(
     src: &[T],
     src_stride: usize,

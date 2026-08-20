@@ -22,7 +22,6 @@ endfunc
 
 
 function ff_pred4x4_tm_neon, export=1
-        // These small blocks are fully unrolled: a taken branch per row costs more.
         sub             x3,  x0,  x2
         sub             x4,  x3,  #1
         ld1r            {v0.8b},  [x4]
@@ -134,7 +133,6 @@ function ff_pred8x8_top_dc_neon, export=1
 endfunc
 
 function ff_pred16x16_dc_neon, export=1
-        // Scalar left-column loads avoid serializing vector lane insertion.
         sub             x2,  x0,  x1
         sub             x3,  x0,  #1
         ld1             {v0.16b}, [x2]
@@ -186,7 +184,6 @@ function ff_pred16x16_top_dc_neon, export=1
 endfunc
 
 
-// uhadd-based avg3 is exact: its dropped bit cannot affect the final rounding.
 .macro  edge_filters   seq, a, b, t1, t2
         ext             \t1\().8b, \seq\().8b, \seq\().8b, #1
         ext             \t2\().8b, \seq\().8b, \seq\().8b, #2

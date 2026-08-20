@@ -1,20 +1,7 @@
-//! Painting one picture onto another, which is what compositing an animation
-//! frame comes down to.
-//!
-//! Each of the four takes a rectangle in the source's coordinates and a corner
-//! in the destination's, because an animation lands a sub-frame at its own
-//! position on the canvas. Which one runs is [`crate::anim`]'s decision; these
-//! only walk rows.
-//!
-//! The chroma blend is the reason [`FrameMut::planes_mut`] exists: it writes U
-//! and V while reading the alpha plane of the same picture, and only
-//! destructuring the plane array proves those three do not overlap.
-
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::image::{self, ceil_rshift, Format};
 use crate::picture::{Frame, FrameMut};
 
-/// A rectangle of the source picture.
 #[derive(Clone, Copy)]
 pub struct Rect {
     pub x: i32,
@@ -23,7 +10,6 @@ pub struct Rect {
     pub h: i32,
 }
 
-/// Alpha-blends an ARGB region.
 pub fn blend_argb(
     dsp: &Vp8lDsp,
     premultiply: bool,
@@ -49,7 +35,6 @@ pub fn blend_argb(
     }
 }
 
-/// Copies an ARGB region, alpha and all.
 pub fn copy_argb(
     dst: &mut FrameMut<'_>,
     src: &Frame<'_>,
@@ -69,8 +54,6 @@ pub fn copy_argb(
     }
 }
 
-/// Alpha-blends a YUVA region, chroma first so the luma pass can overwrite the
-/// alpha plane it reads.
 pub fn blend_yuva(
     dst: &mut FrameMut<'_>,
     src: &Frame<'_>,
@@ -84,8 +67,6 @@ pub fn blend_yuva(
     let (src_cx, dst_cx) = ((r.x >> 1) as usize, (base_x >> 1) as usize);
 
     for y in 0..ceil_rshift(r.h, 1) {
-        /* A block is one or two rows tall, so the pair lives on the stack and
-        only the rows the block actually spans are passed on. */
         let tile_h = (r.h - y * 2).min(2);
         let rows = [r.y + y * 2, r.y + y * 2 + tile_h - 1];
         let src_alpha = [
@@ -130,8 +111,6 @@ pub fn blend_yuva(
     }
 }
 
-/// Copies a YUVA region. A source with no alpha plane leaves the destination's
-/// opaque, which is what a frame coded without one means.
 pub fn copy_yuva(
     dst: &mut FrameMut<'_>,
     src: &Frame<'_>,
@@ -166,8 +145,6 @@ pub fn copy_yuva(
     }
 }
 
-/// Fills a rectangle with one colour, in whichever of the two canvas formats
-/// is in use.
 pub fn clear(dst: &mut FrameMut<'_>, argb: bool, colour: [u8; 4], r: Rect) {
     if argb {
         for y in 0..r.h {
@@ -196,7 +173,6 @@ pub fn clear(dst: &mut FrameMut<'_>, argb: bool, colour: [u8; 4], r: Rect) {
     }
 }
 
-/// Whether a picture in `format` carries its own alpha plane.
 pub fn has_alpha_plane(format: Format) -> bool {
     format != Format::Yuv420p
 }
@@ -243,8 +219,6 @@ mod tests {
         assert_eq!(f.row(0, 5)[5 * 4], 0x22, "and the column right");
     }
 
-    /// A fully opaque source replaces the destination; a fully transparent one
-    /// leaves it alone. Those two are what the region split relies on.
     #[test]
     fn blending_respects_the_two_extremes_of_alpha() {
         let dsp = Vp8lDsp::scalar();

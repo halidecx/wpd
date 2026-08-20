@@ -13,14 +13,6 @@ if not fs.is_dir(testdata_dir)
         testdata_dir)
 endif
 
-# The dispose_*, overlap_*, and other single-purpose animations cover the
-# compositing matrix and are verified bit-exact against libwebp by
-# scripts/animcheck.sh.
-#
-# The huffman_* stills are hand-written by wpd-test-data/scripts/mk_huffman_codes.py
-# for code shapes no encoder emits; their hashes come from the pixels the
-# specification says they decode to, not from a decode. huffman_simple_duplicate
-# and huffman_simple_single differ in bytes and must share a hash.
 testdata = [
   ['a_lossy',             'Argb',     'da3731b078d166fdc013b5224fdf0a08'],
   ['a_lossy',             'bgr',      '3b6907ba6cdb7ddb49ea94d3e04a3723'],
@@ -36,9 +28,6 @@ testdata = [
   ['alpha_uncompressed_horizontal', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
   ['alpha_uncompressed_none', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
   ['alpha_uncompressed_vertical', 'argb', 'ff31569bf9f4921691b644d4438b7045'],
-  # A palette ALPH with a colour cache, and one with no palette transform at
-  # all: the two shapes the eight-bit alpha decode hands back to the ARGB
-  # canvas, and which nothing else here reaches.
   ['a_lossy_cached',      'Argb',     '925268fc7bf4bcc86010b276eb48d564'],
   ['a_lossy_cached',      'bgr',      '48a92b37dd942ee8d0f6868bce5ed7d9'],
   ['a_lossy_cached',      'bgra',     '428f8991b0ddbfc09437c7d3e897eb5f'],
@@ -159,9 +148,6 @@ foreach t : testdata
   test('@0@-@1@'.format(t[0], t[1]), wpd,
        suite: ['testdata', 'testdata-' + t[1]],
        args: ['--verify', t[2], '-f', t[1], input])
-  # The same decode driven incrementally must be bit-identical. The chunk size
-  # is deliberately not a power of two, so chunk boundaries land inside chunk
-  # headers and payloads rather than lining up with them.
   test('@0@-@1@-stream'.format(t[0], t[1]), wpd,
        suite: ['testdata', 'testdata-stream'],
        args: ['--verify', t[2], '-f', t[1], '--stream', '1021', input])

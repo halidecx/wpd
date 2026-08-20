@@ -1,11 +1,3 @@
-//! C ABI for the lossless DSP table, as declared by `src/vp8l_dsp.h`.
-//!
-//! The assembly entries are the raw symbols, so `checkasm --bench` measures
-//! the assembly and nothing else. The fallback entries are thin trampolines
-//! that rebuild slices from the caller's pointers and hand them to the safe
-//! kernels in [`wpd::dsp::vp8l`]; that cost lands on checkasm's reference
-//! side, where it affects neither correctness nor the benchmark.
-
 use std::ffi::c_int;
 
 use super::count;
@@ -59,10 +51,6 @@ unsafe extern "C" fn pred_add_1_c(
     }
 }
 
-/// Wraps a kernel that reads `upper`. The three flags say which out-of-row
-/// neighbours the predictor actually needs, because reading one it does not —
-/// `upper[-1]` on the first row of the image, say — would step outside the
-/// buffer.
 macro_rules! pred_tramp {
     ($name:ident, $kernel:ident, $l:literal, $tl:literal, $tr:literal) => {
         unsafe extern "C" fn $name(
@@ -137,9 +125,6 @@ unsafe extern "C" fn map_color32_c(
     }
 }
 
-/// The kernel works in place, and every caller passes the same pointer twice;
-/// a distinct destination is copied first so checkasm can still compare the
-/// two forms.
 unsafe extern "C" fn color_row_c(dst: *mut u32, src: *const u32, n: c_int, mult: u32) {
     let Some(n) = count(n) else {
         return;
@@ -178,9 +163,6 @@ unsafe extern "C" fn blend_row_argb_premult_c(dst: *mut u8, src: *const u8, n: c
     }
 }
 
-/// Overlays whatever [`wpd::asm::vp8l::raw_table`] selected for the running
-/// CPU. The symbols and the instruction-set ladder both live in the core, so
-/// this table and the decoder's cannot pick different kernels.
 #[cfg(all(
     feature = "asm",
     any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
@@ -211,7 +193,6 @@ fn init_asm(dsp: &mut WPDLosslessDSP) {
 }
 
 impl WPDLosslessDSP {
-    /// The best implementation the running CPU allows.
     pub(crate) fn new() -> Self {
         #[allow(unused_mut)]
         let mut table = WPDLosslessDSP {
@@ -248,12 +229,8 @@ impl WPDLosslessDSP {
     }
 }
 
-/// Fills in `dsp` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `dsp` must point to a writable, aligned `WPDLosslessDSP`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_vp8l_dsp_init(dsp: *mut WPDLosslessDSP) {
     unsafe { dsp.write(WPDLosslessDSP::new()) }
 }

@@ -1,13 +1,3 @@
-//! C ABI for the YUV DSP table and its row drivers, as declared by
-//! `src/yuvdsp.h`.
-//!
-//! The assembly entries are the raw symbols, so `checkasm --bench` measures
-//! the assembly and nothing else. The fallbacks are trampolines that rebuild
-//! slices for the safe kernels in [`wpd::dsp::yuv`].
-//!
-//! The row drivers moved to [`wpd::convert`]; what is left of them here are
-//! three entry points the C harnesses in `tests/` and the tool still call.
-
 use std::ffi::c_int;
 
 use super::count;
@@ -64,10 +54,6 @@ pub struct WPDYUVDSP {
     pub argb_to_uv: ArgbToUvFn,
 }
 
-/// Builds the row an upsample block entry point reads, given the pair count.
-///
-/// For `n` blocks the kernel walks pairs `1..=16n`, so it touches luma and
-/// output pixels `0..32n` and chroma `0..=16n`.
 macro_rules! upsample_block_tramp {
     ($name:ident, $layout:expr) => {
         unsafe extern "C" fn $name(
@@ -115,34 +101,9 @@ upsample_block_tramp!(upsample_block_bgra_c, LAYOUT_BGRA);
 upsample_block_tramp!(upsample_block_rgb_c, LAYOUT_RGB);
 upsample_block_tramp!(upsample_block_bgr_c, LAYOUT_BGR);
 
-unsafe extern "C" fn dispatch_alpha_first_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::dispatch_alpha_first(
-            slice::from_raw_parts_mut(dst, 4 * n),
-            slice::from_raw_parts(src, n),
-        )
-    }
-}
-
-unsafe extern "C" fn dispatch_alpha_last_c(dst: *mut u8, src: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::dispatch_alpha_last(
-            slice::from_raw_parts_mut(dst, 4 * n),
-            slice::from_raw_parts(src, n),
-        )
-    }
-}
-
-macro_rules! pack_tramp {
-    ($name:ident, $kernel:ident, $bpp:literal) => {
+/* dst holds $d bytes per pixel, src $s, and the kernel takes the two rows. */
+macro_rules! row_tramp {
+    ($name:ident, $kernel:ident, $d:literal, $s:literal) => {
         unsafe extern "C" fn $name(dst: *mut u8, src: *const u8, n: c_int) {
             let Some(n) = count(n) else {
                 return;
@@ -150,22 +111,41 @@ macro_rules! pack_tramp {
 
             unsafe {
                 k::$kernel(
-                    slice::from_raw_parts_mut(dst, $bpp * n),
-                    slice::from_raw_parts(src, 4 * n),
+                    slice::from_raw_parts_mut(dst, $d * n),
+                    slice::from_raw_parts(src, $s * n),
                 )
             }
         }
     };
 }
 
-pack_tramp!(pack_rgba_c, pack_rgba, 4);
-pack_tramp!(pack_bgra_c, pack_bgra, 4);
-pack_tramp!(pack_rgb_c, pack_rgb, 3);
-pack_tramp!(pack_bgr_c, pack_bgr, 3);
-pack_tramp!(pack_rgb565_c, pack_rgb565, 2);
-pack_tramp!(pack_bgr565_c, pack_bgr565, 2);
-pack_tramp!(pack_rgba4444_c, pack_rgba4444, 2);
-pack_tramp!(pack_bgra4444_c, pack_bgra4444, 2);
+/* One row in place, plus whatever fixed argument selects the variant. */
+macro_rules! inplace_tramp {
+    ($name:ident, $kernel:ident, $bpp:literal, $extra:expr) => {
+        unsafe extern "C" fn $name(row: *mut u8, n: c_int) {
+            let Some(n) = count(n) else {
+                return;
+            };
+
+            k::$kernel(unsafe { slice::from_raw_parts_mut(row, $bpp * n) }, $extra);
+        }
+    };
+}
+
+row_tramp!(dispatch_alpha_first_c, dispatch_alpha_first, 4, 1);
+row_tramp!(dispatch_alpha_last_c, dispatch_alpha_last, 4, 1);
+row_tramp!(pack_rgba_c, pack_rgba, 4, 4);
+row_tramp!(pack_bgra_c, pack_bgra, 4, 4);
+row_tramp!(pack_rgb_c, pack_rgb, 3, 4);
+row_tramp!(pack_bgr_c, pack_bgr, 3, 4);
+row_tramp!(pack_rgb565_c, pack_rgb565, 2, 4);
+row_tramp!(pack_bgr565_c, pack_bgr565, 2, 4);
+row_tramp!(pack_rgba4444_c, pack_rgba4444, 2, 4);
+row_tramp!(pack_bgra4444_c, pack_bgra4444, 2, 4);
+row_tramp!(argb_to_y_c, argb_to_y, 1, 4);
+
+inplace_tramp!(premultiply_row_4444_c, premultiply_row_4444, 2, false);
+inplace_tramp!(premultiply_row_4444_swap_c, premultiply_row_4444, 2, true);
 
 unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_int) {
     let Some(n) = count(n) else {
@@ -174,37 +154,6 @@ unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_i
     let row = unsafe { slice::from_raw_parts_mut(rgba, 4 * n) };
 
     k::premultiply_row(row, alpha_first != 0);
-}
-
-unsafe extern "C" fn premultiply_row_4444_c(rgba4444: *mut u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-    let row = unsafe { slice::from_raw_parts_mut(rgba4444, 2 * n) };
-
-    k::premultiply_row_4444(row, false);
-}
-
-unsafe extern "C" fn premultiply_row_4444_swap_c(bgra4444: *mut u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-    let row = unsafe { slice::from_raw_parts_mut(bgra4444, 2 * n) };
-
-    k::premultiply_row_4444(row, true);
-}
-
-unsafe extern "C" fn argb_to_y_c(y: *mut u8, argb: *const u8, n: c_int) {
-    let Some(n) = count(n) else {
-        return;
-    };
-
-    unsafe {
-        k::argb_to_y(
-            slice::from_raw_parts_mut(y, n),
-            slice::from_raw_parts(argb, 4 * n),
-        )
-    }
 }
 
 unsafe extern "C" fn argb_to_yuv444_c(
@@ -256,9 +205,6 @@ unsafe extern "C" fn argb_to_uv_c(
     }
 }
 
-/// Overlays whatever [`wpd::asm::yuv::raw_table`] selected for the running
-/// CPU. The symbols and the instruction-set ladder both live in the core, so
-/// this table and the decoder's cannot pick different kernels.
 #[cfg(all(
     feature = "asm",
     any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
@@ -314,7 +260,6 @@ fn init_asm(dsp: &mut WPDYUVDSP) {
 }
 
 impl WPDYUVDSP {
-    /// The best implementation the running CPU allows.
     pub(crate) fn new() -> Self {
         #[allow(unused_mut)]
         let mut table = WPDYUVDSP {
@@ -353,31 +298,15 @@ impl WPDYUVDSP {
     }
 }
 
-/// Fills in `dsp` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `dsp` must point to a writable, aligned `WPDYUVDSP`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
     unsafe { dsp.write(WPDYUVDSP::new()) }
 }
 
-/// Fancy-upsamples rows `[row_start, row_end)`, returning the first row
-/// written.
-///
-/// This entry point and its two siblings exist for the harnesses in `tests/`;
-/// the decoder calls [`wpd::convert`] directly. They take no table, because
-/// the one the core builds from the current CPU flags is the one under test —
-/// `checkasm` sets those flags before it asks for either.
-///
-/// # Safety
-///
-/// The planes must hold `height` rows of `width` samples at the given strides,
-/// and `dst` the same in the packed layout. Every stride must be positive;
-/// a negative one is rejected, since the row walk here is unsigned.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     layout: c_int,
     dst: *mut u8,
@@ -439,11 +368,9 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     }
 }
 
-/// # Safety
-///
-/// As [`wpd_yuv420_to_packed_rows`].
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed(
     layout: c_int,
     dst: *mut u8,

@@ -1,23 +1,13 @@
-//! The YUV DSP assembly.
-//!
-//! Laid out as [`super::vp8l`]: one marker type per symbol, and one generic
-//! safe wrapper per shape that turns the caller's slices into the pointer and
-//! count the kernel wants.
-//!
-//! # Regions
-//!
-//! Every kernel here walks whole pixels of one row, so the run length is what
-//! the shorter of the two slices allows and there is nothing to assert beyond
-//! that — with two exceptions. `upsample_block` is told its block count and
-//! reads a fixed extent from it, so the extents are checked; and
-//! `argb_to_uv` reads a second row at `stride`, which the slice must reach.
+/* Which macro families an arch reaches for varies; several are dead on
+ * targets whose assembly does not cover this DSP at all. */
+#![allow(unused_macros)]
 
 use std::ffi::c_int;
 
 use crate::cpu::CpuFlags;
 use crate::dsp::yuv::{bpp, UpsampleDst, UpsampleSrc, YuvDsp, UPSAMPLE_BLOCK};
 
-pub use super::vp8::Raw;
+pub use super::Raw;
 
 pub type UpsampleBlockRaw = unsafe extern "C" fn(
     *const u8,
@@ -37,22 +27,6 @@ pub type ArgbToYuv444Raw =
     unsafe extern "C" fn(*mut u8, *mut u8, *mut u8, *const u8, c_int);
 pub type ArgbToUvRaw =
     unsafe extern "C" fn(*mut u8, *mut u8, *const u8, isize, c_int, c_int);
-
-macro_rules! raw {
-    ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),*)) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner($(_: $arg),*);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = $sig;
-            const F: $sig = $inner;
-        }
-    };
-}
 
 macro_rules! raw_upsample {
     ($marker:ident, $inner:ident, $sym:literal) => {
@@ -82,8 +56,6 @@ macro_rules! raw_row {
     };
 }
 
-/// The kernel walks pairs `1..=16n`, so it touches luma and output pixels
-/// `0..32n` and chroma `0..=16n`.
 fn upsample_block<T: Raw<Sig = UpsampleBlockRaw>, const L: usize>(
     src: &UpsampleSrc<'_>,
     dst: &mut UpsampleDst<'_>,
@@ -127,14 +99,12 @@ fn upsample_block<T: Raw<Sig = UpsampleBlockRaw>, const L: usize>(
     }
 }
 
-/// Writes one alpha byte into every pixel of a four-byte row.
 fn dispatch_alpha<T: Raw<Sig = RowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = (dst.len() / 4).min(src.len());
 
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
-/// Reorders an ARGB row into a packed layout of `BPP` bytes per pixel.
 fn pack_row<T: Raw<Sig = RowRaw>, const BPP: usize>(dst: &mut [u8], src: &[u8]) {
     let n = (dst.len() / BPP).min(src.len() / 4);
 
@@ -178,8 +148,6 @@ fn argb_to_yuv444<T: Raw<Sig = ArgbToYuv444Raw>>(
     }
 }
 
-/// Chroma for one pair of ARGB rows. A `stride` of zero repeats the top row,
-/// which is how the last row of an odd-height picture is averaged.
 fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
     u: &mut [u8],
     v: &mut [u8],
@@ -205,10 +173,6 @@ fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
     }
 }
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
-/// the instruction-set selection with the decoder's own table without sharing
-/// the safe wrappers, which the C ABI cannot use.
 #[derive(Default)]
 pub struct RawTable {
     pub upsample_block: Option<[UpsampleBlockRaw; 5]>,
@@ -225,9 +189,6 @@ pub struct RawTable {
     pub argb_to_uv: Option<ArgbToUvRaw>,
 }
 
-/// The eight packers of one instruction set, raw, in [`RawTable::packers`]
-/// order — which is the field order of the C table.
-#[allow(unused_macros)]
 macro_rules! raw_packers {
     ($set:ident) => {
         [
@@ -243,8 +204,6 @@ macro_rules! raw_packers {
     };
 }
 
-/// The five upsamplers of one instruction set, raw, in layout order.
-#[allow(unused_macros)]
 macro_rules! raw_upsample_table {
     ($set:ident) => {
         [
@@ -257,7 +216,6 @@ macro_rules! raw_upsample_table {
     };
 }
 
-/// The eight packers of one instruction set, in table order.
 macro_rules! packers {
     ($dsp:ident, $set:ident) => {
         $dsp.pack_rgba = pack_row::<$set::PackRgba, 4>;
@@ -271,8 +229,6 @@ macro_rules! packers {
     };
 }
 
-/// `#[link_name]` takes a literal, not a `concat!`, so every symbol is spelled
-/// out where it is bound — which is also what makes them greppable.
 macro_rules! pack_syms {
     ($rgba:literal, $bgra:literal, $rgb:literal, $bgr:literal,
      $rgb565:literal, $rgba4444:literal, $bgr565:literal, $bgra4444:literal) => {
@@ -340,21 +296,6 @@ macro_rules! upsample_syms {
     };
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
-///
-/// The `@` forms stand for a whole set of slots rather than a field, which is
-/// where the two tables stop looking alike: the decoder keeps five upsamplers
-/// in one array and the C ABI keeps the array beside the two slots a partial
-/// tier fills, so `@upsample` has to clear those two as it overwrites all
-/// five. Doing that by hand was one line in one tier that nothing would have
-/// missed.
-///
-/// A tier may be named more than once, which is how the entries an
-/// architecture only has on some targets get their `#[cfg]` without every
-/// entry carrying one. Order within a tier does not matter: no two entries
-/// write the same slot.
-#[allow(unused_macros)]
 macro_rules! ladder {
     ($(
         $(#[$attr:meta])*

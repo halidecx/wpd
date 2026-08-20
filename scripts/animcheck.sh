@@ -1,11 +1,4 @@
 #!/bin/bash -eu
-# Verify wpd against libwebp: bit-exact packed output via libwebpdec for every
-# file in the corpus and every packed format, and container metadata via
-# webpmux for animations.
-#
-# libwebp's WebPAnimDecoder only emits RGB, so the packed formats are the ones
-# in which an animation can be compared with the reference implementation at
-# all.
 
 WPD="${1:-./build/wpd}"
 LWP="${2:-./build/libwebpdec}"
@@ -82,10 +75,6 @@ for input in "${inputs[@]}"; do
         [[ $want_durations == "$got_durations" ]] ||
             problems+=("durations [$got_durations] != [$want_durations]")
 
-        # The frame table wpd_decoder_frame_info() builds without decoding,
-        # against the same fields libwebp's demuxer hands Blink and Skia.
-        # webpmux spells dispose and blend out; wpd reports the enum values,
-        # where blend "yes" is WPD_BLEND_ALPHA, which is 0.
         want_table=$(awk '/^ *[0-9]+:/ {
                 printf "%sx%s at %s,%s duration %s dispose %d blend %d alpha %d\n",
                        $2, $3, $5, $6, $7,
@@ -95,7 +84,6 @@ for input in "${inputs[@]}"; do
         [[ $want_table == "$got_table" ]] ||
             problems+=("frame table does not match webpmux")
 
-        # Sub-frame mode has to hand out those very dimensions and offsets.
         want_subframes=$(awk '/^ *[0-9]+:/ { printf "%sx%s at %s,%s\n", $2, $3, $5, $6 }' \
                              <<<"$mux_info")
         got_subframes=$("$WPD" --info --subframe "$input" 2>/dev/null |

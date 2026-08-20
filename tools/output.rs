@@ -1,5 +1,3 @@
-//! The muxers: raw planes, md5, ppm, pam and y4m.
-
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -19,7 +17,6 @@ pub enum Muxer {
 }
 
 impl Muxer {
-    /// What the muxer calls itself in a message.
     fn name(self) -> &'static str {
         match self {
             Muxer::Raw => "raw",
@@ -29,12 +26,6 @@ impl Muxer {
         }
     }
 
-    /// The one pixel format the muxer writes, and the name of it.
-    ///
-    /// `None` for the two that have no single answer: y4m picks between two
-    /// from the frame, and raw writes whatever it is handed. Both of the
-    /// places that refuse a mismatched format ask this rather than pairing
-    /// ppm with rgb and pam with rgba again.
     fn required(self) -> Option<(&'static str, Format)> {
         match self {
             Muxer::Ppm => Some(("rgb", Format::Rgb)),
@@ -90,7 +81,6 @@ pub fn format_name(format: Format) -> &'static str {
         .map_or("unknown", |(name, _)| name)
 }
 
-/// The extension of `filename`, if it has one after the last path separator.
 fn extension(filename: &str) -> Option<&str> {
     let start = filename.rfind(['/', '\\']).map_or(0, |i| i + 1);
 
@@ -100,8 +90,6 @@ fn extension(filename: &str) -> Option<&str> {
 }
 
 impl Output {
-    /// Mirrors `output_open`: a null `filename` is only valid with the md5
-    /// muxer, which is how `--verify` runs with no output at all.
     pub fn open(muxer: Option<&str>, filename: Option<&OsStr>) -> io::Result<Self> {
         let chosen = match muxer {
             Some(m) => m.to_owned(),
@@ -149,7 +137,6 @@ impl Output {
         Ok(out)
     }
 
-    /// The sink `--verify` uses: an md5 accumulator with nowhere to print it.
     pub fn null() -> Self {
         Self {
             kind: Kind::Null,
@@ -198,8 +185,6 @@ impl Output {
         self.md5.finish() == *expected
     }
 
-    /// Mirrors `output_select_format`: the structured muxers each demand one
-    /// pixel format, and disagreeing with an explicit `-f` is an error.
     pub fn select_format(
         &mut self,
         info: &ImageInfo,
@@ -238,7 +223,6 @@ impl Output {
         Ok(())
     }
 
-    /// Every row of one plane, its natural width.
     fn write_plane(&mut self, frame: &Picture<'_>, plane: usize) -> io::Result<()> {
         for y in 0..frame.rows(plane) {
             let row = frame.row(plane, y);
@@ -248,8 +232,6 @@ impl Output {
         Ok(())
     }
 
-    /// Doubles a 4:2:0 chroma plane up to full resolution, which is what y4m's
-    /// 444alpha layout wants.
     fn write_chroma_444(
         &mut self,
         frame: &Picture<'_>,
@@ -275,9 +257,6 @@ impl Output {
         let mut u = vec![0u8; pixels];
         let mut v = vec![0u8; pixels];
 
-        /* The kernel makes all three planes at once and y4m wants them one
-        after another, so the whole image is converted before anything is
-        written. */
         for row in 0..frame.height() as usize {
             let at = row * width;
             let [y, u, v] = [&mut y, &mut u, &mut v].map(|p| &mut p[at..at + width]);
@@ -313,7 +292,6 @@ impl Output {
                     eprintln!("{} requires {required_name} output", self.muxer.name());
                     return Err(fail("wrong format".into()));
                 }
-                /* The one thing the two headers do not share. */
                 let header = if self.muxer == Muxer::Ppm {
                     format!("P6\n{} {}\n255\n", frame.width(), frame.height())
                 } else {

@@ -1,25 +1,3 @@
-//! The lossy DSP assembly.
-//!
-//! Every symbol the hand-written assembly exports is declared here once. The
-//! raw declaration is public, because `wpd-capi` builds its C ABI table out of
-//! the same items and has to put the bare symbol in the table so that
-//! `checkasm --bench` times the assembly and not a wrapper.
-//!
-//! What the core crate sees instead is [`init`], which fills a [`Vp8Dsp`] with
-//! safe functions. Each one checks that the plane really does extend as far as
-//! the kernel reads before handing over a pointer, so the only thing outside
-//! this module that has to be true is what the type system already says.
-//!
-//! # Regions
-//!
-//! `o` is the offset of the position a filter acts on and `s` the stride, both
-//! in bytes. A filter that works across a horizontal edge reads `up` rows above
-//! `o` and writes as far as `down` rows below it, over `n` columns; one working
-//! across a vertical edge reads `left` bytes before `o` and writes as far as
-//! `right - 1` bytes after it, in each of `n` rows. The macroblock variants
-//! fold in the three subblock edges inside the macroblock, which is why their
-//! `down` and `right` reach a whole macroblock further than the plain ones.
-
 use std::ffi::c_int;
 
 use crate::cpu::CpuFlags;
@@ -52,40 +30,15 @@ fn check_h(p: &[u8], o: usize, s: usize, left: usize, right: usize, n: usize) {
     );
 }
 
-/// One assembly entry point, named so it can be used as a type parameter.
-///
-/// A table field is a plain `fn` pointer with nowhere to keep the symbol, so
-/// the symbol travels as an associated constant and each wrapper is
-/// monomorphised into its own function item.
-pub trait Raw {
-    type Sig: Copy;
-    const F: Self::Sig;
-}
+pub use super::Raw;
 
-macro_rules! raw {
-    ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),*)) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner($(_: $arg),*);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = $sig;
-            const F: $sig = $inner;
-        }
-    };
-}
-
-macro_rules! raw_lf {
-    ($m:ident, $i:ident, $sym:literal) => {
+/* The kind picks the signature alias and the argument list that goes with it.
+ * An arm no arch happens to use costs nothing, unlike an unused macro. */
+macro_rules! raw_vp8 {
+    ($m:ident, $i:ident, lf, $sym:literal) => {
         raw!($m, $i, LfRaw, $sym, (*mut u8, isize, c_int, c_int, c_int));
     };
-}
-
-macro_rules! raw_lf_uv {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_uv, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -94,11 +47,7 @@ macro_rules! raw_lf_uv {
             (*mut u8, *mut u8, isize, c_int, c_int, c_int)
         );
     };
-}
-
-#[allow(unused_macros)]
-macro_rules! raw_lf_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_mb, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -107,11 +56,7 @@ macro_rules! raw_lf_mb {
             (*mut u8, isize, c_int, c_int, c_int, c_int)
         );
     };
-}
-
-#[allow(unused_macros)]
-macro_rules! raw_lf_uv_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_uv_mb, $sym:literal) => {
         raw!(
             $m,
             $i,
@@ -120,40 +65,23 @@ macro_rules! raw_lf_uv_mb {
             (*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int)
         );
     };
-}
-
-macro_rules! raw_lf_simple {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_simple, $sym:literal) => {
         raw!($m, $i, LfSimpleRaw, $sym, (*mut u8, isize, c_int));
     };
-}
-
-macro_rules! raw_lf_simple_mb {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, lf_simple_mb, $sym:literal) => {
         raw!($m, $i, LfSimpleMbRaw, $sym, (*mut u8, isize, c_int, c_int));
     };
-}
-
-macro_rules! raw_wht {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, wht, $sym:literal) => {
         raw!($m, $i, WhtRaw, $sym, (*mut [[i16; 16]; 4], *mut i16));
     };
-}
-
-macro_rules! raw_idct {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, idct, $sym:literal) => {
         raw!($m, $i, IdctRaw, $sym, (*mut u8, *mut i16, isize));
     };
-}
-
-macro_rules! raw_idct4 {
-    ($m:ident, $i:ident, $sym:literal) => {
+    ($m:ident, $i:ident, idct4, $sym:literal) => {
         raw!($m, $i, Idct4Raw, $sym, (*mut u8, *mut [i16; 16], isize));
     };
 }
 
-/// Declares the ten loop filter symbols one instruction set provides, under
-/// marker names prefixed with `$p`.
 macro_rules! lf_set {
     ($p:ident,
      $v_simple:literal, $h_simple:literal,
@@ -162,21 +90,20 @@ macro_rules! lf_set {
         pub mod $p {
             use super::*;
 
-            raw_lf_simple!(VSimple, v_simple, $v_simple);
-            raw_lf_simple!(HSimple, h_simple, $h_simple);
-            raw_lf!(V16, v16, $v16);
-            raw_lf!(H16, h16, $h16);
-            raw_lf_uv!(V8uv, v8uv, $v8uv);
-            raw_lf_uv!(H8uv, h8uv, $h8uv);
-            raw_lf!(V16Inner, v16_inner, $v16i);
-            raw_lf!(H16Inner, h16_inner, $h16i);
-            raw_lf_uv!(V8uvInner, v8uv_inner, $v8uvi);
-            raw_lf_uv!(H8uvInner, h8uv_inner, $h8uvi);
+            raw_vp8!(VSimple, v_simple, lf_simple, $v_simple);
+            raw_vp8!(HSimple, h_simple, lf_simple, $h_simple);
+            raw_vp8!(V16, v16, lf, $v16);
+            raw_vp8!(H16, h16, lf, $h16);
+            raw_vp8!(V8uv, v8uv, lf_uv, $v8uv);
+            raw_vp8!(H8uv, h8uv, lf_uv, $h8uv);
+            raw_vp8!(V16Inner, v16_inner, lf, $v16i);
+            raw_vp8!(H16Inner, h16_inner, lf, $h16i);
+            raw_vp8!(V8uvInner, v8uv_inner, lf_uv, $v8uvi);
+            raw_vp8!(H8uvInner, h8uv_inner, lf_uv, $h8uvi);
         }
     };
 }
 
-/// Declares the five transform symbols one instruction set provides.
 #[allow(unused_macros)]
 macro_rules! idct_set {
     ($p:ident, $wht:literal, $add:literal, $dc_add:literal,
@@ -184,17 +111,14 @@ macro_rules! idct_set {
         pub mod $p {
             use super::*;
 
-            raw_wht!(Wht, wht, $wht);
-            raw_idct!(Add, add, $add);
-            raw_idct!(DcAdd, dc_add, $dc_add);
-            raw_idct4!(DcAdd4y, dc_add4y, $dc_add4y);
-            raw_idct4!(DcAdd4uv, dc_add4uv, $dc_add4uv);
+            raw_vp8!(Wht, wht, wht, $wht);
+            raw_vp8!(Add, add, idct, $add);
+            raw_vp8!(DcAdd, dc_add, idct, $dc_add);
+            raw_vp8!(DcAdd4y, dc_add4y, idct4, $dc_add4y);
+            raw_vp8!(DcAdd4uv, dc_add4uv, idct4, $dc_add4uv);
         }
     };
 }
-
-// The safe wrappers. Each is generic over the symbol it calls, so one body
-// serves every instruction set.
 
 fn lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
     p: &mut [u8],
@@ -385,9 +309,6 @@ fn lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
     unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize, e, be) }
 }
 
-/// Composes a macroblock edge filter out of an edge kernel and an inner one,
-/// for the instruction sets that do not provide a fused entry point. The C
-/// spelled this out per set with its `VP8_*_LOOP_FILTER*_MB` macros.
 fn mb_from<E, I, const VERT: bool>(
     p: &mut [u8],
     o: usize,
@@ -507,184 +428,40 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
     unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
 }
 
-/// The same four compositions as [`mb_from`], [`uv_mb_from`] and
-/// [`simple_mb_from`], but producing raw entry points for the C ABI table,
-/// which cannot call the safe wrappers. The step arithmetic is stated once
-/// here rather than once per crate.
 macro_rules! composed_mb {
     ($set:ident) => {
-        /// # Safety
-        ///
-        /// As the C prototype: `dst` is the horizontal edge of a plane with
-        /// two rows before it and fourteen from it, sixteen columns wide.
-        pub unsafe extern "C" fn v_simple_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = <$set::VSimple as Raw>::F;
+        $crate::composed_mb!(simple pub v_simple_mb, vert, <$set::VSimple as Raw>::F);
+        $crate::composed_mb!(simple pub h_simple_mb, horiz, <$set::HSimple as Raw>::F);
+        $crate::composed_mb!(luma pub v16_mb, vert,
+            <$set::V16 as Raw>::F, <$set::V16Inner as Raw>::F);
+        $crate::composed_mb!(luma pub h16_mb, horiz,
+            <$set::H16 as Raw>::F, <$set::H16Inner as Raw>::F);
+        $crate::composed_mb!(chroma pub v8uv_mb, vert,
+            <$set::V8uv as Raw>::F, <$set::V8uvInner as Raw>::F);
+        $crate::composed_mb!(chroma pub h8uv_mb, horiz,
+            <$set::H8uv as Raw>::F, <$set::H8uvInner as Raw>::F);
 
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.offset(4 * stride), stride, bedge_lim);
-                f(dst.offset(8 * stride), stride, bedge_lim);
-                f(dst.offset(12 * stride), stride, bedge_lim);
-            }
-        }
+        marker!(VSimpleMb, LfSimpleMbRaw, v_simple_mb);
+        marker!(HSimpleMb, LfSimpleMbRaw, h_simple_mb);
+        marker!(V16Mb, LfMbRaw, v16_mb);
+        marker!(H16Mb, LfMbRaw, h16_mb);
+        marker!(V8uvMb, LfUvMbRaw, v8uv_mb);
+        marker!(H8uvMb, LfUvMbRaw, h8uv_mb);
+    };
+}
 
-        /// # Safety
-        ///
-        /// As [`v_simple_mb`], transposed: two columns before `dst` and
-        /// fourteen from it, in each of sixteen rows.
-        pub unsafe extern "C" fn h_simple_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = <$set::HSimple as Raw>::F;
+/* Names a composed filter so the ladder can install it like a raw symbol. */
+macro_rules! marker {
+    ($name:ident, $sig:ty, $f:ident) => {
+        pub struct $name;
 
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.add(4), stride, bedge_lim);
-                f(dst.add(8), stride, bedge_lim);
-                f(dst.add(12), stride, bedge_lim);
-            }
-        }
-
-        /// # Safety
-        ///
-        /// As the C prototype: `dst` is the horizontal edge of a plane with
-        /// four rows before it and sixteen from it, sixteen columns wide.
-        pub unsafe extern "C" fn v16_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::V16 as Raw>::F, <$set::V16Inner as Raw>::F);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.offset(4 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(8 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(12 * stride), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        /// # Safety
-        ///
-        /// As [`v16_mb`], transposed: four columns before `dst` and sixteen
-        /// from it, in each of sixteen rows.
-        pub unsafe extern "C" fn h16_mb(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::H16 as Raw>::F, <$set::H16Inner as Raw>::F);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.add(4), stride, bedge_e, flim_i, hev);
-                inner(dst.add(8), stride, bedge_e, flim_i, hev);
-                inner(dst.add(12), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        /// # Safety
-        ///
-        /// As [`v16_mb`], for the two chroma planes: eight columns wide.
-        pub unsafe extern "C" fn v8uv_mb(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::V8uv as Raw>::F, <$set::V8uvInner as Raw>::F);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(
-                    dst_u.offset(4 * stride),
-                    dst_v.offset(4 * stride),
-                    stride,
-                    bedge_e,
-                    flim_i,
-                    hev,
-                );
-            }
-        }
-
-        /// # Safety
-        ///
-        /// As [`h16_mb`], for the two chroma planes: eight rows.
-        pub unsafe extern "C" fn h8uv_mb(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = (<$set::H8uv as Raw>::F, <$set::H8uvInner as Raw>::F);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(dst_u.add(4), dst_v.add(4), stride, bedge_e, flim_i, hev);
-            }
-        }
-
-        pub struct VSimpleMb;
-        pub struct HSimpleMb;
-        pub struct V16Mb;
-        pub struct H16Mb;
-        pub struct V8uvMb;
-        pub struct H8uvMb;
-
-        impl Raw for VSimpleMb {
-            type Sig = LfSimpleMbRaw;
-            const F: LfSimpleMbRaw = v_simple_mb;
-        }
-
-        impl Raw for HSimpleMb {
-            type Sig = LfSimpleMbRaw;
-            const F: LfSimpleMbRaw = h_simple_mb;
-        }
-
-        impl Raw for V16Mb {
-            type Sig = LfMbRaw;
-            const F: LfMbRaw = v16_mb;
-        }
-
-        impl Raw for H16Mb {
-            type Sig = LfMbRaw;
-            const F: LfMbRaw = h16_mb;
-        }
-
-        impl Raw for V8uvMb {
-            type Sig = LfUvMbRaw;
-            const F: LfUvMbRaw = v8uv_mb;
-        }
-
-        impl Raw for H8uvMb {
-            type Sig = LfUvMbRaw;
-            const F: LfUvMbRaw = h8uv_mb;
+        impl Raw for $name {
+            type Sig = $sig;
+            const F: $sig = $f;
         }
     };
 }
 
-/// The raw counterpart of [`install_lf`]: every slot one instruction set's
-/// loop filters cover, for the C ABI table.
 macro_rules! raw_install_lf {
     ($t:expr, $p:ident, $mb:ident) => {
         $t.v_loop_filter_simple = Some($p::VSimple::F);
@@ -709,7 +486,6 @@ macro_rules! raw_install_lf {
     };
 }
 
-/// The raw counterpart of [`install_idct`].
 macro_rules! raw_install_idct {
     ($t:expr, $p:ident) => {
         $t.luma_dc_wht = Some($p::Wht::F);
@@ -720,10 +496,6 @@ macro_rules! raw_install_idct {
     };
 }
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
-/// the instruction-set selection with the decoder's own table without sharing
-/// the safe wrappers, which the C ABI cannot use.
 #[derive(Default)]
 pub struct RawTable {
     pub luma_dc_wht: Option<WhtRaw>,
@@ -750,8 +522,6 @@ pub struct RawTable {
     pub h_loop_filter8uv_mb: Option<LfUvMbRaw>,
 }
 
-/// Installs everything one instruction set's ten loop filters cover, composing
-/// the four macroblock entries from the edge and inner kernels.
 macro_rules! install_lf {
     ($c:expr, $p:ident) => {
         $c.v_loop_filter_simple = lf_v_simple::<$p::VSimple>;
@@ -786,13 +556,6 @@ macro_rules! install_idct {
     };
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
-///
-/// `@lf` and `@idct` stand for whole instruction sets rather than single
-/// slots, and take the composed-macroblock module the raw table needs beside
-/// the set the wrappers compose for themselves. The `@` is what keeps them
-/// from looking like field names to the matcher.
 #[allow(unused_macros)]
 macro_rules! ladder {
     ($(
@@ -876,31 +639,33 @@ mod arch {
     pub mod sse2_idct {
         use super::*;
 
-        raw_wht!(Wht, wht, "ff_vp8_luma_dc_wht_sse2");
-        raw_idct!(Add, add, "ff_vp8_idct_add_sse2");
-        raw_idct!(DcAdd, dc_add, "ff_vp8_idct_dc_add_sse2");
-        raw_idct4!(DcAdd4y, dc_add4y, "ff_vp8_idct_dc_add4y_sse2");
-        raw_idct4!(DcAdd4uv, dc_add4uv, "ff_vp8_idct_dc_add4uv_sse2");
+        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse2");
+        raw_vp8!(Add, add, idct, "ff_vp8_idct_add_sse2");
+        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse2");
+        raw_vp8!(DcAdd4y, dc_add4y, idct4, "ff_vp8_idct_dc_add4y_sse2");
+        raw_vp8!(DcAdd4uv, dc_add4uv, idct4, "ff_vp8_idct_dc_add4uv_sse2");
     }
 
     pub mod sse4 {
         use super::*;
 
-        raw_wht!(Wht, wht, "ff_vp8_luma_dc_wht_sse4");
-        raw_idct!(DcAdd, dc_add, "ff_vp8_idct_dc_add_sse4");
+        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse4");
+        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse4");
     }
 
     pub mod avx2 {
         use super::*;
 
-        raw_lf_simple_mb!(
+        raw_vp8!(
             VSimpleMb,
             v_simple_mb,
+            lf_simple_mb,
             "ff_vp8_v_loop_filter_simple_mb_avx2"
         );
-        raw_lf_simple_mb!(
+        raw_vp8!(
             HSimpleMb,
             h_simple_mb,
+            lf_simple_mb,
             "ff_vp8_h_loop_filter_simple_mb_avx2"
         );
 
@@ -926,15 +691,10 @@ mod arch {
         }
     }
 
-    /// The AVX2 horizontal macroblock filters transpose into this, run the
-    /// vertical SSSE3 kernels over it, and transpose back.
     #[repr(C, align(32))]
     pub struct Transposed(pub [u8; 16 * 16]);
 
-    /// # Safety
-    ///
-    /// As the C prototype: `dst` is the edge of a plane with four columns
-    /// before it and sixteen from it, in each of sixteen rows.
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe extern "C" fn h16_mb_avx2(
         dst: *mut u8,
         stride: isize,
@@ -956,9 +716,7 @@ mod arch {
         }
     }
 
-    /// # Safety
-    ///
-    /// As [`h16_mb_avx2`], for the two chroma planes.
+    #[allow(clippy::missing_safety_doc)]
     pub unsafe extern "C" fn h8uv_mb_avx2(
         dst_u: *mut u8,
         dst_v: *mut u8,
@@ -1049,13 +807,14 @@ mod arch {
     pub mod fused {
         use super::*;
 
-        raw_lf_simple_mb!(
+        raw_vp8!(
             HSimpleMb,
             h_simple_mb,
+            lf_simple_mb,
             "ff_vp8_h_loop_filter_simple_mb_neon"
         );
-        raw_lf_mb!(H16Mb, h16_mb, "ff_vp8_h_loop_filter16y_mb_neon");
-        raw_lf_uv_mb!(H8uvMb, h8uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
+        raw_vp8!(H16Mb, h16_mb, lf_mb, "ff_vp8_h_loop_filter16y_mb_neon");
+        raw_vp8!(H8uvMb, h8uv_mb, lf_uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
     }
 
     ladder! {
@@ -1124,7 +883,7 @@ mod arch {
     pub mod armv6_wht_dc {
         use super::*;
 
-        raw_wht!(WhtDc, wht_dc, "ff_vp8_luma_dc_wht_dc_armv6");
+        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_armv6");
     }
 
     pub mod neon_mb {

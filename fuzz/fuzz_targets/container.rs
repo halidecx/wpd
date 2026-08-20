@@ -1,8 +1,3 @@
-//! The RIFF walk, which is the first thing any input reaches.
-//!
-//! Both entry points are driven: the one-shot information read, and the
-//! resumable scan a stream uses, fed in two pieces so the resume path is
-//! exercised as well as the complete one.
 
 #![no_main]
 

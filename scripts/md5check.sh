@@ -13,8 +13,6 @@ for input in wpd-test-data/*.webp; do
         'yuva420p ')  formats="yuva420p yuv420p" ;;
         'yuv420p ')   formats="yuv420p" ;;
         *' '*' ')
-            # Animations mixing lossy and lossless frames have no single
-            # planar format; auto writes each frame in its own.
             formats="auto"
             ;;
         *)

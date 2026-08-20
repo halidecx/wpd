@@ -1,8 +1,3 @@
-//! The lossless decoder, driven as both a whole chunk and a resumable stream.
-//!
-//! The canvas is set from the input rather than left at zero, because an ALPH
-//! chunk carries no dimensions of its own and the disagreement between what
-//! the container promised and what the frame header says is a path of its own.
 
 #![no_main]
 

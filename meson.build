@@ -17,8 +17,6 @@ cc = meson.get_compiler('c')
 source_root = meson.current_source_dir()
 cpu_family = host_machine.cpu_family()
 
-# The public header states the version so a consumer can test it at compile
-# time, which only helps if it agrees with the one the build ships.
 public_header = import('fs').read('include/wpd.h')
 header_version = []
 foreach line : public_header.split('\n')
@@ -68,7 +66,6 @@ asm_c_args = ['-DWPD_HAVE_ASM=@0@'.format(asm_enabled ? 1 : 0)]
 cpu_baseline_c_args = []
 lib_c_args += asm_c_args
 
-# Eliminate DSP fallbacks the build target can never reach (dav1d's trim_dsp).
 trim_dsp = get_option('trim_dsp') == 'true' or (
   get_option('trim_dsp') == 'if-release' and
   get_option('buildtype') in ['release', 'minsize'])
@@ -76,22 +73,14 @@ trim_c_args = trim_dsp ? ['-DWPD_TRIM_DSP_FUNCTIONS=1'] : []
 
 if asm_enabled
   if cpu_family.startswith('x86')
-    # cargo's build script is what actually invokes nasm; finding it here just
-    # turns a missing assembler into a configure error rather than a link one.
     nasm = find_program('nasm')
   elif cpu_family == 'aarch64'
     inc_dirs += [include_directories('src/aarch64')]
   elif cpu_family.startswith('arm')
     inc_dirs += [include_directories('src/arm')]
 
-    # src/cpu.h starts detection from the compile-time baseline, and the ARMv6
-    # asm is only assembled when the target has it. The extension probes the
-    # assembly itself needs are cargo's, in build.rs, since cargo is what
-    # assembles it.
     if cc.compiles(
       '''#if !defined(__ARM_ARCH) || __ARM_ARCH < 6
-         #error no ARMv6 on this target
-         #endif
          int main(void) { return 0; }''',
       name: 'ARMv6 target')
       cpu_baseline_c_args += ['-DWPD_ARM_ARMV6_ASM=1']
@@ -104,10 +93,6 @@ lib_c_args += cpu_baseline_c_args
 message('Architecture assembly: ' + (asm_enabled ? 'enabled' : 'disabled'))
 message('Trim DSP functions: ' + (trim_dsp ? 'enabled' : 'disabled'))
 
-# The library and the assembly are built by cargo; Meson keeps the C test
-# harnesses, the tools and the testdata suite.
-# Cargo tracks its own inputs far better than a file list here could, so the
-# target is always stale and cargo decides whether there is work to do.
 cargo = find_program('cargo')
 cargo_features = []
 if asm_enabled
@@ -128,10 +113,6 @@ cargo_profile = {
   'plain': 'release',
 }.get(get_option('buildtype'), 'release')
 
-# The x86 assembly's constant tables are still compiled by cargo's build script,
-# so meson's sanitizer selection has to be handed across; the cc crate reads
-# CFLAGS. Rust's own sanitizer support needs nightly and is wired up in
-# scripts/sanitize.sh.
 cargo_env = environment()
 if get_option('nightly_size')
   if get_option('buildtype') != 'minsize'
@@ -143,8 +124,6 @@ endif
 if get_option('b_sanitize') != 'none'
   cargo_env.append('CFLAGS', '-fsanitize=' + get_option('b_sanitize'),
                    '-fno-omit-frame-pointer', separator: ' ')
-  # The tool is linked by rustc, so the sanitizer runtime has to reach the
-  # link line there too; cargo_tool.sh turns this into RUSTFLAGS.
   cargo_env.set('WPD_SANITIZE', get_option('b_sanitize'))
 endif
 soversion = meson.project_version()
@@ -168,14 +147,6 @@ libwpd_artifacts = custom_target(
 )
 libwpd = libwpd_artifacts[0]
 
-# A Rust cdylib exports only the Rust symbols it was told to, which is nothing
-# while the entry points are still C, so the shared library is linked out of
-# the archive cargo staged. Nothing in it refers to the archive, so each entry
-# point has to be named on the link line to be pulled in, and the export list
-# then hides everything the archive brought along with them. src/shared_stub.c
-# is empty and exists only because a Meson target needs a source of its own.
-# Taken from the same parser that writes the export list, so the root set and
-# the list of what stays visible cannot disagree about a declaration.
 wpd_symbols = run_command(
   files('tools/gen_exports.sh'),
   source_root / 'include/wpd.h',
@@ -228,12 +199,6 @@ if get_option('nightly_size')
   libwpd_sealed = libwpd_sealed_artifacts[0]
 endif
 
-# The export list already says the header's symbols are the only ones that
-# leave, and `-u` names the same list, which is exactly the root set a
-# dead-strip wants: anything the public API cannot reach goes. rustc emits one
-# section per function, so what it drops is whole functions -- half the
-# library, most of it std's, none of it ours. Optimised profiles only, and only
-# if the linker takes the flag, so a toolchain without one still gets a library.
 if cargo_profile in ['release', 'minsize']
   if host_machine.system() == 'darwin'
     gc_args = cc.get_supported_link_arguments('-Wl,-dead_strip')
@@ -247,8 +212,6 @@ else
   strip_args = []
 endif
 
-# Meson owns the versioned names, the soname or install_name, and the symlinks
-# that go with them, which is the one part of this that differs per platform.
 libwpd_shared = shared_library(
   'wpd',
   files('src/shared_stub.c'),
@@ -301,7 +264,6 @@ if get_option('nightly_size')
   )
 endif
 
-# The tool is a cargo binary linked directly to the Rust decoder crate.
 wpd = custom_target(
   'wpd-tool',
   output: 'wpd',
@@ -327,8 +289,6 @@ api_test = executable(
 )
 test('api', api_test, suite: 'api')
 
-# The Rust unit tests. Nothing else runs them, and they are where the RFC 1321
-# vectors that tests/md5.c used to carry now live.
 test(
   'cargo',
   cargo,
@@ -363,8 +323,6 @@ fuzz_test = executable(
   install: false,
 )
 
-# A row function writing outside its row is invisible to the reference
-# comparisons, so this one backs each row onto an unmapped page instead.
 if cc.has_header('sys/mman.h')
   rowbounds_test = executable(
     'test_rowbounds',
@@ -376,10 +334,6 @@ if cc.has_header('sys/mman.h')
   test('rowbounds', rowbounds_test, suite: 'rowbounds')
 endif
 
-# libwebp is the reference the parity suite and libwebpdec measure against, so
-# which one gets linked is a correctness question, not just a convenience: a
-# released libwebp predates decoder changes wpd already matches. The wrap pins a
-# revision known to agree, and is preferred over whatever the system carries.
 libwebp_source = get_option('libwebp')
 libwebpdecoder_path = get_option('libwebpdecoder')
 libwebp_dec_dep = declare_dependency()
@@ -474,10 +428,6 @@ checkasm_dep = dependency(
 )
 
 if asm_enabled and checkasm_dep.found()
-  # trim_dsp lets the compiler drop every fallback the build target cannot
-  # reach, which is exactly what checkasm compares the assembly against. So it
-  # gets its own copy of the library with trim_dsp off; otherwise the lower
-  # CPU tiers vanish and their tests silently stop running.
   checkasm_features = []
   foreach f : cargo_features
     if f != 'trim_dsp'
@@ -512,8 +462,6 @@ if asm_enabled and checkasm_dep.found()
     ],
   )
 
-  # checkasm reaches past the public API to poke the DSP tables and override
-  # the CPU flags, so it links the static archive rather than the shared one.
   checkasm = executable(
     'checkasm',
     files(

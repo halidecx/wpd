@@ -1,9 +1,3 @@
-//! The safe API against the real corpus.
-//!
-//! `wpd-test-data` supplies the shapes the unit tests cannot reach —
-//! animations, alpha, every packed output format, and a decode fed a byte at
-//! a time.
-
 use std::fs;
 use std::path::PathBuf;
 
@@ -11,9 +5,6 @@ use wpd::api::{Animation, Decoder, Options};
 use wpd::image::Format;
 
 fn corpus() -> Vec<PathBuf> {
-    /* miri interprets every instruction, so decoding the corpus in eight
-    formats under it would take hours. The unit tests reach the same paths on
-    a one-pixel file, which is what that run is for. */
     if cfg!(miri) {
         return Vec::new();
     }
@@ -42,8 +33,6 @@ const FORMATS: [Format; 6] = [
     Format::Rgb565,
 ];
 
-/// Every file, every packed format, every frame: the rows come out the length
-/// the geometry says and the frame count matches the header.
 #[test]
 fn the_corpus_decodes_in_every_packed_format() {
     for path in corpus() {
@@ -72,8 +61,6 @@ fn the_corpus_decodes_in_every_packed_format() {
     }
 }
 
-/// A planar decode hands out three or four planes, and the chroma ones are
-/// half size in both directions.
 #[test]
 fn a_planar_decode_hands_out_subsampled_chroma() {
     for path in corpus() {
@@ -100,7 +87,6 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
     }
 }
 
-/// A stream fed in small pieces reaches the same pixels as one whole open.
 #[test]
 fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
     for path in corpus() {
@@ -140,8 +126,6 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
     }
 }
 
-/// Sub-frame mode hands out each frame at its own position rather than the
-/// composited canvas, so a sub-frame may be smaller than the canvas.
 #[test]
 fn sub_frame_mode_reports_a_position() {
     for path in corpus() {
@@ -165,7 +149,6 @@ fn sub_frame_mode_reports_a_position() {
     }
 }
 
-/// A flip is a reading order: the same rows come out in the opposite order.
 #[test]
 fn flipping_reverses_the_rows() {
     for path in corpus() {

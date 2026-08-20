@@ -1,26 +1,29 @@
-//! The hand-written assembly boundary.
-//!
-//! This is the only module in the core crate permitted to use `unsafe`. Every
-//! assembly routine is declared here and exposed as a safe function that
-//! validates its slices before the call, so nothing outside this module needs
-//! to reason about raw pointers.
-//!
-//! Building without the `asm` feature removes the module entirely, which is
-//! what lets the crate compile under `#![forbid(unsafe_code)]`.
-//!
-//! # Dispatch tables
-//!
-//! Each architecture is described by one `ladder!` invocation: a list of the
-//! kernels a CPU tier adds, from which both of the tables that tier feeds are
-//! generated. The decoder's table holds the safe wrapper and the C ABI's holds
-//! the bare symbol — checkasm has to time the assembly and not a wrapper —
-//! which is the whole reason there are two. What they have to agree on is
-//! which slots a tier fills, and nothing compares them: checkasm exercises
-//! only the raw table and the decode tests only the safe one, so a kernel
-//! added to one list and forgotten in the other passes every gate as a silent
-//! regression. One list is what makes that unrepresentable.
+/* A hand-written assembly symbol reaches Rust as a marker type, so that the
+ * dispatch ladders and the safe wrappers can name one by type rather than by
+ * function pointer. The extern declaration spells the argument types out --
+ * that is what checks each symbol against the signature it is installed as. */
+macro_rules! raw {
+    ($marker:ident, $inner:ident, $sig:ty, $sym:literal, ($($arg:ty),* $(,)?)) => {
+        extern "C" {
+            #[link_name = $sym]
+            fn $inner($(_: $arg),*);
+        }
+
+        pub struct $marker;
+
+        impl Raw for $marker {
+            type Sig = $sig;
+            const F: $sig = $inner;
+        }
+    };
+}
 
 pub mod vp8;
 pub mod vp8l;
 pub mod vp8pred;
 pub mod yuv;
+
+pub trait Raw {
+    type Sig: Copy;
+    const F: Self::Sig;
+}

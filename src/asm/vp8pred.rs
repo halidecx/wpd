@@ -1,30 +1,11 @@
-//! The intra prediction assembly.
-//!
-//! Laid out as [`super::vp8`]: the symbols are declared once and exported raw
-//! for the C ABI table, and the core crate gets safe wrappers.
-//!
-//! # Regions
-//!
-//! Every predictor reads the row above the block and the column to its left,
-//! so a block at `o` needs `o >= stride + 1`, and writes an `n` by `n` square,
-//! so the plane must reach `o + (n - 1) * stride + n`. Three of the 4x4 modes
-//! also read four samples above and to the right; those live in the row the
-//! block already needs, except in the last macroblock of a row, where the
-//! decoder passes a replicated sample instead and the assembly reads it from
-//! the pointer rather than the plane.
-
 use crate::cpu::CpuFlags;
 use crate::dsp::vp8pred::*;
 
 pub type PredRaw = unsafe extern "C" fn(*mut u8, isize);
 pub type Pred4x4Raw = unsafe extern "C" fn(*mut u8, *const u8, isize);
 
-pub use super::vp8::Raw;
+pub use super::Raw;
 
-/// What the running CPU offers the C ABI table, slot by slot: `None` leaves
-/// the caller's fallback in place. As [`super::vp8l::RawTable`], this shares
-/// the instruction-set selection with the decoder's own table without sharing
-/// the safe wrappers, which the C ABI cannot use.
 pub struct RawTable {
     pub pred4x4: [Option<Pred4x4Raw>; PRED4X4_COUNT],
     pub pred8x8: [Option<PredRaw>; PRED8X8_COUNT],
@@ -41,35 +22,13 @@ impl Default for RawTable {
     }
 }
 
-macro_rules! raw_pred {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *mut u8, _: isize);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = PredRaw;
-            const F: PredRaw = $inner;
-        }
+/* The kind picks the signature alias and its argument list. */
+macro_rules! raw_vp8pred {
+    ($m:ident, $i:ident, pred, $sym:literal) => {
+        raw!($m, $i, PredRaw, $sym, (*mut u8, isize));
     };
-}
-
-macro_rules! raw_pred4x4 {
-    ($marker:ident, $inner:ident, $sym:literal) => {
-        extern "C" {
-            #[link_name = $sym]
-            fn $inner(_: *mut u8, _: *const u8, _: isize);
-        }
-
-        pub struct $marker;
-
-        impl Raw for $marker {
-            type Sig = Pred4x4Raw;
-            const F: Pred4x4Raw = $inner;
-        }
+    ($m:ident, $i:ident, pred4x4, $sym:literal) => {
+        raw!($m, $i, Pred4x4Raw, $sym, (*mut u8, *const u8, isize));
     };
 }
 
@@ -88,8 +47,6 @@ fn pred4x4<T: Raw<Sig = Pred4x4Raw>>(p: &mut [u8], o: usize, s: usize, tr: &[u8;
     unsafe { (T::F)(p.as_mut_ptr().add(o), tr.as_ptr(), s as isize) }
 }
 
-/// Both dispatch tables, from one list of kernels; see the module docs for
-/// why they are two lists in the first place.
 #[allow(unused_macros)]
 macro_rules! ladder {
     ($(
@@ -121,62 +78,83 @@ mod arch {
     pub mod sse {
         use super::*;
 
-        raw_pred!(Vert16, vert16, "ff_pred16x16_vertical_8_sse");
+        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vertical_8_sse");
     }
 
     pub mod sse2 {
         use super::*;
 
-        raw_pred4x4!(Dc4, dc4, "ff_pred4x4_dc_8_sse2");
-        raw_pred4x4!(Hor4, hor4, "ff_pred4x4_horizontal_vp8_8_sse2");
-        raw_pred4x4!(Vert4, vert4, "ff_pred4x4_vertical_vp8_8_sse2");
-        raw_pred4x4!(DownLeft4, down_left4, "ff_pred4x4_down_left_8_sse2");
-        raw_pred4x4!(DownRight4, down_right4, "ff_pred4x4_down_right_8_sse2");
-        raw_pred4x4!(VertRight4, vert_right4, "ff_pred4x4_vertical_right_8_sse2");
-        raw_pred4x4!(HorDown4, hor_down4, "ff_pred4x4_horizontal_down_8_sse2");
-        raw_pred4x4!(HorUp4, hor_up4, "ff_pred4x4_horizontal_up_8_sse2");
-        raw_pred4x4!(Tm4, tm4, "ff_pred4x4_tm_vp8_8_sse2");
+        raw_vp8pred!(Dc4, dc4, pred4x4, "ff_pred4x4_dc_8_sse2");
+        raw_vp8pred!(Hor4, hor4, pred4x4, "ff_pred4x4_horizontal_vp8_8_sse2");
+        raw_vp8pred!(Vert4, vert4, pred4x4, "ff_pred4x4_vertical_vp8_8_sse2");
+        raw_vp8pred!(
+            DownLeft4,
+            down_left4,
+            pred4x4,
+            "ff_pred4x4_down_left_8_sse2"
+        );
+        raw_vp8pred!(
+            DownRight4,
+            down_right4,
+            pred4x4,
+            "ff_pred4x4_down_right_8_sse2"
+        );
+        raw_vp8pred!(
+            VertRight4,
+            vert_right4,
+            pred4x4,
+            "ff_pred4x4_vertical_right_8_sse2"
+        );
+        raw_vp8pred!(
+            HorDown4,
+            hor_down4,
+            pred4x4,
+            "ff_pred4x4_horizontal_down_8_sse2"
+        );
+        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "ff_pred4x4_horizontal_up_8_sse2");
+        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_vp8_8_sse2");
 
-        raw_pred!(Dc8, dc8, "ff_pred8x8_dc_vp8_8_sse2");
-        raw_pred!(TopDc8, top_dc8, "ff_pred8x8_top_dc_8_sse2");
-        raw_pred!(LeftDc8, left_dc8, "ff_pred8x8_left_dc_8_sse2");
-        raw_pred!(Hor8, hor8, "ff_pred8x8_horizontal_8_sse2");
-        raw_pred!(Tm8, tm8, "ff_pred8x8_tm_vp8_8_sse2");
-        raw_pred!(Vert8, vert8, "ff_pred8x8_vertical_8_sse2");
+        raw_vp8pred!(Dc8, dc8, pred, "ff_pred8x8_dc_vp8_8_sse2");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_8_sse2");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_8_sse2");
+        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_horizontal_8_sse2");
+        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_vp8_8_sse2");
+        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vertical_8_sse2");
 
-        raw_pred!(Hor16, hor16, "ff_pred16x16_horizontal_8_sse2");
-        raw_pred!(Dc16, dc16, "ff_pred16x16_dc_8_sse2");
-        raw_pred!(TopDc16, top_dc16, "ff_pred16x16_top_dc_8_sse2");
-        raw_pred!(LeftDc16, left_dc16, "ff_pred16x16_left_dc_8_sse2");
-        raw_pred!(Tm16, tm16, "ff_pred16x16_tm_vp8_8_sse2");
+        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_horizontal_8_sse2");
+        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_8_sse2");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_8_sse2");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_8_sse2");
+        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_sse2");
     }
 
     pub mod ssse3 {
         use super::*;
 
-        raw_pred4x4!(Tm4, tm4, "ff_pred4x4_tm_vp8_8_ssse3");
-        raw_pred4x4!(
+        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_vp8_8_ssse3");
+        raw_vp8pred!(
             VertLeft4,
             vert_left4,
+            pred4x4,
             "ff_pred4x4_vertical_left_vp8_8_ssse3"
         );
 
-        raw_pred!(TopDc8, top_dc8, "ff_pred8x8_top_dc_8_ssse3");
-        raw_pred!(LeftDc8, left_dc8, "ff_pred8x8_left_dc_8_ssse3");
-        raw_pred!(Hor8, hor8, "ff_pred8x8_horizontal_8_ssse3");
-        raw_pred!(Tm8, tm8, "ff_pred8x8_tm_vp8_8_ssse3");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_8_ssse3");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_8_ssse3");
+        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_horizontal_8_ssse3");
+        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_vp8_8_ssse3");
 
-        raw_pred!(Hor16, hor16, "ff_pred16x16_horizontal_8_ssse3");
-        raw_pred!(Dc16, dc16, "ff_pred16x16_dc_8_ssse3");
-        raw_pred!(TopDc16, top_dc16, "ff_pred16x16_top_dc_8_ssse3");
-        raw_pred!(LeftDc16, left_dc16, "ff_pred16x16_left_dc_8_ssse3");
-        raw_pred!(Tm16, tm16, "ff_pred16x16_tm_vp8_8_ssse3");
+        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_horizontal_8_ssse3");
+        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_8_ssse3");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_8_ssse3");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_8_ssse3");
+        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_ssse3");
     }
 
     pub mod avx2 {
         use super::*;
 
-        raw_pred!(Tm16, tm16, "ff_pred16x16_tm_vp8_8_avx2");
+        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_avx2");
     }
 
     ladder! {
@@ -235,30 +213,40 @@ mod arch {
     pub mod neon {
         use super::*;
 
-        raw_pred4x4!(Tm4, tm4, "ff_pred4x4_tm_neon");
-        raw_pred4x4!(Dc4, dc4, "ff_pred4x4_dc_neon");
-        raw_pred4x4!(Vert4, vert4, "ff_pred4x4_vert_neon");
-        raw_pred4x4!(Hor4, hor4, "ff_pred4x4_hor_neon");
-        raw_pred4x4!(DownLeft4, down_left4, "ff_pred4x4_down_left_neon");
-        raw_pred4x4!(DownRight4, down_right4, "ff_pred4x4_down_right_neon");
-        raw_pred4x4!(VertLeft4, vert_left4, "ff_pred4x4_vert_left_neon");
-        raw_pred4x4!(VertRight4, vert_right4, "ff_pred4x4_vert_right_neon");
-        raw_pred4x4!(HorUp4, hor_up4, "ff_pred4x4_hor_up_neon");
-        raw_pred4x4!(HorDown4, hor_down4, "ff_pred4x4_hor_down_neon");
+        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_neon");
+        raw_vp8pred!(Dc4, dc4, pred4x4, "ff_pred4x4_dc_neon");
+        raw_vp8pred!(Vert4, vert4, pred4x4, "ff_pred4x4_vert_neon");
+        raw_vp8pred!(Hor4, hor4, pred4x4, "ff_pred4x4_hor_neon");
+        raw_vp8pred!(DownLeft4, down_left4, pred4x4, "ff_pred4x4_down_left_neon");
+        raw_vp8pred!(
+            DownRight4,
+            down_right4,
+            pred4x4,
+            "ff_pred4x4_down_right_neon"
+        );
+        raw_vp8pred!(VertLeft4, vert_left4, pred4x4, "ff_pred4x4_vert_left_neon");
+        raw_vp8pred!(
+            VertRight4,
+            vert_right4,
+            pred4x4,
+            "ff_pred4x4_vert_right_neon"
+        );
+        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "ff_pred4x4_hor_up_neon");
+        raw_vp8pred!(HorDown4, hor_down4, pred4x4, "ff_pred4x4_hor_down_neon");
 
-        raw_pred!(Vert8, vert8, "ff_pred8x8_vert_neon");
-        raw_pred!(Hor8, hor8, "ff_pred8x8_hor_neon");
-        raw_pred!(Dc8, dc8, "ff_pred8x8_dc_neon");
-        raw_pred!(Tm8, tm8, "ff_pred8x8_tm_neon");
-        raw_pred!(TopDc8, top_dc8, "ff_pred8x8_top_dc_neon");
-        raw_pred!(LeftDc8, left_dc8, "ff_pred8x8_left_dc_neon");
+        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vert_neon");
+        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_hor_neon");
+        raw_vp8pred!(Dc8, dc8, pred, "ff_pred8x8_dc_neon");
+        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_neon");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_neon");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_neon");
 
-        raw_pred!(Vert16, vert16, "ff_pred16x16_vert_neon");
-        raw_pred!(Hor16, hor16, "ff_pred16x16_hor_neon");
-        raw_pred!(Dc16, dc16, "ff_pred16x16_dc_neon");
-        raw_pred!(Tm16, tm16, "ff_pred16x16_tm_neon");
-        raw_pred!(TopDc16, top_dc16, "ff_pred16x16_top_dc_neon");
-        raw_pred!(LeftDc16, left_dc16, "ff_pred16x16_left_dc_neon");
+        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vert_neon");
+        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_hor_neon");
+        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_neon");
+        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_neon");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_neon");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_neon");
     }
 
     ladder! {
@@ -298,16 +286,16 @@ mod arch {
     pub mod neon {
         use super::*;
 
-        raw_pred!(Vert8, vert8, "ff_pred8x8_vert_neon");
-        raw_pred!(Hor8, hor8, "ff_pred8x8_hor_neon");
-        raw_pred!(Dc128_8, dc128_8, "ff_pred8x8_128_dc_neon");
+        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vert_neon");
+        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_hor_neon");
+        raw_vp8pred!(Dc128_8, dc128_8, pred, "ff_pred8x8_128_dc_neon");
 
-        raw_pred!(Dc16, dc16, "ff_pred16x16_dc_neon");
-        raw_pred!(Vert16, vert16, "ff_pred16x16_vert_neon");
-        raw_pred!(Hor16, hor16, "ff_pred16x16_hor_neon");
-        raw_pred!(LeftDc16, left_dc16, "ff_pred16x16_left_dc_neon");
-        raw_pred!(TopDc16, top_dc16, "ff_pred16x16_top_dc_neon");
-        raw_pred!(Dc128_16, dc128_16, "ff_pred16x16_128_dc_neon");
+        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_neon");
+        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vert_neon");
+        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_hor_neon");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_neon");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_neon");
+        raw_vp8pred!(Dc128_16, dc128_16, pred, "ff_pred16x16_128_dc_neon");
     }
 
     ladder! {

@@ -1,36 +1,3 @@
-//! The lossless (VP8L) decoder.
-//!
-//! A port of `src/vp8l.c`: the frame header and its transform list, the prefix
-//! codes each meta-block is coded with, the pixel loop, and the transforms that
-//! turn the decoded residual back into ARGB.
-//!
-//! Three things are shaped differently from the C.
-//!
-//! A picture is a flat `Vec<u32>` rather than a byte plane addressed through a
-//! `linesize`. The pixel loop already walked it linearly, the predictors
-//! already took `uint32_t *`, and the transforms only ever look at whole
-//! pixels, so `u32` is the unit the whole module wants — and it takes the
-//! per-byte index arithmetic, and its bounds checks, out of the hot loop. A
-//! pixel is stored in native byte order over the memory the C laid out as
-//! `[A, R, G, B]`, which is what the assembly and the C ABI both still see, and
-//! [`Picture::frame`] is where the canvas becomes those bytes again.
-//!
-//! That last step is the crate's one dependency. Reinterpreting `[u32]` as
-//! `[u8]` cannot be done in the standard library without `unsafe`, and this
-//! crate forbids it; `zerocopy::IntoBytes::as_bytes` is infallible for `u32`,
-//! because the cast only ever weakens alignment and no bit pattern is invalid.
-//! rav1d has the same problem in the other direction — it stores bytes and
-//! casts up to pixels, which *can* fail on alignment, which is why its
-//! allocations are `AlignedVec64`.
-//!
-//! The bit reader holds an offset into the chunk rather than a pointer to it,
-//! so `br_extend` has no counterpart: a streaming append that reallocates the
-//! buffer cannot invalidate anything the reader tracks. See [`bitreader`].
-//!
-//! Caller-owned memory — the alpha plane an ALPH chunk can be written straight
-//! into — is an argument to [`Decoder::decode_frame`] rather than a pointer
-//! kept in the context. Nothing borrowed outlives the call that passed it in.
-
 pub mod bitreader;
 pub mod entropy;
 pub mod huffman;
@@ -51,13 +18,10 @@ const NUM_LENGTH_CODES: u32 = 24;
 const NUM_DISTANCE_CODES: u32 = 40;
 const NUM_SHORT_DISTANCES: u32 = 120;
 
-/// How many finished rows the resumable path hands out at a time.
 const ROW_BATCH: i32 = 16;
 
-/// The slack `WPD_FILE_PADDING` leaves past the last pixel, in pixels.
 const PADDING: usize = 16;
 
-/// What one image's prefix-code tables are assumed to fit in.
 const ARENA_CHUNK: usize = 4096;
 
 const HUFF_IDX_GREEN: usize = 0;
@@ -81,8 +45,9 @@ const ALPHABET_SIZES: [u32; HUFFMAN_CODES_PER_META_CODE] = [
     NUM_DISTANCE_CODES,
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Transform {
+    #[default]
     Predictor,
     Color,
     SubtractGreen,
@@ -100,20 +65,12 @@ impl Transform {
     }
 }
 
-/// Which of the module's output pictures a decode fills in.
-///
-/// Both are kept across calls and resized on use, so a lossy animation with
-/// alpha alternates between them without reallocating either.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
     Argb,
     Alpha,
 }
 
-/// Picks one of the two output pictures.
-///
-/// Taking them as two arguments rather than reaching into the decoder is what
-/// lets the callers that have already split their borrows keep them split.
 fn target_picture<'p>(
     target: Target,
     argb: &'p mut Picture,
@@ -125,29 +82,17 @@ fn target_picture<'p>(
     }
 }
 
-/// The alpha plane an ALPH chunk can be written straight into.
-///
-/// This is caller memory, so it arrives per call rather than being kept in the
-/// decoder — see the module documentation.
 pub struct AlphaDst<'a> {
     pub data: &'a mut [u8],
     pub stride: usize,
 }
 
-/// Which of the decoder's pictures a decode left its output in.
-///
-/// Naming it is what lets a caller hold on to the answer without holding a
-/// borrow, which is what the C latched a `(pointer, stride)` pair for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Output {
-    /// What [`Decoder::decode_frame`] filled in for [`Target::Argb`].
     Argb,
-    /// What the resumable path is filling in, which alternates between two
-    /// pictures as the caller peeks at it.
     Still,
 }
 
-/// A picture, one pixel per `u32`, rows contiguous at `stride`.
 #[derive(Default)]
 pub struct Picture {
     pub data: Vec<u32>,
@@ -157,7 +102,6 @@ pub struct Picture {
 }
 
 impl Picture {
-    /// The canvas as the `[A, R, G, B]` bytes everything downstream reads.
     pub fn frame(&self) -> Frame<'_> {
         Frame::packed(
             self.data.as_bytes(),
@@ -168,8 +112,6 @@ impl Picture {
         )
     }
 
-    /// As [`Self::frame`], writable, which the compositor's per-frame
-    /// premultiply weights in place.
     pub fn frame_mut(&mut self) -> FrameMut<'_> {
         let (width, height, stride) = (self.width, self.height, self.stride * 4);
         let plane = [
@@ -182,13 +124,10 @@ impl Picture {
         FrameMut::borrowed(plane, width, height, Format::Argb, false)
     }
 
-    /// Whether the picture describes any pixels at all.
     pub fn is_empty(&self) -> bool {
         self.width <= 0 || self.data.is_empty()
     }
 
-    /// Sizes the picture to `w` by `h` and zeroes it, keeping the allocation
-    /// when it is already large enough, as `image_alloc_plane` does.
     fn alloc(&mut self, w: i32, h: i32) -> Result<()> {
         if w <= 0 || h <= 0 {
             return Err(Error::TooLarge);
@@ -199,8 +138,6 @@ impl Picture {
             .ok_or(Error::TooLarge)?;
 
         if self.data.len() < size {
-            /* Growing already zeroes what it adds, and dropping what was
-            there first means it zeroes the whole buffer exactly once. */
             self.data.clear();
             self.data
                 .try_reserve_exact(size)
@@ -220,8 +157,6 @@ impl Picture {
     }
 }
 
-/// Where the pixel loop left off, so a chunk that ran out mid-image can be
-/// picked up once more of it has arrived.
 #[derive(Clone, Copy, Default)]
 pub struct Resume {
     pub pos: usize,
@@ -232,8 +167,6 @@ pub struct Resume {
     pub rows_done: i32,
 }
 
-/// One meta prefix code: the five trees a pixel is read with, and the shortcut
-/// for a group whose three non-green channels never vary.
 #[derive(Clone, Copy, Default)]
 pub struct HTreeGroup {
     pub trees: [Reader; HUFFMAN_CODES_PER_META_CODE],
@@ -241,8 +174,6 @@ pub struct HTreeGroup {
     pub literal: [u8; 4],
 }
 
-/// One entropy-coded image: the ARGB picture itself, or one of the sub-images
-/// a transform is described by.
 #[derive(Default)]
 struct ImageContext {
     storage: Picture,
@@ -254,9 +185,6 @@ struct ImageContext {
 }
 
 impl ImageContext {
-    /// Drops what a decode derived without giving the buffers back: an
-    /// animation runs this between frames, and every one of them would
-    /// otherwise re-ask the allocator for the same sizes.
     fn clear(&mut self) {
         self.color_cache.clear();
         self.color_cache_bits = 0;
@@ -269,8 +197,6 @@ impl ImageContext {
     }
 }
 
-/// Sizes a reused scratch buffer, falling back to an error rather than an
-/// abort when the allocator cannot manage it.
 fn grow<T: Copy>(buf: &mut Vec<T>, len: usize, fill: T) -> Result<()> {
     if buf.len() < len {
         buf.try_reserve(len - buf.len())
@@ -280,6 +206,7 @@ fn grow<T: Copy>(buf: &mut Vec<T>, len: usize, fill: T) -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
 pub struct Decoder {
     dsp: Vp8lDsp,
     gb: BitReader,
@@ -299,16 +226,9 @@ pub struct Decoder {
     argb: Picture,
     alpha_argb: Picture,
     out: Picture,
-    /// One palette index per byte, which is all an eight-bit alpha decode
-    /// needs; see [`Self::decode_alpha_8b`].
     indices: Vec<u8>,
-    /// Which picture the resumable path is filling in, once it has one.
     staged: bool,
-    /// The row above the batch, as the predictor transform left it, plus the
-    /// batch's first row while it is being predicted against it.
     scratch: Vec<u32>,
-    /// Reused across prefix codes: the symbols sorted by code length, and the
-    /// length list they were sorted from.
     sorted: Vec<u16>,
     lengths: Vec<u8>,
 
@@ -319,44 +239,11 @@ pub struct Decoder {
     peeked: bool,
 }
 
-impl Default for Decoder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Decoder {
     pub fn new() -> Self {
-        Self {
-            dsp: Vp8lDsp::new(),
-            gb: BitReader::default(),
-            width: 0,
-            height: 0,
-            has_alpha: false,
-            reduced_width: 0,
-            transforms: [Transform::Predictor; 4],
-            nb_transforms: 0,
-            nb_huffman_groups: 0,
-            image: Default::default(),
-            alpha_dst_used: false,
-            argb: Picture::default(),
-            alpha_argb: Picture::default(),
-            out: Picture::default(),
-            indices: Vec::new(),
-            staged: false,
-            scratch: Vec::new(),
-            sorted: Vec::new(),
-            lengths: Vec::new(),
-            active: false,
-            next_try: 0,
-            resume: Resume::default(),
-            rows_out: 0,
-            peeked: false,
-        }
+        Self::default()
     }
 
-    /// Drops everything derived from a file, keeping the decode buffers, which
-    /// are sized on use and reused.
     pub fn reset(&mut self) {
         for img in &mut self.image {
             img.clear();
@@ -368,16 +255,11 @@ impl Decoder {
         self.width = 0;
         self.height = 0;
         self.has_alpha = false;
-        /* How far the last image got, and how wide its rows were. `still_step`
-        clears these when it activates, so a decode that reaches the pixel loop
-        never reads a previous image's; one that stops before it would. */
         self.resume = Resume::default();
         self.rows_out = 0;
         self.reduced_width = 0;
     }
 
-    /// [`Self::reset`], and the decode buffers too, for when the file is closed
-    /// and nothing is looking at the pictures any more.
     pub fn release(&mut self) {
         self.reset();
         for img in &mut self.image {
@@ -392,22 +274,10 @@ impl Decoder {
         self.lengths = Vec::new();
     }
 
-    /// Drops the ARGB canvas an alpha chunk was decoded through.
-    ///
-    /// Nothing reads it once the alpha plane has been taken out of it, and it
-    /// is four bytes per pixel against the plane's one. Holding it until the
-    /// decoder drops means a lossy frame with alpha has two full-size ARGB
-    /// buffers live at its peak — the canvas and whatever the frame is being
-    /// converted into — where it needs one at a time. The C freed it here for
-    /// the same reason, and the block it leaves behind is the size the
-    /// conversion then asks for.
     pub fn release_alpha_canvas(&mut self) {
         self.alpha_argb.release();
     }
 
-    /// The canvas the container has already committed to. A lossless frame
-    /// header carries its own dimensions, an alpha chunk does not, and the two
-    /// have to agree.
     pub fn set_canvas(&mut self, width: i32, height: i32) {
         self.width = width;
         self.height = height;
@@ -425,7 +295,6 @@ impl Decoder {
         self.rows_out
     }
 
-    /// The picture a [`Self::decode_frame`] filled in.
     pub fn picture(&self, target: Target) -> &Picture {
         match target {
             Target::Argb => &self.argb,
@@ -433,7 +302,6 @@ impl Decoder {
         }
     }
 
-    /// The picture the resumable path is filling in, once it has started one.
     pub fn still_picture(&self) -> Option<&Picture> {
         if !self.staged {
             return None;
@@ -441,9 +309,6 @@ impl Decoder {
         Some(if self.peeked { &self.out } else { &self.argb })
     }
 
-    /// As [`Self::picture`], writable, which the compositor's per-frame
-    /// premultiply needs: it weights the canvas in place rather than copying
-    /// it aside first, as libwebp does.
     pub fn picture_out_mut(&mut self, target: Target) -> &mut Picture {
         match target {
             Target::Argb => &mut self.argb,
@@ -451,7 +316,6 @@ impl Decoder {
         }
     }
 
-    /// As [`Self::still_picture`], writable.
     pub fn still_picture_mut(&mut self) -> Option<&mut Picture> {
         if !self.staged {
             return None;
@@ -463,8 +327,6 @@ impl Decoder {
         })
     }
 
-    /// The picture `which` names, as a borrowed view, or nothing when the
-    /// decoder has not produced one.
     pub fn view(&self, which: Output) -> Option<Frame<'_>> {
         let pic = match which {
             Output::Argb => self.picture(Target::Argb),
@@ -474,7 +336,6 @@ impl Decoder {
         (!pic.is_empty()).then(|| pic.frame())
     }
 
-    /// As [`Self::view`], writable.
     pub fn view_mut(&mut self, which: Output) -> Option<FrameMut<'_>> {
         let pic = match which {
             Output::Argb => self.picture_out_mut(Target::Argb),
@@ -511,8 +372,6 @@ impl Decoder {
         self.height = h;
     }
 
-    /// The block size a transform sub-image is coded at, and how many blocks
-    /// of it cover the picture.
     fn parse_block_size(&mut self, buf: &[u8]) -> (u32, i32, i32) {
         let bits = self.gb.bits(buf, 3) + 2;
         let w = ceil_shift(self.reduced_width, bits);
@@ -521,8 +380,6 @@ impl Decoder {
         (bits, w, h)
     }
 
-    /// One entropy-coded pixel per block of the picture: the shape the two
-    /// spatial transforms and the meta prefix-code map are all written in.
     fn parse_subimage(&mut self, role: usize, buf: &[u8]) -> Result<()> {
         let (block_bits, blocks_w, blocks_h) = self.parse_block_size(buf);
 
@@ -573,7 +430,6 @@ impl Decoder {
             self.reduced_width = ceil_shift(self.width, width_bits);
         }
 
-        /* The palette is stored as deltas along the row. */
         let row = &mut img.storage.data[..img.storage.width as usize];
 
         for i in 1..row.len() {
@@ -596,13 +452,6 @@ impl Decoder {
         Ok(())
     }
 
-    /// The prefix codes one entropy-coded image is written with, and the
-    /// sub-image saying which of them applies where.
-    ///
-    /// The picture is allocated by the caller rather than here, because whether
-    /// one is needed at all depends on what this reads: an alpha chunk whose
-    /// prefix codes turn out to be trivial never wants the ARGB canvas. See
-    /// [`Self::decode_alpha_8b`].
     fn read_image_header(&mut self, role: usize, buf: &[u8]) -> Result<()> {
         let cache_bits = if self.gb.bit(buf) != 0 {
             let bits = self.gb.bits(buf, 4);
@@ -665,8 +514,6 @@ impl Decoder {
             .map_err(|_| Error::NoMemory)?;
         img.groups.resize(nb_groups, HTreeGroup::default());
         img.arena.clear();
-        /* The C grew the arena in chunks of this size; asking for one up front
-        keeps the per-code `try_reserve` from reallocating and copying. */
         img.arena
             .try_reserve(ARENA_CHUNK)
             .map_err(|_| Error::NoMemory)?;
@@ -689,11 +536,7 @@ impl Decoder {
                 } else {
                     huffman::read_normal_code(gb, buf, &mut plan, lengths)?;
                 }
-                /* A code the reader ran off the end of is a code whose tail
-                came out of the zeros past the chunk rather than the file.
-                Building it would succeed on lengths nobody wrote, so the
-                overrun is the error, not whatever the table came out as.
-                libwebp's `ok = ok && !br->eos` in `ReadHuffmanCode`. */
+                /* Match libwebp: reject Huffman tables read past the chunk. */
                 if gb.is_eos(buf) {
                     crate::log::error("prefix code runs past the end of the data");
                     return Err(Error::InvalidData);
@@ -718,12 +561,6 @@ impl Decoder {
         Ok(())
     }
 
-    /// The pixel loop, over whichever image the role names.
-    ///
-    /// The picture and the prefix codes come from different places depending on
-    /// the role — the ARGB picture is one the caller keeps, a sub-image's is
-    /// owned by its own context — so the pieces are split out here and the loop
-    /// itself takes them as arguments.
     fn decode_pixels(
         &mut self,
         role: usize,
@@ -796,8 +633,6 @@ impl Decoder {
         })
     }
 
-    /// Reads everything up to the pixels and returns the size the picture the
-    /// caller is about to allocate has to be.
     fn read_frame_header(
         &mut self,
         buf: &[u8],
@@ -864,12 +699,6 @@ impl Decoder {
         Ok((w, h))
     }
 
-    /// Whether the frame just read is one an eight-bit decode can take.
-    ///
-    /// A palette and nothing else, no colour cache, and every meta prefix code
-    /// carrying a single symbol for red, blue and alpha — so the pixel loop
-    /// would read the green tree and put the other three back unchanged.
-    /// `Is8bOptimizable` in libwebp, whose conditions these are.
     fn alpha_is_8b(&self) -> bool {
         self.nb_transforms == 1
             && self.transforms[0] == Transform::ColorIndexing
@@ -880,7 +709,6 @@ impl Decoder {
                 .all(|hg| hg.trivial_literal)
     }
 
-    /// Decodes a whole frame in one call.
     pub fn decode_frame(
         &mut self,
         target: Target,
@@ -893,8 +721,6 @@ impl Decoder {
         let ret = self.decode_frame_inner(target, buf, is_alpha_chunk, alpha_dst);
 
         if self.alpha_dst_used {
-            /* Nothing reads the canvas once the plane is out, and the one an
-            earlier frame left behind is not this frame's picture. */
             self.alpha_argb.release();
         } else {
             let pic = self.picture_mut(ROLE_ARGB, target);
@@ -927,13 +753,6 @@ impl Decoder {
         self.apply_transforms(target, alpha_dst)
     }
 
-    /// The eight-bit alpha decode: one palette index per byte, then the palette
-    /// looked up straight into the caller's plane.
-    ///
-    /// This is the whole point of [`Self::alpha_is_8b`]. The four-byte canvas
-    /// is never allocated — for a 600 by 600 frame that is 1.4 MB the decoder
-    /// does not hold at its peak — and the pass that pulled green back out of
-    /// it is gone with it.
     fn decode_alpha_8b(&mut self, buf: &[u8], dst: AlphaDst<'_>) -> Result<()> {
         let width = self.reduced_width.max(0) as usize;
         let height = self.height;
@@ -1125,12 +944,10 @@ impl Decoder {
     }
 }
 
-/// `(v + (1 << s) - 1) >> s`, which is how many blocks of `1 << s` cover `v`.
 fn ceil_shift(v: i32, s: u32) -> i32 {
     (v + (1 << s) - 1) >> s
 }
 
-/// The resumable still-image path.
 impl Decoder {
     fn still_alloc(&mut self) -> Result<()> {
         self.out.alloc(self.width, self.height)?;
@@ -1148,8 +965,6 @@ impl Decoder {
         Ok(())
     }
 
-    /// Decodes as much of a still lossless image as the buffered bytes allow.
-    /// [`Status::Done`] means the whole image is out.
     pub fn still_step(
         &mut self,
         payload: &[u8],
@@ -1213,7 +1028,6 @@ impl Decoder {
             return Ok(Status::NeedMore);
         }
 
-        /* Nobody looked, so the image can be transformed where it lies. */
         let ret = if self.peeked {
             Ok(())
         } else {
@@ -1228,14 +1042,6 @@ impl Decoder {
         ret.map(|()| Status::Done)
     }
 
-    /// Switches the in-progress image over to handing rows out as they finish,
-    /// which needs somewhere to put them: backward references keep reading the
-    /// untransformed pixels for as long as the image is being decoded.
-    ///
-    /// Does nothing when no image is in progress. Until a frame header has been
-    /// read there are no rows to hand out and no dimensions to size the staging
-    /// picture by — only the canvas, which is what the container promised
-    /// rather than what the image turns out to be.
     pub fn still_peek(&mut self) -> Result<()> {
         if !self.active {
             return Ok(());
@@ -1254,13 +1060,6 @@ impl Decoder {
         Ok(())
     }
 
-    /// Copies the rows the pixel loop has finished into the staging picture and
-    /// transforms them there.
-    ///
-    /// The predictor needs the row above the batch as *it* left it, not as the
-    /// transforms that follow it left it, so that one row is kept in
-    /// [`Self::scratch`] and the batch's first row is predicted alongside it
-    /// before the rest run in place.
     fn transform_rows(&mut self, y0: i32, y1: i32) -> Result<()> {
         let Decoder {
             dsp,
@@ -1365,12 +1164,6 @@ impl Decoder {
     }
 }
 
-/// One batch of predictor rows.
-///
-/// `scratch` holds the row above the batch in its first `width` entries; the
-/// batch's first row is copied in behind it so the two are adjacent, predicted
-/// there, and copied back. Everything after that row has the row it needs
-/// immediately above it in `plane` already.
 #[allow(clippy::too_many_arguments)]
 fn predict_batch(
     dsp: &Vp8lDsp,
@@ -1438,28 +1231,15 @@ fn predict_batch(
 mod tests {
     use super::*;
 
-    /// A 6706 x 10809 frame header, which is what the fuzzer found: a canvas
-    /// far smaller than the image, so a row copied at the frame's width runs
-    /// off the end of a staging picture sized by the canvas.
     const WIDE: &[u8] = &[
         0x2f, 0x31, 0x1a, 0x8e, 0x1a, 0x8e, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         0xff, 0xff, 0xff, 0xff, 0x40, 0x3e, 0x3e, 0x3e, 0x2f, 0x03,
     ];
 
-    /// Both tests below decode [`WIDE`], and the gap between the image and the
-    /// canvas is the whole point of it: the image has to be larger than the
-    /// canvas can hold for the row copy to run off the end, so there is no
-    /// small input that reproduces either bug. Seventy million pixels is a
-    /// fraction of a second compiled and hours interpreted, so miri sits these
-    /// two out — the paths they cover are pointer-free either way.
     fn too_big_for_miri() -> bool {
         cfg!(miri)
     }
 
-    /// The rows a previous image reached, and the width they were reached at,
-    /// must not survive into the next one: a `still_peek` before the header of
-    /// the second has been read would otherwise transform the first's progress
-    /// through the second's canvas.
     #[test]
     fn a_reset_forgets_how_far_the_last_image_got() {
         if too_big_for_miri() {
@@ -1479,13 +1259,6 @@ mod tests {
         assert_eq!(dec.reduced_width, 0);
     }
 
-    /// Peeking is what a caller does between two steps; with no image in
-    /// progress there is nothing to hand out, and the canvas is not the size of
-    /// whatever was decoded last.
-    ///
-    /// The decode is not reset first, so the width it finished at is still
-    /// there to be read: this is the guard on its own, not [`Decoder::reset`]
-    /// clearing the ground underneath it.
     #[test]
     fn peeking_with_no_image_in_progress_does_nothing() {
         if too_big_for_miri() {
@@ -1502,9 +1275,6 @@ mod tests {
         dec.still_peek().unwrap();
     }
 
-    /// The same guard from the other side: a step that stops short of the
-    /// header has not activated either, so the peek between the two does
-    /// nothing and the second step still completes.
     #[test]
     fn peeking_before_a_frame_header_does_nothing() {
         if too_big_for_miri() {
@@ -1515,8 +1285,6 @@ mod tests {
 
         dec.set_canvas(39, 16);
 
-        /* Short of the sixteen bytes `still_step` wants before it will read a
-        header, so it returns without activating. */
         assert_eq!(
             dec.still_step(&WIDE[..11], WIDE.len(), false),
             Ok(Status::NeedMore)

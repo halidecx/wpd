@@ -1,31 +1,9 @@
-//! The RIFF container: walking the chunk list of a file that may still be
-//! arriving, without decoding any of it.
-//!
-//! The scanner works in stream offsets rather than pointers, so the buffer it
-//! is handed can move, grow or lose its head between calls. [`Scan::headers`]
-//! takes the window that is currently buffered along with the stream offset it
-//! starts at, and resumes from wherever the last call stopped, which is what
-//! keeps feeding a stream one piece at a time linear rather than quadratic.
-//!
-//! Nothing here indexes without a bound: every read goes through the helpers
-//! below, which return zero past the end of the window. The C could prove its
-//! reads in range by construction; a Rust bounds check that fires on damaged
-//! input would be a denial of service the C did not have, so the reads simply
-//! cannot leave the slice. That is still the rule, and it is still what makes
-//! the scanner safe to run on a stranger's bytes -- `wpd-capi`'s guard turns a
-//! panic into a status rather than the end of the process, but a guard is a
-//! backstop for a defect, not a licence to index without looking.
-
 use crate::bits;
 use crate::error::{Error, Result};
 use crate::log;
 
-/// ICCP, EXIF and XMP, in `WPDMetadata` bit order.
 pub const METADATA_NB: usize = 3;
 
-/// Far above any animation a player would sit through, and low enough that the
-/// table cannot be made to eat memory by a file that is all ANMF headers. A
-/// file past it still decodes; the table simply stops growing.
 pub const MAX_FRAMES: usize = 1 << 20;
 
 pub const ANMF_FLAG_DISPOSE: u8 = 1 << 0;
@@ -37,16 +15,11 @@ const VP8X_FLAG_EXIF: u8 = 0x08;
 const VP8X_FLAG_ICCP: u8 = 0x20;
 const VP8X_FLAG_ALPHA: u8 = 0x10;
 
-/// The five flags the format defines. libwebp's `ALL_VALID_FLAGS`; anything
-/// else in the byte is reserved, and a file that sets one is rejected rather
-/// than read as if the bit meant nothing.
 const VP8X_FLAGS_VALID: u8 =
     VP8X_FLAG_ANIM | VP8X_FLAG_XMP | VP8X_FLAG_EXIF | VP8X_FLAG_ALPHA | VP8X_FLAG_ICCP;
 
-/// The only payload length a VP8X chunk may declare.
 const VP8X_CHUNK_SIZE: u32 = 10;
 
-/// The only payload length an ANIM chunk may be shorter than.
 const ANIM_CHUNK_SIZE: u32 = 6;
 
 const TAG_RIFF: u32 = u32::from_le_bytes(*b"RIFF");
@@ -58,7 +31,6 @@ pub(crate) const TAG_ALPH: u32 = u32::from_le_bytes(*b"ALPH");
 const TAG_ANIM: u32 = u32::from_le_bytes(*b"ANIM");
 pub(crate) const TAG_ANMF: u32 = u32::from_le_bytes(*b"ANMF");
 
-/// The order of the `WPDMetadata` bits, so a bit indexes these tables.
 const META_TAG: [u32; METADATA_NB] = [
     u32::from_le_bytes(*b"ICCP"),
     u32::from_le_bytes(*b"EXIF"),
@@ -100,7 +72,6 @@ pub enum Blend {
     None,
 }
 
-/// Which of the three shapes a file with no RIFF wrapper turned out to be.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Raw {
     #[default]
@@ -110,7 +81,6 @@ pub enum Raw {
     AlphaAndLossy,
 }
 
-/// One ANMF header, as the scanner reads it without decoding anything.
 #[derive(Clone, Copy, Default)]
 pub struct FrameEntry {
     pub pos_x: i32,
@@ -124,16 +94,12 @@ pub struct FrameEntry {
     pub complete: bool,
 }
 
-/// What a scan found. The scanner's own state — where it stopped, the frame
-/// table, how far into an ANMF the alpha walk has gone — stays in [`Scan`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Info {
     pub end: usize,
     pub width: i32,
     pub height: i32,
     pub has_alpha: bool,
-    /// Alpha the image chunks themselves carry, without the VP8X declaration
-    /// folded in, which is what a decoded frame reports.
     pub image_has_alpha: bool,
     pub animation: bool,
     pub images: i32,
@@ -158,28 +124,13 @@ pub struct Scan {
     riff_end: u64,
     info: Info,
     vp8x: bool,
-    /// What the VP8X flag byte declared, so the chunks that follow can be
-    /// checked against it: an animation's frames all live in ANMFs, a still's
-    /// do not, and the two shapes are not allowed to mix.
     vp8x_flags: u8,
     anim_chunk: bool,
-    /// Whether a still's own chunk has been seen at the top level, so that an
-    /// ANIM arriving afterwards is refused the way one arriving before it
-    /// refuses the still. The two orderings are the same broken file.
     still_chunk: bool,
-    /// The frame table, built only when `collect_frames` asks for it, so that
-    /// reading a file's information keeps its promise not to allocate.
-    /// `nb_frames` counts the frames whose payload is all here; a frame whose
-    /// ANMF header has arrived but whose payload has not occupies the slot
-    /// past them and is rebuilt on every rescan until it completes.
     collect_frames: bool,
     partial_frame: bool,
     frames_capped: bool,
     nb_frames: usize,
-    /// How far the alpha scan has walked into the sub-chunk list starting at
-    /// `anmf_scan_at`, so an ANMF arriving in pieces is not re-walked from its
-    /// first sub-chunk on every delivery. The offset is never zero, so a scan
-    /// that has moved on to another ANMF invalidates this by itself.
     anmf_scan_at: usize,
     anmf_scan_pos: usize,
     anmf_scan_done: bool,
@@ -192,8 +143,6 @@ fn byte(b: &[u8], at: usize) -> u8 {
     b.get(at).copied().unwrap_or(0)
 }
 
-/* A header walk reads fields the stream may not have reached, so every read
-here is padded rather than bounds-checked at the call site. */
 fn rl16(b: &[u8], at: usize) -> u32 {
     bits::rl16(&bits::quad(b, at))
 }
@@ -206,7 +155,6 @@ fn rl32(b: &[u8], at: usize) -> u32 {
     bits::rl32(&bits::quad(b, at))
 }
 
-/// `len` bytes of `b` from `from`, clipped to what is there.
 fn window(b: &[u8], from: usize, len: usize) -> &[u8] {
     let from = from.min(b.len());
     let to = from.saturating_add(len).min(b.len());
@@ -219,8 +167,6 @@ impl Scan {
         Self::default()
     }
 
-    /// Puts the scanner back to before any file, keeping the frame table's
-    /// allocation, which the next file sizes on use and reuses.
     pub fn reset(&mut self) {
         let mut frames = core::mem::take(&mut self.frames);
 
@@ -235,9 +181,6 @@ impl Scan {
         &self.info
     }
 
-    /// The `index`th ANMF header, or `None` when there is no such frame. A
-    /// frame whose header has arrived but whose payload has not is the last
-    /// one and reports itself incomplete.
     pub fn frame(&self, index: usize) -> Option<&FrameEntry> {
         if index >= self.nb_frames + usize::from(self.partial_frame) {
             return None;
@@ -282,13 +225,6 @@ impl Scan {
         }
     }
 
-    /// Walks an ANMF's sub-chunks for the one frame field the 16-byte ANMF
-    /// header does not carry, and reports what it made of the alpha. Stops at
-    /// the image chunk either way, and says nothing when the payload has not
-    /// all arrived. Resumes where the last delivery of the same ANMF left off,
-    /// so a frame that arrives in many pieces costs one walk of its sub-chunks
-    /// in total rather than one per piece; only a sub-chunk stepped over whole
-    /// advances that mark.
     fn anmf_alpha(&mut self, p: &[u8]) -> bool {
         let at = self.pos + 24;
 
@@ -334,14 +270,6 @@ impl Scan {
         false
     }
 
-    /// Records the ANMF whose payload starts `p`, of which only what is
-    /// buffered is here. `complete` says whether the scan is stepping past the
-    /// whole padded chunk, which is the only thing that may promote the entry:
-    /// a frame still arriving takes the slot past the complete ones and is
-    /// rewritten by the next scan, so the table never double-counts. Deriving
-    /// it from the buffered length instead would count an odd-sized chunk
-    /// twice, once when every byte but its pad has landed and again once the
-    /// scan finally walks over it.
     fn anmf(&mut self, p: &[u8], complete: bool) -> Result<()> {
         if p.len() < 16 {
             return Ok(());
@@ -392,10 +320,6 @@ impl Scan {
         Ok(())
     }
 
-    /// Turns away a chunk that belongs to a still in a file that has said it
-    /// is an animation: every frame of one lives inside an ANMF, so an image
-    /// or alpha chunk at the top level is a file that cannot be read two ways
-    /// at once.
     fn still_chunk_allowed(&mut self) -> Result<()> {
         if self.vp8x_flags & VP8X_FLAG_ANIM != 0 || self.anim_chunk {
             log::error("image chunk outside a frame of an animation");
@@ -405,8 +329,6 @@ impl Scan {
         Ok(())
     }
 
-    /// Checks one ANMF's rectangle against the canvas, so a frame table never
-    /// reports a frame that does not fit. libwebp's `CheckFrameBounds`.
     fn frame_bounds(&self, p: &[u8]) -> Result<()> {
         if p.len() < 16 {
             log::error("ANMF chunk is too short");
@@ -453,9 +375,6 @@ impl Scan {
             }
             self.still_header(TAG_VP8L, data, size);
         } else if size >= 6 && data[3] == 0x9d && data[4] == 0x01 && data[5] == 0x2a {
-            /* A bare stream declares no payload length, so until the caller
-            says the stream has ended the keyframe header's own first partition
-            is the only length to measure it against. */
             self.info.raw = Raw::Lossy;
             self.info.raw_image_offset = 0;
             self.info.raw_image_size = size;
@@ -530,11 +449,6 @@ impl Scan {
         }
     }
 
-    /// Walks the chunk list without decoding anything, so it is safe to run on
-    /// the caller's memory before the file is copied. `base` is the stream
-    /// offset `buf` starts at, once earlier bytes have been dropped;
-    /// `partial` says more input may still be coming, and `collect_frames`
-    /// asks for the ANMF table, which is the only thing here that allocates.
     pub fn headers(
         &mut self,
         buf: &[u8],
@@ -605,8 +519,6 @@ impl Scan {
 
             match tag {
                 TAG_VP8X => {
-                    /* Ten bytes exactly: `WebPGetFeatures` refuses any other
-                    length, and an encoder has never written one. */
                     if self.vp8x || size != VP8X_CHUNK_SIZE {
                         log::error("invalid VP8X chunk");
                         return Err(Error::InvalidData);
@@ -647,15 +559,11 @@ impl Scan {
                         log::error("ANIM chunk is too short");
                         return Err(Error::InvalidData);
                     }
-                    /* The other half of `still_chunk_allowed`: a file that has
-                    already put an image or its alpha at the top level is a
-                    still, and cannot turn into an animation here. */
                     if self.still_chunk {
                         log::error("ANIM chunk after a still image chunk");
                         return Err(Error::InvalidData);
                     }
-                    /* A second ANIM says nothing the first did not; libwebp
-                    keeps the first and steps over the rest. */
+                    /* Match libwebp: keep the first ANIM and skip later ones. */
                     if !self.anim_chunk {
                         self.anim_chunk = true;
                         self.info.animation = true;
@@ -668,9 +576,7 @@ impl Scan {
                         log::error("ANMF chunk before the ANIM header");
                         return Err(Error::InvalidData);
                     }
-                    /* Without the animation flag a file may still carry one
-                    ANMF, and it has to be the whole canvas -- libwebp's
-                    `CheckFrameBounds` with `exact` set. */
+                    /* Match libwebp: a non-animation ANMF must cover the canvas. */
                     if self.vp8x_flags & VP8X_FLAG_ANIM == 0
                         && self.info.frame_count > 0
                     {
@@ -704,9 +610,7 @@ impl Scan {
                         if self.vp8x && width != 0 && height != 0 {
                             self.info.width = width;
                             self.info.height = height;
-                            /* The canvas a still declares twice has to agree
-                            with itself. libwebp calls the disagreement a
-                            bitstream error rather than picking one. */
+                            /* Match libwebp: conflicting still dimensions are invalid. */
                             if image_w != 0
                                 && image_h != 0
                                 && (image_w != width || image_h != height)
@@ -736,9 +640,7 @@ impl Scan {
             self.pos += 8 + padded;
         }
 
-        /* An animation may mix lossy and lossless frames, which libwebp
-        reports as an undefined coding; only the first still's coding is
-        meaningful. */
+        /* Match libwebp: mixed animation coding is undefined. */
         if self.info.animation {
             self.info.coding = Coding::Unknown;
         } else {
@@ -752,8 +654,6 @@ impl Scan {
                 Error::InvalidData
             });
         }
-        /* Only once the file has ended: until then the ANIM chunk may still
-        be on its way. */
         if !partial
             && !self.info.truncated
             && self.vp8x_flags & VP8X_FLAG_ANIM != 0
@@ -766,9 +666,6 @@ impl Scan {
     }
 }
 
-/// Reads what a file declares about itself without decoding it, and without
-/// allocating: the frame table is what costs memory, and this never asks for
-/// one.
 pub fn get_info(data: &[u8]) -> Result<Info> {
     let mut scan = Scan::new();
 
@@ -802,7 +699,6 @@ mod tests {
         out
     }
 
-    /// A VP8L frame header for `w` by `h`, with no pixel data behind it.
     fn vp8l_header(w: u32, h: u32, alpha: bool) -> Vec<u8> {
         let bits = (w - 1) | (h - 1) << 14 | u32::from(alpha) << 28;
         let mut body = vec![0x2f];
@@ -841,8 +737,6 @@ mod tests {
         let info = get_info(&riff(&payload)).unwrap();
 
         assert_eq!((info.width, info.height), (100, 50));
-        /* The VP8X alpha flag is the one WPDImageInfo reports, but a frame
-        still says only what its own header carried. */
         assert!(info.has_alpha);
         assert!(!info.image_has_alpha);
     }
@@ -880,13 +774,11 @@ mod tests {
 
     #[test]
     fn the_animation_flag_and_the_anim_chunk_have_to_agree() {
-        /* Flagged as an animation, but the frames are laid out as a still. */
         let mut payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
 
         payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
         assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
 
-        /* Flagged as an animation with nothing to animate. */
         let payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
         let mut scan = Scan::new();
 
@@ -895,7 +787,6 @@ mod tests {
             Err(Error::InvalidData)
         );
 
-        /* A frame before the header that says frames are coming. */
         let mut payload = chunk(b"VP8X", &[0x02, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
         let mut anmf = vec![0u8; 16];
 
@@ -908,16 +799,12 @@ mod tests {
 
     #[test]
     fn an_anim_chunk_after_a_still_is_refused() {
-        /* No animation flag, a still at the top level, and then an ANIM: the
-        same file the reverse ordering already refuses. */
         let mut payload = chunk(b"VP8X", &[0x00, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
 
         payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(16, 16, false)));
         payload.extend_from_slice(&chunk(b"ANIM", &[0, 0, 0, 0xff, 0, 0]));
         assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
 
-        /* And with a whole-canvas ANMF behind it, which the one-frame-without
-        -the-flag allowance would otherwise let through. */
         let mut anmf = vec![0u8; 16];
 
         anmf[6] = 15;
@@ -926,7 +813,6 @@ mod tests {
         payload.extend_from_slice(&chunk(b"ANMF", &anmf));
         assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
 
-        /* A top-level ALPH is as much a still's chunk as the image is. */
         let mut payload = chunk(b"VP8X", &[0x10, 0, 0, 0, 15, 0, 0, 15, 0, 0]);
 
         payload.extend_from_slice(&chunk(b"ALPH", &[0, 0, 0, 0]));
@@ -942,8 +828,6 @@ mod tests {
 
         let mut anmf = vec![0u8; 16];
 
-        /* Eight pixels across, starting eight in, on a canvas sixteen wide is
-        exact; one more of either and it hangs off. */
         anmf[0] = 4;
         anmf[6] = 8;
         anmf[9] = 15;
@@ -1010,8 +894,6 @@ mod tests {
         payload[5] = 0xff;
         let file = riff(&payload);
 
-        /* A stream may still be carrying the rest of it, so the header that
-        did arrive is read; a file that has ended cannot be completed. */
         let mut scan = Scan::new();
 
         scan.headers(&file, 0, true, true).unwrap();
@@ -1036,8 +918,6 @@ mod tests {
         for split in 0..file.len() {
             let _ = get_info(&file[..split]);
         }
-        /* And with every single byte corrupted, since a size field that says
-        far more than is there is the shape that reaches furthest. */
         for i in 0..file.len() {
             let saved = file[i];
 

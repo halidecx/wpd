@@ -396,14 +396,12 @@ static void fill_smooth_buffer(uint8_t *buf, int spread) {
 static void check_loopfilter_simple_mb(VP8DSPContext *d) {
     LOCAL_ALIGNED_16(uint8_t, buf0, [16 * MB_STRIDE]);
     LOCAL_ALIGNED_16(uint8_t, buf1, [16 * MB_STRIDE]);
-    // mbedge_lim, bedge_lim; 193 is the largest limit a stream can produce
     static const int lims[][2] = {
         {20, 12}, {193, 63}, {0, 20}, {40, 0}, {24, 24}};
     int dir, i;
     declare_func(void, uint8_t *, ptrdiff_t, int, int);
 
     for (dir = 0; dir < 2; dir++) {
-        // the v filters load whole rows with mova, so dst has to stay aligned
         int      midoff = dir ? 2 * MB_STRIDE + 16 : 8;
         uint8_t *dst0 = buf0 + midoff, *dst1 = buf1 + midoff;
         void (*func)(uint8_t *, ptrdiff_t, int, int) = dir
@@ -412,7 +410,6 @@ static void check_loopfilter_simple_mb(VP8DSPContext *d) {
 
         if (check_func(func, "vp8_loop_filter_simple_mb_%s", dir ? "v" : "h")) {
             for (i = 0; i < 5; i++) {
-                // low contrast, so most edges are actually filtered
                 fill_smooth_buffer(buf0, 8);
                 memcpy(buf1, buf0, 16 * MB_STRIDE);
                 call_ref(dst0, MB_STRIDE, lims[i][0], lims[i][1]);
@@ -420,7 +417,6 @@ static void check_loopfilter_simple_mb(VP8DSPContext *d) {
                 if (memcmp(buf0, buf1, 16 * MB_STRIDE))
                     fail();
 
-                // full range, to exercise the limit test and the clamps
                 fill_loopfilter_buffers(buf0, MB_STRIDE, MB_STRIDE, 16);
                 memcpy(buf1, buf0, 16 * MB_STRIDE);
                 call_ref(dst0, MB_STRIDE, lims[i][0], lims[i][1]);

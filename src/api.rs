@@ -1,23 +1,3 @@
-//! The safe Rust API.
-//!
-//! Every entry point `include/wpd.h` declares is reachable from here without
-//! writing `unsafe`, and two things the C ABI cannot say are said in the type
-//! system instead:
-//!
-//! - **A picture borrows the decoder that produced it.** `wpd_decoder_next_frame`
-//!   hands out pointers into memory the next call may reuse; [`Picture`] holds
-//!   the borrow, so asking for the next frame while the previous one is still
-//!   alive does not compile.
-//! - **Opening without a copy borrows the input.** `wpd_decoder_open_borrowed`
-//!   promises the caller keeps the bytes alive for the decoder's whole life;
-//!   [`Decoder::open_borrowed`] makes that a lifetime.
-//!
-//! A picture is a [`Handout`] and nothing else, so a row is a slice the
-//! compiler has bounded rather than a pointer and a stride that may run
-//! backwards. That is the whole difference between this and the C ABI: the
-//! negative stride the header promises exists only where a `WPDFrame` is
-//! built, and a flip here is the order the rows come out in.
-
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
@@ -31,8 +11,6 @@ pub use crate::error::{Error, Result};
 pub use crate::info::{FrameInfo, ImageInfo};
 pub use crate::options::Options;
 
-/// What an animation hands out: the composited canvas, or each sub-frame on
-/// its own at its own position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Animation {
     #[default]
@@ -40,7 +18,6 @@ pub enum Animation {
     Subframe,
 }
 
-/// Which metadata chunk to ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Metadata {
     Iccp,
@@ -48,18 +25,11 @@ pub enum Metadata {
     Xmp,
 }
 
-/// One decoded picture, borrowed from the decoder that produced it.
-///
-/// The next decode reuses this memory, which is why the borrow is held: the
-/// C ABI hands out the same pointers and can only ask the caller to be
-/// careful.
 pub struct Picture<'a> {
     out: Handout<'a>,
 }
 
 impl<'a> Picture<'a> {
-    /// The pixels, or nothing when the decode produced no picture, which is
-    /// what a partial frame with no finished rows has.
     fn pixels(&self) -> Option<&Frame<'a>> {
         self.out.frame()
     }
@@ -76,17 +46,14 @@ impl<'a> Picture<'a> {
         self.out.format
     }
 
-    /// How long this frame is shown, in milliseconds, or zero for a still.
     pub fn duration(&self) -> i32 {
         self.out.duration
     }
 
-    /// When this frame is shown, in milliseconds from the start.
     pub fn timestamp(&self) -> i64 {
         self.out.timestamp
     }
 
-    /// Where a sub-frame lands on the canvas, in [`Animation::Subframe`] mode.
     pub fn position(&self) -> (i32, i32) {
         (self.out.pos_x, self.out.pos_y)
     }
@@ -95,33 +62,22 @@ impl<'a> Picture<'a> {
         self.out.has_alpha
     }
 
-    /// Whether the canvas is cleared to the background colour behind this
-    /// frame before the next one is drawn.
     pub fn dispose_to_background(&self) -> bool {
         self.out.dispose_to_background
     }
 
-    /// Whether this frame is alpha-blended over what is already there, as
-    /// opposed to replacing it.
     pub fn blend(&self) -> bool {
-        self.out.blend
+        !self.out.no_blend
     }
 
-    /// How many planes this picture's format hands out.
     pub fn planes(&self) -> usize {
         self.out.planes()
     }
 
-    /// How many rows `plane` has, which the chroma planes halve.
     pub fn rows(&self, plane: usize) -> i32 {
         self.pixels().map_or(0, |img| img.rows(plane))
     }
 
-    /// Row `y` of `plane`, top row first however the picture is stored.
-    ///
-    /// # Panics
-    ///
-    /// If `plane` or `y` is outside the picture.
     pub fn row(&self, plane: usize, y: i32) -> &'a [u8] {
         assert!(plane < self.planes(), "no such plane");
 
@@ -131,24 +87,13 @@ impl<'a> Picture<'a> {
         img.row(plane, y)
     }
 
-    /// Every row of `plane`, in order.
     pub fn rows_of(&self, plane: usize) -> impl Iterator<Item = &'a [u8]> + '_ {
         (0..self.rows(plane)).map(move |y| self.row(plane, y))
     }
 }
 
-/// A WebP decoder.
-///
-/// The lifetime is the input's: it is `'static` for a decoder that owns its
-/// bytes, and the input's own for one opened with [`Decoder::open_borrowed`].
 pub struct Decoder<'a> {
     inner: Box<driver::Decoder<'a>>,
-    /// What a decode that failed while it was producing a picture was doing.
-    ///
-    /// The decoder cannot write this down itself: the picture it was asked
-    /// for borrows it, and the borrow outlives the call whether or not the
-    /// call succeeded. So the two entry points that hand out a picture keep
-    /// their own account, and [`Decoder::error`] prefers it.
     failed: Option<String>,
     input: PhantomData<&'a [u8]>,
 }
@@ -245,19 +190,11 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// The decoder, with anything this side was keeping about the last
-    /// failure cleared: from here on its own account is the current one.
-    ///
-    /// Reaching the decoder through this is what keeps the two from
-    /// disagreeing about which failure was last.
     fn driver(&mut self) -> &mut driver::Decoder<'a> {
         self.failed = None;
         &mut self.inner
     }
 
-    /// The format frames come out in. Leaving it unset hands out whatever the
-    /// file codes natively, which is planar for a lossy frame and ARGB for a
-    /// lossless one.
     pub fn set_format(&mut self, format: Format) -> Result<()> {
         self.driver().set_output_format(format as i32)
     }
@@ -273,18 +210,14 @@ impl<'a> Decoder<'a> {
         self.driver().set_core_options(options)
     }
 
-    /// Opens a file the decoder copies, so nothing has to outlive the call.
     pub fn open(&mut self, data: &[u8]) -> Result<()> {
         self.driver().open(data)
     }
 
-    /// Opens a file the decoder reads in place. The bytes must outlive the
-    /// decoder, which is what the lifetime says.
     pub fn open_borrowed(&mut self, data: &'a [u8]) -> Result<()> {
         self.driver().open_borrowed(data)
     }
 
-    /// Starts a stream the caller appends to as bytes arrive.
     pub fn open_stream(&mut self) -> Result<()> {
         self.driver().open_stream()
     }
@@ -293,10 +226,6 @@ impl<'a> Decoder<'a> {
         self.driver().append(chunk)
     }
 
-    /// Takes a longer prefix of the same file without copying it. Call
-    /// [`UpdatedDecoder::into_buffer`], extend that buffer and call
-    /// [`UpdateBuffer::update`] to supply the next prefix; dropping the buffer
-    /// also reattaches it before releasing the decoder.
     pub fn update(&mut self, data: Vec<u8>) -> Result<UpdatedDecoder<'_, 'a>> {
         self.driver().update_owned(data)?;
         Ok(UpdatedDecoder { decoder: self })
@@ -314,7 +243,6 @@ impl<'a> Decoder<'a> {
         self.driver().frame_entry(index)
     }
 
-    /// The named metadata chunk, or none when the file carries no such chunk.
     pub fn metadata(&mut self, kind: Metadata) -> Option<&[u8]> {
         let kind = match kind {
             Metadata::Iccp => 1,
@@ -325,16 +253,10 @@ impl<'a> Decoder<'a> {
         self.driver().metadata(kind).ok().flatten()
     }
 
-    /// Returns to the first frame. A stream that was appended to cannot be
-    /// rewound, because the bytes it has read are gone.
     pub fn rewind(&mut self) -> Result<()> {
         self.driver().rewind()
     }
 
-    /// The next frame, or none when the file is finished or the stream has
-    /// not buffered enough of it yet.
-    ///
-    /// The picture borrows the decoder: the next call reuses its memory.
     pub fn next_frame(&mut self) -> Result<Option<Picture<'_>>> {
         let mut out = Handout::default();
 
@@ -349,11 +271,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// As much of the frame in progress as has been decoded, and how many of
-    /// its rows are valid.
-    ///
-    /// Rows past the count hold whatever the buffer held before; a caller that
-    /// wants only finished pixels stops there.
     pub fn partial_frame(&mut self) -> Result<(Picture<'_>, i32)> {
         let mut out = Handout::default();
         let mut rows = 0;
@@ -368,7 +285,6 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// The last failure's message, which says more than the status does.
     pub fn error(&self) -> &str {
         match &self.failed {
             Some(message) => message,
@@ -377,18 +293,14 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// The library's version, as `wpd_version_string` reports it.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Restricts which instruction sets the DSP tables dispatch to, which is what
-/// the test harnesses use to compare the assembly against the fallbacks.
 pub fn set_cpu_flags_mask(mask: u32) {
     crate::cpu::set_mask(mask);
 }
 
-/// What a file says about itself, without opening a decoder for it.
 pub fn info(data: &[u8]) -> Result<ImageInfo> {
     let scanned = crate::container::get_info(data)?;
 
@@ -409,8 +321,6 @@ pub fn info(data: &[u8]) -> Result<ImageInfo> {
 mod tests {
     use super::*;
 
-    /// A one-pixel lossless file, which is the smallest thing that exercises
-    /// the whole path from open to pixels.
     const ONE_PIXEL: &[u8] = &[
         b'R', b'I', b'F', b'F', 0x1a, 0, 0, 0, b'W', b'E', b'B', b'P', b'V', b'P',
         b'8', b'L', 0x0e, 0, 0, 0, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x07, 0x10, 0x11,
@@ -440,8 +350,6 @@ mod tests {
         assert!(d.next_frame().unwrap().is_none());
     }
 
-    /// A complete input that stops inside a chunk is refused at the open,
-    /// which is what tells it apart from a stream that has not caught up.
     #[test]
     fn a_truncated_file_is_refused_rather_than_panicking() {
         let mut d = Decoder::new();

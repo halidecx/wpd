@@ -1,15 +1,5 @@
-//! Where an animation's sub-frame lands on the canvas, and which parts of it
-//! are blended rather than copied.
-//!
-//! This is the compositor's geometry, which is all of it that does not touch a
-//! pixel: whether a frame stands on its own, and how libwebp's rule about
-//! blending only where the canvas can be non-transparent divides the frame
-//! into regions.
-
 use crate::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
 
-/// A rectangle in sub-frame coordinates, and whether it blends onto what is
-/// under it or overwrites it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Region {
     pub x: i32,
@@ -19,14 +9,6 @@ pub struct Region {
     pub blend: bool,
 }
 
-/// One frame's place in the animation, and what the frame before it left
-/// behind.
-///
-/// This is the whole of what an animation carries from frame to frame, which
-/// is why it is one struct: the decoder holds it, clears it as a unit when the
-/// animation restarts, and hands it to the compositor as a unit. Split into
-/// fields it was three lists of the same twelve names, each maintained by
-/// hand.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct AnimState {
     pub pos_x: i32,
@@ -43,7 +25,6 @@ pub struct AnimState {
     pub prev_key_frame: bool,
 }
 
-/// Where the frame goes and what the frame before it left behind.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Placement {
     pub canvas_width: i32,
@@ -56,12 +37,6 @@ impl Placement {
         width == self.canvas_width && height == self.canvas_height
     }
 
-    /// Whether this frame stands on its own, so whatever the canvas holds can
-    /// be discarded rather than blended with.
-    ///
-    /// Three ways to qualify: it is the first frame; it covers the canvas and
-    /// cannot show through; or the frame before it disposed everything this
-    /// one could have seen.
     pub fn is_key_frame(&self, width: i32, height: i32) -> bool {
         if self.frame.frame_index == 0 {
             return true;
@@ -80,19 +55,6 @@ impl Placement {
     }
 }
 
-/// How compositing this frame divides into regions, in the order they are
-/// applied.
-///
-/// libwebp overwrites the frame rectangle and alpha-blends only where the
-/// previous canvas can be non-transparent; blending elsewhere would round the
-/// colour down against pixels that are not there. When the frame before this
-/// one disposed its rectangle, the part of this frame outside that rectangle
-/// is the part with something under it, so the overlap is copied and the four
-/// strips around it are blended.
-///
-/// `chroma_aligned` is set for a planar canvas, whose 2x2 chroma blocks cannot
-/// be split down the middle: an overlap that does not land on even samples is
-/// given up on and the whole frame is blended instead.
 pub fn regions(
     place: &Placement,
     width: i32,
@@ -147,8 +109,6 @@ pub fn regions(
             out[0] = full;
             return 1;
         }
-        /* Only the extent is rounded, not the corner: that is what the C did,
-        and the region blitters truncate an odd corner to its chroma block. */
     }
 
     out[0] = Region {
@@ -193,7 +153,6 @@ pub fn regions(
 mod tests {
     use super::*;
 
-    /// A 64x64 canvas, so a test only has to say what the frame does on it.
     fn on_canvas(frame: AnimState) -> Placement {
         Placement {
             canvas_width: 64,
@@ -322,8 +281,6 @@ mod tests {
         assert!(out[0].blend);
     }
 
-    /// The four blended strips and the copied overlap have to tile the frame
-    /// exactly: every pixel once, none twice.
     #[test]
     fn the_five_regions_tile_the_frame_exactly() {
         let mut out = [Region {
@@ -362,8 +319,6 @@ mod tests {
         assert!(out[..4].iter().all(|r| r.blend));
     }
 
-    /// A planar canvas cannot split a 2x2 chroma block, so an overlap that
-    /// rounds away to nothing gives up and blends the frame whole.
     #[test]
     fn a_planar_overlap_too_thin_to_align_blends_instead() {
         let mut out = [Region {

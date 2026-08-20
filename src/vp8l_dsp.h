@@ -11,17 +11,11 @@ typedef void (*pred_add_func)(const uint32_t *in, const uint32_t *upper,
 typedef struct WPDLosslessDSP {
     pred_add_func pred_add[WPD_PRED_COUNT];
     void (*extract_green)(uint8_t *dst, const uint8_t *src, int num_pixels);
-    /* Replace each pixel by palette[green]; dst may alias src. */
     void (*map_color32)(uint8_t *dst, const uint8_t *src,
                         const uint32_t *palette, int num_pixels);
-    /* Alpha-blend an ARGB row of src over dst; alpha is the low byte. */
     void (*blend_row_argb)(uint8_t *dst, const uint8_t *src, int num_pixels);
-    /* The same, for rows whose alpha is already multiplied in. */
     void (*blend_row_argb_premult)(uint8_t *dst, const uint8_t *src,
                                    int num_pixels);
-    /* Undoes the cross-colour transform over one tile of a row. 'mult' packs
-       the tile's three signed multipliers at bytes three, two and one; dst may
-       alias src, and every caller has them equal. */
     void (*color_row)(uint32_t *dst, const uint32_t *src, int num_pixels,
                       uint32_t mult);
 } WPDLosslessDSP;

@@ -1,16 +1,3 @@
-//! The animation compositor's plumbing, as `src/anim.c` did it.
-//!
-//! The geometry — whether a frame stands on its own, and how it divides into
-//! blended and copied regions — is [`crate::anim`]. What is here brings the
-//! canvas into the format the next frame will be composited in, disposes what
-//! the frame before asked to be disposed, and walks the regions.
-//!
-//! The canvas is the decoder's own buffer and the frame being composited is
-//! one of the codecs' pictures, so both arrive as borrows taken from one
-//! destructuring of the decoder. That is what says they are not the same
-//! memory — except in the one case where they are, which
-//! `prepare_canvas` moves aside by name.
-
 use std::mem;
 
 use crate::anim::{regions, AnimState, Placement, Region};
@@ -31,11 +18,7 @@ use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::premultiply_argb_row;
 
-/// Everything the compositor asks the decoder about a frame's placement,
-/// gathered at the call.
 pub struct CPlacement {
-    /// The geometry, exactly as [`regions`] and [`Placement::is_key_frame`]
-    /// want it, rather than copied out field by field on the way in.
     pub geom: Placement,
     pub premultiply: bool,
     pub no_fancy_upsampling: bool,
@@ -43,14 +26,12 @@ pub struct CPlacement {
     pub clear_yuva: [u8; 4],
 }
 
-/// The tables the compositor dispatches through, and the canvas it paints on.
 pub struct CompositeTargets<'a> {
     pub ldsp: &'a Vp8lDsp,
     pub ydsp: &'a YuvDsp,
     pub canvas: &'a mut Buffer,
 }
 
-/// Paints `region` of `frame` onto the canvas at the frame's position.
 fn paint(
     pl: &CPlacement,
     ldsp: &Vp8lDsp,
@@ -81,7 +62,6 @@ fn paint(
     }
 }
 
-/// Fills a rectangle of the canvas with the background colour.
 fn clear_rect(
     pl: &CPlacement,
     canvas: &mut Buffer,
@@ -107,10 +87,6 @@ fn clear_rect(
     );
 }
 
-/// The canvas holds whichever alpha convention the output format asked for
-/// when its pixels were composited, and the caller may change that format
-/// between frames. Bring what is already there into the convention the next
-/// frame will be blended in, so the two are never mixed.
 fn reconcile_alpha(pl: &CPlacement, ydsp: &YuvDsp, canvas: &mut Buffer) {
     if !canvas.is_empty()
         && canvas.format == Some(Format::Argb)
@@ -167,8 +143,6 @@ fn prepare_canvas(
         }
     } else {
         if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
-            /* The canvas is its own source here, so it is moved aside whole
-            and the converted picture built into the slot it left. */
             let yuva = mem::take(canvas);
 
             convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
@@ -189,7 +163,6 @@ fn prepare_canvas(
     Ok(())
 }
 
-/// Composites one decoded sub-frame onto the canvas.
 pub fn anim_composite(
     pl: &CPlacement,
     ct: CompositeTargets<'_>,
@@ -199,8 +172,6 @@ pub fn anim_composite(
     let CompositeTargets { ldsp, ydsp, canvas } = ct;
 
     prepare_canvas(pl, ydsp, canvas, frame, target)?;
-    /* A frame coded without an alpha plane has nothing to blend with, and a
-    planar canvas cannot split the 2x2 chroma block an overlap would land in. */
     let has_alpha_plane = frame.format != Format::Yuv420p;
     let chroma_aligned = canvas.format != Some(Format::Argb);
     let mut out = [Region {
@@ -226,9 +197,6 @@ pub fn anim_composite(
 }
 
 impl<'a> Decoder<'a> {
-    /// The decoder's answers to what the compositor asks, gathered at the
-    /// call. `key_frame` is the one field it does not know yet:
-    /// [`Placement::is_key_frame`] decides it from the rest.
     fn placement(&self) -> CPlacement {
         CPlacement {
             geom: Placement {
@@ -239,17 +207,13 @@ impl<'a> Decoder<'a> {
                     ..self.anim
                 },
             },
-            premultiply: format_is_premultiplied(self.out_format),
+            premultiply: format_is_premultiplied(self.out_format.0),
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
-            clear_yuva: self.clear_yuva,
+            clear_yuva: self.clear_yuva.0,
         }
     }
 
-    /// Reads the ANMF header and latches what the frame declares.
-    ///
-    /// Returns the declared size, or nothing when the chunk is too short to
-    /// carry one.
     fn read_anmf_header(&mut self, header: &[u8]) -> Option<(i32, i32)> {
         if header.len() < 16 {
             return None;
@@ -261,10 +225,6 @@ impl<'a> Decoder<'a> {
         Some((rl24(&header[6..]) as i32 + 1, rl24(&header[9..]) as i32 + 1))
     }
 
-    /// Decodes one ANMF chunk and composites it onto the canvas.
-    ///
-    /// `base` is where the chunk's payload sits in the stream, which is what
-    /// the alpha offset is measured from.
     pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {
         let mut header = [0; 16];
         let available = self.input.chunk(base, size.min(16));
@@ -322,8 +282,6 @@ impl<'a> Decoder<'a> {
                         crate::log::error("invalid ALPHA chunk size");
                         return Err(Error::InvalidData);
                     }
-                    /* Alpha precedes the image it belongs to; behind it there
-                    is nothing left to apply it to. */
                     if sub.is_some() {
                         crate::log::error("ALPHA chunk after the image it belongs to");
                         return Err(Error::InvalidData);
@@ -383,7 +341,7 @@ impl<'a> Decoder<'a> {
         let mut target = Format::Yuva420p;
 
         if sub_format == argb
-            || format_is_packed(self.out_format)
+            || format_is_packed(self.out_format.0)
             || (!self.anim.key_frame
                 && !self.canvas.is_empty()
                 && self.canvas.format == Some(argb))
@@ -414,15 +372,10 @@ impl<'a> Decoder<'a> {
             which = Source::Converted;
         }
 
-        /* libwebp premultiplies each frame before compositing it, which is not
-        the same as premultiplying the finished canvas. Premultiplying only ever
-        goes with a packed output format, which forces the ARGB target above, so
-        'sub' is four-byte ARGB here whatever the frame coded as. A sub-frame
-        feeds no canvas, so a two-byte output premultiplies after the pack
-        instead, in the four-bit domain a still uses. */
-        if format_is_premultiplied(self.out_format)
+        /* libwebp premultiplies frames before compositing, so this uses ARGB. */
+        if format_is_premultiplied(self.out_format.0)
             && !(premultiply_after_pack(self.animation, self.anim_mode)
-                && format_bpp(self.out_format) == 2)
+                && format_bpp(self.out_format.0) == 2)
         {
             let Self {
                 ydsp,
@@ -431,9 +384,6 @@ impl<'a> Decoder<'a> {
                 lossless_out,
                 ..
             } = self;
-            /* The ARGB target rule above leaves only these two: a frame that
-            was converted, and a lossless one, which is written back into the
-            codec's own canvas as the C did through its latched pointer. */
             let view = match which {
                 Source::Converted => Some(converted.frame_mut()),
                 Source::Lossless => lossless_out.and_then(|which| vp8l.view_mut(which)),
@@ -449,11 +399,7 @@ impl<'a> Decoder<'a> {
 
         self.subframe_out = Some(which);
 
-        /* Sub-frame mode owns no canvas, so it skips the allocation and the
-        blend altogether; the dispose latch below is bookkeeping the canvas never
-        fed. Nothing above reads the canvas except the ARGB target rule, which
-        wants a canvas to stay compatible with and correctly declines when there
-        is none. Switching modes mid-animation is refused for that reason. */
+        /* Sub-frame mode has no canvas to allocate or blend. */
         if self.anim_mode != ANIM_SUBFRAME {
             self.composite(&pl, which, target)?;
         }
@@ -470,8 +416,6 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
-    /// The canvas, the tables and the sub-frame, taken from one destructuring
-    /// so that the compositor cannot be handed the canvas as its own source.
     fn composite(
         &mut self,
         pl: &CPlacement,

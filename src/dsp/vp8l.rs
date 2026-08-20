@@ -1,22 +1,3 @@
-//! Scalar kernels for the lossless (VP8L) DSP.
-//!
-//! These are the fallbacks the assembly replaces at runtime. They are plain
-//! safe Rust; the dispatch table that selects between them and the assembly
-//! lives with whichever caller consumes it — see `LOG.md` on the two DSP tiers.
-//!
-//! # Shapes
-//!
-//! The predictors take the destination row as one `&mut [u32]` and the row
-//! above as `&[u32]`, with the two out-of-row neighbours — `out[-1]` and
-//! `upper[-1]` in the C — passed by value as `left` and `top_left`. Carrying
-//! them in registers is what the C loop effectively does anyway, and it keeps
-//! the two slices disjoint even when the rows are physically adjacent, where a
-//! literal transcription would have `upper` and `out` overlap by one element.
-//!
-//! The input row is the output row: every call site passes the same pointer
-//! for both, and so does checkasm. The C prototype keeps them separate only
-//! because that is the assembly's ABI.
-
 use super::clip_uint8;
 
 const fn avg2(a: u32, b: u32) -> u32 {
@@ -31,7 +12,6 @@ const fn avg4(a: u32, b: u32, c: u32, d: u32) -> u32 {
     avg2(avg2(a, b), avg2(c, d))
 }
 
-/// Adds the four channels independently, discarding carries between bytes.
 pub const fn add_pixels(a: u32, b: u32) -> u32 {
     let ag = (a & 0xFF00_FF00).wrapping_add(b & 0xFF00_FF00);
     let rb = (a & 0x00FF_00FF).wrapping_add(b & 0x00FF_00FF);
@@ -81,14 +61,12 @@ const fn clamped_add_sub_half(c0: u32, c1: u32, c2: u32) -> u32 {
 
 const BLACK: u32 = u32::from_ne_bytes([0xFF, 0x00, 0x00, 0x00]);
 
-/// Predictor 0: the constant opaque black.
 pub fn pred_add_0(out: &mut [u32]) {
     for o in out.iter_mut() {
         *o = add_pixels(*o, BLACK);
     }
 }
 
-/// Predictor 1: the pixel to the left.
 pub fn pred_add_1(out: &mut [u32], left: u32) {
     let mut l = left;
     for o in out.iter_mut() {
@@ -97,9 +75,6 @@ pub fn pred_add_1(out: &mut [u32], left: u32) {
     }
 }
 
-/// Predictors that read `upper[x]` but never `upper[x + 1]`.
-///
-/// `upper` must be at least as long as `out`.
 macro_rules! pred_add {
     ($(#[$doc:meta])* $name:ident, |$l:ident, $t:ident, $tl:ident| $expr:expr) => {
         $(#[$doc])*
@@ -121,9 +96,6 @@ macro_rules! pred_add {
     };
 }
 
-/// Predictors that also read `upper[x + 1]`.
-///
-/// `upper` must be strictly longer than `out`.
 macro_rules! pred_add_tr {
     ($(#[$doc:meta])* $name:ident,
      |$l:ident, $t:ident, $tl:ident, $tr:ident| $expr:expr) => {
@@ -150,63 +122,25 @@ macro_rules! pred_add_tr {
     };
 }
 
-pred_add!(
-    /// Predictor 2: the pixel above.
-    pred_add_2, |l, t, tl| t
-);
-pred_add_tr!(
-    /// Predictor 3: the pixel above and to the right.
-    pred_add_3, |l, t, tl, tr| tr
-);
-pred_add!(
-    /// Predictor 4: the pixel above and to the left.
-    pred_add_4, |l, t, tl| tl
-);
-pred_add_tr!(
-    /// Predictor 5: `avg2(avg2(left, top_right), top)`.
-    pred_add_5, |l, t, tl, tr| avg3(l, t, tr)
-);
-pred_add!(
-    /// Predictor 6: `avg2(left, top_left)`.
-    pred_add_6, |l, t, tl| avg2(l, tl)
-);
-pred_add!(
-    /// Predictor 7: `avg2(left, top)`.
-    pred_add_7, |l, t, tl| avg2(l, t)
-);
-pred_add!(
-    /// Predictor 8: `avg2(top_left, top)`.
-    pred_add_8, |l, t, tl| avg2(tl, t)
-);
-pred_add_tr!(
-    /// Predictor 9: `avg2(top, top_right)`.
-    pred_add_9, |l, t, tl, tr| avg2(t, tr)
-);
-pred_add_tr!(
-    /// Predictor 10: `avg4(left, top_left, top, top_right)`.
-    pred_add_10, |l, t, tl, tr| avg4(l, tl, t, tr)
-);
-pred_add!(
-    /// Predictor 11: whichever of top and left is closer to top_left.
-    pred_add_11, |l, t, tl| select(t, l, tl)
-);
-pred_add!(
-    /// Predictor 12: `clamp(left + top - top_left)` per channel.
-    pred_add_12, |l, t, tl| clamped_add_sub_full(l, t, tl)
-);
-pred_add!(
-    /// Predictor 13: predictor 12 applied at half strength.
-    pred_add_13, |l, t, tl| clamped_add_sub_half(l, t, tl)
-);
+pred_add!(pred_add_2, |l, t, tl| t);
+pred_add_tr!(pred_add_3, |l, t, tl, tr| tr);
+pred_add!(pred_add_4, |l, t, tl| tl);
+pred_add_tr!(pred_add_5, |l, t, tl, tr| avg3(l, t, tr));
+pred_add!(pred_add_6, |l, t, tl| avg2(l, tl));
+pred_add!(pred_add_7, |l, t, tl| avg2(l, t));
+pred_add!(pred_add_8, |l, t, tl| avg2(tl, t));
+pred_add_tr!(pred_add_9, |l, t, tl, tr| avg2(t, tr));
+pred_add_tr!(pred_add_10, |l, t, tl, tr| avg4(l, tl, t, tr));
+pred_add!(pred_add_11, |l, t, tl| select(t, l, tl));
+pred_add!(pred_add_12, |l, t, tl| clamped_add_sub_full(l, t, tl));
+pred_add!(pred_add_13, |l, t, tl| clamped_add_sub_half(l, t, tl));
 
-/// Extracts the green channel of each ARGB pixel of `src` into `dst`.
 pub fn extract_green(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.iter_mut().zip(src.chunks_exact(4)) {
         *d = s[2];
     }
 }
 
-/// Replaces each pixel by `palette[green]`, in place.
 pub fn map_color32_inplace(buf: &mut [u8], palette: &[u32]) {
     let palette = &palette[..256];
 
@@ -215,7 +149,6 @@ pub fn map_color32_inplace(buf: &mut [u8], palette: &[u32]) {
     }
 }
 
-/// Replaces each pixel of `src` by `palette[green]`, writing to `dst`.
 pub fn map_color32(dst: &mut [u8], src: &[u8], palette: &[u32]) {
     let palette = &palette[..256];
 
@@ -224,7 +157,6 @@ pub fn map_color32(dst: &mut [u8], src: &[u8], palette: &[u32]) {
     }
 }
 
-/// Alpha-blends an ARGB row of `src` over `dst`; alpha is the low byte.
 pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
         let src_alpha = u32::from(s[0]);
@@ -249,8 +181,6 @@ pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// The same as [`blend_row_argb`], for rows whose alpha is already multiplied
-/// in.
 pub fn blend_row_argb_premult(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
         if s[0] == 255 {
@@ -266,21 +196,11 @@ pub fn blend_row_argb_premult(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// Replaces each pixel by `palette[green]`, in place, on a `u32` picture.
-/// The product of two `i8`s fits an `i16` exactly, and saying so is what lets
-/// the row loop vectorise on 16-bit lanes instead of widening to 32. The
-/// multiplier is sign-extended by the caller, once per tile rather than once
-/// per pixel.
 #[inline(always)]
 fn color_delta(pred: i16, color: u8) -> u8 {
     (pred.wrapping_mul(i16::from(color as i8)) >> 5) as u8
 }
 
-/// Undoes the cross-colour transform over one tile's worth of a row, which
-/// predicts red from green and blue from both.
-///
-/// `mult` packs the three signed multipliers the tile carries, at bytes three,
-/// two and one; a pixel is `[A, R, G, B]` in the same byte order.
 pub fn color_row(row: &mut [u32], mult: u32) {
     let cp = mult.to_ne_bytes();
     let green_to_red = i16::from(cp[3] as i8);
@@ -307,26 +227,14 @@ pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
     }
 }
 
-/// One predictor over a whole picture, addressed by offset.
-///
-/// The destination row and the row above it are two windows on the same
-/// allocation, and when the picture is contiguous — which it is, because the
-/// entropy decode indexes it linearly — they touch: the top-right neighbour of
-/// the last pixel in a row *is* the first pixel of that row. Handing the kernel
-/// two slices would either deny that or have to lie about it, so the table
-/// takes the picture whole and says where in it to work.
 pub type PredAddFn = fn(plane: &mut [u32], out: usize, up: usize, n: usize);
 
-/// The runtime-selected lossless kernels the decoder calls.
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
     pub map_color32: fn(&mut [u32], &[u32]),
     pub color_row: fn(&mut [u32], u32),
-    /// Writes each pixel's green channel out as a byte.
     pub extract_green: fn(&mut [u8], &[u8]),
-    /// Alpha-blends one ARGB row of `src` over `dst`.
     pub blend_row_argb: fn(&mut [u8], &[u8]),
-    /// The same, for rows whose alpha is already multiplied in.
     pub blend_row_argb_premult: fn(&mut [u8], &[u8]),
 }
 
@@ -343,9 +251,6 @@ fn plane_pred_1(plane: &mut [u32], out: usize, _up: usize, n: usize) {
     pred_add_1(&mut tail[..n], head[out - 1]);
 }
 
-/// Adapts a kernel to the table's shape. The two flags say which out-of-row
-/// neighbours the predictor needs, because reading one it does not — `upper[-1]`
-/// on the first row of a batch, say — would step outside the picture.
 macro_rules! plane_pred {
     ($name:ident, $kernel:ident, $l:literal, $tl:literal) => {
         fn $name(plane: &mut [u32], out: usize, up: usize, n: usize) {

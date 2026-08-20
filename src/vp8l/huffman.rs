@@ -1,23 +1,3 @@
-//! VP8L prefix codes.
-//!
-//! This is the code CVE-2023-4863 was in: a length list that described more
-//! symbols than the table had been sized for overflowed it. The shape of the
-//! defence is the same as the C's — size the table from the length histogram,
-//! reject a malformed list before writing anything, and check at the end that
-//! exactly as much was filled as was reserved — but here an arithmetic slip
-//! reaching past the table is a panic rather than a write into whatever
-//! followed it.
-//!
-//! A table entry packs the bits to consume in its low eight bits and either the
-//! symbol or a secondary-table offset above them. The root table is sized to
-//! the longest code it holds, capped at [`TABLE_BITS`], so only codes longer
-//! than that reach a secondary table and only then is the cap in force.
-//!
-//! All the tables of one image live in a single arena, and a reader holds its
-//! extent in that arena rather than a pointer into it. That is what the C's
-//! chunked allocator was for — a reader must not be invalidated by a later
-//! table being added — and an offset gets it for free.
-
 use super::bitreader::BitReader;
 use crate::error::{Error, Result};
 
@@ -32,7 +12,6 @@ const CODE_LENGTH_CODE_ORDER: [u8; NUM_CODE_LENGTH_CODES] = [
     17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
 ];
 
-/// Where one prefix code's tables sit in the arena.
 #[derive(Clone, Copy, Default)]
 pub struct Reader {
     start: u32,
@@ -40,11 +19,6 @@ pub struct Reader {
     pub mask: u32,
 }
 
-/// A reader resolved against the arena it lives in.
-///
-/// `root` is exactly `mask + 1` entries long, so indexing it with `& (len - 1)`
-/// is in bounds by construction and costs no check. `full` reaches the
-/// secondary tables, which only long codes touch.
 #[derive(Clone, Copy)]
 pub struct Tree<'a> {
     root: &'a [u32],
@@ -64,8 +38,6 @@ impl Reader {
 }
 
 impl Tree<'_> {
-    /// The symbol at the reader's position. Never refills: the caller fills
-    /// before a run of these, as the pixel loop does.
     #[inline(always)]
     pub fn read(&self, br: &mut BitReader) -> u32 {
         let mut index = (br.prefetch() as usize) & (self.root.len() - 1);
@@ -85,15 +57,11 @@ impl Tree<'_> {
         entry >> 8
     }
 
-    /// The one symbol a single-entry table holds, which is how the pixel loop
-    /// recognises a channel that never varies.
     pub fn only_symbol(&self) -> u8 {
         (self.full[0] >> 8) as u8
     }
 }
 
-/// The length histogram a code-length list accumulates, and what sizing the
-/// tables from it worked out.
 pub struct Plan {
     pub count: [i32; MAX_CODE_LENGTH + 1],
     num_symbols: i32,
@@ -116,10 +84,6 @@ const fn entry(bits: u32, value: u32) -> u32 {
     bits | value << 8
 }
 
-/// The next canonical code of the same length, in bit-reversed order.
-///
-/// `leading_zeros` rather than `ilog2`, which carries a panic path for zero
-/// that this has already ruled out.
 #[inline(always)]
 fn next_key(key: u32, len: u32) -> u32 {
     let inv = !key & ((1u32 << len) - 1);
@@ -156,8 +120,6 @@ fn table_size(p: &Plan) -> usize {
     let mut low = 0xFFFF_FFFFu32;
     let mut total = 1usize << p.root_bits;
 
-    /* Ranged over the whole histogram rather than over `root_bits`, so the
-    index is one the compiler can see is in bounds. */
     for len in 1..=MAX_CODE_LENGTH as u32 {
         if len > p.root_bits {
             break;
@@ -188,9 +150,6 @@ pub fn count_lengths(p: &mut Plan, lengths: &[u8]) {
     }
 }
 
-/// Sizes the tables and sorts the symbols by code length, given the histogram
-/// the reader accumulated as it went. Codes are rejected here, before anything
-/// is written, so a malformed length list never produces a partly filled table.
 fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
     let mut offset = [0usize; MAX_CODE_LENGTH + 2];
     let mut left = 1i32;
@@ -219,12 +178,6 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
     let num_symbols = p.num_symbols as usize;
     let sorted = &mut sorted[..num_symbols];
 
-    /* Sparse length lists are the common case, so step over whole zero runs
-    instead of testing every symbol. Eight is the stride, measured: thirty-two
-    is 3% better on a file that is all long codes and 3% worse on an animation
-    of small frames, whose lists are short enough that the wider stride rarely
-    fires. Writing the test as `iter().all()` instead of a word compare is
-    worse than both — it compiles to a byte loop, not a vector op. */
     let mut symbol = 0;
     while symbol + 8 <= lengths.len() {
         let run: [u8; 8] = lengths[symbol..symbol + 8].try_into().unwrap();
@@ -259,8 +212,6 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
         symbol += 1;
     }
 
-    /* Every offset has to have advanced to where the next length started, or
-    the histogram described a different list from the one just sorted. */
     let mut seen = 0usize;
 
     #[allow(clippy::needless_range_loop)]
@@ -282,10 +233,6 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
     true
 }
 
-/// Because the index is the bit-reversed code, a code of length `len` owns
-/// every slot congruent to its key modulo `2^len`. So the slots for all codes
-/// shorter than `len` are already correct in the first half of the table and
-/// only need copying into the second, leaving one store per symbol.
 #[inline(always)]
 fn double_to(table: &mut [u32], filled: &mut usize, size: usize) {
     let mut n = *filled;
@@ -298,8 +245,6 @@ fn double_to(table: &mut [u32], filled: &mut usize, size: usize) {
 }
 
 fn fill(p: &Plan, table: &mut [u32], sorted: &[u16]) -> bool {
-    /* Exactly as many symbols are written as were counted, so cutting the
-    list to that length is what lets the writes below index it unchecked. */
     let sorted = &sorted[..p.num_symbols.max(1) as usize];
     let mut count = p.count;
     let mut key = 0u32;
@@ -362,7 +307,6 @@ fn fill(p: &Plan, table: &mut [u32], sorted: &[u16]) -> bool {
     total == p.total_size
 }
 
-/// Builds one prefix code into `arena`, returning where it landed.
 pub fn build(
     arena: &mut Vec<u32>,
     plan: &mut Plan,
@@ -390,10 +334,6 @@ pub fn build(
     })
 }
 
-/// The short form of a length list: one or two symbols, each of length one.
-///
-/// The two symbols may repeat, and the histogram has to stay an exact count of
-/// the non-zero lengths for the counting sort to line up.
 pub fn read_simple_code(
     br: &mut BitReader,
     buf: &[u8],
@@ -423,15 +363,12 @@ pub fn read_simple_code(
     }
 }
 
-/// The long form: a prefix code over code lengths, then the lengths themselves.
 pub fn read_normal_code(
     br: &mut BitReader,
     buf: &[u8],
     plan: &mut Plan,
     lengths: &mut [u8],
 ) -> Result<()> {
-    /* Code lengths are 3 bits wide, so this table never needs a second level
-    and is at most 128 entries wide, which is why it lives on the stack. */
     let mut arena = [0u32; 1 << MAX_CODE_LENGTH_CODE_LENGTH];
     let mut sorted = [0u16; NUM_CODE_LENGTH_CODES];
     let mut code_length_lengths = [0u8; NUM_CODE_LENGTH_CODES];
@@ -514,7 +451,6 @@ pub fn read_normal_code(
             ));
             return Err(Error::InvalidData);
         }
-        /* The buffer arrives zeroed, so a run of zeros is just a skip. */
         if length != 0 {
             plan.count[usize::from(length)] += repeat as i32;
             lengths[symbol..symbol + repeat].fill(length);
@@ -565,7 +501,6 @@ mod tests {
     fn a_balanced_code_round_trips() {
         let (arena, reader) = build_from(&[1, 2, 3, 3]).unwrap();
         let tree = reader.tree(&arena);
-        /* Canonical codes, bit-reversed: 0 -> 0, 1 -> 01, 2 -> 011, 3 -> 111. */
         let buf = [0b0111_1010u8, 0b0000_0001, 0, 0, 0, 0, 0, 0];
         let mut br = BitReader::new(&buf);
 

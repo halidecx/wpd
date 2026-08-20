@@ -10,8 +10,6 @@ tm_shuf2: times 4 db 0x03, 0x80
 
 vl_shuf: db 0, 1, 2, 3, 8, 9, 10, 11, 1, 2, 3, 12, 9, 10, 11, 13
 
-; tm_shuf2 is eight bytes, so the aligned loads below need the section put
-; back on a sixteen-byte boundary first.
 alignb 16
 pb_1:    times 16 db 1
 pb_3:    times 16 db 3
@@ -220,7 +218,6 @@ cglobal pred16x16_tm_vp8_8, 2,6,6
     jg .loop
     RET
 
-; Broadcast the byte at [%2] to every lane of %1.
 %macro TM_SPLATB 2
 %if cpuflag(avx2)
     vpbroadcastb %1, [%2]
@@ -230,8 +227,6 @@ cglobal pred16x16_tm_vp8_8, 2,6,6
 %endif
 %endmacro
 
-; Bytewise TM: with a = top -us tl and b = tl -us top (one is always 0),
-; clip(top + left - tl) == (left +us a) -us b exactly.
 %macro PRED16x16_TM_BYTEWISE 0
 cglobal pred16x16_tm_vp8_8, 2, 4, 5, dst, stride, stride3, iteration
     sub       dstq, strideq
@@ -481,7 +476,6 @@ cglobal pred4x4_dc_8, 3,5
     RET
 
 
-; Two rows at a time: words 0-3 hold row y, words 4-7 hold row y+1.
 %macro PRED4x4_TM_STORE 3
     packuswb   %1, %1
     movd      [%2], %1

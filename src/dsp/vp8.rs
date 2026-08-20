@@ -1,19 +1,3 @@
-//! Scalar kernels for the lossy (VP8) DSP: the inverse transforms and the
-//! loop filter.
-//!
-//! # Shapes
-//!
-//! Every kernel here takes the exact region it touches as one slice, so the
-//! caller does the address arithmetic and the kernel does none of the pointer
-//! juggling the C equivalents do. The filters are given the slice starting at
-//! their lowest sample rather than at the edge, which turns the C's negative
-//! `p[-4 * stride]` indices into ordinary ones.
-//!
-//! `stridea` steps from one filtered position to the next along the edge;
-//! `strideb` steps from one sample to the next across it. A vertical edge
-//! filter has `stridea = 1` and `strideb = stride`, and a horizontal one has
-//! them the other way round.
-
 use super::clip_uint8;
 
 #[inline(always)]
@@ -21,12 +5,6 @@ fn clip_int8(v: i32) -> i32 {
     i32::from(clip_uint8(v + 0x80)) - 0x80
 }
 
-/// The eight samples across an edge: `p3 p2 p1 p0 q0 q1 q2 q3`.
-///
-/// Loading them once and deciding from the copy, rather than re-reading the
-/// plane for every predicate, is what keeps the bounds checks off the hot
-/// path: what remains is one check per load and one per store, the same
-/// accesses the C makes unchecked.
 type Win = [i32; 8];
 
 #[inline(always)]
@@ -72,7 +50,6 @@ fn load4<const VERT: bool>(buf: &[u8], q: usize, s: usize) -> [i32; 4] {
     }
 }
 
-/// The 4-tap and 6-tap common filter, over `p1 p0 q0 q1` at `p1i + k * s`.
 #[inline(always)]
 fn filter_common(buf: &mut [u8], w: [i32; 4], p1i: usize, s: usize, is4tap: bool) {
     let mut a = 3 * (w[2] - w[1]);
@@ -118,7 +95,6 @@ fn hev(w: &Win, thresh: i32) -> bool {
     (w[2] - w[3]).abs() > thresh || (w[5] - w[4]).abs() > thresh
 }
 
-/// The macroblock-edge filter, which widens to `p2 .. q2` at `p2i + k * s`.
 #[inline(always)]
 fn filter_mbedge(buf: &mut [u8], w: &Win, p2i: usize, s: usize) {
     let a = clip_int8(w[2] - w[5]);
@@ -136,9 +112,6 @@ fn filter_mbedge(buf: &mut [u8], w: &Win, p2i: usize, s: usize) {
     buf[p2i + 5 * s] = clip_uint8(w[6] - a2);
 }
 
-/// The direction, size and edge kind are const parameters so that the two
-/// strides fold to `1` and `stride` and the loop bound is known, which is what
-/// the C gets from expanding its `LOOP_FILTER` macro per variant.
 const fn strides<const VERT: bool>(stride: usize) -> (usize, usize) {
     if VERT {
         (1, stride)
@@ -147,11 +120,6 @@ const fn strides<const VERT: bool>(stride: usize) -> (usize, usize) {
     }
 }
 
-/// The normal loop filter over `SIZE` positions along an edge.
-///
-/// `buf` starts at the fourth sample before the edge — `dst - 4 * strideb` in
-/// the C — and must reach the fourth after it at the last position. `INNER`
-/// selects the subblock filter, which never widens to the macroblock taps.
 pub fn loop_filter<const SIZE: usize, const VERT: bool, const INNER: bool>(
     buf: &mut [u8],
     stride: usize,
@@ -180,10 +148,6 @@ pub fn loop_filter<const SIZE: usize, const VERT: bool, const INNER: bool>(
     }
 }
 
-/// The simple loop filter, which reads and writes only the two samples either
-/// side of the edge.
-///
-/// `buf` starts at `dst - 2 * strideb`.
 pub fn loop_filter_simple<const VERT: bool>(buf: &mut [u8], stride: usize, flim: i32) {
     let (sa, sb) = strides::<VERT>(stride);
 
@@ -197,8 +161,6 @@ pub fn loop_filter_simple<const VERT: bool>(buf: &mut [u8], stride: usize, flim:
     }
 }
 
-/// Inverts the Walsh-Hadamard transform of the luma DC coefficients,
-/// scattering them into the DC slot of each of the sixteen luma blocks.
 pub fn luma_dc_wht(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
     for i in 0..4 {
         let d = |k: usize| i32::from(dc[k * 4 + i]);
@@ -225,7 +187,6 @@ pub fn luma_dc_wht(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
     }
 }
 
-/// [`luma_dc_wht`] where only the DC of the DC block is non-zero.
 pub fn luma_dc_wht_dc(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
     let val = ((i32::from(dc[0]) + 3) >> 3) as i16;
 
@@ -243,8 +204,6 @@ fn mul_35468(a: i32) -> i32 {
     (a * 35468) >> 16
 }
 
-/// Inverts the 4x4 DCT and adds the residual to `dst`, which starts at the
-/// block's top-left sample.
 pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
     let mut tmp = [0i16; 16];
 
@@ -280,7 +239,6 @@ pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
     }
 }
 
-/// [`idct_add`] where only the DC coefficient is non-zero.
 pub fn idct_dc_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
     let dc = (i32::from(block[0]) + 4) >> 3;
 
@@ -336,19 +294,6 @@ mod tests {
     }
 }
 
-/// The lossy DSP table the decoder calls through.
-///
-/// Unlike the kernels above, the entries take the whole plane plus the offset
-/// of the position they act on. A macroblock edge filter reads rows above the
-/// one it is given and writes to the byte before its first column, so handing
-/// it a slice that starts at the edge would make those ordinary reads negative
-/// indices; addressing one flat allocation by offset keeps them in bounds
-/// without a single `unsafe`, and the assembly wrappers get the pointer they
-/// want from the same two numbers.
-///
-/// The chroma entries take an offset per plane rather than one shared offset.
-/// The two planes are separate allocations, so the padding each needs to put
-/// its rows on a 64-byte boundary differs, and their origins differ with it.
 pub type WhtFn = fn(&mut [[i16; 16]; 16], &mut [i16; 16]);
 pub type IdctFn = fn(&mut [u8], usize, usize, &mut [i16; 16]);
 pub type Idct4Fn = fn(&mut [u8], usize, usize, &mut [[i16; 16]; 4]);
@@ -467,8 +412,6 @@ fn h_simple_c(p: &mut [u8], o: usize, s: usize, flim: i32) {
     loop_filter_simple::<false>(&mut p[o - 2..], s, flim);
 }
 
-/// The four filters a macroblock edge needs: the edge itself, then the three
-/// subblock edges inside it. `$step` is how far apart they sit.
 macro_rules! mb_c {
     ($name:ident, $edge:ident, $inner:ident, $step:expr) => {
         fn $name(p: &mut [u8], o: usize, s: usize, e: i32, be: i32, i: i32, hev: i32) {
@@ -524,7 +467,6 @@ fn v_simple_mb_c(p: &mut [u8], o: usize, s: usize, e: i32, be: i32) {
 }
 
 impl Vp8Dsp {
-    /// The scalar table, before any assembly is substituted in.
     pub const fn scalar() -> Self {
         Self {
             luma_dc_wht: wht_c,
@@ -556,7 +498,6 @@ impl Vp8Dsp {
         }
     }
 
-    /// The best table the running CPU allows.
     pub fn new() -> Self {
         #[allow(unused_mut)]
         let mut table = Self::scalar();

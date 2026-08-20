@@ -17,10 +17,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Lets wpd-capi read the assembler probe results via DEP_WPDASM_*.
 links = "wpdasm"
-# The C that is left builds the test harnesses and the libwebp oracle, none of
-# which a consumer of the crate needs.
 exclude = ["*.c", "*.h", "meson*", "scripts/", "tests/", "tools/", "wpd-test-data/"]
 
 [lib]
@@ -28,12 +25,8 @@ crate-type = ["rlib"]
 
 [features]
 default = ["asm"]
-# Hand-written assembly, dispatched at runtime. Turning this off makes the
-# crate compile under #![forbid(unsafe_code)].
 asm = []
-# Drop DSP fallbacks the build target can never reach (dav1d's trim_dsp).
 trim_dsp = []
-# Use the 32-bit range coder even where the 64-bit one fits.
 force_rac32 = []
 
 [build-dependencies]
@@ -43,9 +36,6 @@ nasm-rs = { version = "0.3", features = ["parallel"] }
 [dependencies]
 zerocopy = { version = "0.8", default-features = false }
 
-# No `panic = "abort"`: `wpd-capi` turns a panic into WPD_ERR_INTERNAL rather
-# than into the end of the caller's process, and catching one needs the unwind.
-# Measured at no throughput cost and 17 KB of binary on aarch64.
 [profile.release]
 codegen-units = 1
 lto = "fat"
@@ -57,8 +47,6 @@ opt-level = "s"
 [profile.release.package."*"]
 opt-level = 3
 
-# What meson's `debugoptimized` maps to: optimised, but with the debug info and
-# the checks that make a sanitizer or a fuzzer run useful.
 [profile.debugopt]
 inherits = "release"
 debug = true

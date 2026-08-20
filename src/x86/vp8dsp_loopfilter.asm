@@ -6,7 +6,6 @@ SECTION_RODATA 32
 pw_27:    times 8 dw 27
 pw_63:    times 8 dw 63
 
-; 32 bytes wide so the avx2 filters can use them as memory operands
 pb_3:     times 32 db 3
 pb_4:     times 32 db 4
 pb_16:    times 32 db 16
@@ -246,8 +245,6 @@ SIMPLE_LOOPFILTER v, 3
 SIMPLE_LOOPFILTER h, 5
 
 
-; SIMPLE_FILTER p1, p0, q0, q1, flim, t0, t1, t2, t3, pb_80
-; Updates p0 and q0 in place, leaving p1 and q1 unchanged.
 %macro SIMPLE_FILTER 10
     psubusb        %6, %2, %3
     psubusb        %7, %3, %2
@@ -295,7 +292,6 @@ SIMPLE_LOOPFILTER h, 5
     pxor           %2, %2, %10          ; p0 += (f + 3) >> 3
 %endmacro
 
-; Two horizontal edges four rows apart, one per lane, with per-lane flim.
 %macro V_SIMPLE_FILTER_PAIR 1
     movu          xm0, [dstq+mstrideq*2]
     vinserti128    m0, m0, [dst4q+mstrideq*2], 1
@@ -314,7 +310,6 @@ SIMPLE_LOOPFILTER h, 5
     vextracti128  [dst4q], m2, 1
 %endmacro
 
-; All four horizontal luma edges, paired in the two 128-bit lanes.
 INIT_YMM avx2
 cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
     movd          xm4, mbedged
@@ -338,8 +333,6 @@ cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
     RET
 
 
-; Transposes m0-m7 packed as [row i | row i+8], clobbering m8-m15.
-; The output is packed as [col j | col j+8], making this its own inverse.
 %macro TRANSPOSE_16x16B 0
     punpcklbw      m8, m0, m1
     punpckhbw      m9, m0, m1
@@ -368,8 +361,6 @@ cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
     punpckldq     m14, m5, m7
     punpckhdq     m15, m5, m7
 
-    ; each register now holds two columns per lane; 0xd8 reorders the qwords to
-    ; [0 2 1 3], which joins the two row halves of a column into one lane
     punpcklqdq     m0, m8, m12
     punpckhqdq     m1, m8, m12
     punpcklqdq     m2, m9, m13
@@ -427,10 +418,8 @@ cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
     vextracti128 [dst16q+mstrideq], m7, 1
 %endmacro
 
-; All four vertical luma edges using one 16x16 load and transpose.
 INIT_YMM avx2
 cglobal vp8_h_loop_filter_simple_mb, 4, 9, 16, dst, stride, mbedge, bedge
-    ; the transpose clobbers m8-m15, so the limits stay in gprs until after it
     DEFINE_ARGS dst, stride, mbedge, bedge, mstride, dst4, dst8, dst12, dst16
     mov      mstrideq, strideq
     neg      mstrideq
@@ -448,7 +437,6 @@ cglobal vp8_h_loop_filter_simple_mb, 4, 9, 16, dst, stride, mbedge, bedge
     vpbroadcastb xm10, xm10
     vpbroadcastb   m9, xm9               ; edges 1 and 3, both inner
     vinserti128   m10, m10, xm9, 1       ; edge 0 is the macroblock edge, edge 2
-                                         ; rides along in the other lane
     vbroadcasti128 m8, [pb_80]
 
     SIMPLE_FILTER  m0, m1, m2, m3, m10, m11, m12, m13, m14, m8

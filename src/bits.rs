@@ -1,11 +1,3 @@
-//! Little-endian reads out of a byte slice.
-//!
-//! Every container and bitstream header in the format stores its multi-byte
-//! fields little-endian, and the shift arithmetic for them belongs in one
-//! place. These panic on a short slice, so callers that may be looking past
-//! the end of what has arrived pad first — [`crate::container`] does, because
-//! a streaming header walk reads fields the stream has not reached yet.
-
 pub fn rl16(b: &[u8]) -> u32 {
     u32::from(b[0]) | u32::from(b[1]) << 8
 }
@@ -18,7 +10,6 @@ pub fn rl32(b: &[u8]) -> u32 {
     rl24(b) | u32::from(b[3]) << 24
 }
 
-/// Four bytes from `at`, zero-filled past the end of `b`.
 pub fn quad(b: &[u8], at: usize) -> [u8; 4] {
     let mut out = [0; 4];
 

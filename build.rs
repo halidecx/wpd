@@ -1,9 +1,3 @@
-//! Assembles the hand-written assembly, replicating what `meson.build` does.
-//!
-//! Nothing in `src/x86/*.asm` or `src/*/*.S` changes for the Rust port; this
-//! only has to reproduce the flags and the feature probes the Meson build
-//! already performs.
-
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -11,8 +5,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
 }
 
-/// Whether `snippet` compiles for the target. Mirrors meson's `cc.compiles()`,
-/// which is how the aarch64 and arm extension probes are phrased.
 fn compiles(snippet: &str, name: &str) -> bool {
     let out =
         PathBuf::from(env::var("OUT_DIR").unwrap()).join(format!("probe_{name}.c"));
@@ -46,7 +38,6 @@ fn nasm_common(root: &Path, x86_64: bool) -> nasm_rs::Build {
 }
 
 fn build_x86(root: &Path, x86_64: bool) {
-    // Only these three are assembled with HAVE_AVX2_EXTERNAL, as in meson.
     let mut avx2 = nasm_common(root, x86_64);
     avx2.define("HAVE_AVX2_EXTERNAL", Some("1"));
     for f in ["vp8l.asm", "vp8dsp.asm", "vp8_intrapred.asm"] {
@@ -73,9 +64,6 @@ fn build_aarch64(root: &Path) {
         ("dotprod", "sdot v0.4s, v0.16b, v0.16b"),
         ("i8mm", "usdot v0.4s, v0.16b, v0.16b"),
     ] {
-        // An assembler may accept the instructions without being able to
-        // toggle the extension with .arch_extension, and one that takes the
-        // directive still has to be asked whether the instructions assemble.
         let directive = compiles(
             &format!("__asm__ (\".arch_extension {name}\\n\");\n"),
             &format!("archext_{name}"),
@@ -93,8 +81,6 @@ fn build_aarch64(root: &Path) {
             if directive { "1" } else { "0" },
         );
         build.define(&format!("HAVE_{upper}"), if have { "1" } else { "0" });
-        // wpd-capi compiles the not-yet-ported C against the same headers, so
-        // it needs the same answers; DEP_WPDASM_* carries them across.
         println!("cargo:archext_{name}={}", u8::from(directive));
         println!("cargo:have_{name}={}", u8::from(have));
         if have {

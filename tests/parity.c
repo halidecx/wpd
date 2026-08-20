@@ -136,11 +136,7 @@ static long compare_plane(const uint8_t *got, ptrdiff_t got_stride,
     return compare_packed(got, got_stride, want, want_stride, width, height, 1);
 }
 
-/* libwebp gained gamma-correct chroma downsampling for lossless-to-YUV after
-   1.6.0 (upstream 0d14d84b, "Have lossless use ImportYUVAFromRGB"), and the
-   release does not report a distinguishing version, so decide from behaviour:
-   reproduce the old averaging and see whether the linked libwebp still does
-   it. Only lossless sources are affected; a lossy one is already YUV. */
+/* Detect libwebp's post-1.6 gamma-correct lossless chroma behavior. */
 static int lossless_yuv_is_gamma = 1;
 
 static int simple_chroma_u(const uint8_t *row, int x, int width) {
@@ -191,8 +187,6 @@ static int uses_simple_lossless_chroma(const uint8_t *data, size_t size) {
     return matches;
 }
 
-/* The planar formats have no packed buffer to compare, so they get their own
-   path over the three or four planes. */
 static void check_planar(const char *file, const uint8_t *data, size_t size,
                          const WPDDecoderOptions  *options,
                          const WebPDecoderOptions *webp_options, int alpha,
@@ -283,15 +277,12 @@ static void check_all_formats(const char *file, const uint8_t *data,
         file, data, size, options, webp_options, 1, what, detail, coding);
 }
 
-/* libwebp's rescaler, driven directly, against ours. wpd only ever asks for
-   one or four channels; libwebp's own SSE2 path diverges from its C at two and
-   three, so those are left out. */
+/* libwebp's SSE2 rescaler differs for two and three channels. */
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)
 #define PARITY_HAVE_RESCALER 1
 #define MAYBE_WEAK __attribute__((weak))
 
-/* Only a static libwebp exposes these; against a shared one they resolve to
-   NULL and the direct comparison is skipped. */
+/* Direct rescaler comparison requires static libwebp internals. */
 MAYBE_WEAK int WebPRescalerInit(void *r, int src_width, int src_height,
                                 uint8_t *dst, int dst_width, int dst_height,
                                 int dst_stride, int num_channels,
@@ -308,8 +299,7 @@ static int rescaler_available(void) {
         WebPRescalerGetScaledDimensions;
 }
 
-/* Rescales the same pseudo-random source both ways. 1 if libwebp agrees with
-   us, 0 if it does not, -1 if the run could not be made. */
+/* Return 1 for agreement, 0 for mismatch, and -1 when unavailable. */
 static int rescaler_agrees(int sw, int sh, int dw, int dh, int ch,
                            unsigned *seed) {
     uint8_t  *src  = malloc((size_t)sw * sh * ch);
@@ -345,32 +335,7 @@ static int rescaler_agrees(int sw, int sh, int dw, int dh, int ch,
     return result;
 }
 
-/* Whether libwebp rescales this geometry the way its own C rescaler would,
-   which is the arithmetic wpd implements.
-
-   libwebp's SIMD rescalers are not bit-exact with its C one. Both compute
-   MULT_FIX(x, scale), which the C spells as an exact 64-bit
-   ((uint64_t)x * scale + (1 << 31)) >> 32; rescaler_neon.c instead halves the
-   scale into a constant (MAKE_HALF_CST) and reaches for vqrdmulhq_s32, which
-   drops the scale's low bit -- so an odd scale comes out one too low -- and is
-   signed, so an accumulator at or above 2^31 is read as negative. Whether
-   either fires depends on the ratio, so most geometries agree and a few do
-   not; 576x576 -> 64x1 is one that does not.
-
-   It cannot be dodged by asking libwebp for its C rescaler, because on aarch64
-   WEBP_NEON_OMIT_C_CODE leaves the C export functions unbuilt and installs the
-   NEON ones without consulting VP8GetCPUInfo. So the reference itself is what
-   varies here, and the honest thing is to leave out the geometries where it
-   disagrees with the arithmetic it documents rather than to loosen the
-   comparison everywhere. Probing keeps that narrow, and re-enables these
-   automatically if libwebp makes its SIMD exact -- where it already is, as on
-   the SSE2 path at the channel counts below, nothing is left out at all.
-
-   The probe rescales a pseudo-random source rather than the file being
-   decoded, so which geometries drop out does not depend on image content. That
-   costs a little: a geometry where the two implementations can disagree is
-   skipped even for a file whose pixels would not have made them. Reproducing
-   the exact intermediate the decoder hands its rescaler is not worth that. */
+/* Skip geometries where libwebp SIMD differs from its scalar rescaler. */
 static int scaling_is_comparable(const WPDDecoderOptions *options,
                                  int full_width, int full_height) {
     static const int channels[] = {1, 4};
@@ -399,10 +364,7 @@ static int scaling_is_comparable(const WPDDecoderOptions *options,
 #define scaling_is_comparable(options, full_width, full_height) 1
 #endif
 
-/* As check_all_formats, minus the one combination scaling has to leave out:
-   libwebp has not moved its rescaler onto the gamma-correct conversion, so a
-   lossless source reaching YUV through it still goes via the low-quality
-   duplicate that upstream 0d14d84b replaced everywhere else. */
+/* Exclude scaled lossless YUV: libwebp's rescaler still uses legacy conversion. */
 static void check_scaled_formats(const char *file, const uint8_t *data,
                                  size_t size, const WPDDecoderOptions *options,
                                  const WebPDecoderOptions *webp_options,
@@ -443,9 +405,6 @@ static void check_file(const char *dir, const char *name) {
         {64, 0},
         {0, 48},
         {300, 100},
-        /* The ends of the range: a single pixel, a single row or column, where
-           the ratio stops fitting the rescaler's fixed point, and a large
-           expansion in both directions. */
         {1, 1},
         {1, 64},
         {64, 1},
@@ -535,9 +494,7 @@ static void check_file(const char *dir, const char *name) {
                              info.height);
     }
 
-    /* Cropping and scaling together, because the two interact: libwebp scales
-       the cropped region but decides whether the downscale is steep enough to
-       drop the in-loop filter from the size of the whole frame. */
+    /* libwebp bases loop-filter skipping on whole-frame dimensions. */
     for (size_t i = 0; i < sizeof(crops) / sizeof(*crops); i++) {
         static const int combined[][2] = {{8, 8}, {40, 40}, {0, 12}};
         char             detail[64];
@@ -613,9 +570,6 @@ static void check_file(const char *dir, const char *name) {
     check_all_formats(
         name, data, size, &options, &webp_options, "flip", "", info.coding);
 
-    /* Flip runs last, over whatever cropping and scaling produced, and offsets
-       each plane by its own height, which halves for chroma. An odd height is
-       what tells the two roundings apart. */
     for (size_t i = 0; i < sizeof(scales) / sizeof(*scales); i++) {
         char detail[64];
 

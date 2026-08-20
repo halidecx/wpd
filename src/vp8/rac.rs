@@ -1,16 +1,3 @@
-//! The VP5/VP6/VP8 binary range decoder.
-//!
-//! The C kept three raw pointers into the chunk and had to save and restore
-//! them as byte offsets every time a streaming append moved the buffer. Here
-//! the coder holds those offsets to begin with and takes the chunk as a slice
-//! per call, so `wpd_vp56_save_offsets` and its partner have no counterpart:
-//! a coder that outlives the buffer it was reading is not expressible.
-//!
-//! Two forms exist, as in the C. The 64-bit one consumes seven bytes per
-//! refill and is what any 64-bit target uses; the 32-bit one refills two bytes
-//! at a time and is what `force_rac32` and 32-bit targets get. They are
-//! bit-exact with each other, which `scripts/rac32.sh` checks end to end.
-
 pub const RAC_64: bool = cfg!(all(
     target_pointer_width = "64",
     not(feature = "force_rac32")
@@ -30,10 +17,8 @@ mod imp {
     }
 
     impl RangeCoder {
-        /// Nothing to prime: the 64-bit form fills its window on first use.
         pub fn prime(&mut self, _buf: &[u8]) {}
 
-        /// Starts decoding at `start`, over the `size` bytes that follow it.
         pub fn new(start: usize, size: usize) -> Self {
             Self {
                 value: 0,
@@ -46,8 +31,6 @@ mod imp {
             }
         }
 
-        /// Grows the window this coder may read, after a streaming append made
-        /// more of the same chunk available.
         pub fn extend(&mut self, end: usize) {
             self.end = end;
             self.buf_max = if end - self.pos >= 8 {
@@ -96,7 +79,6 @@ mod imp {
 
         #[inline(always)]
         pub fn get_prob(&mut self, buf: &[u8], prob: u8) -> u32 {
-            // Loaded before the rare refill call so it stays in a register.
             let mut range = self.range;
 
             if self.bits < 0 {
@@ -123,8 +105,6 @@ mod imp {
             bit
         }
 
-        /// [`Self::get_prob`] where the caller branches on the result, so the
-        /// two outcomes stay separate rather than being folded arithmetically.
         #[inline(always)]
         pub fn get_prob_branchy(&mut self, buf: &[u8], prob: u8) -> bool {
             let range = self.range;
@@ -153,7 +133,6 @@ mod imp {
             }
         }
 
-        /// Reads one equiprobable bit and applies it as the sign of `v`.
         #[inline(always)]
         pub fn get_signed(&mut self, buf: &[u8], v: i32) -> i32 {
             if self.bits < 0 {
@@ -210,8 +189,6 @@ mod imp {
             }
         }
 
-        /// Reads the three bytes the constructor cannot, since it has no
-        /// buffer. Kept separate so `new` stays a plain value constructor.
         pub fn prime(&mut self, buf: &[u8]) {
             let mut word = 0u32;
 
@@ -319,8 +296,6 @@ mod imp {
 pub use imp::RangeCoder;
 
 impl RangeCoder {
-    /// Starts a coder over `buf[start..start + size]`, doing whatever priming
-    /// the underlying form needs.
     pub fn start(buf: &[u8], start: usize, size: usize) -> Self {
         let mut c = Self::new(start, size);
 
@@ -355,8 +330,6 @@ impl RangeCoder {
         }
     }
 
-    /// Walks a binary tree whose nodes are `[left, right]` pairs, negative
-    /// entries being leaves.
     #[inline(always)]
     pub fn get_tree(&mut self, buf: &[u8], tree: &[[i8; 2]], probs: &[u8]) -> usize {
         let mut i = 0i32;
@@ -372,7 +345,6 @@ impl RangeCoder {
         }
     }
 
-    /// Reads a coefficient's extra bits: one per non-zero probability.
     #[inline(always)]
     pub fn get_coeff(&mut self, buf: &[u8], probs: &[u8]) -> i32 {
         let mut v = 0;
@@ -404,7 +376,6 @@ mod tests {
 
     #[test]
     fn a_uniform_stream_decodes_its_own_bits() {
-        // 0x00 repeated keeps every equiprobable bit at zero; 0xff at one.
         let zeros = [0u8; 32];
         let ones = [0xffu8; 32];
         let mut a = RangeCoder::start(&zeros, 0, zeros.len());

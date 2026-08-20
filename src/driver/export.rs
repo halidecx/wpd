@@ -1,22 +1,3 @@
-//! Handing a decoded picture out.
-//!
-//! This is the last place a picture passes through, and it is all plumbing:
-//! which conversion the output format needs, which rows have already been
-//! done, and whether the bytes go into the decoder's memory or the caller's.
-//! The arithmetic that a caller's buffer sizes drive is [`crate::image`]; what
-//! is here walks rows of a [`Frame`] that may already be a crop or a flip.
-//!
-//! The scratch an export writes through arrives as borrows of the decoder's
-//! own fields, which is why there are two sets of them. A whole-frame export
-//! may be handed the conversion buffer as its *source* — that is how sub-frame
-//! mode returns a converted animation frame — while the resumable row exports
-//! write into it. The C passed one struct of pointers to both and the rule
-//! that they are never the same buffer at the same time was written nowhere.
-//!
-//! Nothing here knows where a caller's own memory is. A destination that is
-//! not the decoder's own arrives as a [`RowSink`], which hands back one row at
-//! a time; what those rows are made of belongs to whoever supplied them.
-
 use crate::container::{ANMF_FLAG_DISPOSE, ANMF_FLAG_NO_BLEND};
 use crate::dsp::yuv::LAYOUT_ARGB;
 use crate::image::Format;
@@ -32,9 +13,8 @@ use crate::handout::{Handout, Pixels, RowSink};
 use crate::options::Options;
 use crate::picture::{Buffer, Frame};
 use crate::rescale::Scratch;
+use std::ops::Range;
 
-/// What the decoder was asked for, gathered at the call rather than reached
-/// for, so nothing here can read a field that has moved on since.
 pub struct ExportSettings {
     pub out_format: i32,
     pub premultiply: bool,
@@ -48,26 +28,15 @@ pub struct ExportSettings {
     pub timestamp: i64,
 }
 
-/// The scratch a whole-frame export writes through.
-///
-/// The conversion buffer is not here: a whole-frame export may be handed it as
-/// its source.
 pub struct ExportTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub options: &'a Options,
     pub rescale: &'a mut Scratch,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
-    /// Where the rows go when the caller supplied its own memory. `None` is
-    /// what says the decoder hands out its own instead, which is why there is
-    /// no separate flag: the destination and the choice are one value.
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
 }
 
-/// The scratch a resumable row export writes through, plus how far it has got.
-///
-/// These paths read the codec's own picture and convert into the decoder's
-/// buffers, so the conversion buffer is theirs to write.
 pub struct RowTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub options: &'a Options,
@@ -78,7 +47,6 @@ pub struct RowTargets<'a> {
     pub converted_format: &'a mut i32,
 }
 
-/// Describes `img` as the picture a decode hands back.
 pub(crate) fn export_frame(
     set: &ExportSettings,
     img: &Frame<'_>,
@@ -96,12 +64,10 @@ pub(crate) fn export_frame(
     out.pos_x = set.pos_x;
     out.pos_y = set.pos_y;
     out.dispose_to_background = flags & ANMF_FLAG_DISPOSE != 0;
-    out.blend = flags & ANMF_FLAG_NO_BLEND == 0;
+    out.no_blend = flags & ANMF_FLAG_NO_BLEND != 0;
     out.has_alpha = set.has_alpha;
 }
 
-/// As [`export_frame`], keeping the picture itself, which is what a caller
-/// that supplied no buffer of its own reads.
 pub(crate) fn export_own<'a>(
     set: &ExportSettings,
     img: Frame<'a>,
@@ -112,7 +78,6 @@ pub(crate) fn export_own<'a>(
     out.pixels = Pixels::Own(img);
 }
 
-/// Packs rows `[row_start, row_end)` of `img` into the caller's own plane.
 #[allow(clippy::too_many_arguments)]
 fn export_external_rows(
     set: &ExportSettings,
@@ -139,8 +104,6 @@ fn export_external_rows(
     }
 
     for y in row_start..row_end {
-        /* The caller's plane may have a negative stride, so it is asked for a
-        row at a time rather than borrowed whole. */
         let dst = ext.row(0, y, row);
 
         match pack {
@@ -154,7 +117,6 @@ fn export_external_rows(
     Ok(())
 }
 
-/// As [`export_external_rows`], for a planar format's three or four planes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn export_external_planar_rows(
     set: &ExportSettings,
@@ -205,28 +167,46 @@ fn export_external_planar(
     export_external_planar_rows(set, ext, img, format, out, 0, height)
 }
 
-/// Which conversion the output format needs, decided before anything is
-/// written so that the buffer it writes into is borrowed exactly once.
+/* Rows go out packed, copied when the layout already matches, and are
+ * premultiplied in place afterwards. Four callers want some of that. */
+fn pack_rows(dst: &mut Buffer, src: &Frame<'_>, pack: Option<RowFn>, rows: Range<i32>) {
+    let mut view = dst.frame_mut();
+
+    for y in rows {
+        let row = view.row(0, y);
+
+        match pack {
+            Some(pack) => pack(row, src.row(0, y)),
+            None => row.copy_from_slice(src.row(0, y)),
+        }
+    }
+}
+
+fn premultiply_row(dsp: &YuvDsp, row: &mut [u8], format: i32, packed: fn(&mut [u8])) {
+    if format_bpp(format) == 2 {
+        packed(row);
+    } else {
+        (dsp.premultiply_row)(row, format_layout(format) == LAYOUT_ARGB);
+    }
+}
+
+fn premultiply_rows(dsp: &YuvDsp, dst: &mut Buffer, format: i32, rows: Range<i32>) {
+    let packed = format_premultiplier_4444(dsp, format);
+    let mut view = dst.frame_mut();
+
+    for y in rows {
+        premultiply_row(dsp, view.row(0, y), format, packed);
+    }
+}
+
 enum Route {
-    /// The picture is already in the output format.
     AsIs,
-    /// Upsample, or go through ARGB for a two-byte format.
     Upsample,
-    /// Repack a four-byte format into another.
     Pack(RowFn),
-    /// Premultiplied ARGB over an animation canvas whose colour is already
-    /// weighted, which is a relabelling.
     Relabel,
-    /// The same, for a still, which the caller may hold past the next decode.
     Copy,
 }
 
-/// Hands out a whole frame: crop, scale, convert, premultiply, flip, and then
-/// either the decoder's own memory or the caller's.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_packed<'a>(
     set: &ExportSettings,
     t: ExportTargets<'a>,
@@ -300,10 +280,6 @@ pub fn export_packed<'a>(
     } else {
         Route::AsIs
     };
-    /* Premultiplying only ever goes with a route through `output`: no picture
-    the decoder holds is premultiplied, so a format that is cannot be `AsIs`,
-    and the relabelling is only reached for an animation, which premultiplies
-    each frame before compositing it instead. */
     let premultiply = set.premultiply && !set.animation && format_bpp(format) != 2;
     let mut img = match route {
         Route::AsIs => img,
@@ -329,30 +305,15 @@ pub fn export_packed<'a>(
                 }
                 Route::Pack(pack) => {
                     output.alloc_packed(img.width, img.height, packed.bpp(), packed)?;
-
-                    let mut view = output.frame_mut();
-
-                    for y in 0..img.height {
-                        pack(view.row(0, y), img.row(0, y));
-                    }
+                    pack_rows(output, &img, Some(pack), 0..img.height);
                 }
                 _ => {
                     output.alloc_packed(img.width, img.height, 4, Format::ArgbPre)?;
-
-                    let mut view = output.frame_mut();
-
-                    for y in 0..img.height {
-                        view.row(0, y).copy_from_slice(img.row(0, y));
-                    }
+                    pack_rows(output, &img, None, 0..img.height);
                 }
             }
             if premultiply {
-                let alpha_first = format_layout(format) == LAYOUT_ARGB;
-                let mut view = output.frame_mut();
-
-                for y in 0..view.height {
-                    (dsp.premultiply_row)(view.row(0, y), alpha_first);
-                }
+                premultiply_rows(dsp, output, format, 0..img.height);
             }
             output.frame()
         }
@@ -368,12 +329,6 @@ pub fn export_packed<'a>(
     Ok(())
 }
 
-/// Converts and hands out rows `[0, upto)` of the still lossy frame,
-/// converting each row exactly once however many times it is asked for.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_still_packed<'a>(
     set: &ExportSettings,
     t: RowTargets<'a>,
@@ -400,8 +355,6 @@ pub fn export_still_packed<'a>(
         still_packed_direct(set, dsp, options, converted, src, first, upto)?
     };
 
-    /* Bound only now: both helpers may have grown the image, and a view taken
-    before that would be of the memory as it was. */
     let dst = converted.frame();
 
     if let Some(ext) = ext {
@@ -416,7 +369,6 @@ pub fn export_still_packed<'a>(
     Ok(())
 }
 
-/// Upsamples straight into the output format. Returns the first row written.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_direct(
     set: &ExportSettings,
@@ -441,20 +393,11 @@ fn still_packed_direct(
         converted_from = upsample_fancy(dsp, dst, src, layout, first, upto);
     }
     if set.premultiply {
-        let alpha_first = layout == LAYOUT_ARGB;
-        let mut view = dst.frame_mut();
-
-        for y in converted_from..upto {
-            (dsp.premultiply_row)(view.row(0, y), alpha_first);
-        }
+        premultiply_rows(dsp, dst, format, converted_from..upto);
     }
     Ok(converted_from)
 }
 
-/// The two-byte formats are packed from ARGB, so the intermediate has to be
-/// carried between calls too, rather than rebuilt for the whole frame.
-///
-/// Returns the first row it wrote.
 #[allow(clippy::too_many_arguments)]
 fn still_packed_2byte(
     set: &ExportSettings,
@@ -542,8 +485,6 @@ fn upsample_simple(
     );
 }
 
-/// Returns the first row the fancy upsampler actually wrote, which is one
-/// above `first` when it starts on an even row.
 fn upsample_fancy(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -568,12 +509,6 @@ fn upsample_fancy(
     ) as i32
 }
 
-/// Hands out rows `[0, upto)` of the still lossless frame, premultiplying and
-/// packing each row exactly once however many times it is asked for.
-///
-/// # Safety
-///
-/// `frame` must be writable, and the caller's planes as they were declared.
 pub fn export_still_lossless<'a>(
     set: &ExportSettings,
     t: RowTargets<'a>,
@@ -630,20 +565,13 @@ pub fn export_still_lossless<'a>(
     }
 
     let premultiply = format_premultiplier_4444(dsp, format);
-    let alpha_first = format_layout(format) == LAYOUT_ARGB;
     let out_len = img.width as usize * format_bpp(format);
 
     if let Some(ext) = ext {
         export_external_rows(set, dsp, ext, img, format, out, first, upto)?;
         if set.premultiply {
             for y in first..upto {
-                let row = ext.row(0, y, out_len);
-
-                if format_bpp(format) == 2 {
-                    premultiply(row);
-                } else {
-                    (dsp.premultiply_row)(row, alpha_first);
-                }
+                premultiply_row(dsp, ext.row(0, y, out_len), format, premultiply);
             }
         }
         finish();
@@ -664,24 +592,9 @@ pub fn export_still_lossless<'a>(
         output.alloc_packed(img.width, img.height, target.bpp(), target)?;
     }
 
-    {
-        let mut view = output.frame_mut();
-
-        for y in first..upto {
-            let dst = view.row(0, y);
-
-            match pack {
-                Some(pack) => pack(dst, img.row(0, y)),
-                None => dst.copy_from_slice(img.row(0, y)),
-            }
-            if set.premultiply {
-                if format_bpp(format) == 2 {
-                    premultiply(dst);
-                } else {
-                    (dsp.premultiply_row)(dst, alpha_first);
-                }
-            }
-        }
+    pack_rows(output, img, pack, first..upto);
+    if set.premultiply {
+        premultiply_rows(dsp, output, format, first..upto);
     }
 
     export_own(set, output.frame(), format, out);

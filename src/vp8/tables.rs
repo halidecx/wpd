@@ -1,11 +1,5 @@
-//! The constant tables the VP8 bitstream is defined against.
-//!
-//! Transcribed mechanically from the C so that no digit is retyped; the
-//! `checked_against_the_spec` test re-derives what can be re-derived.
-
 use crate::dsp::vp8pred::*;
 
-/// The 16x16 mode that means "each 4x4 subblock codes its own mode".
 pub const MODE_I4: usize = 4;
 
 pub static COEFF_BAND: [u8; 16] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7];
@@ -509,7 +503,6 @@ pub static AC_QLOOKUP: [u16; 128] = [
     225, 229, 234, 239, 245, 249, 254, 259, 264, 269, 274, 279, 284,
 ];
 
-/// `vp8_pred4x4_mode`, mapping a 16x16 mode onto the 4x4 mode it implies.
 pub static PRED4X4_MODE: [usize; 4] = [DC_PRED, HOR_PRED, VERT_PRED, TM_VP8_PRED];
 
 pub static PRED16X16_TREE_INTRA: [[i8; 2]; 4] = [

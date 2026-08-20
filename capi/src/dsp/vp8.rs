@@ -1,10 +1,3 @@
-//! C ABI for the lossy DSP table, as declared by `src/vp8dsp.h`.
-//!
-//! Each instruction set gets a module whose function names are the same, with
-//! `#[link_name]` pointing at that variant's symbol. The macroblock-edge
-//! filters are then composed once per module, as the `VP8_*_LOOP_FILTER*_MB`
-//! macros in `src/vp8dsp.h` do for the C.
-
 use std::ffi::c_int;
 use std::slice;
 
@@ -52,144 +45,6 @@ pub struct VP8DSPContext {
     pub vp8_v_loop_filter_simple_mb: LfSimpleMbFn,
 }
 
-macro_rules! h_simple_mb {
-    ($name:ident, $single:expr) => {
-        unsafe extern "C" fn $name(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = $single;
-
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.add(4), stride, bedge_lim);
-                f(dst.add(8), stride, bedge_lim);
-                f(dst.add(12), stride, bedge_lim);
-            }
-        }
-    };
-}
-
-macro_rules! v_simple_mb {
-    ($name:ident, $single:expr) => {
-        unsafe extern "C" fn $name(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_lim: c_int,
-            bedge_lim: c_int,
-        ) {
-            let f = $single;
-
-            unsafe {
-                f(dst, stride, mbedge_lim);
-                f(dst.offset(4 * stride), stride, bedge_lim);
-                f(dst.offset(8 * stride), stride, bedge_lim);
-                f(dst.offset(12 * stride), stride, bedge_lim);
-            }
-        }
-    };
-}
-
-macro_rules! h_mb {
-    ($name:ident, $mbedge:expr, $inner:expr) => {
-        unsafe extern "C" fn $name(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = ($mbedge, $inner);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.add(4), stride, bedge_e, flim_i, hev);
-                inner(dst.add(8), stride, bedge_e, flim_i, hev);
-                inner(dst.add(12), stride, bedge_e, flim_i, hev);
-            }
-        }
-    };
-}
-
-macro_rules! v_mb {
-    ($name:ident, $mbedge:expr, $inner:expr) => {
-        unsafe extern "C" fn $name(
-            dst: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = ($mbedge, $inner);
-
-            unsafe {
-                edge(dst, stride, mbedge_e, flim_i, hev);
-                inner(dst.offset(4 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(8 * stride), stride, bedge_e, flim_i, hev);
-                inner(dst.offset(12 * stride), stride, bedge_e, flim_i, hev);
-            }
-        }
-    };
-}
-
-macro_rules! h_uv_mb {
-    ($name:ident, $mbedge:expr, $inner:expr) => {
-        unsafe extern "C" fn $name(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = ($mbedge, $inner);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(dst_u.add(4), dst_v.add(4), stride, bedge_e, flim_i, hev);
-            }
-        }
-    };
-}
-
-macro_rules! v_uv_mb {
-    ($name:ident, $mbedge:expr, $inner:expr) => {
-        unsafe extern "C" fn $name(
-            dst_u: *mut u8,
-            dst_v: *mut u8,
-            stride: isize,
-            mbedge_e: c_int,
-            bedge_e: c_int,
-            flim_i: c_int,
-            hev: c_int,
-        ) {
-            let (edge, inner) = ($mbedge, $inner);
-
-            unsafe {
-                edge(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
-                inner(
-                    dst_u.offset(4 * stride),
-                    dst_v.offset(4 * stride),
-                    stride,
-                    bedge_e,
-                    flim_i,
-                    hev,
-                );
-            }
-        }
-    };
-}
-
-/// # Safety
-///
-/// `dst` must be the edge sample of a plane with four rows above it and four
-/// below at `stride`, and `size` columns to its right. That is what every
-/// caller of the C prototype already guarantees.
 unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
     dst: *mut u8,
     stride: isize,
@@ -204,10 +59,6 @@ unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
     k::loop_filter::<SIZE, true, INNER>(buf, s, flim_e, flim_i, hev);
 }
 
-/// # Safety
-///
-/// As [`lf_v`], transposed: four samples either side of `dst` in each of
-/// `size` rows.
 unsafe fn lf_h<const SIZE: usize, const INNER: bool>(
     dst: *mut u8,
     stride: isize,
@@ -276,28 +127,16 @@ unsafe extern "C" fn h_loop_filter_simple_c(dst: *mut u8, stride: isize, flim: c
     k::loop_filter_simple::<false>(buf, s, flim);
 }
 
-h_mb!(
-    h_loop_filter16y_mb_c,
-    h_loop_filter16y_c,
-    h_loop_filter16y_inner_c
-);
-v_mb!(
-    v_loop_filter16y_mb_c,
-    v_loop_filter16y_c,
-    v_loop_filter16y_inner_c
-);
-h_uv_mb!(
-    h_loop_filter8uv_mb_c,
-    h_loop_filter8uv_c,
-    h_loop_filter8uv_inner_c
-);
-v_uv_mb!(
-    v_loop_filter8uv_mb_c,
-    v_loop_filter8uv_c,
-    v_loop_filter8uv_inner_c
-);
-h_simple_mb!(h_loop_filter_simple_mb_c, h_loop_filter_simple_c);
-v_simple_mb!(v_loop_filter_simple_mb_c, v_loop_filter_simple_c);
+wpd::composed_mb!(luma h_loop_filter16y_mb_c, horiz,
+    h_loop_filter16y_c, h_loop_filter16y_inner_c);
+wpd::composed_mb!(luma v_loop_filter16y_mb_c, vert,
+    v_loop_filter16y_c, v_loop_filter16y_inner_c);
+wpd::composed_mb!(chroma h_loop_filter8uv_mb_c, horiz,
+    h_loop_filter8uv_c, h_loop_filter8uv_inner_c);
+wpd::composed_mb!(chroma v_loop_filter8uv_mb_c, vert,
+    v_loop_filter8uv_c, v_loop_filter8uv_inner_c);
+wpd::composed_mb!(simple h_loop_filter_simple_mb_c, horiz, h_loop_filter_simple_c);
+wpd::composed_mb!(simple v_loop_filter_simple_mb_c, vert, v_loop_filter_simple_c);
 
 unsafe extern "C" fn luma_dc_wht_c(block: *mut [[i16; 16]; 4], dc: *mut i16) {
     unsafe {
@@ -364,11 +203,6 @@ unsafe extern "C" fn idct_dc_add4uv_c(
     }
 }
 
-/// Overlays whatever [`wpd::asm::vp8::raw_table`] selected for the running
-/// CPU. The symbols, the macroblock-edge compositions and the instruction-set
-/// ladder all live in the core, so this table and the decoder's cannot pick
-/// different kernels. The scalar entries above stay here, since they compose
-/// this table's own fallbacks.
 #[cfg(all(
     feature = "asm",
     any(
@@ -415,12 +249,8 @@ fn init_asm(c: &mut VP8DSPContext) {
     }
 }
 
-/// Fills in `c` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `c` must point to a writable, aligned `VP8DSPContext`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
     #[allow(unused_mut)]
     let mut table = VP8DSPContext {

@@ -1,12 +1,3 @@
-//! The `wpd` command-line decoder.
-//!
-//! Option parsing reproduces what `getopt_long` gave the C tool — clustered
-//! short options, `--name value` and `--name=value`, `--` to stop — because
-//! `scripts/md5check.sh`, `scripts/testdata.sh` and the testdata suite all
-//! drive this binary and its output has to stay byte for byte what it was. A
-//! positional `-` extends the C tool: it names stdin as input and stdout as
-//! output.
-
 mod md5;
 mod output;
 
@@ -35,8 +26,6 @@ const CPU_MASK_NAMES: &str = "neon, none";
 )))]
 const CPU_MASK_NAMES: &str = "none";
 
-/// Named CPU masks, each including everything it implies, as `tools/wpd.c`
-/// spelled them out.
 fn cpu_masks() -> Vec<(&'static str, u32)> {
     #[allow(unused_mut)]
     let mut masks: Vec<(&'static str, u32)> = Vec::new();
@@ -149,7 +138,6 @@ fn parse_format(value: &str) -> Option<(Option<&'static str>, Option<Format>)> {
         .map(|(name, format)| (Some(*name), Some(*format)))
 }
 
-/// `strtoul(value, &end, 0)`: decimal, or `0x`-prefixed hex, or octal.
 fn parse_cpumask(value: &str) -> Option<u32> {
     if let Some((_, mask)) = cpu_masks().iter().find(|(name, _)| *name == value) {
         return Some(*mask);
@@ -220,59 +208,73 @@ enum Parsed {
     Bad(&'static str),
 }
 
-fn long_option(name: &str) -> Option<&'static str> {
-    match name.as_bytes().first() {
-        Some(b'h') if "help".starts_with(name) => Some("help"),
-        Some(b'r') if "repeat".starts_with(name) => Some("repeat"),
-        Some(b'f') if "fmt".starts_with(name) => Some("fmt"),
-        Some(b'm') if "muxer".starts_with(name) => Some("muxer"),
-        Some(b'v') if "verify".starts_with(name) => Some("verify"),
-        Some(b'i') if "info".starts_with(name) => Some("info"),
-        Some(b'l') if "loops".starts_with(name) => Some("loops"),
-        Some(b'c') if "cpumask".starts_with(name) => Some("cpumask"),
-        Some(b's') => {
-            match ("subframe".starts_with(name), "stream".starts_with(name)) {
-                (true, false) => Some("subframe"),
-                (false, true) => Some("stream"),
-                _ => None,
+/* An option is reachable by any unambiguous prefix of its long name, and the
+ * three oldest ones also by a short letter. */
+const OPTIONS: &[(&str, Option<char>, bool)] = &[
+    ("help", Some('h'), false),
+    ("repeat", Some('r'), true),
+    ("fmt", Some('f'), true),
+    ("muxer", None, true),
+    ("verify", None, true),
+    ("info", None, false),
+    ("loops", None, true),
+    ("cpumask", None, true),
+    ("subframe", None, false),
+    ("stream", None, true),
+];
+
+fn by_prefix(prefix: &str) -> Option<(&'static str, bool)> {
+    let mut hit = None;
+
+    for &(name, _, takes_value) in OPTIONS {
+        if name.starts_with(prefix) {
+            if hit.is_some() {
+                return None;
             }
+            hit = Some((name, takes_value));
         }
-        _ => None,
     }
+    hit
 }
 
-/// The short spelling of an option, as the canonical long name.
-fn short_option(opt: char) -> Option<&'static str> {
-    match opt {
-        'h' => Some("help"),
-        'r' => Some("repeat"),
-        'f' => Some("fmt"),
-        _ => None,
-    }
+fn by_letter(letter: char) -> Option<(&'static str, bool)> {
+    OPTIONS
+        .iter()
+        .find(|(_, short, _)| *short == Some(letter))
+        .map(|&(name, _, takes_value)| (name, takes_value))
 }
 
-/// Applies an option that takes a value, given its canonical long name.
-///
-/// `-r` and `--repeat` are one option, so this is where it is parsed: written
-/// out in both arms, the two spellings were two copies of the same body down
-/// to the error string, and free to drift apart.
-fn set_valued(o: &mut Options, name: &str, value: &str) -> Result<(), &'static str> {
+fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
     match name {
-        "repeat" => o.repeat = parse_repeat(value).ok_or(BAD_REPEAT)?,
+        "repeat" => o.repeat = parse_repeat(&value).ok_or(BAD_REPEAT)?,
+        "loops" => o.loops = parse_repeat(&value).ok_or(BAD_LOOPS)?,
+        "stream" => o.stream = parse_repeat(&value).ok_or(BAD_STREAM)? as usize,
         "fmt" => {
-            let (pixel_format, out_format) = parse_format(value).ok_or(BAD_FORMAT)?;
+            let (pixel_format, out_format) = parse_format(&value).ok_or(BAD_FORMAT)?;
 
             o.pixel_format = pixel_format;
             o.out_format = out_format;
         }
+        "muxer" => {
+            if !matches!(value.as_str(), "raw" | "md5" | "ppm" | "pam" | "y4m") {
+                return Err(BAD_MUXER);
+            }
+            o.muxer = Some(value);
+        }
+        "verify" => o.verify = Some(value),
+        "cpumask" => {
+            let mask = parse_cpumask(&value).ok_or(BAD_CPUMASK)?;
+
+            warn_baseline_cpumask(mask);
+            api::set_cpu_flags_mask(mask);
+        }
+        "info" => o.info = true,
+        "subframe" => o.subframe = true,
         _ => return Err(MISSING),
     }
     Ok(())
 }
 
-/// Reproduces `getopt_long` with `opterr = 0`: options and operands may be
-/// interleaved, `--` ends the options, and a long option takes its value
-/// either after `=` or as the next argument.
 #[inline(never)]
 fn parse_args(argv: &[OsString]) -> Parsed {
     let mut o = Options {
@@ -297,95 +299,48 @@ fn parse_args(argv: &[OsString]) -> Parsed {
             continue;
         }
 
+        /* A long option carries its value after '=', a short one in the rest
+         * of its cluster; either may instead take the next argument. */
+        let next = |i: &mut usize| {
+            let v = argv.get(*i).map(|v| v.to_string_lossy().into_owned());
+
+            if v.is_some() {
+                *i += 1;
+            }
+            v
+        };
+
         if let Some(long) = arg.strip_prefix("--") {
-            let (name, inline) = match long.split_once('=') {
+            let (prefix, attached) = match long.split_once('=') {
                 Some((n, v)) => (n, Some(v.to_owned())),
                 None => (long, None),
             };
-            let mut value = || match inline.clone() {
-                Some(v) => Some(v),
-                None => {
-                    let v = argv.get(i).map(|v| v.to_string_lossy().into_owned());
-                    if v.is_some() {
-                        i += 1;
-                    }
-                    v
-                }
-            };
-
-            // An option whose value is simply absent is what getopt reported as
-            // an unknown option, not as a bad value, so it says so first.
-            macro_rules! value {
-                () => {
-                    match value() {
-                        Some(v) => v,
-                        None => return Parsed::Bad(MISSING),
-                    }
-                };
-            }
-
-            macro_rules! no_value {
-                () => {
-                    if inline.is_some() {
-                        return Parsed::Bad(MISSING);
-                    }
-                };
-            }
-
-            let Some(name) = long_option(name) else {
+            let Some((name, takes_value)) = by_prefix(prefix) else {
                 return Parsed::Bad(MISSING);
             };
 
-            match name {
-                "help" => {
-                    no_value!();
-                    return Parsed::Help;
+            if !takes_value && attached.is_some() {
+                return Parsed::Bad(MISSING);
+            }
+            if name == "help" {
+                return Parsed::Help;
+            }
+
+            let value = if takes_value {
+                match attached.or_else(|| next(&mut i)) {
+                    Some(v) => v,
+                    None => return Parsed::Bad(MISSING),
                 }
-                "repeat" | "fmt" => {
-                    if let Err(e) = set_valued(&mut o, name, &value!()) {
-                        return Parsed::Bad(e);
-                    }
-                }
-                "muxer" => match value!() {
-                    v if matches!(
-                        v.as_str(),
-                        "raw" | "md5" | "ppm" | "pam" | "y4m"
-                    ) =>
-                    {
-                        o.muxer = Some(v)
-                    }
-                    _ => return Parsed::Bad(BAD_MUXER),
-                },
-                "verify" => o.verify = Some(value!()),
-                "info" => {
-                    no_value!();
-                    o.info = true;
-                }
-                "subframe" => {
-                    no_value!();
-                    o.subframe = true;
-                }
-                "loops" => match parse_repeat(&value!()) {
-                    Some(v) => o.loops = v,
-                    None => return Parsed::Bad(BAD_LOOPS),
-                },
-                "stream" => match parse_repeat(&value!()) {
-                    Some(v) => o.stream = v as usize,
-                    None => return Parsed::Bad(BAD_STREAM),
-                },
-                "cpumask" => match parse_cpumask(&value!()) {
-                    Some(mask) => {
-                        warn_baseline_cpumask(mask);
-                        api::set_cpu_flags_mask(mask);
-                    }
-                    None => return Parsed::Bad(BAD_CPUMASK),
-                },
-                _ => return Parsed::Bad(MISSING),
+            } else {
+                String::new()
+            };
+
+            if let Err(e) = set(&mut o, name, value) {
+                return Parsed::Bad(e);
             }
             continue;
         }
 
-        // A short-option cluster: -r5, -r 5, -hf argb.
         let cluster: Vec<char> = arg[1..].chars().collect();
         let mut c = 0;
 
@@ -393,39 +348,31 @@ fn parse_args(argv: &[OsString]) -> Parsed {
             let opt = cluster[c];
 
             c += 1;
-            let mut value = |i: &mut usize| {
-                if c < cluster.len() {
-                    let v: String = cluster[c..].iter().collect();
-                    c = cluster.len();
-                    Some(v)
-                } else {
-                    let v = argv.get(*i).map(|v| v.to_string_lossy().into_owned());
-                    if v.is_some() {
-                        *i += 1;
-                    }
-                    v
-                }
-            };
 
-            macro_rules! value {
-                () => {
-                    match value(&mut i) {
-                        Some(v) => v,
-                        None => return Parsed::Bad(MISSING),
-                    }
-                };
-            }
-
-            let Some(name) = short_option(opt) else {
+            let Some((name, takes_value)) = by_letter(opt) else {
                 return Parsed::Bad(MISSING);
             };
 
-            /* -h asks for help wherever it appears, so -hf needs no value for
-            the f; --help=x, which has one, is an error. */
             if name == "help" {
                 return Parsed::Help;
             }
-            if let Err(e) = set_valued(&mut o, name, &value!()) {
+
+            let rest = (c < cluster.len()).then(|| {
+                let v: String = cluster[c..].iter().collect();
+
+                c = cluster.len();
+                v
+            });
+            let value = if takes_value {
+                match rest.or_else(|| next(&mut i)) {
+                    Some(v) => v,
+                    None => return Parsed::Bad(MISSING),
+                }
+            } else {
+                String::new()
+            };
+
+            if let Err(e) = set(&mut o, name, value) {
                 return Parsed::Bad(e);
             }
         }
@@ -441,8 +388,6 @@ const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 
-/// Renders an I/O error the way `strerror` did for the C tool: the message on
-/// its own, without the `(os error N)` tail Rust appends.
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
 
@@ -491,7 +436,7 @@ fn print_image_info(decoder: &mut Decoder<'_>, printed: &mut bool) {
             entry.pos_y,
             entry.duration,
             i32::from(entry.dispose_to_background),
-            i32::from(!entry.blend),
+            i32::from(entry.no_blend),
             i32::from(entry.has_alpha),
             i32::from(entry.complete)
         );
@@ -514,8 +459,6 @@ fn print_metadata(decoder: &mut Decoder<'_>) {
     }
 }
 
-/// Pulls every frame currently available. Returns 0 when the decoder has
-/// nothing more for now, or negative on error.
 fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
     loop {
         let Ok(next) = decoder.next_frame() else {
@@ -593,8 +536,6 @@ fn decode_stream(
     drain_frames(decoder, ctx)
 }
 
-/// Builds a decoder with the output format and animation mode the options ask
-/// for.
 fn new_decoder(
     out_format: Option<Format>,
     pixel_format: Option<&str>,
@@ -626,9 +567,6 @@ fn read_file(name: &OsStr) -> std::io::Result<Vec<u8>> {
     Ok(data)
 }
 
-/// Rust's runtime ignores `SIGPIPE` before `main`, which would turn a closed
-/// reader into a write error or a panic out of `println!`. The C tool died of
-/// the signal, so a truncated pipe has to keep exiting 141.
 #[cfg(unix)]
 fn restore_sigpipe() {
     const SIGPIPE: i32 = 13;
@@ -799,7 +737,6 @@ fn run(
         let mut ret = 0;
 
         if opts.stream != 0 {
-            // A stream cannot be rewound, so a replay reopens instead.
             for loop_index in 0..opts.loops {
                 if loop_index > 0 {
                     let Some(next) =

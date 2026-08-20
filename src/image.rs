@@ -1,25 +1,14 @@
-//! Pixel format policy, plane geometry, and the blend kernels the animation
-//! compositor runs over YUVA.
-//!
-//! The C still owns the `WebPImage` struct and makes crop and flip views of it
-//! by pointer arithmetic, so what lives here is everything that does not need
-//! a pointer: the format predicates, the allocation and scale arithmetic that
-//! a damaged header can drive, and the per-row kernels.
-
 use crate::error::{Error, Result};
 
-/// The slack every plane allocation carries past its last row, so a kernel
-/// that reads a word at a time never runs off the end.
 pub const FILE_PADDING: usize = 64;
 
-/// The limit `scaled_size` puts on either output dimension.
 pub const MAX_SCALED: i32 = 16384;
 
-/// `WPDPixelFormat` from `include/wpd.h`, less `NONE`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Format {
     Yuv420p,
     Yuva420p,
+    #[default]
     Argb,
     Rgba,
     Bgra,
@@ -59,8 +48,6 @@ impl Format {
         })
     }
 
-    /// Packed formats sort after the two planar ones, which is what the C's
-    /// `format >= WPD_PIX_FMT_ARGB` was testing.
     pub fn is_packed(self) -> bool {
         !matches!(self, Self::Yuv420p | Self::Yuva420p)
     }
@@ -89,8 +76,6 @@ impl Format {
         )
     }
 
-    /// The byte layout the upsampler can emit for this format without a second
-    /// pass; the numbering is `WPD_LAYOUT_*` from `src/yuvdsp.h`.
     pub fn layout(self) -> usize {
         match self {
             Self::Rgba | Self::RgbaPre => crate::dsp::yuv::LAYOUT_RGBA,
@@ -110,20 +95,14 @@ impl Format {
     }
 }
 
-/// Rounds `v` up rather than down when shifting right, which is what the C's
-/// `CEIL_RSHIFT` did without the double negation being obvious.
 pub fn ceil_rshift(v: i32, shift: u32) -> i32 {
     -((-v) >> shift)
 }
 
-/// How far plane `p` is subsampled from the picture: planes one and two are
-/// the chroma pair, half the picture each way, and luma and alpha are neither.
 pub fn plane_shift(p: usize) -> u32 {
     u32::from(p == 1 || p == 2)
 }
 
-/// The byte count one plane of `w` by `h` samples at `bpp` needs, padding
-/// included, or `TooLarge` when the multiplication would not fit.
 pub fn plane_size(w: i32, h: i32, bpp: usize) -> Result<usize> {
     if w <= 0 || h <= 0 || bpp == 0 {
         return Err(Error::TooLarge);
@@ -138,8 +117,6 @@ pub fn plane_size(w: i32, h: i32, bpp: usize) -> Result<usize> {
         .ok_or(Error::TooLarge)
 }
 
-/// The output size a scaled decode lands on, resolving a zero dimension
-/// against the aspect ratio the other one implies.
 pub fn scaled_size(
     scaled_width: i32,
     scaled_height: i32,
@@ -173,11 +150,6 @@ pub fn scaled_size(
     Ok((w, h))
 }
 
-/// Where a crop rectangle starts in each plane, once it has been checked
-/// against the source.
-///
-/// A planar source rounds the corner down to an even sample so the chroma
-/// offset stays exact, which is the `& ~1` the C applied before validating.
 pub struct Crop {
     pub left: i32,
     pub top: i32,
@@ -205,10 +177,6 @@ pub fn crop_origin(
     Ok((left, top))
 }
 
-/// How far one row advances in a caller's buffer, whichever direction it runs.
-///
-/// A negative stride is negated in `usize` rather than `isize`, so the most
-/// negative stride has a magnitude too.
 pub fn stride_magnitude(stride: isize) -> usize {
     if stride < 0 {
         (-(stride + 1)) as usize + 1
@@ -217,13 +185,6 @@ pub fn stride_magnitude(stride: isize) -> usize {
     }
 }
 
-/// Whether a caller's plane has room for `height` rows of `row` bytes at
-/// `stride`.
-///
-/// The division the C did here had no guard on a zero stride: a zero-width
-/// image reached it with both operands zero, which passed the first test and
-/// divided by zero in the second. A plane that advances by nothing holds one
-/// row at most, and that is what this says.
 pub fn external_plane_fits(
     size: usize,
     stride: isize,
@@ -241,13 +202,8 @@ pub fn external_plane_fits(
     }
 }
 
-/// How a source alpha combines with a destination one, worked out once so a
-/// pair of channels sharing an alpha shares the reciprocal too: the divide
-/// dominates the blend, and chroma runs it for U and V together.
 enum Mix {
-    /// The source covers the sample completely.
     TakeSrc,
-    /// The source is fully transparent.
     KeepDst,
     Blend {
         src_alpha: u32,
@@ -302,7 +258,6 @@ impl Mix {
     }
 }
 
-/// Blends one row of luma and alpha, sample for sample.
 pub fn blend_row_ya(dst_y: &mut [u8], dst_a: &mut [u8], src_y: &[u8], src_a: &[u8]) {
     let n = dst_y
         .len()
@@ -324,12 +279,6 @@ pub fn blend_row_ya(dst_y: &mut [u8], dst_a: &mut [u8], src_y: &[u8], src_a: &[u
     }
 }
 
-/// The alpha a 2x2 block averages to, over the rows it spans and the one or
-/// two columns it covers.
-///
-/// Both counts are known at the call, so they are constants here and the
-/// summation unrolls; a dynamic bound left the whole chroma pass walking two
-/// nested loops per sample.
 fn block_alpha<const ROWS: usize, const COLS: usize>(
     rows: &[&[u8]; ROWS],
     x: usize,
@@ -346,12 +295,6 @@ fn block_alpha<const ROWS: usize, const COLS: usize>(
     ceil_rshift(sum as i32, shift) as u8
 }
 
-/// Blends one row of a chroma pair, weighted by the alpha of the 2x2 block
-/// each sample covers.
-///
-/// `src_alpha` and `dst_alpha` are the alpha rows the block spans, top first;
-/// a block at the bottom edge of an odd-height region passes one row. `width`
-/// counts luma samples, not chroma ones.
 pub fn blend_row_uv<const ROWS: usize>(
     dst_u: &mut [u8],
     dst_v: &mut [u8],
@@ -367,8 +310,6 @@ pub fn blend_row_uv<const ROWS: usize>(
         .min(dst_v.len())
         .min(src_u.len())
         .min(src_v.len());
-    /* Only an odd width leaves a half block, and only at the far end, so the
-    body runs on whole ones and the tail is at most a single sample. */
     let full = if width % 2 == 0 {
         n
     } else {
@@ -504,14 +445,10 @@ mod tests {
             &dst_a_rows,
             4,
         );
-        /* The left block is fully covered, so it takes the source; the right
-        block is fully transparent, so it keeps what was there. */
         assert_eq!(dst_u, [200, 10]);
         assert_eq!(dst_v, [100, 20]);
     }
 
-    /// The half block at an odd width is averaged over the samples it really
-    /// covers, so a covered left column reads as covered rather than half so.
     #[test]
     fn an_odd_width_averages_its_last_block_over_one_column() {
         let mut dst_u = [10u8, 10];
@@ -551,8 +488,6 @@ mod tests {
         assert!(external_plane_fits(40, -10, 10, 4));
     }
 
-    /// The bottom edge of an odd-height region spans one row, and the average
-    /// shifts by one less because of it.
     #[test]
     fn an_odd_height_block_averages_over_the_single_row_it_spans() {
         let mut dst_u = [10u8];

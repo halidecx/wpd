@@ -1,11 +1,3 @@
-//! A whole file through the public APIs, which is the only target that reaches
-//! the driver.
-//!
-//! The other three enter below it: `container` walks the RIFF without decoding
-//! a pixel, and `vp8`/`vp8l` are handed a chunk the driver would have validated
-//! first. What a caller can actually provoke is the composition of the two, so
-//! this one drives what ships — both entry points, in every output format,
-//! taking the first byte as the format so a mutation can move between them.
 
 #![no_main]
 
@@ -39,8 +31,6 @@ const FORMATS: [Format; 16] = [
     Format::Bgra4444Pre,
 ];
 
-/// Enough frames to pass the end of any corpus animation, so the exhausted
-/// path is reached rather than only the frames a file has.
 const FRAMES: usize = 16;
 
 fn byte(data: &[u8], at: usize) -> u8 {
@@ -180,8 +170,6 @@ fuzz_target!(|data: &[u8]| {
 
     decode_external(data, options);
 
-    /* The same file arriving in pieces, decoded as far as it will go after
-    each one, which is what puts a frame boundary inside a chunk. */
     let mut stream = Decoder::new();
     configure(&mut stream, format, options, subframe);
 

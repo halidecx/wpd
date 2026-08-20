@@ -8,8 +8,7 @@
 
 #define WPD_UPSAMPLE_BLOCK 32
 
-/* Packed output layouts the upsampler can emit directly. The three-byte ones
-   drop alpha, as libwebp's RGB and BGR colorspaces do. */
+/* Three-byte packed layouts drop alpha, as libwebp's RGB and BGR do. */
 enum {
     WPD_LAYOUT_ARGB,
     WPD_LAYOUT_RGBA,
@@ -24,57 +23,39 @@ typedef void (*upsample_argb_block_func)(
     const uint8_t *top_v, const uint8_t *cur_u, const uint8_t *cur_v,
     uint8_t *top_dst, uint8_t *bottom_dst, int num_blocks);
 
-/* Writes one alpha byte into every pixel of a packed four-byte row, leaving
-   the three colour bytes as they were. 'dst' is the start of the first pixel,
-   not the alpha byte inside it; the assembly rewrites whole pixels, so it
-   would carry a bias of three into the row below. The two variants take alpha
-   at the front of the pixel, as ARGB has it, and at the back, as RGBA and
-   BGRA do. Neither touches a byte outside the num_pixels * 4 the row owns. */
 typedef void (*dispatch_alpha_func)(uint8_t *dst, const uint8_t *src,
                                     int num_pixels);
 
-/* Reorders an ARGB row into the packed output layout; dst must not alias
-   src. */
+/* Reorders an ARGB row; dst must not alias src. */
 typedef void (*pack_row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
 
 typedef void (*premultiply_row_func)(uint8_t *rgba, int alpha_first,
                                      int num_pixels);
 
-/* The same in the packed 4-bit layout, which libwebp multiplies in its own
-   precision rather than in 8-bit and then truncating. The _swap variant takes
-   the two bytes of each pixel the other way round. */
+/* libwebp premultiplies packed 4-bit output at 4-bit precision. */
 typedef void (*premultiply_4444_row_func)(uint8_t *rgba4444, int num_pixels);
 
-/* Luma for one ARGB row. */
 typedef void (*argb_to_y_func)(uint8_t *y, const uint8_t *argb, int num_pixels);
 
 typedef void (*argb_to_yuv444_func)(uint8_t *y, uint8_t *u, uint8_t *v,
                                     const uint8_t *argb, int num_pixels);
 
-/* Chroma for one pair of ARGB rows, averaged 2x2 in linear light. 'argb' is
-   the top row and 'argb_stride' reaches the bottom one; a stride of 0 repeats
-   the row, which is how the last row of an odd-height image is handled. When
-   'weight_alpha' is set, a partly transparent block is averaged weighted by
-   alpha, as libwebp does whenever it is also producing an alpha plane. */
+/* A zero argb_stride repeats an odd image's final row. */
 typedef void (*argb_to_uv_func)(uint8_t *u, uint8_t *v, const uint8_t *argb,
                                 ptrdiff_t argb_stride, int num_pixels,
                                 int weight_alpha);
 
-/* The gamma tables argb_to_uv walks; assembly gathers from them directly. The
-   first has a padding entry so a gather may read a dword at the last index. */
 extern const uint16_t wpd_gamma_to_linear_tab[257];
 extern const uint16_t wpd_linear_to_gamma_tab[33];
 
 typedef struct WPDYUVDSP {
-    upsample_argb_block_func upsample_block[WPD_LAYOUT_NB];
-    dispatch_alpha_func      dispatch_alpha_first;
-    dispatch_alpha_func      dispatch_alpha_last;
-    pack_row_func            pack_rgba;
-    pack_row_func            pack_bgra;
-    pack_row_func            pack_rgb;
-    pack_row_func            pack_bgr;
-    /* These four write two bytes per pixel, not three or four. The bgr ones
-       lay the same two bytes down in the opposite order. */
+    upsample_argb_block_func  upsample_block[WPD_LAYOUT_NB];
+    dispatch_alpha_func       dispatch_alpha_first;
+    dispatch_alpha_func       dispatch_alpha_last;
+    pack_row_func             pack_rgba;
+    pack_row_func             pack_bgra;
+    pack_row_func             pack_rgb;
+    pack_row_func             pack_bgr;
     pack_row_func             pack_rgb565;
     pack_row_func             pack_rgba4444;
     pack_row_func             pack_bgr565;
@@ -89,14 +70,6 @@ typedef struct WPDYUVDSP {
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);
 
-/* Converts rows [row_start, row_end). The fancy upsampler emits an (odd, even)
-   row pair at a time, so an even row_start also rewrites row_start - 1; the
-   first row actually written is returned, and a caller with a per-row pass of
-   its own must run that pass from there, not from row_start.
-
-   This and the two below take no table: the decoder reaches the row drivers in
-   the Rust core directly, and what these convert with is the table the core
-   builds from the CPU flags in force when they are called. */
 int wpd_yuv420_to_packed_rows(int layout, uint8_t *dst, ptrdiff_t dst_stride,
                               const uint8_t *y, ptrdiff_t y_stride,
                               const uint8_t *u, const uint8_t *v,

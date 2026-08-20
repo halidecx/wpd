@@ -1,26 +1,3 @@
-//! The YUV DSP: the scalar kernels, the [`YuvDsp`] table that picks between
-//! them and the assembly, and [`upsample_row`], which is the one piece of glue
-//! the drivers in [`crate::convert`] reach the table through.
-//!
-//! `wpd-capi` keeps a second, C-ABI table of the same kernels for `checkasm`;
-//! see `LOG.md` on the two DSP tiers.
-//!
-//! # Layouts
-//!
-//! The packed output layout is a const generic rather than a runtime argument,
-//! which is what the C gets from expanding its `YUV_TO_OUT` and
-//! `UPSAMPLE_PAIRS` macros once per layout. [`bpp`] is 3 for the two layouts
-//! that drop alpha.
-//!
-//! # Shapes
-//!
-//! [`upsample_pairs`] keeps the C's pair index `x`, reading chroma at `x - 1`
-//! and `x`, but takes the first luma sample and output pixel it touches as
-//! `pix` instead of having the caller bias the pointers. The C biases them by
-//! a pixel for the block entry point, which would mean forming a slice that
-//! starts before the row — sound in neither language, and checkasm does hand
-//! it the very first byte of a buffer.
-
 use crate::image::Format;
 
 pub const LAYOUT_ARGB: usize = 0;
@@ -32,7 +9,6 @@ pub const LAYOUT_NB: usize = 5;
 
 pub const UPSAMPLE_BLOCK: usize = 32;
 
-/// Bytes per pixel of a packed layout.
 pub const fn bpp(layout: usize) -> usize {
     if layout == LAYOUT_RGB || layout == LAYOUT_BGR {
         3
@@ -41,9 +17,6 @@ pub const fn bpp(layout: usize) -> usize {
     }
 }
 
-/// Byte offsets of alpha, red, green and blue within one pixel. The three-byte
-/// layouts have no alpha byte; their entry aliases red, whose store comes
-/// later and overwrites it, exactly as the C's `YUV_TO_OUT3` leaves it out.
 const fn channels(layout: usize) -> [usize; 4] {
     match layout {
         LAYOUT_RGBA => [3, 0, 1, 2],
@@ -90,7 +63,6 @@ const fn yuv_to_b(y: i32, u: i32) -> i32 {
     yuv_clip8(yuv_mult_hi(y, 19077) + yuv_mult_hi(u, 33050) - 17685)
 }
 
-/// Converts one pixel into the first [`bpp`] bytes of `out`.
 #[inline(always)]
 pub fn yuv_to_out<const L: usize>(y: i32, u: i32, v: i32, out: &mut [u8]) {
     let c = channels(L);
@@ -104,7 +76,6 @@ pub fn yuv_to_out<const L: usize>(y: i32, u: i32, v: i32, out: &mut [u8]) {
     out[c[3]] = yuv_to_b(y, u) as u8;
 }
 
-/// Packs a chroma pair into one word so the two planes advance together.
 #[inline(always)]
 const fn load_uv(u: u8, v: u8) -> u32 {
     u as u32 | ((v as u32) << 16)
@@ -117,11 +88,6 @@ fn corner<const L: usize>(y: u8, near: u32, far: u32, out: &mut [u8]) {
     yuv_to_out::<L>(y.into(), (uv & 0xff) as i32, (uv >> 16) as i32, out);
 }
 
-/// Interpolates chroma for the pixel pairs `first..=last`, writing output
-/// pixels `pix` onwards.
-///
-/// `top_y` must reach `pix + 2 * (last - first) + 1`, the chroma rows must
-/// reach `last`, and `top_dst` must hold [`bpp`] bytes for each pixel written.
 #[allow(clippy::too_many_arguments)]
 pub fn upsample_pairs<const L: usize>(
     top_y: &[u8],
@@ -185,8 +151,6 @@ pub fn upsample_pairs<const L: usize>(
     }
 }
 
-/// The first and last pixels of a row, whose chroma has no neighbour on one
-/// side and is weighted 3:1 against the row across instead.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub fn upsample_edge<const L: usize>(
@@ -282,8 +246,6 @@ pub fn pack_bgra4444(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// `(x * a * 32897) >> 23` is bit-exact with `(int)(x * a / 255.)` for 8-bit
-/// `x` and `a`.
 #[inline(always)]
 const fn premultiply(x: u8, m: u32) -> u8 {
     ((x as u32 * m) >> 23) as u8
@@ -305,9 +267,6 @@ pub fn premultiply_row(rgba: &mut [u8], alpha_first: bool) {
     }
 }
 
-/// The 4-bit layout, multiplied in its own precision rather than in 8-bit and
-/// then truncated. `swap` takes the two bytes of each pixel the other way
-/// round.
 pub fn premultiply_row_4444(rgba4444: &mut [u8], swap: bool) {
     let (i_rg, i_ba) = if swap { (1, 0) } else { (0, 1) };
 
@@ -332,11 +291,6 @@ const GAMMA_TAB_SCALE: i32 = 1 << GAMMA_TAB_FIX;
 const GAMMA_TAB_ROUNDER: i32 = GAMMA_TAB_SCALE >> 1;
 const ALPHA_FIX: u32 = 19;
 
-/// `pow(v / 255, 0.8) * 4095`, rounded, with one padding entry so a gather may
-/// read a whole dword at the last index.
-///
-/// The assembly gathers from this table directly, so with `asm` on it carries
-/// the C name `src/yuvdsp.h` declares.
 #[cfg_attr(feature = "asm", allow(unsafe_code))]
 #[cfg_attr(feature = "asm", export_name = "wpd_gamma_to_linear_tab")]
 pub static GAMMA_TO_LINEAR: [u16; 257] = [
@@ -360,7 +314,6 @@ pub static GAMMA_TO_LINEAR: [u16; 257] = [
     3953, 3966, 3979, 3992, 4005, 4018, 4031, 4044, 4056, 4069, 4082, 4095, 0,
 ];
 
-/// `255 * pow(v * 128 / 4095, 1 / 0.8)`, rounded.
 #[cfg_attr(feature = "asm", allow(unsafe_code))]
 #[cfg_attr(feature = "asm", export_name = "wpd_linear_to_gamma_tab")]
 pub static LINEAR_TO_GAMMA: [u16; GAMMA_TAB_SIZE + 1] = [
@@ -470,10 +423,6 @@ fn sum_weighted(
     linear_to_gamma(sum.wrapping_mul(inv) >> (ALPHA_FIX - 2), 0)
 }
 
-/// Chroma for one pair of ARGB rows, averaged 2x2 in linear light. A `stride`
-/// of 0 repeats the row, which is how the last row of an odd-height image is
-/// handled. `argb` must be `4 * num_pixels + stride` long, whether the width
-/// is odd or even.
 pub fn argb_to_uv(
     u: &mut [u8],
     v: &mut [u8],
@@ -529,14 +478,12 @@ pub fn argb_to_uv(
     }
 }
 
-/// Copies the alpha channel of a packed ARGB row into its own plane.
 pub fn extract_alpha(dst: &mut [u8], argb: &[u8]) {
     for (d, px) in dst.iter_mut().zip(argb.chunks_exact(4)) {
         *d = px[0];
     }
 }
 
-/// Point conversion of one row from full-resolution planes.
 pub fn yuv444_row<const L: usize>(dst: &mut [u8], y: &[u8], u: &[u8], v: &[u8]) {
     let src = y.iter().zip(u).zip(v);
 
@@ -545,18 +492,12 @@ pub fn yuv444_row<const L: usize>(dst: &mut [u8], y: &[u8], u: &[u8], v: &[u8]) 
     }
 }
 
-/// Point sampling of one row from 4:2:0 planes, which libwebp uses when fancy
-/// upsampling is turned off.
 pub fn yuv420_row<const L: usize>(dst: &mut [u8], y: &[u8], u: &[u8], v: &[u8]) {
     for (i, (out, &yy)) in dst.chunks_exact_mut(bpp(L)).zip(y).enumerate() {
         yuv_to_out::<L>(yy.into(), u[i >> 1].into(), v[i >> 1].into(), out);
     }
 }
 
-/// The six input rows an upsample entry point reads.
-///
-/// `bottom_y` is absent for the first and last rows of a picture, which are
-/// folded onto themselves rather than paired with a neighbour.
 pub struct UpsampleSrc<'a> {
     pub top_y: &'a [u8],
     pub bottom_y: Option<&'a [u8]>,
@@ -566,20 +507,13 @@ pub struct UpsampleSrc<'a> {
     pub cur_v: &'a [u8],
 }
 
-/// The one or two output rows it writes.
 pub struct UpsampleDst<'a> {
     pub top: &'a mut [u8],
     pub bottom: Option<&'a mut [u8]>,
 }
 
-/// Interpolates `16 * blocks` pixel pairs, starting at pair one.
-///
-/// The slices start at pixel zero, not at the first pair, because the kernel
-/// reads `top_u[0]` as the pair's left-hand neighbour.
 pub type UpsampleBlockFn = fn(&UpsampleSrc<'_>, &mut UpsampleDst<'_>, usize);
 
-/// One row in, one row out: the packers, the alpha dispatchers and the luma
-/// pass all have this shape, and the run is what the shorter one allows.
 pub type RowFn = fn(&mut [u8], &[u8]);
 pub type ArgbToYuv444Fn = fn(&mut [u8], &mut [u8], &mut [u8], &[u8]);
 pub type ArgbToUvFn = fn(&mut [u8], &mut [u8], &[u8], usize, usize, bool);
@@ -604,7 +538,6 @@ fn upsample_block<const L: usize>(
     );
 }
 
-/// The YUV DSP, one entry per kernel the assembly may replace.
 pub struct YuvDsp {
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
     pub dispatch_alpha_first: RowFn,
@@ -671,8 +604,6 @@ impl YuvDsp {
         table
     }
 
-    /// The packer for a packed output format, or none for the formats that are
-    /// written directly rather than reordered from ARGB.
     pub fn packer(&self, format: Format) -> Option<RowFn> {
         Some(match format {
             Format::Rgba | Format::RgbaPre => self.pack_rgba,
@@ -687,8 +618,6 @@ impl YuvDsp {
         })
     }
 
-    /// The four-bit premultiplier for a two-byte format, which libwebp applies
-    /// in that precision rather than in eight bits and then truncating.
     pub fn premultiplier_4444(&self, format: Format) -> fn(&mut [u8]) {
         if format == Format::Bgra4444Pre {
             self.premultiply_row_4444_swap
@@ -697,8 +626,6 @@ impl YuvDsp {
         }
     }
 
-    /// The alpha dispatcher for a layout, or none for the three-byte layouts,
-    /// which have nowhere to put it.
     pub fn alpha_dispatcher(&self, layout: usize) -> Option<RowFn> {
         match layout {
             LAYOUT_ARGB => Some(self.dispatch_alpha_first),
@@ -714,11 +641,6 @@ impl Default for YuvDsp {
     }
 }
 
-/// One output row pair of the fancy upsampler.
-///
-/// The rows must hold `len` luma samples, `(len + 1) / 2` chroma samples and
-/// `len` output pixels, which is what the block entry point plus the scalar
-/// head and tail add up to.
 pub fn upsample_row<const L: usize>(
     dsp: &YuvDsp,
     src: &UpsampleSrc<'_>,
@@ -746,8 +668,6 @@ pub fn upsample_row<const L: usize>(
     );
 
     if blocks != 0 {
-        /* The block kernel starts one pixel in, where the first pair does; the
-        chroma rows it reads are indexed from the pair, so they do not move. */
         let shifted = UpsampleSrc {
             top_y: &src.top_y[1..],
             bottom_y: src.bottom_y.map(|b| &b[1..]),

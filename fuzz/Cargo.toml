@@ -1,10 +1,3 @@
-# The coverage-guided half of the robustness testing. scripts/fuzz.sh mutates
-# real files and runs them through the whole decoder under ASan; this drives
-# the parsers in the safe core directly, where the failure mode is a panic on
-# damaged input rather than a memory error.
-#
-# Kept out of the workspace, as cargo-fuzz expects: it builds with its own
-# sanitizer and profile settings.
 [package]
 name = "wpd-fuzz"
 version = "0.0.0"

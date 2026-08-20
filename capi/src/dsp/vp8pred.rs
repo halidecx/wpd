@@ -1,5 +1,3 @@
-//! C ABI for the intra prediction table, as declared by `src/vp8pred.h`.
-
 use std::slice;
 
 use wpd::dsp::vp8pred as k;
@@ -17,9 +15,6 @@ pub struct VP8PredContext {
     pub pred16x16: [PredFn; PRED8X8_COUNT],
 }
 
-/// Wraps a 4x4 predictor. `$rows` and `$cols` say how far back of the block
-/// the mode reads, in whole rows and in bytes; that is exactly the region the
-/// kernel is handed.
 macro_rules! pred4x4_entry {
     ($name:ident, $k:expr, $rows:expr, $cols:expr) => {
         unsafe extern "C" fn $name(src: *mut u8, _tr: *const u8, stride: isize) {
@@ -32,8 +27,6 @@ macro_rules! pred4x4_entry {
     };
 }
 
-/// The same, for the three modes that also read four samples above and to the
-/// right of the block, which live outside that region.
 macro_rules! pred4x4_tr_entry {
     ($name:ident, $k:expr, $rows:expr, $cols:expr) => {
         unsafe extern "C" fn $name(src: *mut u8, tr: *const u8, stride: isize) {
@@ -89,9 +82,6 @@ pred_entry!(left_dc16_c, k::pred_left_dc::<16>, 16, 0, 1);
 pred_entry!(top_dc16_c, k::pred_top_dc::<16>, 16, 1, 0);
 pred_entry!(dc128_16_c, k::pred_dc128::<16>, 16, 0, 0);
 
-/// Overlays whatever [`wpd::asm::vp8pred::raw_table`] selected for the running
-/// CPU. The symbols and the instruction-set ladder both live in the core, so
-/// this table and the decoder's cannot pick different kernels.
 #[cfg(all(
     feature = "asm",
     any(
@@ -121,12 +111,8 @@ fn init_asm(p: &mut VP8PredContext) {
     }
 }
 
-/// Fills in `p` with the best implementation the running CPU allows.
-///
-/// # Safety
-///
-/// `p` must point to a writable, aligned `VP8PredContext`.
 #[no_mangle]
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn ff_vp8_pred_init(p: *mut VP8PredContext) {
     #[allow(unused_mut)]
     let mut table = VP8PredContext {
