@@ -586,6 +586,7 @@ mod arch {
             "ff_premultiply_row_4444_neon",
             "ff_premultiply_row_4444_swap_neon"
         );
+        multiply_syms!("ff_multiply_row_neon", "ff_premultiply_argb_row_neon");
         raw_row!(
             DispatchFirst,
             dispatch_first,
@@ -646,6 +647,8 @@ mod arch {
             premultiply_row_4444 = premultiply_row_4444::<neon::Premultiply4444>;
             premultiply_row_4444_swap =
                 premultiply_row_4444::<neon::Premultiply4444Swap>;
+            multiply_row = multiply_row::<neon::MultiplyRow>;
+            premultiply_argb_row = premultiply_argb_row::<neon::MultiplyArgb>;
             dispatch_alpha_first = dispatch_alpha::<neon::DispatchFirst>;
             dispatch_alpha_last = dispatch_alpha::<neon::DispatchLast>;
             argb_to_y = argb_to_y::<neon::ArgbToY>;
