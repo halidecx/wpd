@@ -186,6 +186,8 @@ endfunc
 //   right * x_add + (left - right) * accum == left * accum
 //                                             + right * (x_add - accum)
 function ff_rescale_import_expand_neon, export=1
+        cmp             w2,  #0
+        b.le            9f
         ldr             s0,  [x1]
         ldr             s1,  [x1, #4]
         uxtl            v0.8h,   v0.8b            // left
@@ -218,6 +220,8 @@ endfunc
 // four times. The caller keeps x_add <= x_sub << 7, which caps the window at
 // 128 source pixels and so keeps sum, and sum * x_sub, in range.
 function ff_rescale_import_shrink_neon, export=1
+        cmp             w2,  #0
+        b.le            9f
         movi            v0.4h,   #0               // sum
         fmov            s7,  w4                   // x_sub
         fmov            s17, w5                   // fx_scale
@@ -241,5 +245,5 @@ function ff_rescale_import_shrink_neon, export=1
         xtn             v0.4h,   v6.4s
         subs            w2,  w2,  #4
         b.gt            1b
-        ret
+9:      ret
 endfunc

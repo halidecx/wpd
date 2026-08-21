@@ -32,7 +32,8 @@ SECTION .text
 %endmacro
 
 ; Multiply-fix the loaded values by m6 with rounder m7, clip, store bytes.
-%macro PROCESS_ROW 5 ; even0, even1, odd0, odd1 (register numbers), dst addr
+; The odd-lane mask lives in a register: it is read twice a pass.
+%macro PROCESS_ROW 6 ; even0, even1, odd0, odd1 (register numbers), dst addr, mask
     pmuludq   m%1, m6
     pmuludq   m%2, m6
     pmuludq   m%3, m6
@@ -43,8 +44,8 @@ SECTION .text
     paddq     m%4, m7
     psrlq     m%1, 32
     psrlq     m%2, 32
-    pand      m%3, [pd_odd]
-    pand      m%4, [pd_odd]
+    pand      m%3, m%6
+    pand      m%4, m%6
     por       m%1, m%3
     por       m%2, m%4
     packssdw  m%1, m%2
@@ -86,11 +87,12 @@ SECTION .text
 cglobal rescale_export_direct, 4, 5, 8, dst, frow, n, fy
     BCAST_SCALE 6, fyd
     mova      m7, [pq_rrounder]
+    mova      m4, [pd_odd]
     sub       nd, mmsize / 2
     jl        .tail
 .loop:
     LOAD_PAIRS frowq, 0, 1, 2, 3
-    PROCESS_ROW 0, 1, 2, 3, dstq
+    PROCESS_ROW 0, 1, 2, 3, dstq, 4
     add       frowq, 2 * mmsize
     add       dstq, mmsize / 2
     sub       nd, mmsize / 2
@@ -119,6 +121,7 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
     mova      m7, [pq_rrounder]
     BCAST_SCALE 12, wad              ; the frow weight
     BCAST_SCALE 13, wbd              ; the irow weight
+    mova      m10, [pd_odd]
     sub       nd, mmsize / 2
     jl        .tail
 .loop:
@@ -144,7 +147,7 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
     psrlq     m1, 32
     psrlq     m2, 32
     psrlq     m3, 32
-    PROCESS_ROW 0, 1, 2, 3, dstq
+    PROCESS_ROW 0, 1, 2, 3, dstq, 10
     add       frowq, 2 * mmsize
     add       irowq, 2 * mmsize
     add       dstq, mmsize / 2
@@ -175,10 +178,11 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
 ;                                    const uint32_t *frow, int n,
 ;                                    uint32_t yscale, uint32_t fxy_scale)
 %macro EXPORT_SHRINK 0
-cglobal rescale_export_shrink, 6, 7, 11, dst, irow, frow, n, yscale, fxy
+cglobal rescale_export_shrink, 6, 7, 12, dst, irow, frow, n, yscale, fxy
     BCAST_SCALE 6, fxyd
     mova      m7, [pq_rrounder]
     BCAST_SCALE 10, yscaled
+    mova      m11, [pd_odd]
     sub       nd, mmsize / 2
     jl        .tail
 .loop:
@@ -202,7 +206,7 @@ cglobal rescale_export_shrink, 6, 7, 11, dst, irow, frow, n, yscale, fxy
     por       m5, m9
     movu      [irowq], m4            ; the fraction starts the next row
     movu      [irowq + mmsize], m5
-    PROCESS_ROW 0, 1, 2, 3, dstq
+    PROCESS_ROW 0, 1, 2, 3, dstq, 11
     add       frowq, 2 * mmsize
     add       irowq, 2 * mmsize
     add       dstq, mmsize / 2
@@ -235,13 +239,14 @@ cglobal rescale_export_shrink0, 4, 5, 8, dst, irow, n, fxy
     BCAST_SCALE 6, fxyd
     mova      m7, [pq_rrounder]
     pxor      m4, m4
+    mova      m5, [pd_odd]
     sub       nd, mmsize / 2
     jl        .tail
 .loop:
     LOAD_PAIRS irowq, 0, 1, 2, 3
     movu      [irowq], m4
     movu      [irowq + mmsize], m4
-    PROCESS_ROW 0, 1, 2, 3, dstq
+    PROCESS_ROW 0, 1, 2, 3, dstq, 5
     add       irowq, 2 * mmsize
     add       dstq, mmsize / 2
     sub       nd, mmsize / 2
@@ -289,6 +294,8 @@ EXPORT_SHRINK0
 ; pmaddwd's signed words.
 INIT_XMM sse2
 cglobal rescale_import_expand, 7, 9, 8, frow, src, n, srcw, ch, x_add, x_sub
+    test      nd, nd
+    jle       .end
     pxor      m7, m7
     mov       r7d, x_addd            ; accum
     cmp       chd, 4
@@ -306,7 +313,7 @@ cglobal rescale_import_expand, 7, 9, 8, frow, src, n, srcw, ch, x_add, x_sub
     movu      [frowq], m2
     add       frowq, 16
     sub       nd, 4
-    jz        .end
+    jle       .end
     sub       r7d, x_subd
     jns       .loop4
     add       srcq, 4
@@ -363,6 +370,8 @@ cglobal rescale_import_expand, 7, 9, 8, frow, src, n, srcw, ch, x_add, x_sub
 ; sum * x_sub stays inside sixteen unsigned bits.
 INIT_XMM sse2
 cglobal rescale_import_shrink, 6, 8, 10, frow, src, n, x_add, x_sub, fx
+    test      nd, nd
+    jle       .end
     pxor      m0, m0
     movd      m1, x_subd
     pshuflw   m1, m1, q0000
@@ -412,6 +421,7 @@ cglobal rescale_import_shrink, 6, 8, 10, frow, src, n, x_add, x_sub, fx
     add       frowq, 16
     sub       nd, 4
     jg        .loop
+.end:
     RET
 
 %endif ; ARCH_X86_64
