@@ -36,7 +36,10 @@ unfilter_tramp!(horizontal_unfilter_c, k::horizontal_unfilter);
 unfilter_tramp!(vertical_unfilter_c, k::vertical_unfilter);
 unfilter_tramp!(gradient_unfilter_c, k::gradient_unfilter);
 
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(all(
+    feature = "asm",
+    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn init_asm(dsp: &mut WPDFILTERSDSP) {
     let t = wpd::asm::filters::raw_table(wpd::cpu::flags());
 
@@ -60,7 +63,10 @@ impl WPDFILTERSDSP {
             gradient_unfilter: gradient_unfilter_c,
         };
 
-        #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
+        #[cfg(all(
+            feature = "asm",
+            any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         init_asm(&mut table);
 
         table

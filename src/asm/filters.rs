@@ -99,7 +99,28 @@ mod arch {
     }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(target_arch = "aarch64")]
+mod arch {
+    use super::*;
+
+    pub mod neon {
+        use super::*;
+
+        raw_unfilter!(Horizontal, horizontal, "ff_horizontal_unfilter_neon");
+        raw_unfilter!(Vertical, vertical, "ff_vertical_unfilter_neon");
+        raw_unfilter!(Gradient, gradient, "ff_gradient_unfilter_neon");
+    }
+
+    ladder! {
+        NEON {
+            horizontal_unfilter = unfilter::<neon::Horizontal>;
+            vertical_unfilter = unfilter::<neon::Vertical>;
+            gradient_unfilter = unfilter::<neon::Gradient>;
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
     use super::*;
 

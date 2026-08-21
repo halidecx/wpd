@@ -6,6 +6,8 @@
 #define MAX_WIDTH 512
 #define GUARD 16
 
+/* Besides the usual boundaries, 161 lands a row end exactly where a kernel
+ * that falls back to a fixed-length serial burst finishes one. */
 static const int widths[] = {1,
                              2,
                              3,
@@ -20,6 +22,7 @@ static const int widths[] = {1,
                              63,
                              127,
                              128,
+                             161,
                              255,
                              256,
                              509,
