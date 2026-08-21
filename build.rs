@@ -90,6 +90,7 @@ fn build_aarch64(root: &Path) {
 
     for f in [
         "filters_neon.S",
+        "rescaler_neon.S",
         "vp8l_neon.S",
         "vp8dsp_neon.S",
         "vp8pred_neon.S",

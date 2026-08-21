@@ -16,18 +16,20 @@ pub type ImportExpandRaw =
 pub type ImportShrinkRaw =
     unsafe extern "C" fn(*mut u32, *const u8, c_int, c_int, c_int, u32);
 
-fn import_row_expand<T: Raw<Sig = ImportExpandRaw>>(
+/* LUMA marks the kernels that also carry a single-channel path; the rest
+ * only pay off where four channels share one accumulator. */
+fn import_row_expand<T: Raw<Sig = ImportExpandRaw>, const LUMA: bool>(
     frow: &mut [u32],
     src: &[u8],
     p: Import,
 ) {
     let n = p.dst_width * p.num_channels;
 
-    /* pmaddwd blends with signed 16-bit weights, and the sliding windows
+    /* The blends take unsigned 16-bit weights, and the sliding windows
      * want a run of at least eight source pixels. */
     if p.src_width < 8
         || p.x_add >= 1 << 15
-        || !(p.num_channels == 1 || p.num_channels == 4)
+        || !(p.num_channels == 4 || (LUMA && p.num_channels == 1))
     {
         return scalar::import_row_expand(frow, src, p);
     }
@@ -48,6 +50,10 @@ fn import_row_expand<T: Raw<Sig = ImportExpandRaw>>(
     }
 }
 
+/* Only x86 carries a shrinking-import kernel: what limits that pass is the
+ * sliding window's control flow, not the arithmetic, so lane width buys
+ * little and the other targets stay on the scalar row. */
+#[allow(dead_code)]
 fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
     frow: &mut [u32],
     src: &[u8],
@@ -223,7 +229,7 @@ mod arch {
     }
 
     pub fn import_row_expand_sse2(frow: &mut [u32], src: &[u8], p: Import) {
-        import_row_expand::<sse2::ImportExpand>(frow, src, p)
+        import_row_expand::<sse2::ImportExpand, true>(frow, src, p)
     }
 
     pub fn import_row_shrink_sse2(frow: &mut [u32], src: &[u8], p: Import) {
@@ -296,7 +302,93 @@ mod arch {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
+mod arch {
+    use super::*;
+
+    pub mod neon {
+        use super::*;
+
+        raw!(
+            ExportDirect,
+            export_direct,
+            ExportDirectRaw,
+            "ff_rescale_export_direct_neon",
+            (*mut u8, *const u32, c_int, u32)
+        );
+        raw!(
+            ExportBlend,
+            export_blend,
+            ExportBlendRaw,
+            "ff_rescale_export_blend_neon",
+            (*mut u8, *const u32, *const u32, c_int, u32, u32, u32)
+        );
+        raw!(
+            ExportShrink,
+            export_shrink,
+            ExportShrinkRaw,
+            "ff_rescale_export_shrink_neon",
+            (*mut u8, *mut u32, *const u32, c_int, u32, u32)
+        );
+        raw!(
+            ExportShrink0,
+            export_shrink0,
+            ExportShrink0Raw,
+            "ff_rescale_export_shrink0_neon",
+            (*mut u8, *mut u32, c_int, u32)
+        );
+        raw!(
+            ImportExpand,
+            import_expand,
+            ImportExpandRaw,
+            "ff_rescale_import_expand_neon",
+            (*mut u32, *const u8, c_int, c_int, c_int, c_int, c_int)
+        );
+    }
+
+    pub fn import_row_expand_neon(frow: &mut [u32], src: &[u8], p: Import) {
+        import_row_expand::<neon::ImportExpand, false>(frow, src, p)
+    }
+
+    pub fn export_row_expand_neon(
+        dst: &mut [u8],
+        irow: &[u32],
+        frow: &[u32],
+        p: Export,
+    ) {
+        export_row_expand::<neon::ExportDirect, neon::ExportBlend>(dst, irow, frow, p)
+    }
+
+    pub fn export_row_shrink_neon(
+        dst: &mut [u8],
+        irow: &mut [u32],
+        frow: &[u32],
+        p: Export,
+    ) {
+        export_row_shrink::<neon::ExportShrink, neon::ExportShrink0>(dst, irow, frow, p)
+    }
+
+    pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
+        if flags.contains(CpuFlags::NEON) {
+            dsp.import_row_expand = import_row_expand_neon;
+            dsp.export_row_expand = export_row_expand_neon;
+            dsp.export_row_shrink = export_row_shrink_neon;
+        }
+    }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::NEON) {
+            t.import_row_expand = Some(import_row_expand_neon);
+            t.export_row_expand = Some(export_row_expand_neon);
+            t.export_row_shrink = Some(export_row_shrink_neon);
+        }
+        t
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
     use super::*;
 

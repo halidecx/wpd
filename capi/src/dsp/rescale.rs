@@ -174,6 +174,32 @@ mod asm {
     }
 }
 
+#[cfg(all(feature = "asm", target_arch = "aarch64"))]
+mod asm {
+    use super::*;
+
+    import_tramp!(
+        import_row_expand_neon_c,
+        wpd::asm::rescale::import_row_expand_neon
+    );
+    export_expand_tramp!(
+        export_row_expand_neon_c,
+        wpd::asm::rescale::export_row_expand_neon
+    );
+    export_shrink_tramp!(
+        export_row_shrink_neon_c,
+        wpd::asm::rescale::export_row_shrink_neon
+    );
+
+    pub fn init(dsp: &mut WPDRESCALEDSP) {
+        if wpd::cpu::flags().contains(wpd::cpu::CpuFlags::NEON) {
+            dsp.import_row_expand = import_row_expand_neon_c;
+            dsp.export_row_expand = export_row_expand_neon_c;
+            dsp.export_row_shrink = export_row_shrink_neon_c;
+        }
+    }
+}
+
 impl WPDRESCALEDSP {
     pub(crate) fn new() -> Self {
         #[allow(unused_mut)]
@@ -184,7 +210,10 @@ impl WPDRESCALEDSP {
             export_row_shrink: export_row_shrink_c,
         };
 
-        #[cfg(all(feature = "asm", target_arch = "x86_64"))]
+        #[cfg(all(
+            feature = "asm",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         asm::init(&mut table);
 
         table
