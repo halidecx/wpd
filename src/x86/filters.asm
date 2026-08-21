@@ -22,6 +22,22 @@ SECTION .text
 ; reconstruct row in place. A null prev marks the top row, which is
 ; left-predicted whatever the mode.
 
+; That top row is one row per plane, so the two predicted modes spell it out
+; here rather than tail-jumping into the horizontal kernel: a jump would land
+; on its prologue with the jumper's own pushes already on the stack, which
+; reads the arguments back shifted on x86-32 and never unwinds on Win64.
+%macro TOP_ROW_UNFILTER 0 ; width in wd, known positive
+.top:
+    xor       r3d, r3d
+.top_loop:
+    add       r3b, [rowq]
+    mov       [rowq], r3b
+    add       rowq, 1
+    sub       wd, 1
+    jnz       .top_loop
+    RET
+%endmacro
+
 ;------------------------------------------------------------------------------
 ; The running total makes every byte depend on the one before it; adding the
 ; vector to itself shifted by 1, 2 then 4 turns eight loads into three vector
@@ -78,6 +94,8 @@ cglobal horizontal_unfilter, 3, 4, 3, prev, row, w
 ;------------------------------------------------------------------------------
 %macro VERTICAL_UNFILTER 0
 cglobal vertical_unfilter, 3, 4, 4, prev, row, w
+    test      wd, wd
+    jle       .end
     test      prevq, prevq
     jz        .top
     sub       wd, 2 * mmsize
@@ -117,8 +135,7 @@ cglobal vertical_unfilter, 3, 4, 4, prev, row, w
     jnz       .bytes
 .end:
     RET
-.top:
-    jmp       ff_horizontal_unfilter_sse2
+    TOP_ROW_UNFILTER
 %endmacro
 
 INIT_XMM sse2
@@ -154,10 +171,10 @@ VERTICAL_UNFILTER
 ; block falls back to the serial loop above.
 INIT_XMM sse2
 cglobal gradient_unfilter, 3, 6, 8, prev, row, w
-    test      prevq, prevq
-    jz        .top
     test      wd, wd
     jle       .end
+    test      prevq, prevq
+    jz        .top
     movzx     r3d, byte [prevq]
     add       r3b, [rowq]
     mov       [rowq], r3b
@@ -241,18 +258,17 @@ cglobal gradient_unfilter, 3, 6, 8, prev, row, w
     pshuflw   m0, m0, 0
     punpcklqdq m0, m0
     jmp       .next
-.top:
-    jmp       ff_horizontal_unfilter_sse2
+    TOP_ROW_UNFILTER
 
 ; The same speculative closed form, sixteen pixels per block: the prefix
 ; sums run inside each 128-bit lane, then the low lane's total carries
 ; into the high one with one cross-lane permute.
 INIT_YMM avx2
 cglobal gradient_unfilter, 3, 6, 8, prev, row, w
-    test      prevq, prevq
-    jz        .top
     test      wd, wd
     jle       .end
+    test      prevq, prevq
+    jz        .top
     movzx     r3d, byte [prevq]
     add       r3b, [rowq]
     mov       [rowq], r3b
@@ -325,5 +341,4 @@ cglobal gradient_unfilter, 3, 6, 8, prev, row, w
     movd      xm0, r3d
     vpbroadcastw m0, xm0
     jmp       .next
-.top:
-    jmp       ff_horizontal_unfilter_sse2
+    TOP_ROW_UNFILTER
