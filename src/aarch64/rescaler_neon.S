@@ -209,3 +209,37 @@ function ff_rescale_import_expand_neon, export=1
         b               1b
 9:      ret
 endfunc
+
+// void ff_rescale_import_shrink_neon(uint32_t *frow, const uint8_t *src,
+//                                    int n, int x_add, int x_sub,
+//                                    uint32_t fx_scale)
+// Four channels only. They share one accumulator, so an output pixel is one
+// quad of 16-bit lanes and the window's control flow is paid once instead of
+// four times. The caller keeps x_add <= x_sub << 7, which caps the window at
+// 128 source pixels and so keeps sum, and sum * x_sub, in range.
+function ff_rescale_import_shrink_neon, export=1
+        movi            v0.4h,   #0               // sum
+        fmov            s7,  w4                   // x_sub
+        fmov            s17, w5                   // fx_scale
+        mov             w6,  #0                   // accum
+1:      add             w6,  w6,  w3
+2:      ldr             s1,  [x1], #4             // base
+        uxtl            v1.8h,   v1.8b
+        add             v0.4h,   v0.4h,  v1.4h
+        subs            w6,  w6,  w4
+        b.gt            2b
+        neg             w7,  w6
+        fmov            s3,  w7                   // the by-element multiplier
+        umull           v2.4s,   v1.4h,  v3.h[0]  // frac = base * -accum
+        umull           v3.4s,   v0.4h,  v7.h[0]
+        sub             v3.4s,   v3.4s,  v2.4s
+        st1             {v3.4s}, [x0], #16
+        umull           v4.2d,   v2.2s,  v17.s[0] // the fraction carries over
+        umull2          v5.2d,   v2.4s,  v17.s[0]
+        rshrn           v6.2s,   v4.2d,  #32
+        rshrn2          v6.4s,   v5.2d,  #32
+        xtn             v0.4h,   v6.4s
+        subs            w2,  w2,  #4
+        b.gt            1b
+        ret
+endfunc

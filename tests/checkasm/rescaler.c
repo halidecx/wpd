@@ -40,6 +40,7 @@ static const struct {
                     {128, 1},
                     {257, 2},
                     {512, 3},
+                    {512, 128},
                     {129, 1}};
 
 static uint32_t frac32(uint32_t x, uint32_t y) {
@@ -91,8 +92,10 @@ static void check_import(rescale_import_row_func func, const char *name,
                     fail();
             }
         {
+            /* The shrink kernels only take x_add <= x_sub << 7, so a bench
+             * ratio past 128:1 would time the scalar fallback instead. */
             const int      sw    = expand ? 100 : 512;
-            const int      dw    = expand ? 128 : 3;
+            const int      dw    = 128;
             const uint32_t x_add = expand ? (uint32_t)(dw - 1) : (uint32_t)sw;
             const uint32_t x_sub = expand ? (uint32_t)(sw - 1) : (uint32_t)dw;
 

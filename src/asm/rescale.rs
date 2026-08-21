@@ -50,10 +50,6 @@ fn import_row_expand<T: Raw<Sig = ImportExpandRaw>, const LUMA: bool>(
     }
 }
 
-/* Only x86 carries a shrinking-import kernel: what limits that pass is the
- * sliding window's control flow, not the arithmetic, so lane width buys
- * little and the other targets stay on the scalar row. */
-#[allow(dead_code)]
 fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
     frow: &mut [u32],
     src: &[u8],
@@ -344,10 +340,21 @@ mod arch {
             "ff_rescale_import_expand_neon",
             (*mut u32, *const u8, c_int, c_int, c_int, c_int, c_int)
         );
+        raw!(
+            ImportShrink,
+            import_shrink,
+            ImportShrinkRaw,
+            "ff_rescale_import_shrink_neon",
+            (*mut u32, *const u8, c_int, c_int, c_int, u32)
+        );
     }
 
     pub fn import_row_expand_neon(frow: &mut [u32], src: &[u8], p: Import) {
         import_row_expand::<neon::ImportExpand, false>(frow, src, p)
+    }
+
+    pub fn import_row_shrink_neon(frow: &mut [u32], src: &[u8], p: Import) {
+        import_row_shrink::<neon::ImportShrink>(frow, src, p)
     }
 
     pub fn export_row_expand_neon(
@@ -371,6 +378,7 @@ mod arch {
     pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
         if flags.contains(CpuFlags::NEON) {
             dsp.import_row_expand = import_row_expand_neon;
+            dsp.import_row_shrink = import_row_shrink_neon;
             dsp.export_row_expand = export_row_expand_neon;
             dsp.export_row_shrink = export_row_shrink_neon;
         }
@@ -381,6 +389,7 @@ mod arch {
 
         if flags.contains(CpuFlags::NEON) {
             t.import_row_expand = Some(import_row_expand_neon);
+            t.import_row_shrink = Some(import_row_shrink_neon);
             t.export_row_expand = Some(export_row_expand_neon);
             t.export_row_shrink = Some(export_row_shrink_neon);
         }

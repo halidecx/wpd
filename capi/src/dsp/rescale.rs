@@ -182,6 +182,10 @@ mod asm {
         import_row_expand_neon_c,
         wpd::asm::rescale::import_row_expand_neon
     );
+    import_tramp!(
+        import_row_shrink_neon_c,
+        wpd::asm::rescale::import_row_shrink_neon
+    );
     export_expand_tramp!(
         export_row_expand_neon_c,
         wpd::asm::rescale::export_row_expand_neon
@@ -194,6 +198,7 @@ mod asm {
     pub fn init(dsp: &mut WPDRESCALEDSP) {
         if wpd::cpu::flags().contains(wpd::cpu::CpuFlags::NEON) {
             dsp.import_row_expand = import_row_expand_neon_c;
+            dsp.import_row_shrink = import_row_shrink_neon_c;
             dsp.export_row_expand = export_row_expand_neon_c;
             dsp.export_row_shrink = export_row_shrink_neon_c;
         }
