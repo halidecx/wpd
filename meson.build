@@ -126,6 +126,24 @@ if get_option('b_sanitize') != 'none'
                    '-fno-omit-frame-pointer', separator: ' ')
   cargo_env.set('WPD_SANITIZE', get_option('b_sanitize'))
 endif
+if meson.is_cross_build()
+  # Cargo defaults to the build machine, so a cross build would link a
+  # wrong-architecture staticlib and every Rust symbol would come up
+  # undefined.  Hand the wrappers the host triple instead.
+  rust_cpu = {
+    'x86': 'i686',
+    'arm': 'armv7',
+  }.get(cpu_family, cpu_family)
+  rust_system = {
+    'darwin': 'apple-darwin',
+    'linux': 'unknown-linux-gnu' + (cpu_family == 'arm' ? 'eabihf' : ''),
+    'windows': 'pc-windows-gnu',
+  }.get(host_machine.system(), '')
+  if rust_system == ''
+    error('no Rust target triple mapping for ' + host_machine.system())
+  endif
+  cargo_env.set('WPD_CARGO_TARGET', rust_cpu + '-' + rust_system)
+endif
 soversion = meson.project_version()
 
 libwpd_artifacts = custom_target(
@@ -430,6 +448,7 @@ custom_target(
     meson.current_build_dir(),
     cargo_profile,
   ],
+  env: cargo_env,
   build_always_stale: true,
   build_by_default: false,
   install: false,
