@@ -1,12 +1,6 @@
-use crate::dsp::rescale::{frac, RescaleDsp, RFIX};
+use crate::dsp::rescale::{frac, ExportExpand, ExportShrink, Import, RescaleDsp, RFIX};
 use crate::error::{Error, Result};
 use crate::picture::{PlaneMut, PlaneRef};
-
-pub use crate::dsp::rescale::{
-    export_row_expand, export_row_shrink, import_row_expand, import_row_shrink, Export,
-    Import,
-};
-pub use crate::dsp::yuv::{multiply_row, premultiply_argb_row};
 
 pub fn accumulate(irow: &mut [u32], frow: &[u32]) {
     for (i, f) in irow.iter_mut().zip(frow) {
@@ -73,7 +67,7 @@ impl Scratch {
     }
 }
 
-pub struct Rescaler {
+pub struct Rescaler<'a> {
     x_expand: bool,
     y_expand: bool,
     num_channels: usize,
@@ -90,11 +84,12 @@ pub struct Rescaler {
     dst_height: i32,
     dst_y: i32,
     swapped: bool,
-    dsp: RescaleDsp,
+    dsp: &'a RescaleDsp,
 }
 
-impl Rescaler {
+impl<'a> Rescaler<'a> {
     pub fn new(
+        dsp: &'a RescaleDsp,
         work: &mut [u32],
         src_width: i32,
         src_height: i32,
@@ -143,7 +138,7 @@ impl Rescaler {
             dst_height,
             dst_y: 0,
             swapped: false,
-            dsp: RescaleDsp::new(),
+            dsp,
         }
     }
 
@@ -151,7 +146,7 @@ impl Rescaler {
         self.num_channels * self.dst_width
     }
 
-    fn rows<'a>(&self, work: &'a mut [u32]) -> (&'a mut [u32], &'a mut [u32]) {
+    fn rows<'w>(&self, work: &'w mut [u32]) -> (&'w mut [u32], &'w mut [u32]) {
         let width = self.width();
         let (a, b) = work[..2 * width].split_at_mut(width);
 
@@ -197,18 +192,24 @@ impl Rescaler {
         let width = self.width();
 
         while !self.wants_row() {
-            let p = Export {
-                y_accum: self.y_accum,
-                y_sub: self.y_sub as u32,
-                fy_scale: self.fy_scale,
-                fxy_scale: self.fxy_scale,
-            };
             let out = dst.row_mut(self.dst_y, 0, width);
             let (irow, frow) = self.rows(work);
 
             if self.y_expand {
+                let p = ExportExpand {
+                    y_accum: self.y_accum,
+                    y_sub: self.y_sub as u32,
+                    fy_scale: self.fy_scale,
+                };
+
                 (self.dsp.export_row_expand)(out, irow, frow, p);
             } else if self.fxy_scale != 0 {
+                let p = ExportShrink {
+                    y_accum: self.y_accum,
+                    fy_scale: self.fy_scale,
+                    fxy_scale: self.fxy_scale,
+                };
+
                 (self.dsp.export_row_shrink)(out, irow, frow, p);
             } else {
                 export_row_direct(out, irow);
@@ -221,6 +222,7 @@ impl Rescaler {
 
 #[allow(clippy::too_many_arguments)]
 pub fn rescale_plane(
+    dsp: &RescaleDsp,
     work: &mut [u32],
     dst: &mut PlaneMut<'_>,
     dst_width: i32,
@@ -231,6 +233,7 @@ pub fn rescale_plane(
     num_channels: usize,
 ) {
     let mut r = Rescaler::new(
+        dsp,
         work,
         src_width,
         src_height,
@@ -253,6 +256,7 @@ pub fn rescale_plane(
 #[allow(clippy::too_many_arguments)]
 pub fn rescale_plane_weighted(
     dsp: &crate::dsp::yuv::YuvDsp,
+    rdsp: &RescaleDsp,
     scratch: &mut Scratch,
     dst: &mut PlaneMut<'_>,
     dst_width: i32,
@@ -267,6 +271,7 @@ pub fn rescale_plane_weighted(
     let len = src_width as usize * num_channels;
     let row = &mut row[..len];
     let mut r = Rescaler::new(
+        rdsp,
         work,
         src_width,
         src_height,
@@ -295,6 +300,8 @@ pub fn rescale_plane_weighted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dsp::rescale::import_row_shrink;
+    use crate::dsp::yuv::premultiply_argb_row;
 
     #[test]
     fn premultiplying_and_undoing_it_round_trips_opaque_pixels() {

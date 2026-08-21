@@ -3,7 +3,7 @@ use std::slice;
 
 use super::count;
 use wpd::dsp::rescale as k;
-use wpd::dsp::rescale::{Export, Import};
+use wpd::dsp::rescale::{ExportExpand, ExportShrink, Import};
 
 pub type ImportRowFn =
     unsafe extern "C" fn(*mut u32, *const u8, c_int, c_int, c_int, u32, u32, u32);
@@ -38,6 +38,11 @@ macro_rules! import_tramp {
             else {
                 return;
             };
+            /* An empty source row has nothing to resample from, and the
+             * kernels prime their window before their first store. */
+            if dw == 0 || sw == 0 || ch == 0 {
+                return;
+            }
             let p = Import {
                 num_channels: ch,
                 src_width: sw,
@@ -58,6 +63,8 @@ macro_rules! import_tramp {
     };
 }
 
+/* Only the row a kernel actually reads becomes a slice: the other pointer
+ * is free to be null, as it is on the pass that ignores it. */
 macro_rules! export_expand_tramp {
     ($name:ident, $f:path) => {
         unsafe extern "C" fn $name(
@@ -72,17 +79,19 @@ macro_rules! export_expand_tramp {
             let Some(n) = count(width) else {
                 return;
             };
-            let p = Export {
+            let p = ExportExpand {
                 y_accum,
                 y_sub,
                 fy_scale,
-                fxy_scale: 0,
             };
 
             unsafe {
                 $f(
                     slice::from_raw_parts_mut(dst, n),
-                    slice::from_raw_parts(irow, n),
+                    match p.blend() {
+                        Some(_) => slice::from_raw_parts(irow, n),
+                        None => &[],
+                    },
                     slice::from_raw_parts(frow, n),
                     p,
                 )
@@ -105,9 +114,8 @@ macro_rules! export_shrink_tramp {
             let Some(n) = count(width) else {
                 return;
             };
-            let p = Export {
+            let p = ExportShrink {
                 y_accum,
-                y_sub: 1,
                 fy_scale,
                 fxy_scale,
             };
@@ -116,7 +124,10 @@ macro_rules! export_shrink_tramp {
                 $f(
                     slice::from_raw_parts_mut(dst, n),
                     slice::from_raw_parts_mut(irow, n),
-                    slice::from_raw_parts(frow, n),
+                    match p.yscale() {
+                        0 => &[],
+                        _ => slice::from_raw_parts(frow, n),
+                    },
                     p,
                 )
             }
@@ -132,6 +143,7 @@ export_shrink_tramp!(export_row_shrink_c, k::export_row_shrink);
 #[cfg(all(feature = "asm", target_arch = "x86_64"))]
 mod asm {
     use super::*;
+    use wpd::asm::rescale::Kernel;
 
     import_tramp!(
         import_row_expand_sse2_c,
@@ -159,24 +171,31 @@ mod asm {
     );
 
     pub fn init(dsp: &mut WPDRESCALEDSP) {
-        let flags = wpd::cpu::flags();
+        let s = wpd::asm::rescale::selection(wpd::cpu::flags());
 
-        if flags.contains(wpd::cpu::CpuFlags::SSE2) {
+        if s.import_row_expand == Kernel::Sse2 {
             dsp.import_row_expand = import_row_expand_sse2_c;
+        }
+        if s.import_row_shrink == Kernel::Sse2 {
             dsp.import_row_shrink = import_row_shrink_sse2_c;
-            dsp.export_row_expand = export_row_expand_sse2_c;
-            dsp.export_row_shrink = export_row_shrink_sse2_c;
         }
-        if flags.contains(wpd::cpu::CpuFlags::AVX2) {
-            dsp.export_row_expand = export_row_expand_avx2_c;
-            dsp.export_row_shrink = export_row_shrink_avx2_c;
-        }
+        dsp.export_row_expand = match s.export_row_expand {
+            Kernel::Sse2 => export_row_expand_sse2_c,
+            Kernel::Avx2 => export_row_expand_avx2_c,
+            _ => dsp.export_row_expand,
+        };
+        dsp.export_row_shrink = match s.export_row_shrink {
+            Kernel::Sse2 => export_row_shrink_sse2_c,
+            Kernel::Avx2 => export_row_shrink_avx2_c,
+            _ => dsp.export_row_shrink,
+        };
     }
 }
 
 #[cfg(all(feature = "asm", target_arch = "aarch64"))]
 mod asm {
     use super::*;
+    use wpd::asm::rescale::Kernel;
 
     import_tramp!(
         import_row_expand_neon_c,
@@ -196,10 +215,18 @@ mod asm {
     );
 
     pub fn init(dsp: &mut WPDRESCALEDSP) {
-        if wpd::cpu::flags().contains(wpd::cpu::CpuFlags::NEON) {
+        let s = wpd::asm::rescale::selection(wpd::cpu::flags());
+
+        if s.import_row_expand == Kernel::Neon {
             dsp.import_row_expand = import_row_expand_neon_c;
+        }
+        if s.import_row_shrink == Kernel::Neon {
             dsp.import_row_shrink = import_row_shrink_neon_c;
+        }
+        if s.export_row_expand == Kernel::Neon {
             dsp.export_row_expand = export_row_expand_neon_c;
+        }
+        if s.export_row_shrink == Kernel::Neon {
             dsp.export_row_shrink = export_row_shrink_neon_c;
         }
     }

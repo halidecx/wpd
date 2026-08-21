@@ -1,5 +1,6 @@
 use super::ANIM_SUBFRAME;
 use crate::convert::YuvPlanes;
+use crate::dsp::rescale::RescaleDsp;
 use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use crate::error::{Error, Result};
 use crate::image::{self, ceil_rshift, Crop, Format};
@@ -85,6 +86,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
 #[allow(clippy::too_many_arguments)]
 fn scale_image(
     dsp: &YuvDsp,
+    rdsp: &RescaleDsp,
     scratch: &mut Scratch,
     dst: &mut Buffer,
     src: &Frame<'_>,
@@ -130,6 +132,7 @@ fn scale_image(
         if premult || (weight_luma && p == 0) {
             rescale_plane_weighted(
                 dsp,
+                rdsp,
                 scratch,
                 plane,
                 dw,
@@ -142,6 +145,7 @@ fn scale_image(
             );
         } else {
             rescale_plane(
+                rdsp,
                 scratch.work_mut(),
                 plane,
                 dw,
@@ -176,6 +180,7 @@ fn scale_image(
 
 pub fn transform_image<'a>(
     dsp: &YuvDsp,
+    rdsp: &RescaleDsp,
     options: &Options,
     scratch: &mut Scratch,
     scaled: &'a mut Buffer,
@@ -200,6 +205,7 @@ pub fn transform_image<'a>(
 
     scale_image(
         dsp,
+        rdsp,
         scratch,
         scaled,
         &view,

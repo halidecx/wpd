@@ -29,11 +29,38 @@ pub struct Import {
 }
 
 #[derive(Clone, Copy)]
-pub struct Export {
+pub struct ExportExpand {
     pub y_accum: i32,
     pub y_sub: u32,
     pub fy_scale: u32,
+}
+
+#[derive(Clone, Copy)]
+pub struct ExportShrink {
+    pub y_accum: i32,
+    pub fy_scale: u32,
     pub fxy_scale: u32,
+}
+
+impl ExportExpand {
+    /* A destination row that lands on a source row takes it whole; any
+     * other one blends the pair the accumulator sits between, and only
+     * then is irow read at all. */
+    pub fn blend(&self) -> Option<(u32, u32)> {
+        (self.y_accum != 0).then(|| {
+            let b = frac((-self.y_accum) as u32, self.y_sub);
+
+            (0u32.wrapping_sub(b), b)
+        })
+    }
+}
+
+impl ExportShrink {
+    /* Zero means the accumulator holds whole source rows, so nothing
+     * carries into the next one and frow goes unread. */
+    pub fn yscale(&self) -> u32 {
+        self.fy_scale.wrapping_mul((-self.y_accum) as u32)
+    }
 }
 
 fn clip8(v: u32) -> u8 {
@@ -48,6 +75,11 @@ pub fn import_row_expand(frow: &mut [u32], src: &[u8], p: Import) {
     let stride = p.num_channels;
     let x_out_max = p.dst_width * stride;
 
+    /* The window is primed before the first store, so an empty row has to
+     * turn back here rather than at the loop's foot. */
+    if x_out_max == 0 {
+        return;
+    }
     for channel in 0..stride {
         let mut x_in = channel;
         let mut x_out = channel;
@@ -109,16 +141,13 @@ pub fn import_row_shrink(frow: &mut [u32], src: &[u8], p: Import) {
     }
 }
 
-pub fn export_row_expand(dst: &mut [u8], irow: &[u32], frow: &[u32], p: Export) {
-    if p.y_accum == 0 {
+pub fn export_row_expand(dst: &mut [u8], irow: &[u32], frow: &[u32], p: ExportExpand) {
+    let Some((a, b)) = p.blend() else {
         for (d, &f) in dst.iter_mut().zip(frow) {
             *d = clip8(mult_fix(f, p.fy_scale));
         }
         return;
-    }
-
-    let b = frac((-p.y_accum) as u32, p.y_sub);
-    let a = 0u32.wrapping_sub(b);
+    };
 
     for ((d, &f), &i) in dst.iter_mut().zip(frow).zip(irow) {
         let acc = u64::from(a) * u64::from(f) + u64::from(b) * u64::from(i);
@@ -128,8 +157,13 @@ pub fn export_row_expand(dst: &mut [u8], irow: &[u32], frow: &[u32], p: Export) 
     }
 }
 
-pub fn export_row_shrink(dst: &mut [u8], irow: &mut [u32], frow: &[u32], p: Export) {
-    let yscale = p.fy_scale.wrapping_mul((-p.y_accum) as u32);
+pub fn export_row_shrink(
+    dst: &mut [u8],
+    irow: &mut [u32],
+    frow: &[u32],
+    p: ExportShrink,
+) {
+    let yscale = p.yscale();
 
     if yscale != 0 {
         for ((d, i), &f) in dst.iter_mut().zip(irow.iter_mut()).zip(frow) {
@@ -147,8 +181,8 @@ pub fn export_row_shrink(dst: &mut [u8], irow: &mut [u32], frow: &[u32], p: Expo
 }
 
 pub type ImportFn = fn(&mut [u32], &[u8], Import);
-pub type ExportExpandFn = fn(&mut [u8], &[u32], &[u32], Export);
-pub type ExportShrinkFn = fn(&mut [u8], &mut [u32], &[u32], Export);
+pub type ExportExpandFn = fn(&mut [u8], &[u32], &[u32], ExportExpand);
+pub type ExportShrinkFn = fn(&mut [u8], &mut [u32], &[u32], ExportShrink);
 
 #[derive(Clone, Copy)]
 pub struct RescaleDsp {

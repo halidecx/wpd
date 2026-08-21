@@ -1,7 +1,9 @@
 use std::ffi::c_int;
 
 use crate::cpu::CpuFlags;
-use crate::dsp::rescale::{self as scalar, frac, Export, Import, ImportFn, RescaleDsp};
+use crate::dsp::rescale::{
+    self as scalar, ExportExpand, ExportShrink, Import, RescaleDsp,
+};
 
 pub(crate) use super::Raw;
 
@@ -57,8 +59,9 @@ fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
 ) {
     let n = p.dst_width * p.num_channels;
 
-    /* sum * x_sub must stay inside sixteen unsigned bits: a 1/128 ratio. */
-    if p.num_channels != 4 || p.x_add > p.x_sub << 7 {
+    /* x_sub is a 16-bit multiplier lane, and sum * x_sub must stay inside
+     * sixteen unsigned bits too: a 1/128 ratio. */
+    if p.num_channels != 4 || p.x_sub >= 1 << 16 || p.x_add > p.x_sub << 7 {
         return scalar::import_row_shrink(frow, src, p);
     }
     assert!(
@@ -77,7 +80,7 @@ fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
     }
 }
 
-fn export_row_expand<D, B>(dst: &mut [u8], irow: &[u32], frow: &[u32], p: Export)
+fn export_row_expand<D, B>(dst: &mut [u8], irow: &[u32], frow: &[u32], p: ExportExpand)
 where
     D: Raw<Sig = ExportDirectRaw>,
     B: Raw<Sig = ExportBlendRaw>,
@@ -85,12 +88,7 @@ where
     let n = dst.len();
 
     assert!(frow.len() >= n, "short rescaler row");
-    if p.y_accum == 0 {
-        unsafe { (D::F)(dst.as_mut_ptr(), frow.as_ptr(), n as c_int, p.fy_scale) }
-    } else {
-        let b = frac((-p.y_accum) as u32, p.y_sub);
-        let a = 0u32.wrapping_sub(b);
-
+    if let Some((a, b)) = p.blend() {
         assert!(irow.len() >= n, "short rescaler row");
         unsafe {
             (B::F)(
@@ -103,16 +101,22 @@ where
                 b,
             )
         }
+    } else {
+        unsafe { (D::F)(dst.as_mut_ptr(), frow.as_ptr(), n as c_int, p.fy_scale) }
     }
 }
 
-fn export_row_shrink<S, Z>(dst: &mut [u8], irow: &mut [u32], frow: &[u32], p: Export)
-where
+fn export_row_shrink<S, Z>(
+    dst: &mut [u8],
+    irow: &mut [u32],
+    frow: &[u32],
+    p: ExportShrink,
+) where
     S: Raw<Sig = ExportShrinkRaw>,
     Z: Raw<Sig = ExportShrink0Raw>,
 {
     let n = dst.len();
-    let yscale = p.fy_scale.wrapping_mul((-p.y_accum) as u32);
+    let yscale = p.yscale();
 
     assert!(irow.len() >= n, "short rescaler row");
     if yscale != 0 {
@@ -132,12 +136,54 @@ where
     }
 }
 
-#[derive(Default)]
-pub struct RawTable {
-    pub import_row_expand: Option<ImportFn>,
-    pub import_row_shrink: Option<ImportFn>,
-    pub export_row_expand: Option<crate::dsp::rescale::ExportExpandFn>,
-    pub export_row_shrink: Option<crate::dsp::rescale::ExportShrinkFn>,
+/* The wrappers above are safe Rust fns, so the C bindings cannot hand them
+ * out the way the other modules hand out raw symbols. They get told which
+ * kernel the dispatch below picked instead, and wrap that one themselves,
+ * which keeps the choice in one place. */
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Kernel {
+    #[default]
+    Scalar,
+    Sse2,
+    Avx2,
+    Neon,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Selection {
+    pub import_row_expand: Kernel,
+    pub import_row_shrink: Kernel,
+    pub export_row_expand: Kernel,
+    pub export_row_shrink: Kernel,
+}
+
+/* One description of the ladder, read out as both the dispatch table and
+ * the selection: they cannot drift apart. */
+macro_rules! ladder {
+    ($(
+        $flag:ident => $kernel:ident {
+            $( $field:ident = $wrap:ident; )*
+        }
+    )*) => {
+        pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
+            $(
+                if flags.contains(CpuFlags::$flag) {
+                    $( dsp.$field = $wrap; )*
+                }
+            )*
+        }
+
+        pub fn selection(flags: CpuFlags) -> Selection {
+            let mut s = Selection::default();
+
+            $(
+                if flags.contains(CpuFlags::$flag) {
+                    $( s.$field = Kernel::$kernel; )*
+                }
+            )*
+            s
+        }
+    };
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -236,7 +282,7 @@ mod arch {
         dst: &mut [u8],
         irow: &[u32],
         frow: &[u32],
-        p: Export,
+        p: ExportExpand,
     ) {
         export_row_expand::<sse2::ExportDirect, sse2::ExportBlend>(dst, irow, frow, p)
     }
@@ -245,7 +291,7 @@ mod arch {
         dst: &mut [u8],
         irow: &mut [u32],
         frow: &[u32],
-        p: Export,
+        p: ExportShrink,
     ) {
         export_row_shrink::<sse2::ExportShrink, sse2::ExportShrink0>(dst, irow, frow, p)
     }
@@ -254,7 +300,7 @@ mod arch {
         dst: &mut [u8],
         irow: &[u32],
         frow: &[u32],
-        p: Export,
+        p: ExportExpand,
     ) {
         export_row_expand::<avx2::ExportDirect, avx2::ExportBlend>(dst, irow, frow, p)
     }
@@ -263,38 +309,22 @@ mod arch {
         dst: &mut [u8],
         irow: &mut [u32],
         frow: &[u32],
-        p: Export,
+        p: ExportShrink,
     ) {
         export_row_shrink::<avx2::ExportShrink, avx2::ExportShrink0>(dst, irow, frow, p)
     }
 
-    pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
-        if flags.contains(CpuFlags::SSE2) {
-            dsp.import_row_expand = import_row_expand_sse2;
-            dsp.import_row_shrink = import_row_shrink_sse2;
-            dsp.export_row_expand = export_row_expand_sse2;
-            dsp.export_row_shrink = export_row_shrink_sse2;
+    ladder! {
+        SSE2 => Sse2 {
+            import_row_expand = import_row_expand_sse2;
+            import_row_shrink = import_row_shrink_sse2;
+            export_row_expand = export_row_expand_sse2;
+            export_row_shrink = export_row_shrink_sse2;
         }
-        if flags.contains(CpuFlags::AVX2) {
-            dsp.export_row_expand = export_row_expand_avx2;
-            dsp.export_row_shrink = export_row_shrink_avx2;
+        AVX2 => Avx2 {
+            export_row_expand = export_row_expand_avx2;
+            export_row_shrink = export_row_shrink_avx2;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if flags.contains(CpuFlags::SSE2) {
-            t.import_row_expand = Some(import_row_expand_sse2);
-            t.import_row_shrink = Some(import_row_shrink_sse2);
-            t.export_row_expand = Some(export_row_expand_sse2);
-            t.export_row_shrink = Some(export_row_shrink_sse2);
-        }
-        if flags.contains(CpuFlags::AVX2) {
-            t.export_row_expand = Some(export_row_expand_avx2);
-            t.export_row_shrink = Some(export_row_shrink_avx2);
-        }
-        t
     }
 }
 
@@ -361,7 +391,7 @@ mod arch {
         dst: &mut [u8],
         irow: &[u32],
         frow: &[u32],
-        p: Export,
+        p: ExportExpand,
     ) {
         export_row_expand::<neon::ExportDirect, neon::ExportBlend>(dst, irow, frow, p)
     }
@@ -370,30 +400,18 @@ mod arch {
         dst: &mut [u8],
         irow: &mut [u32],
         frow: &[u32],
-        p: Export,
+        p: ExportShrink,
     ) {
         export_row_shrink::<neon::ExportShrink, neon::ExportShrink0>(dst, irow, frow, p)
     }
 
-    pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
-        if flags.contains(CpuFlags::NEON) {
-            dsp.import_row_expand = import_row_expand_neon;
-            dsp.import_row_shrink = import_row_shrink_neon;
-            dsp.export_row_expand = export_row_expand_neon;
-            dsp.export_row_shrink = export_row_shrink_neon;
+    ladder! {
+        NEON => Neon {
+            import_row_expand = import_row_expand_neon;
+            import_row_shrink = import_row_shrink_neon;
+            export_row_expand = export_row_expand_neon;
+            export_row_shrink = export_row_shrink_neon;
         }
-    }
-
-    pub fn raw_table(flags: CpuFlags) -> RawTable {
-        let mut t = RawTable::default();
-
-        if flags.contains(CpuFlags::NEON) {
-            t.import_row_expand = Some(import_row_expand_neon);
-            t.import_row_shrink = Some(import_row_shrink_neon);
-            t.export_row_expand = Some(export_row_expand_neon);
-            t.export_row_shrink = Some(export_row_shrink_neon);
-        }
-        t
     }
 }
 
@@ -403,8 +421,8 @@ mod arch {
 
     pub fn init(_dsp: &mut RescaleDsp, _flags: CpuFlags) {}
 
-    pub fn raw_table(_flags: CpuFlags) -> RawTable {
-        RawTable::default()
+    pub fn selection(_flags: CpuFlags) -> Selection {
+        Selection::default()
     }
 }
 

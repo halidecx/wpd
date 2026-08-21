@@ -5,6 +5,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "cpu.h"
+#include "rescaler.h"
 #include "yuvdsp.h"
 
 #include <setjmp.h>
@@ -140,6 +141,52 @@ done:
     return failed;
 }
 
+/* A zero-length row starts on the guard page itself, so a rescaler kernel
+ * that stores before it tests its count faults on the first write. The
+ * source row is wide enough to reach the vector paths. */
+#define RESCALE_SRC 64
+
+static int probe_rescale(const WPDRESCALEDSP *dsp) {
+    uint8_t *maps[4]  = {NULL, NULL, NULL, NULL};
+    size_t   sizes[4] = {0, 0, 0, 0};
+    uint8_t *dst      = guarded(&maps[0], &sizes[0], 0);
+    uint8_t *src      = guarded(&maps[1], &sizes[1], 4 * RESCALE_SRC);
+    uint8_t *frow     = guarded(&maps[2], &sizes[2], 0);
+    uint8_t *irow     = guarded(&maps[3], &sizes[3], 0);
+    int      failed   = 0;
+
+    if (!dst || !src || !frow || !irow) {
+        fprintf(stderr, "mmap failed\n");
+        failed = 1;
+        goto done;
+    }
+
+    trapped = 0;
+    signal(SIGSEGV, on_fault);
+    signal(SIGBUS, on_fault);
+    if (sigsetjmp(escape, 1) == 0) {
+        dsp->import_row_expand(
+            (uint32_t *)frow, src, 0, RESCALE_SRC, 4, 1, 1, 0);
+        dsp->import_row_shrink(
+            (uint32_t *)frow, src, 0, RESCALE_SRC, 4, 1, 1, 0);
+        dsp->export_row_expand(
+            dst, (const uint32_t *)irow, (const uint32_t *)frow, 0, 0, 1, 0);
+        dsp->export_row_shrink(
+            dst, (uint32_t *)irow, (const uint32_t *)frow, 0, 0, 0, 0);
+    }
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGBUS, SIG_DFL);
+    if (trapped) {
+        printf("FAIL rescale: an empty row was still written\n");
+        failed = 1;
+    }
+done:
+    for (size_t i = 0; i < 4; i++)
+        if (maps[i])
+            munmap(maps[i], sizes[i]);
+    return failed;
+}
+
 #define ROW(fn, dst, src) {#fn, KIND_ROW, dst, src, 0, dsp->fn}
 #define INPLACE(fn, dst) {#fn, KIND_INPLACE, dst, 0, 0, dsp->fn}
 #define PREMUL(pos, first)   \
@@ -203,13 +250,16 @@ int main(void) {
     have = wpd_get_cpu_flags();
 
     for (size_t i = 0; i < sizeof(levels) / sizeof(*levels); i++) {
-        WPDYUVDSP dsp;
+        WPDYUVDSP     dsp;
+        WPDRESCALEDSP rdsp;
 
         if (levels[i] & ~have)
             continue;
         wpd_set_cpu_flags_mask(levels[i] ? levels[i] | (levels[i] - 1) : 0);
         wpd_yuv_dsp_init(&dsp);
         failed |= check(&dsp);
+        wpd_rescale_dsp_init(&rdsp);
+        failed |= probe_rescale(&rdsp);
     }
     wpd_set_cpu_flags_mask(~0u);
     printf("rowbounds: %s\n", failed ? "FAILED" : "all rows stayed in bounds");
