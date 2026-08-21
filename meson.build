@@ -134,13 +134,20 @@ if meson.is_cross_build()
     'x86': 'i686',
     'arm': 'armv7',
   }.get(cpu_family, cpu_family)
+  # rustc has no aarch64-pc-windows-gnu: gnullvm is the GNU-flavoured
+  # aarch64 Windows target, and 32-bit arm has no Windows target at all.
+  rust_windows = {
+    'aarch64': 'pc-windows-gnullvm',
+    'arm': '',
+  }.get(cpu_family, 'pc-windows-gnu')
   rust_system = {
     'darwin': 'apple-darwin',
     'linux': 'unknown-linux-gnu' + (cpu_family == 'arm' ? 'eabihf' : ''),
-    'windows': 'pc-windows-gnu',
+    'windows': rust_windows,
   }.get(host_machine.system(), '')
   if rust_system == ''
-    error('no Rust target triple mapping for ' + host_machine.system())
+    error('no Rust target triple mapping for ' + cpu_family + ' ' +
+          host_machine.system())
   endif
   cargo_env.set('WPD_CARGO_TARGET', rust_cpu + '-' + rust_system)
 endif
