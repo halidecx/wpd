@@ -169,10 +169,16 @@ static int probe_rescale(const WPDRESCALEDSP *dsp) {
             (uint32_t *)frow, src, 0, RESCALE_SRC, 4, 1, 1, 0);
         dsp->import_row_shrink(
             (uint32_t *)frow, src, 0, RESCALE_SRC, 4, 1, 1, 0);
+        /* Each export slot picks between two kernels, so both a y_accum
+         * that lands on a source row and one that does not. */
         dsp->export_row_expand(
             dst, (const uint32_t *)irow, (const uint32_t *)frow, 0, 0, 1, 0);
+        dsp->export_row_expand(
+            dst, (const uint32_t *)irow, (const uint32_t *)frow, 0, -3, 7, 0);
         dsp->export_row_shrink(
             dst, (uint32_t *)irow, (const uint32_t *)frow, 0, 0, 0, 0);
+        dsp->export_row_shrink(
+            dst, (uint32_t *)irow, (const uint32_t *)frow, 0, -3, 1 << 29, 0);
     }
     signal(SIGSEGV, SIG_DFL);
     signal(SIGBUS, SIG_DFL);

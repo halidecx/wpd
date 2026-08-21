@@ -8,25 +8,9 @@
 
 /* Besides the usual boundaries, 161 lands a row end exactly where a kernel
  * that falls back to a fixed-length serial burst finishes one. */
-static const int widths[] = {1,
-                             2,
-                             3,
-                             7,
-                             8,
-                             9,
-                             15,
-                             16,
-                             17,
-                             24,
-                             31,
-                             63,
-                             127,
-                             128,
-                             161,
-                             255,
-                             256,
-                             509,
-                             MAX_WIDTH};
+static const int widths[] = {0,   1,   2,   3,   7,   8,        9,
+                             15,  16,  17,  24,  31,  63,       127,
+                             128, 161, 255, 256, 509, MAX_WIDTH};
 
 static void check_unfilter(unfilter_func func, const char *name) {
     LOCAL_ALIGNED_16(uint8_t, prev, [MAX_WIDTH]);

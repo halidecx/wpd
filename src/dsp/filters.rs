@@ -33,6 +33,9 @@ pub fn gradient_unfilter(prev: Option<&[u8]>, row: &mut [u8]) {
     let Some(prev) = prev else {
         return horizontal_unfilter(None, row);
     };
+    if row.is_empty() {
+        return;
+    }
     let prev = &prev[..row.len()];
 
     row[0] = row[0].wrapping_add(prev[0]);

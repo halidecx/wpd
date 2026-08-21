@@ -38,9 +38,10 @@ macro_rules! import_tramp {
             else {
                 return;
             };
-            /* An empty source row has nothing to resample from, and the
-             * kernels prime their window before their first store. */
-            if dw == 0 || sw == 0 || ch == 0 {
+            /* An empty source row has nothing to resample from. An empty
+             * destination one is the kernels' own business: guarding it
+             * here would leave their entry tests ungated. */
+            if sw == 0 || ch == 0 {
                 return;
             }
             let p = Import {
@@ -173,12 +174,14 @@ mod asm {
     pub fn init(dsp: &mut WPDRESCALEDSP) {
         let s = wpd::asm::rescale::selection(wpd::cpu::flags());
 
-        if s.import_row_expand == Kernel::Sse2 {
-            dsp.import_row_expand = import_row_expand_sse2_c;
-        }
-        if s.import_row_shrink == Kernel::Sse2 {
-            dsp.import_row_shrink = import_row_shrink_sse2_c;
-        }
+        dsp.import_row_expand = match s.import_row_expand {
+            Kernel::Sse2 => import_row_expand_sse2_c,
+            _ => dsp.import_row_expand,
+        };
+        dsp.import_row_shrink = match s.import_row_shrink {
+            Kernel::Sse2 => import_row_shrink_sse2_c,
+            _ => dsp.import_row_shrink,
+        };
         dsp.export_row_expand = match s.export_row_expand {
             Kernel::Sse2 => export_row_expand_sse2_c,
             Kernel::Avx2 => export_row_expand_avx2_c,
@@ -217,18 +220,22 @@ mod asm {
     pub fn init(dsp: &mut WPDRESCALEDSP) {
         let s = wpd::asm::rescale::selection(wpd::cpu::flags());
 
-        if s.import_row_expand == Kernel::Neon {
-            dsp.import_row_expand = import_row_expand_neon_c;
-        }
-        if s.import_row_shrink == Kernel::Neon {
-            dsp.import_row_shrink = import_row_shrink_neon_c;
-        }
-        if s.export_row_expand == Kernel::Neon {
-            dsp.export_row_expand = export_row_expand_neon_c;
-        }
-        if s.export_row_shrink == Kernel::Neon {
-            dsp.export_row_shrink = export_row_shrink_neon_c;
-        }
+        dsp.import_row_expand = match s.import_row_expand {
+            Kernel::Neon => import_row_expand_neon_c,
+            _ => dsp.import_row_expand,
+        };
+        dsp.import_row_shrink = match s.import_row_shrink {
+            Kernel::Neon => import_row_shrink_neon_c,
+            _ => dsp.import_row_shrink,
+        };
+        dsp.export_row_expand = match s.export_row_expand {
+            Kernel::Neon => export_row_expand_neon_c,
+            _ => dsp.export_row_expand,
+        };
+        dsp.export_row_shrink = match s.export_row_shrink {
+            Kernel::Neon => export_row_shrink_neon_c,
+            _ => dsp.export_row_shrink,
+        };
     }
 }
 
