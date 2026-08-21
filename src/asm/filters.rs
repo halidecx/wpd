@@ -83,6 +83,7 @@ mod arch {
         use super::*;
 
         raw_unfilter!(Vertical, vertical, "ff_vertical_unfilter_avx2");
+        raw_unfilter!(Gradient, gradient, "ff_gradient_unfilter_avx2");
     }
 
     ladder! {
@@ -93,6 +94,7 @@ mod arch {
         }
         AVX2 {
             vertical_unfilter = unfilter::<avx2::Vertical>;
+            gradient_unfilter = unfilter::<avx2::Gradient>;
         }
     }
 }

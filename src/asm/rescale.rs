@@ -189,6 +189,39 @@ mod arch {
         );
     }
 
+    pub mod avx2 {
+        use super::*;
+
+        raw!(
+            ExportDirect,
+            export_direct,
+            ExportDirectRaw,
+            "ff_rescale_export_direct_avx2",
+            (*mut u8, *const u32, c_int, u32)
+        );
+        raw!(
+            ExportBlend,
+            export_blend,
+            ExportBlendRaw,
+            "ff_rescale_export_blend_avx2",
+            (*mut u8, *const u32, *const u32, c_int, u32, u32, u32)
+        );
+        raw!(
+            ExportShrink,
+            export_shrink,
+            ExportShrinkRaw,
+            "ff_rescale_export_shrink_avx2",
+            (*mut u8, *mut u32, *const u32, c_int, u32, u32)
+        );
+        raw!(
+            ExportShrink0,
+            export_shrink0,
+            ExportShrink0Raw,
+            "ff_rescale_export_shrink0_avx2",
+            (*mut u8, *mut u32, c_int, u32)
+        );
+    }
+
     pub fn import_row_expand_sse2(frow: &mut [u32], src: &[u8], p: Import) {
         import_row_expand::<sse2::ImportExpand>(frow, src, p)
     }
@@ -215,12 +248,34 @@ mod arch {
         export_row_shrink::<sse2::ExportShrink, sse2::ExportShrink0>(dst, irow, frow, p)
     }
 
+    pub fn export_row_expand_avx2(
+        dst: &mut [u8],
+        irow: &[u32],
+        frow: &[u32],
+        p: Export,
+    ) {
+        export_row_expand::<avx2::ExportDirect, avx2::ExportBlend>(dst, irow, frow, p)
+    }
+
+    pub fn export_row_shrink_avx2(
+        dst: &mut [u8],
+        irow: &mut [u32],
+        frow: &[u32],
+        p: Export,
+    ) {
+        export_row_shrink::<avx2::ExportShrink, avx2::ExportShrink0>(dst, irow, frow, p)
+    }
+
     pub fn init(dsp: &mut RescaleDsp, flags: CpuFlags) {
         if flags.contains(CpuFlags::SSE2) {
             dsp.import_row_expand = import_row_expand_sse2;
             dsp.import_row_shrink = import_row_shrink_sse2;
             dsp.export_row_expand = export_row_expand_sse2;
             dsp.export_row_shrink = export_row_shrink_sse2;
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            dsp.export_row_expand = export_row_expand_avx2;
+            dsp.export_row_shrink = export_row_shrink_avx2;
         }
     }
 
@@ -232,6 +287,10 @@ mod arch {
             t.import_row_shrink = Some(import_row_shrink_sse2);
             t.export_row_expand = Some(export_row_expand_sse2);
             t.export_row_shrink = Some(export_row_shrink_sse2);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            t.export_row_expand = Some(export_row_expand_avx2);
+            t.export_row_shrink = Some(export_row_shrink_avx2);
         }
         t
     }

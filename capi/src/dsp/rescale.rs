@@ -149,21 +149,27 @@ mod asm {
         export_row_shrink_sse2_c,
         wpd::asm::rescale::export_row_shrink_sse2
     );
+    export_expand_tramp!(
+        export_row_expand_avx2_c,
+        wpd::asm::rescale::export_row_expand_avx2
+    );
+    export_shrink_tramp!(
+        export_row_shrink_avx2_c,
+        wpd::asm::rescale::export_row_shrink_avx2
+    );
 
     pub fn init(dsp: &mut WPDRESCALEDSP) {
-        let t = wpd::asm::rescale::raw_table(wpd::cpu::flags());
+        let flags = wpd::cpu::flags();
 
-        if t.import_row_expand.is_some() {
+        if flags.contains(wpd::cpu::CpuFlags::SSE2) {
             dsp.import_row_expand = import_row_expand_sse2_c;
-        }
-        if t.import_row_shrink.is_some() {
             dsp.import_row_shrink = import_row_shrink_sse2_c;
-        }
-        if t.export_row_expand.is_some() {
             dsp.export_row_expand = export_row_expand_sse2_c;
-        }
-        if t.export_row_shrink.is_some() {
             dsp.export_row_shrink = export_row_shrink_sse2_c;
+        }
+        if flags.contains(wpd::cpu::CpuFlags::AVX2) {
+            dsp.export_row_expand = export_row_expand_avx2_c;
+            dsp.export_row_shrink = export_row_shrink_avx2_c;
         }
     }
 }

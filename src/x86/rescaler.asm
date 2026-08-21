@@ -9,10 +9,10 @@
 
 %if ARCH_X86_64
 
-SECTION_RODATA 16
+SECTION_RODATA 32
 
-pq_rrounder: times 2 dq 0x80000000
-pd_odd:      dd 0, -1, 0, -1
+pq_rrounder: times 4 dq 0x80000000
+pd_odd:      dd 0, -1, 0, -1, 0, -1, 0, -1
 
 SECTION .text
 
@@ -20,70 +20,86 @@ SECTION .text
 ; results in low dwords and odd lanes' in high ones; masking and ORing
 ; reassembles the row without a cross-lane shuffle.
 
-; Load eight dwords as even lanes in the first two registers and odd lanes
-; in the qword tops of the last two.
-%macro LOAD_PAIRS 5 ; addr, even0, even1, odd0, odd1
-    movu      %2, [%1]
-    movu      %3, [%1 + 16]
-    mova      %4, %2
-    psrlq     %4, 32
-    mova      %5, %3
-    psrlq     %5, 32
+; Load a register's worth of dword pairs as even lanes in the first two
+; registers and odd lanes in the qword tops of the last two.
+%macro LOAD_PAIRS 5 ; addr, even0, even1, odd0, odd1 (register numbers)
+    movu      m%2, [%1]
+    movu      m%3, [%1 + mmsize]
+    mova      m%4, m%2
+    psrlq     m%4, 32
+    mova      m%5, m%3
+    psrlq     m%5, 32
 %endmacro
 
-; Multiply-fix eight values by m6 with rounder m7, clip to bytes, store.
-%macro PROCESS_ROW 5 ; even0, even1, odd0, odd1, dst addr
-    pmuludq   %1, m6
-    pmuludq   %2, m6
-    pmuludq   %3, m6
-    pmuludq   %4, m6
-    paddq     %1, m7
-    paddq     %2, m7
-    paddq     %3, m7
-    paddq     %4, m7
-    psrlq     %1, 32
-    psrlq     %2, 32
-    pand      %3, [pd_odd]
-    pand      %4, [pd_odd]
-    por       %1, %3
-    por       %2, %4
-    packssdw  %1, %2
-    packuswb  %1, %1
-    movq      [%5], %1
+; Multiply-fix the loaded values by m6 with rounder m7, clip, store bytes.
+%macro PROCESS_ROW 5 ; even0, even1, odd0, odd1 (register numbers), dst addr
+    pmuludq   m%1, m6
+    pmuludq   m%2, m6
+    pmuludq   m%3, m6
+    pmuludq   m%4, m6
+    paddq     m%1, m7
+    paddq     m%2, m7
+    paddq     m%3, m7
+    paddq     m%4, m7
+    psrlq     m%1, 32
+    psrlq     m%2, 32
+    pand      m%3, [pd_odd]
+    pand      m%4, [pd_odd]
+    por       m%1, m%3
+    por       m%2, m%4
+    packssdw  m%1, m%2
+%if mmsize == 32
+    vpermq    m%1, m%1, q3120
+    packuswb  m%1, m%1
+    vpermq    m%1, m%1, q3120
+    movu      [%5], xm%1
+%else
+    packuswb  m%1, m%1
+    movq      [%5], m%1
+%endif
 %endmacro
 
-; One value in m0's low dword, multiply-fixed by m6/m7 into a byte store.
+; The scale in the even dwords of m6, everywhere pmuludq looks.
+%macro BCAST_SCALE 2 ; register number, reg32
+    movd      xm%1, %2
+%if mmsize == 32
+    vpbroadcastd m%1, xm%1
+%else
+    pshufd    m%1, m%1, q3030
+%endif
+%endmacro
+
+; One value in xm0's low dword, multiply-fixed by m6/m7 into a byte store.
 %macro PROCESS_ONE 3 ; dst addr, scratch reg32, scratch reg8
-    pmuludq   m0, m6
-    paddq     m0, m7
-    psrlq     m0, 32
-    packssdw  m0, m0
-    packuswb  m0, m0
-    movd      %2, m0
+    pmuludq   xm0, xm6
+    paddq     xm0, xm7
+    psrlq     xm0, 32
+    packssdw  xm0, xm0
+    packuswb  xm0, xm0
+    movd      %2, xm0
     mov       [%1], %3
 %endmacro
 
 ; void ff_rescale_export_direct_sse2(uint8_t *dst, const uint32_t *frow,
 ;                                    int n, uint32_t fy_scale)
-INIT_XMM sse2
+%macro EXPORT_DIRECT 0
 cglobal rescale_export_direct, 4, 5, 8, dst, frow, n, fy
-    movd      m6, fyd
-    pshufd    m6, m6, q3030
+    BCAST_SCALE 6, fyd
     mova      m7, [pq_rrounder]
-    sub       nd, 8
+    sub       nd, mmsize / 2
     jl        .tail
 .loop:
-    LOAD_PAIRS frowq, m0, m1, m2, m3
-    PROCESS_ROW m0, m1, m2, m3, dstq
-    add       frowq, 32
-    add       dstq, 8
-    sub       nd, 8
+    LOAD_PAIRS frowq, 0, 1, 2, 3
+    PROCESS_ROW 0, 1, 2, 3, dstq
+    add       frowq, 2 * mmsize
+    add       dstq, mmsize / 2
+    sub       nd, mmsize / 2
     jge       .loop
 .tail:
-    add       nd, 8
+    add       nd, mmsize / 2
     jz        .end
 .tail_loop:
-    movd      m0, [frowq]
+    movd      xm0, [frowq]
     PROCESS_ONE dstq, r4d, r4b
     add       frowq, 4
     add       dstq, 1
@@ -91,25 +107,23 @@ cglobal rescale_export_direct, 4, 5, 8, dst, frow, n, fy
     jnz       .tail_loop
 .end:
     RET
+%endmacro
 
 ; void ff_rescale_export_blend_sse2(uint8_t *dst, const uint32_t *irow,
 ;                                   const uint32_t *frow, int n,
 ;                                   uint32_t fy_scale, uint32_t wa,
 ;                                   uint32_t wb)
-INIT_XMM sse2
+%macro EXPORT_BLEND 0
 cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
-    movd      m6, fyd
-    pshufd    m6, m6, q3030
+    BCAST_SCALE 6, fyd
     mova      m7, [pq_rrounder]
-    movd      m12, wad
-    pshufd    m12, m12, q3030        ; the frow weight
-    movd      m13, wbd
-    pshufd    m13, m13, q3030        ; the irow weight
-    sub       nd, 8
+    BCAST_SCALE 12, wad              ; the frow weight
+    BCAST_SCALE 13, wbd              ; the irow weight
+    sub       nd, mmsize / 2
     jl        .tail
 .loop:
-    LOAD_PAIRS frowq, m0, m1, m2, m3
-    LOAD_PAIRS irowq, m4, m5, m8, m9
+    LOAD_PAIRS frowq, 0, 1, 2, 3
+    LOAD_PAIRS irowq, 4, 5, 8, 9
     pmuludq   m0, m12
     pmuludq   m1, m12
     pmuludq   m2, m12
@@ -130,23 +144,23 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
     psrlq     m1, 32
     psrlq     m2, 32
     psrlq     m3, 32
-    PROCESS_ROW m0, m1, m2, m3, dstq
-    add       frowq, 32
-    add       irowq, 32
-    add       dstq, 8
-    sub       nd, 8
+    PROCESS_ROW 0, 1, 2, 3, dstq
+    add       frowq, 2 * mmsize
+    add       irowq, 2 * mmsize
+    add       dstq, mmsize / 2
+    sub       nd, mmsize / 2
     jge       .loop
 .tail:
-    add       nd, 8
+    add       nd, mmsize / 2
     jz        .end
 .tail_loop:
-    movd      m0, [frowq]
-    movd      m1, [irowq]
-    pmuludq   m0, m12
-    pmuludq   m1, m13
-    paddq     m0, m1
-    paddq     m0, m7
-    psrlq     m0, 32
+    movd      xm0, [frowq]
+    movd      xm1, [irowq]
+    pmuludq   xm0, xm12
+    pmuludq   xm1, xm13
+    paddq     xm0, xm1
+    paddq     xm0, xm7
+    psrlq     xm0, 32
     PROCESS_ONE dstq, r7d, r7b
     add       frowq, 4
     add       irowq, 4
@@ -155,22 +169,21 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
     jnz       .tail_loop
 .end:
     RET
+%endmacro
 
 ; void ff_rescale_export_shrink_sse2(uint8_t *dst, uint32_t *irow,
 ;                                    const uint32_t *frow, int n,
 ;                                    uint32_t yscale, uint32_t fxy_scale)
-INIT_XMM sse2
+%macro EXPORT_SHRINK 0
 cglobal rescale_export_shrink, 6, 7, 11, dst, irow, frow, n, yscale, fxy
-    movd      m6, fxyd
-    pshufd    m6, m6, q3030
+    BCAST_SCALE 6, fxyd
     mova      m7, [pq_rrounder]
-    movd      m10, yscaled
-    pshufd    m10, m10, q3030
-    sub       nd, 8
+    BCAST_SCALE 10, yscaled
+    sub       nd, mmsize / 2
     jl        .tail
 .loop:
-    LOAD_PAIRS irowq, m0, m1, m2, m3
-    LOAD_PAIRS frowq, m4, m5, m8, m9
+    LOAD_PAIRS irowq, 0, 1, 2, 3
+    LOAD_PAIRS frowq, 4, 5, 8, 9
     pmuludq   m4, m10
     pmuludq   m5, m10
     pmuludq   m8, m10
@@ -188,23 +201,23 @@ cglobal rescale_export_shrink, 6, 7, 11, dst, irow, frow, n, yscale, fxy
     psllq     m9, 32
     por       m5, m9
     movu      [irowq], m4            ; the fraction starts the next row
-    movu      [irowq + 16], m5
-    PROCESS_ROW m0, m1, m2, m3, dstq
-    add       frowq, 32
-    add       irowq, 32
-    add       dstq, 8
-    sub       nd, 8
+    movu      [irowq + mmsize], m5
+    PROCESS_ROW 0, 1, 2, 3, dstq
+    add       frowq, 2 * mmsize
+    add       irowq, 2 * mmsize
+    add       dstq, mmsize / 2
+    sub       nd, mmsize / 2
     jge       .loop
 .tail:
-    add       nd, 8
+    add       nd, mmsize / 2
     jz        .end
 .tail_loop:
-    movd      m1, [frowq]
-    pmuludq   m1, m10
-    psrlq     m1, 32
-    movd      m0, [irowq]
-    psubq     m0, m1
-    movd      [irowq], m1
+    movd      xm1, [frowq]
+    pmuludq   xm1, xm10
+    psrlq     xm1, 32
+    movd      xm0, [irowq]
+    psubq     xm0, xm1
+    movd      [irowq], xm1
     PROCESS_ONE dstq, r6d, r6b
     add       frowq, 4
     add       irowq, 4
@@ -213,31 +226,31 @@ cglobal rescale_export_shrink, 6, 7, 11, dst, irow, frow, n, yscale, fxy
     jnz       .tail_loop
 .end:
     RET
+%endmacro
 
 ; void ff_rescale_export_shrink0_sse2(uint8_t *dst, uint32_t *irow, int n,
 ;                                     uint32_t fxy_scale)
-INIT_XMM sse2
+%macro EXPORT_SHRINK0 0
 cglobal rescale_export_shrink0, 4, 5, 8, dst, irow, n, fxy
-    movd      m6, fxyd
-    pshufd    m6, m6, q3030
+    BCAST_SCALE 6, fxyd
     mova      m7, [pq_rrounder]
     pxor      m4, m4
-    sub       nd, 8
+    sub       nd, mmsize / 2
     jl        .tail
 .loop:
-    LOAD_PAIRS irowq, m0, m1, m2, m3
+    LOAD_PAIRS irowq, 0, 1, 2, 3
     movu      [irowq], m4
-    movu      [irowq + 16], m4
-    PROCESS_ROW m0, m1, m2, m3, dstq
-    add       irowq, 32
-    add       dstq, 8
-    sub       nd, 8
+    movu      [irowq + mmsize], m4
+    PROCESS_ROW 0, 1, 2, 3, dstq
+    add       irowq, 2 * mmsize
+    add       dstq, mmsize / 2
+    sub       nd, mmsize / 2
     jge       .loop
 .tail:
-    add       nd, 8
+    add       nd, mmsize / 2
     jz        .end
 .tail_loop:
-    movd      m0, [irowq]
+    movd      xm0, [irowq]
     mov       dword [irowq], 0
     PROCESS_ONE dstq, r4d, r4b
     add       irowq, 4
@@ -246,6 +259,18 @@ cglobal rescale_export_shrink0, 4, 5, 8, dst, irow, n, fxy
     jnz       .tail_loop
 .end:
     RET
+%endmacro
+
+INIT_XMM sse2
+EXPORT_DIRECT
+EXPORT_BLEND
+EXPORT_SHRINK
+EXPORT_SHRINK0
+INIT_YMM avx2
+EXPORT_DIRECT
+EXPORT_BLEND
+EXPORT_SHRINK
+EXPORT_SHRINK0
 
 ; Interleave a pair of pixels channel-wise so pmaddwd blends left and right
 ; with the accumulator weights in one step.

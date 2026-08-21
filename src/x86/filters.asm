@@ -7,11 +7,14 @@
 
 %include "ext/x86/x86util.asm"
 
-SECTION_RODATA 16
+SECTION_RODATA 32
 
-grad_mask: db 0xff
-           times 15 db 0
-pw_255f:   times 8 dw 255
+pw_255f:    times 16 dw 255
+grad_w7:    times 16 db 6, 7
+grad_lane1: times 16 db 0
+            times 16 db 0xff
+grad_mask:  db 0xff
+            times 15 db 0
 
 SECTION .text
 
@@ -122,6 +125,7 @@ INIT_XMM sse2
 VERTICAL_UNFILTER
 INIT_YMM avx2
 VERTICAL_UNFILTER
+
 
 ;------------------------------------------------------------------------------
 ; One serially reconstructed pixel: left = in + clip(left + top - top_left),
@@ -236,6 +240,90 @@ cglobal gradient_unfilter, 3, 6, 8, prev, row, w
     movd      m0, r3d
     pshuflw   m0, m0, 0
     punpcklqdq m0, m0
+    jmp       .next
+.top:
+    jmp       ff_horizontal_unfilter_sse2
+
+; The same speculative closed form, sixteen pixels per block: the prefix
+; sums run inside each 128-bit lane, then the low lane's total carries
+; into the high one with one cross-lane permute.
+INIT_YMM avx2
+cglobal gradient_unfilter, 3, 6, 8, prev, row, w
+    test      prevq, prevq
+    jz        .top
+    test      wd, wd
+    jle       .end
+    movzx     r3d, byte [prevq]
+    add       r3b, [rowq]
+    mov       [rowq], r3b
+    movzx     r3d, r3b
+    sub       wd, 1
+    jz        .end
+    add       rowq, 1
+    add       prevq, 1
+    pxor      m7, m7
+    mova      m6, [pw_255f]
+    movd      xm0, r3d
+    vpbroadcastw m0, xm0             ; running left, in every word
+    sub       wd, 16
+    jl        .tail
+.loop:
+    pmovzxbw  m1, [prevq]
+    pmovzxbw  m2, [prevq - 1]
+    pmovsxbw  m3, [rowq]             ; the residuals, sign-extended
+    psubw     m1, m2
+    paddw     m1, m3                 ; in + top - top_left
+    pslldq    m2, m1, 2
+    paddw     m1, m2
+    pslldq    m2, m1, 4
+    paddw     m1, m2
+    pslldq    m2, m1, 8
+    paddw     m1, m2                 ; prefix sums, per lane
+    vpermq    m2, m1, q1111
+    pshufb    m2, [grad_w7]          ; the low lane's total, everywhere
+    pand      m2, [grad_lane1]
+    paddw     m1, m2                 ; carried into the high lane
+    paddw     m1, m0                 ; speculative out, unclipped
+    psubw     m2, m1, m3             ; the predictor each pixel would clip
+    pminsw    m4, m2, m1
+    pmaxsw    m5, m2, m1
+    pcmpgtw   m5, m6                 ; anything above 255
+    pcmpgtw   m4, m7, m4             ; anything below 0
+    por       m4, m5
+    pmovmskb  r4d, m4
+    test      r4d, r4d
+    jnz       .slow
+    packuswb  m1, m1
+    vpermq    m1, m1, q3120
+    movu      [rowq], xm1
+    psrldq    xm1, 15
+    vpbroadcastw m0, xm1             ; out[15] seeds the next block
+    add       rowq, 16
+    add       prevq, 16
+.next:
+    sub       wd, 16
+    jge       .loop
+.tail:
+    add       wd, 16
+    jz        .end
+    movd      r3d, xm0
+    movzx     r3d, r3w               ; every word holds the running left
+.tail_loop:
+    GRADIENT_PIXEL
+    sub       wd, 1
+    jnz       .tail_loop
+.end:
+    RET
+.slow:
+    movd      r3d, xm0
+    movzx     r3d, r3w
+    mov       r5d, 16
+.slow_loop:
+    GRADIENT_PIXEL
+    sub       r5d, 1
+    jnz       .slow_loop
+    movd      xm0, r3d
+    vpbroadcastw m0, xm0
     jmp       .next
 .top:
     jmp       ff_horizontal_unfilter_sse2
