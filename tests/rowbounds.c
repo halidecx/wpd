@@ -10,6 +10,7 @@
 
 #include <setjmp.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -141,6 +142,87 @@ done:
     return failed;
 }
 
+/* The upper half of a 32-bit argument is undefined under the 64-bit ABIs.
+ * Compilers leave it zeroed in practice, which hides a kernel that widens
+ * one into an address. checkasm already clobbers those halves, but every
+ * kernel here is reached through a Rust trampoline that rebuilds its
+ * arguments, so the junk never survives to the asm; these call the asm
+ * symbols directly instead.
+ *
+ * The overrun they expose is read-only and the bytes are discarded, so the
+ * output is identical either way and no value comparison can see it. Ending
+ * the source row flush against a guard page turns it into a fault. */
+#if WPD_HAVE_ASM && WPD_ARCH_X86 && UINTPTR_MAX == 0xffffffffffffffffULL
+void ff_rescale_import_expand_sse2(uint32_t *frow, const uint8_t *src, int n,
+                                   int src_width, int channels, int x_add,
+                                   int x_sub);
+
+#define DIRTY(v) (0xdeadbeef00000000ULL | (uint32_t)(v))
+typedef void (*dirty_import_func)(uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t);
+
+/* The kernel counts in elements, not pixels, so a four-channel row hands it
+ * four times the width it was given. */
+static int probe_import_tail(int ch, int src_w) {
+    const int dst_w    = 2 * src_w;
+    uint8_t  *maps[2]  = {NULL, NULL};
+    size_t    sizes[2] = {0, 0};
+    uint8_t  *src      = guarded(&maps[0], &sizes[0], (size_t)src_w * ch);
+    uint8_t  *frow     = guarded(
+        &maps[1], &sizes[1], (size_t)dst_w * ch * sizeof(uint32_t));
+    int failed = 0;
+
+    if (!src || !frow) {
+        fprintf(stderr, "mmap failed\n");
+        failed = 1;
+        goto done;
+    }
+
+    trapped = 0;
+    signal(SIGSEGV, on_fault);
+    signal(SIGBUS, on_fault);
+    if (sigsetjmp(escape, 1) == 0)
+        ((dirty_import_func)(void *)ff_rescale_import_expand_sse2)(
+            (uint64_t)(uintptr_t)frow,
+            (uint64_t)(uintptr_t)src,
+            DIRTY(dst_w * ch),
+            DIRTY(src_w * ch),
+            DIRTY(ch),
+            DIRTY(dst_w - 1),
+            DIRTY(src_w - 1));
+    signal(SIGSEGV, SIG_DFL);
+    signal(SIGBUS, SIG_DFL);
+
+    if (trapped) {
+        printf(
+            "FAIL rescale_import_expand_sse2: ch=%d src_width=%d read past "
+            "the end of the source row\n",
+            ch,
+            src_w);
+        failed = 1;
+    }
+done:
+    for (size_t i = 0; i < 2; i++)
+        if (maps[i])
+            munmap(maps[i], sizes[i]);
+    return failed;
+}
+
+static int probe_dirty_args(void) {
+    static const int channels[] = {1, 4};
+    int              failed     = 0;
+
+    if (!(wpd_get_cpu_flags() & WPD_X86_CPU_FLAG_SSE2))
+        return 0;
+    for (size_t c = 0; c < sizeof(channels) / sizeof(*channels); c++)
+        for (int src_w = 8; src_w <= 40; src_w++)
+            failed |= probe_import_tail(channels[c], src_w);
+    return failed;
+}
+#else
+static int probe_dirty_args(void) { return 0; }
+#endif
+
 /* A zero-length row starts on the guard page itself, so a rescaler kernel
  * that stores before it tests its count faults on the first write. The
  * source row is wide enough to reach the vector paths. */
@@ -268,6 +350,7 @@ int main(void) {
         failed |= probe_rescale(&rdsp);
     }
     wpd_set_cpu_flags_mask(~0u);
+    failed |= probe_dirty_args();
     printf("rowbounds: %s\n", failed ? "FAILED" : "all rows stayed in bounds");
     return failed;
 }
