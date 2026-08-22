@@ -144,27 +144,81 @@ done:
 
 /* The upper half of a 32-bit argument is undefined under the 64-bit ABIs.
  * Compilers leave it zeroed in practice, which hides a kernel that widens
- * one into an address. checkasm already clobbers those halves, but every
- * kernel here is reached through a Rust trampoline that rebuilds its
- * arguments, so the junk never survives to the asm; these call the asm
- * symbols directly instead.
+ * one into an address. checkasm clobbers those halves from a mask it builds
+ * out of the declared parameter types, which covers every family whose C
+ * table hands out the asm symbols themselves. The rescaler is the exception:
+ * its kernels take their counts in elements and only apply below certain
+ * ratios, so the dispatch stays in Rust and the table hands out wrappers
+ * that rebuild the arguments. The junk never survives that trip, so these
+ * call the asm directly.
  *
- * The overrun they expose is read-only and the bytes are discarded, so the
- * output is identical either way and no value comparison can see it. Ending
- * the source row flush against a guard page turns it into a fault. */
+ * The overrun this exposes is read-only and its bytes are discarded, so both
+ * implementations agree and no value comparison can see it. Ending each row
+ * flush against a guard page turns it into a fault. */
 #if WPD_HAVE_ASM && WPD_ARCH_X86 && UINTPTR_MAX == 0xffffffffffffffffULL
-void ff_rescale_import_expand_sse2(uint32_t *frow, const uint8_t *src, int n,
-                                   int src_width, int channels, int x_add,
-                                   int x_sub);
 
 #define DIRTY(v) (0xdeadbeef00000000ULL | (uint32_t)(v))
-typedef void (*dirty_import_func)(uint64_t, uint64_t, uint64_t, uint64_t,
-                                  uint64_t, uint64_t, uint64_t);
 
-/* The kernel counts in elements, not pixels, so a four-channel row hands it
- * four times the width it was given. */
-static int probe_import_tail(int ch, int src_w) {
-    const int dst_w    = 2 * src_w;
+typedef void (*dirty4)(uint64_t, uint64_t, uint64_t, uint64_t);
+typedef void (*dirty6)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t);
+typedef void (*dirty7)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                       uint64_t, uint64_t);
+
+#define DECL_IMPORT(sym) \
+    void sym(            \
+        uint32_t *frow, const uint8_t *src, int n, int a, int b, int c, int d)
+#define DECL_EXPORT4(sym) \
+    void sym(uint8_t *dst, const uint32_t *a, int n, uint32_t b)
+#define DECL_EXPORT6(sym)          \
+    void sym(uint8_t        *dst,  \
+             uint32_t       *irow, \
+             const uint32_t *frow, \
+             int             n,    \
+             uint32_t        a,    \
+             uint32_t        b)
+#define DECL_EXPORT7(sym)          \
+    void sym(uint8_t        *dst,  \
+             const uint32_t *irow, \
+             const uint32_t *frow, \
+             int             n,    \
+             uint32_t        a,    \
+             uint32_t        b,    \
+             uint32_t        c)
+
+DECL_IMPORT(ff_rescale_import_expand_sse2);
+void ff_rescale_import_shrink_sse2(uint32_t *frow, const uint8_t *src, int n,
+                                   int x_add, int x_sub, uint32_t fx);
+DECL_EXPORT4(ff_rescale_export_direct_sse2);
+DECL_EXPORT4(ff_rescale_export_direct_avx2);
+DECL_EXPORT4(ff_rescale_export_shrink0_sse2);
+DECL_EXPORT4(ff_rescale_export_shrink0_avx2);
+DECL_EXPORT6(ff_rescale_export_shrink_sse2);
+DECL_EXPORT6(ff_rescale_export_shrink_avx2);
+DECL_EXPORT7(ff_rescale_export_blend_sse2);
+DECL_EXPORT7(ff_rescale_export_blend_avx2);
+
+static int faulted(const char *name, int n) {
+    if (!trapped)
+        return 0;
+    printf("FAIL %s: n=%d stepped outside its rows\n", name, n);
+    return 1;
+}
+
+#define GUARD_BEGIN            \
+    trapped = 0;               \
+    signal(SIGSEGV, on_fault); \
+    signal(SIGBUS, on_fault);  \
+    if (sigsetjmp(escape, 1) == 0)
+#define GUARD_END             \
+    signal(SIGSEGV, SIG_DFL); \
+    signal(SIGBUS, SIG_DFL)
+
+/* Imports count in elements, so a four-channel row hands the kernel four
+ * times the width it was given. Expansion walks the source to its last
+ * pixel; shrinking walks it once per accumulated step. */
+static int probe_import(const char *name, int expand, int ch, int src_w) {
+    const int dst_w    = expand ? 2 * src_w : src_w / 2;
     uint8_t  *maps[2]  = {NULL, NULL};
     size_t    sizes[2] = {0, 0};
     uint8_t  *src      = guarded(&maps[0], &sizes[0], (size_t)src_w * ch);
@@ -178,29 +232,27 @@ static int probe_import_tail(int ch, int src_w) {
         goto done;
     }
 
-    trapped = 0;
-    signal(SIGSEGV, on_fault);
-    signal(SIGBUS, on_fault);
-    if (sigsetjmp(escape, 1) == 0)
-        ((dirty_import_func)(void *)ff_rescale_import_expand_sse2)(
-            (uint64_t)(uintptr_t)frow,
-            (uint64_t)(uintptr_t)src,
-            DIRTY(dst_w * ch),
-            DIRTY(src_w * ch),
-            DIRTY(ch),
-            DIRTY(dst_w - 1),
-            DIRTY(src_w - 1));
-    signal(SIGSEGV, SIG_DFL);
-    signal(SIGBUS, SIG_DFL);
-
-    if (trapped) {
-        printf(
-            "FAIL rescale_import_expand_sse2: ch=%d src_width=%d read past "
-            "the end of the source row\n",
-            ch,
-            src_w);
-        failed = 1;
+    GUARD_BEGIN {
+        if (expand)
+            ((dirty7)(void *)ff_rescale_import_expand_sse2)(
+                (uint64_t)(uintptr_t)frow,
+                (uint64_t)(uintptr_t)src,
+                DIRTY(dst_w * ch),
+                DIRTY(src_w * ch),
+                DIRTY(ch),
+                DIRTY(dst_w - 1),
+                DIRTY(src_w - 1));
+        else
+            ((dirty6)(void *)ff_rescale_import_shrink_sse2)(
+                (uint64_t)(uintptr_t)frow,
+                (uint64_t)(uintptr_t)src,
+                DIRTY(dst_w * ch),
+                DIRTY(src_w),
+                DIRTY(dst_w),
+                DIRTY(0x10000 / dst_w));
     }
+    GUARD_END;
+    failed = faulted(name, src_w);
 done:
     for (size_t i = 0; i < 2; i++)
         if (maps[i])
@@ -208,15 +260,97 @@ done:
     return failed;
 }
 
-static int probe_dirty_args(void) {
-    static const int channels[] = {1, 4};
-    int              failed     = 0;
+/* Exports write n bytes out of rows of n accumulators each. The weights do
+ * not steer any address, so only the count has to be right. */
+static int probe_export(const char *name, const void *func, int arity, int n) {
+    uint8_t *maps[3]  = {NULL, NULL, NULL};
+    size_t   sizes[3] = {0, 0, 0};
+    uint8_t *dst      = guarded(&maps[0], &sizes[0], (size_t)n);
+    uint8_t *irow = guarded(&maps[1], &sizes[1], (size_t)n * sizeof(uint32_t));
+    uint8_t *frow = guarded(&maps[2], &sizes[2], (size_t)n * sizeof(uint32_t));
+    int      failed = 0;
 
-    if (!(wpd_get_cpu_flags() & WPD_X86_CPU_FLAG_SSE2))
+    if (!dst || !irow || !frow) {
+        fprintf(stderr, "mmap failed\n");
+        failed = 1;
+        goto done;
+    }
+
+    GUARD_BEGIN {
+        switch (arity) {
+        case 4:
+            /* export_direct reads frow; export_shrink0 reads irow. Both
+             * take one row, so hand each the one it names. */
+            ((dirty4)func)((uint64_t)(uintptr_t)dst,
+                           (uint64_t)(uintptr_t)frow,
+                           DIRTY(n),
+                           DIRTY(1 << 29));
+            break;
+        case 6:
+            ((dirty6)func)((uint64_t)(uintptr_t)dst,
+                           (uint64_t)(uintptr_t)irow,
+                           (uint64_t)(uintptr_t)frow,
+                           DIRTY(n),
+                           DIRTY(1 << 15),
+                           DIRTY(1 << 29));
+            break;
+        default:
+            ((dirty7)func)((uint64_t)(uintptr_t)dst,
+                           (uint64_t)(uintptr_t)irow,
+                           (uint64_t)(uintptr_t)frow,
+                           DIRTY(n),
+                           DIRTY(1 << 29),
+                           DIRTY(3),
+                           DIRTY(5));
+            break;
+        }
+    }
+    GUARD_END;
+    failed = faulted(name, n);
+done:
+    for (size_t i = 0; i < 3; i++)
+        if (maps[i])
+            munmap(maps[i], sizes[i]);
+    return failed;
+}
+
+static int probe_dirty_args(void) {
+    const unsigned have   = wpd_get_cpu_flags();
+    const int      avx2   = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
+    int            failed = 0;
+
+    if (!(have & WPD_X86_CPU_FLAG_SSE2))
         return 0;
-    for (size_t c = 0; c < sizeof(channels) / sizeof(*channels); c++)
-        for (int src_w = 8; src_w <= 40; src_w++)
-            failed |= probe_import_tail(channels[c], src_w);
+
+    for (int src_w = 8; src_w <= 40; src_w++) {
+        failed |= probe_import("rescale_import_expand_sse2 ch=1", 1, 1, src_w);
+        failed |= probe_import("rescale_import_expand_sse2 ch=4", 1, 4, src_w);
+        failed |= probe_import("rescale_import_shrink_sse2", 0, 4, src_w);
+    }
+    for (int n = 1; n <= 64; n++) {
+        failed |= probe_export(
+            "rescale_export_direct_sse2", ff_rescale_export_direct_sse2, 4, n);
+        failed |= probe_export("rescale_export_shrink0_sse2",
+                               ff_rescale_export_shrink0_sse2,
+                               4,
+                               n);
+        failed |= probe_export(
+            "rescale_export_shrink_sse2", ff_rescale_export_shrink_sse2, 6, n);
+        failed |= probe_export(
+            "rescale_export_blend_sse2", ff_rescale_export_blend_sse2, 7, n);
+        if (!avx2)
+            continue;
+        failed |= probe_export(
+            "rescale_export_direct_avx2", ff_rescale_export_direct_avx2, 4, n);
+        failed |= probe_export("rescale_export_shrink0_avx2",
+                               ff_rescale_export_shrink0_avx2,
+                               4,
+                               n);
+        failed |= probe_export(
+            "rescale_export_shrink_avx2", ff_rescale_export_shrink_avx2, 6, n);
+        failed |= probe_export(
+            "rescale_export_blend_avx2", ff_rescale_export_blend_avx2, 7, n);
+    }
     return failed;
 }
 #else
