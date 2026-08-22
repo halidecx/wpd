@@ -321,6 +321,7 @@ cglobal rescale_import_expand, 7, 9, 8, frow, src, n, srcw, ch, x_add, x_sub
     add       r7d, x_addd
     jmp       .loop4
 .luma:
+    movsxdifnidn srcwq, srcwd
     lea       srcwq, [srcq + srcwq - 8] ; the last full eight-pixel load
     movq      m0, [srcq]
     punpcklbw m0, m7
