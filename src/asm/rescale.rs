@@ -157,6 +157,20 @@ pub struct Selection {
     pub export_row_shrink: Kernel,
 }
 
+/* The kernels as the assembly actually exposes them. The dispatch above
+ * hands out safe Rust wrappers, so nothing else can reach the symbols to
+ * check them against the ABI they were written to; checkasm needs them
+ * unwrapped to clobber the undefined halves of their 32-bit arguments. */
+#[derive(Default)]
+pub struct RawTable {
+    pub import_expand: Option<ImportExpandRaw>,
+    pub import_shrink: Option<ImportShrinkRaw>,
+    pub export_direct: Option<ExportDirectRaw>,
+    pub export_blend: Option<ExportBlendRaw>,
+    pub export_shrink: Option<ExportShrinkRaw>,
+    pub export_shrink0: Option<ExportShrink0Raw>,
+}
+
 /* One description of the ladder, read out as both the dispatch table and
  * the selection: they cannot drift apart. */
 macro_rules! ladder {
@@ -326,6 +340,28 @@ mod arch {
             export_row_shrink = export_row_shrink_avx2;
         }
     }
+
+    /* AVX2 rewrites only the exports, so the imports stay whatever SSE2
+     * left behind, exactly as the ladder leaves them. */
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::SSE2) {
+            t.import_expand = Some(sse2::ImportExpand::F);
+            t.import_shrink = Some(sse2::ImportShrink::F);
+            t.export_direct = Some(sse2::ExportDirect::F);
+            t.export_blend = Some(sse2::ExportBlend::F);
+            t.export_shrink = Some(sse2::ExportShrink::F);
+            t.export_shrink0 = Some(sse2::ExportShrink0::F);
+        }
+        if flags.contains(CpuFlags::AVX2) {
+            t.export_direct = Some(avx2::ExportDirect::F);
+            t.export_blend = Some(avx2::ExportBlend::F);
+            t.export_shrink = Some(avx2::ExportShrink::F);
+            t.export_shrink0 = Some(avx2::ExportShrink0::F);
+        }
+        t
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -413,6 +449,20 @@ mod arch {
             export_row_shrink = export_row_shrink_neon;
         }
     }
+
+    pub fn raw_table(flags: CpuFlags) -> RawTable {
+        let mut t = RawTable::default();
+
+        if flags.contains(CpuFlags::NEON) {
+            t.import_expand = Some(neon::ImportExpand::F);
+            t.import_shrink = Some(neon::ImportShrink::F);
+            t.export_direct = Some(neon::ExportDirect::F);
+            t.export_blend = Some(neon::ExportBlend::F);
+            t.export_shrink = Some(neon::ExportShrink::F);
+            t.export_shrink0 = Some(neon::ExportShrink0::F);
+        }
+        t
+    }
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -423,6 +473,10 @@ mod arch {
 
     pub fn selection(_flags: CpuFlags) -> Selection {
         Selection::default()
+    }
+
+    pub fn raw_table(_flags: CpuFlags) -> RawTable {
+        RawTable::default()
     }
 }
 

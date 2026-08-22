@@ -195,6 +195,73 @@ static void check_export_shrink(WPDRESCALEDSP *dsp) {
     }
 }
 
+/* The dispatch hands out safe Rust wrappers, so everything above reaches the
+ * kernels through a layer that rebuilds their arguments from c_int. That is
+ * where checkasm's clobbering of the undefined upper halves dies, and it is
+ * the only family where it does -- the rest hand out the asm symbols
+ * themselves. Run the symbols directly so the callee-saved, stack-canary and
+ * clobber checks apply to the code that actually has to survive them. */
+static void check_raw_abi(void) {
+    LOCAL_ALIGNED_16(uint8_t, src, [4 * MAX_SRC]);
+    LOCAL_ALIGNED_16(uint32_t, frow, [4 * MAX_OUT + GUARD]);
+    LOCAL_ALIGNED_16(uint32_t, irow, [4 * MAX_OUT + GUARD]);
+    LOCAL_ALIGNED_16(uint8_t, dst, [4 * MAX_OUT + GUARD]);
+    WPDRESCALERAWDSP raw;
+    const int        src_w = 64, dst_w = 128;
+
+    wpd_rescale_raw_dsp_init(&raw);
+    for (int x = 0; x < 4 * MAX_SRC; x++) src[x] = (uint8_t)rnd();
+    for (int x = 0; x < 4 * MAX_OUT + GUARD; x++) {
+        frow[x] = rnd() & ROW_MASK;
+        irow[x] = rnd() & ROW_MASK;
+    }
+
+    /* One channel walks the sliding window, four share an accumulator. */
+    for (int ch = 1; ch <= 4; ch += 3)
+        if (check_func(
+                raw.import_expand, "rescale_raw_import_expand_c%d", ch)) {
+            declare_func(
+                void, uint32_t *, const uint8_t *, int, int, int, int, int);
+            call_new(
+                frow, src, dst_w * ch, src_w * ch, ch, dst_w - 1, src_w - 1);
+        }
+    if (check_func(raw.import_shrink, "rescale_raw_import_shrink")) {
+        declare_func(
+            void, uint32_t *, const uint8_t *, int, int, int, uint32_t);
+        call_new(frow, src, dst_w * 4, src_w, dst_w, frac32(1, dst_w));
+    }
+    if (check_func(raw.export_direct, "rescale_raw_export_direct")) {
+        declare_func(void, uint8_t *, const uint32_t *, int, uint32_t);
+        call_new(dst, frow, dst_w, frac32(1, 7));
+    }
+    if (check_func(raw.export_blend, "rescale_raw_export_blend")) {
+        declare_func(void,
+                     uint8_t *,
+                     const uint32_t *,
+                     const uint32_t *,
+                     int,
+                     uint32_t,
+                     uint32_t,
+                     uint32_t);
+        call_new(dst, irow, frow, dst_w, frac32(1, 7), 3, 4);
+    }
+    if (check_func(raw.export_shrink, "rescale_raw_export_shrink")) {
+        declare_func(void,
+                     uint8_t *,
+                     uint32_t *,
+                     const uint32_t *,
+                     int,
+                     uint32_t,
+                     uint32_t);
+        call_new(dst, irow, frow, dst_w, frac32(1, 9), frac32(1, 63));
+    }
+    if (check_func(raw.export_shrink0, "rescale_raw_export_shrink0")) {
+        declare_func(void, uint8_t *, uint32_t *, int, uint32_t);
+        call_new(dst, irow, dst_w, frac32(1, 63));
+    }
+    report("raw_abi");
+}
+
 void checkasm_check_rescaler(void) {
     WPDRESCALEDSP dsp;
 
@@ -205,4 +272,5 @@ void checkasm_check_rescaler(void) {
     check_export_expand(&dsp);
     check_export_shrink(&dsp);
     report("export_row");
+    check_raw_abi();
 }

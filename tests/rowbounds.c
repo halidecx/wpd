@@ -314,6 +314,42 @@ done:
     return failed;
 }
 
+/* WPDRESCALERAWDSP is written out twice, once in Rust and once in the
+ * header, and two of its six entries take the same argument list -- swapping
+ * those two would compile, run, and quietly test the wrong kernel twice.
+ * Pin every entry to the symbol it is supposed to be. */
+static int check_raw_bindings(void) {
+    const unsigned   have = wpd_get_cpu_flags();
+    const int        avx2 = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
+    WPDRESCALERAWDSP raw;
+    int              failed = 0;
+
+    if (!(have & WPD_X86_CPU_FLAG_SSE2))
+        return 0;
+    wpd_rescale_raw_dsp_init(&raw);
+
+#define PIN(field, want)                                             \
+    do {                                                             \
+        if ((void *)raw.field != (void *)(want)) {                   \
+            printf("FAIL raw table: %s is not %s\n", #field, #want); \
+            failed = 1;                                              \
+        }                                                            \
+    } while (0)
+
+    PIN(import_expand, ff_rescale_import_expand_sse2);
+    PIN(import_shrink, ff_rescale_import_shrink_sse2);
+    PIN(export_direct,
+        avx2 ? ff_rescale_export_direct_avx2 : ff_rescale_export_direct_sse2);
+    PIN(export_blend,
+        avx2 ? ff_rescale_export_blend_avx2 : ff_rescale_export_blend_sse2);
+    PIN(export_shrink,
+        avx2 ? ff_rescale_export_shrink_avx2 : ff_rescale_export_shrink_sse2);
+    PIN(export_shrink0,
+        avx2 ? ff_rescale_export_shrink0_avx2 : ff_rescale_export_shrink0_sse2);
+#undef PIN
+    return failed;
+}
+
 static int probe_dirty_args(void) {
     const unsigned have   = wpd_get_cpu_flags();
     const int      avx2   = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
@@ -321,6 +357,7 @@ static int probe_dirty_args(void) {
 
     if (!(have & WPD_X86_CPU_FLAG_SSE2))
         return 0;
+    failed |= check_raw_bindings();
 
     for (int src_w = 8; src_w <= 40; src_w++) {
         failed |= probe_import("rescale_import_expand_sse2 ch=1", 1, 1, src_w);

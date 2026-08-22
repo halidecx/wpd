@@ -259,6 +259,64 @@ impl WPDRESCALEDSP {
     }
 }
 
+/* Spelled out rather than reused from the asm module, which only exists on
+ * the architectures that have kernels. */
+pub type ImportExpandRaw =
+    unsafe extern "C" fn(*mut u32, *const u8, c_int, c_int, c_int, c_int, c_int);
+pub type ImportShrinkRaw =
+    unsafe extern "C" fn(*mut u32, *const u8, c_int, c_int, c_int, u32);
+pub type ExportDirectRaw = unsafe extern "C" fn(*mut u8, *const u32, c_int, u32);
+pub type ExportBlendRaw =
+    unsafe extern "C" fn(*mut u8, *const u32, *const u32, c_int, u32, u32, u32);
+pub type ExportShrinkRaw =
+    unsafe extern "C" fn(*mut u8, *mut u32, *const u32, c_int, u32, u32);
+pub type ExportShrink0Raw = unsafe extern "C" fn(*mut u8, *mut u32, c_int, u32);
+
+/* The kernels as the assembly exposes them: counts in elements, no ratio
+ * gate, no scalar fallback. WPDRESCALEDSP cannot hand these out because the
+ * dispatch that picks between them is safe Rust, which leaves checkasm no
+ * way to reach them at the ABI they were actually written to. Null wherever
+ * this build has no assembly for the running CPU. */
+#[repr(C)]
+#[allow(clippy::upper_case_acronyms)]
+#[derive(Default)]
+pub struct WPDRESCALERAWDSP {
+    pub import_expand: Option<ImportExpandRaw>,
+    pub import_shrink: Option<ImportShrinkRaw>,
+    pub export_direct: Option<ExportDirectRaw>,
+    pub export_blend: Option<ExportBlendRaw>,
+    pub export_shrink: Option<ExportShrinkRaw>,
+    pub export_shrink0: Option<ExportShrink0Raw>,
+}
+
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn wpd_rescale_raw_dsp_init(dsp: *mut WPDRESCALERAWDSP) {
+    #[cfg(all(
+        feature = "asm",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    let t = {
+        let r = wpd::asm::rescale::raw_table(wpd::cpu::flags());
+
+        WPDRESCALERAWDSP {
+            import_expand: r.import_expand,
+            import_shrink: r.import_shrink,
+            export_direct: r.export_direct,
+            export_blend: r.export_blend,
+            export_shrink: r.export_shrink,
+            export_shrink0: r.export_shrink0,
+        }
+    };
+    #[cfg(not(all(
+        feature = "asm",
+        any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
+    )))]
+    let t = WPDRESCALERAWDSP::default();
+
+    unsafe { dsp.write(t) }
+}
+
 #[no_mangle]
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_rescale_dsp_init(dsp: *mut WPDRESCALEDSP) {
