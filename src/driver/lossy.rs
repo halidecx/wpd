@@ -1,10 +1,18 @@
 use crate::dsp::filters::FilterDsp;
+use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{Error, Result, Status};
+use crate::input::Input;
 use crate::picture::PlaneMut;
 use crate::vp8l::{AlphaDst, Target};
 
 use super::convert::scaled_size;
 use super::{Decoder, ALPHA_COMPRESSION_NONE, ALPHA_COMPRESSION_VP8L};
+
+/// Below this a frame's alpha plane is decoded here rather than beside the
+/// colour planes. Measured: a 160x120 frame with a nearly uniform alpha loses
+/// 11us, one whole spawn, because its alpha is done before the thread that
+/// took it exists; a 200x200 one breaks even, and from 300x300 up it wins.
+const ALPHA_THREAD_PIXELS: usize = 256 * 256;
 
 const ALPHA_FILTER_NONE: i32 = 0;
 const ALPHA_FILTER_HORIZONTAL: i32 = 1;
@@ -45,6 +53,82 @@ fn alpha_inverse_prediction(
     }
 }
 
+/// Everything decoding a frame's alpha channel reaches. It is a lossless image
+/// of its own and shares nothing with the colour planes, which is what lets the
+/// two be borrowed apart and run beside each other.
+struct Alpha<'p, 'i> {
+    vp8l: &'p mut crate::vp8l::Decoder,
+    ldsp: &'p Vp8lDsp,
+    fdsp: &'p FilterDsp,
+    plane: &'p mut [u8],
+    input: &'p Input<'i>,
+    offset: usize,
+    size: usize,
+    width: usize,
+    height: i32,
+    compression: i32,
+    filter: i32,
+}
+
+fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
+    let Alpha {
+        vp8l,
+        ldsp,
+        fdsp,
+        plane,
+        input,
+        offset,
+        size,
+        width,
+        height,
+        compression,
+        filter,
+    } = a;
+    let extent = width * height.max(0) as usize;
+
+    if compression == ALPHA_COMPRESSION_NONE {
+        let raw = input.chunk(offset, size);
+
+        /* Match libwebp: a short uncompressed alpha plane is invalid. */
+        if raw.len() < extent {
+            crate::log::error_args(format_args!(
+                "ALPHA chunk carries {} of {extent} bytes",
+                raw.len()
+            ));
+            return Err(Error::InvalidData);
+        }
+        plane[..extent].copy_from_slice(&raw[..extent]);
+    } else if compression == ALPHA_COMPRESSION_VP8L {
+        vp8l.set_canvas(width as i32, height);
+
+        let dst = AlphaDst {
+            data: &mut plane[..extent],
+            stride: width,
+        };
+
+        vp8l.decode_frame(Target::Alpha, input.chunk(offset, size), true, Some(dst))?;
+
+        if !vp8l.alpha_dst_used() {
+            let argb = vp8l.picture(Target::Alpha).frame();
+
+            for y in 0..height {
+                (ldsp.extract_green)(
+                    &mut plane[y as usize * width..][..width],
+                    &argb.row(0, y)[..width * 4],
+                );
+            }
+        }
+        vp8l.release_alpha_canvas();
+    }
+
+    if filter != ALPHA_FILTER_NONE {
+        let mut view = PlaneMut::borrowed(&mut plane[..extent], width);
+
+        alpha_inverse_prediction(fdsp, &mut view, width, height, filter);
+    }
+    Ok(())
+}
+
 impl<'a> Decoder<'a> {
     fn vp8_size(&self) -> (i32, i32) {
         self.vp8
@@ -52,80 +136,10 @@ impl<'a> Decoder<'a> {
             .map_or((0, 0), |vp8| (vp8.width, vp8.height))
     }
 
-    fn decode_alpha(&mut self) -> Result<()> {
-        let (offset, size) = (self.alpha_data_offset, self.alpha_data_size);
-        let width = self.width.max(0) as usize;
-        let height = self.height.max(0);
-        let extent = width * height as usize;
-
-        if self.alpha_compression == ALPHA_COMPRESSION_NONE {
-            let Self {
-                input, alpha_plane, ..
-            } = self;
-            let raw = input.chunk(offset, size);
-
-            /* Match libwebp: a short uncompressed alpha plane is invalid. */
-            if raw.len() < extent {
-                crate::log::error_args(format_args!(
-                    "ALPHA chunk carries {} of {extent} bytes",
-                    raw.len()
-                ));
-                return Err(Error::InvalidData);
-            }
-            alpha_plane[..extent].copy_from_slice(&raw[..extent]);
-        } else if self.alpha_compression == ALPHA_COMPRESSION_VP8L {
-            self.lossless_canvas_in();
-
-            let ret = {
-                let Self {
-                    vp8l,
-                    input,
-                    alpha_plane,
-                    ..
-                } = self;
-                let dst = AlphaDst {
-                    data: &mut alpha_plane[..extent],
-                    stride: width,
-                };
-
-                vp8l.decode_frame(
-                    Target::Alpha,
-                    input.chunk(offset, size),
-                    true,
-                    Some(dst),
-                )
-            };
-
-            ret?;
-            if !self.vp8l.alpha_dst_used() {
-                let Self {
-                    vp8l,
-                    alpha_plane,
-                    ldsp,
-                    ..
-                } = self;
-                let argb = vp8l.picture(Target::Alpha).frame();
-
-                for y in 0..height {
-                    (ldsp.extract_green)(
-                        &mut alpha_plane[y as usize * width..][..width],
-                        &argb.row(0, y)[..width * 4],
-                    );
-                }
-            }
-            self.vp8l.release_alpha_canvas();
-        }
-
-        if self.alpha_filter != ALPHA_FILTER_NONE {
-            let mode = self.alpha_filter;
-            let mut plane = PlaneMut::borrowed(&mut self.alpha_plane[..extent], width);
-
-            alpha_inverse_prediction(&self.fdsp, &mut plane, width, height, mode);
-        }
-        Ok(())
-    }
-
-    fn alpha_plane_decode(&mut self) -> Result<()> {
+    /// Sizes and clears the plane the frame's alpha will be decoded into.
+    /// Split out from the decode so a caller can hand the two to different
+    /// threads.
+    fn alpha_plane_reserve(&mut self) -> Result<()> {
         let Some(alpha_size) =
             (self.width.max(0) as usize).checked_mul(self.height.max(0) as usize)
         else {
@@ -143,8 +157,44 @@ impl<'a> Decoder<'a> {
             self.alpha_plane.resize(alpha_size, 0);
         }
         self.alpha_plane[..alpha_size].fill(0);
+        Ok(())
+    }
 
-        let ret = self.decode_alpha();
+    fn alpha_work(&mut self) -> Alpha<'_, 'a> {
+        let Self {
+            vp8l,
+            ldsp,
+            fdsp,
+            alpha_plane,
+            input,
+            alpha_data_offset,
+            alpha_data_size,
+            alpha_compression,
+            alpha_filter,
+            width,
+            height,
+            ..
+        } = self;
+
+        Alpha {
+            vp8l,
+            ldsp,
+            fdsp,
+            plane: alpha_plane,
+            input,
+            offset: *alpha_data_offset,
+            size: *alpha_data_size,
+            width: (*width).max(0) as usize,
+            height: (*height).max(0),
+            compression: *alpha_compression,
+            filter: *alpha_filter,
+        }
+    }
+
+    fn alpha_plane_decode(&mut self) -> Result<()> {
+        self.alpha_plane_reserve()?;
+
+        let ret = decode_alpha(self.alpha_work());
 
         self.alpha_pending = false;
         ret
@@ -224,23 +274,87 @@ impl<'a> Decoder<'a> {
         offset: usize,
         size: usize,
     ) -> Result<()> {
-        let ret = {
-            let bypass = self.filter_bypass();
+        let bypass = self.filter_bypass();
+
+        {
             let Self { vp8, input, .. } = self;
             let vp8 = vp8_decoder(vp8)?;
 
             vp8.bypass_filtering = bypass;
-            vp8.decode_frame(input.chunk(offset, size))
-        };
-
-        ret?;
+            if vp8.frame_init(input.chunk(offset, size), size, size)?
+                == Status::NeedMore
+            {
+                return Err(Error::InvalidData);
+            }
+        }
 
         let (w, h) = self.vp8_size();
 
         self.update_canvas_size(w, h);
-        if self.has_alpha {
-            self.alpha_plane_decode()?;
+
+        if !self.has_alpha {
+            let Self { vp8, input, .. } = self;
+
+            vp8_decoder(vp8)?.decode_rows_whole(input.chunk(offset, size))?;
+            self.still_lossy = !self.animation;
+            return Ok(());
         }
+
+        self.alpha_plane_reserve()?;
+
+        /* A plane this small is done before the row loop has got going, so
+         * the handoff would cost more than it saves. */
+        let threads = if (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS {
+            self.threads.0
+        } else {
+            1
+        };
+        let (alpha_ret, rows_ret) = {
+            let Self {
+                vp8l,
+                ldsp,
+                fdsp,
+                alpha_plane,
+                input,
+                alpha_data_offset,
+                alpha_data_size,
+                alpha_compression,
+                alpha_filter,
+                width,
+                height,
+                vp8,
+                ..
+            } = self;
+            let alpha = Alpha {
+                vp8l,
+                ldsp,
+                fdsp,
+                plane: alpha_plane,
+                input,
+                offset: *alpha_data_offset,
+                size: *alpha_data_size,
+                width: (*width).max(0) as usize,
+                height: (*height).max(0),
+                compression: *alpha_compression,
+                filter: *alpha_filter,
+            };
+            let chunk = input.chunk(offset, size);
+            let Some(vp8) = vp8.first_mut() else {
+                return Err(Error::InvalidData);
+            };
+
+            crate::task::join(
+                threads,
+                || decode_alpha(alpha),
+                || vp8.decode_rows_whole(chunk),
+            )
+        };
+
+        self.alpha_pending = false;
+        /* The colour planes still decide the frame, as they did when alpha
+         * came after them and never ran if they had failed. */
+        rows_ret?;
+        alpha_ret?;
         self.still_lossy = !self.animation;
         Ok(())
     }
