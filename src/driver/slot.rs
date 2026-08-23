@@ -1,5 +1,6 @@
 use crate::dsp::filters::FilterDsp;
 use crate::dsp::vp8l::Vp8lDsp;
+use crate::dsp::yuv::YuvDsp;
 use crate::error::{Error, Result};
 use crate::input::Input;
 use crate::picture::{Buffer, Frame};
@@ -15,7 +16,7 @@ pub(crate) struct FrameEnv<'e, 'i> {
     pub(crate) input: &'e Input<'i>,
     pub(crate) ldsp: &'e Vp8lDsp,
     pub(crate) fdsp: &'e FilterDsp,
-    pub(crate) ydsp: &'e crate::dsp::yuv::YuvDsp,
+    pub(crate) ydsp: &'e YuvDsp,
     pub(crate) bypass_filtering: bool,
     pub(crate) no_fancy_upsampling: bool,
     /// The output format alone decides the frame must become ARGB, whatever
