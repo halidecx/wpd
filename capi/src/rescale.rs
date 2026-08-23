@@ -35,7 +35,14 @@ pub unsafe extern "C" fn wpd_rescale_plane(
         let work = slice::from_raw_parts_mut(work, 2 * channels * dst_width as usize);
 
         wpd::rescale::rescale_plane(
-            work, &mut out, dst_width, dst_height, &inp, src_width, src_height,
+            &wpd::dsp::rescale::RescaleDsp::new(),
+            work,
+            &mut out,
+            dst_width,
+            dst_height,
+            &inp,
+            src_width,
+            src_height,
             channels,
         );
     });

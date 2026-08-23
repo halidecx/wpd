@@ -60,6 +60,10 @@ mask_bgr565: times 8 db 0x1c, 0xf8, 0xf8, 0xe0
 mul_bgr565:  times 8 db 64, 1, 32, 1
 pw_bgr565scale: times 8 dw 8192, 2048
 
+pw_128:  times 16 dw 128
+pw_257:  times 16 dw 257
+pw_amask: times 4 dw 255, 0, 0, 0
+
 pw_15:   times 16 dw 15
 pw_17:   times 16 dw 17
 pw_240:  times 16 dw 240
@@ -837,6 +841,113 @@ cglobal %1, 2, 3, 6, rgba, n
     RET
 %endmacro
 
+; (v * a + 128) * 257 >> 16 is round(v * a / 255) for eight-bit inputs, the
+; same value the scalar (v * a * KINV_255 + half) >> 24 form produces.
+%macro MULT_TAIL_PIXEL 1 ; dst byte mem; value in r3d, alpha in r4d
+    imul      r3d, r4d
+    add       r3d, 128
+    mov       r4d, r3d
+    shr       r4d, 8
+    add       r3d, r4d
+    shr       r3d, 8
+    mov       %1, r3b
+%endmacro
+
+%macro MULTIPLY_ROW 0
+cglobal multiply_row, 3, 5, 7, row, alpha, n
+    pxor      m4, m4
+    mova      m5, [pw_128]
+    mova      m6, [pw_257]
+    sub       nd, mmsize
+    jl        .tail
+.loop:
+    movu      m0, [rowq]
+    movu      m1, [alphaq]
+    mova      m2, m0
+    punpckhbw m2, m4
+    punpcklbw m0, m4
+    mova      m3, m1
+    punpckhbw m3, m4
+    punpcklbw m1, m4
+    pmullw    m0, m1
+    pmullw    m2, m3
+    paddw     m0, m5
+    paddw     m2, m5
+    pmulhuw   m0, m6
+    pmulhuw   m2, m6
+    packuswb  m0, m2
+    movu      [rowq], m0
+    add       rowq, mmsize
+    add       alphaq, mmsize
+    sub       nd, mmsize
+    jge       .loop
+.tail:
+    add       nd, mmsize
+    jz        .end
+.tail_loop:
+    movzx     r3d, byte [rowq]
+    movzx     r4d, byte [alphaq]
+    MULT_TAIL_PIXEL [rowq]
+    add       rowq, 1
+    add       alphaq, 1
+    sub       nd, 1
+    jnz       .tail_loop
+.end:
+    RET
+%endmacro
+
+; The colour channels of each pixel scale by its own leading alpha byte,
+; which itself survives: (255 * a + 128) * 257 >> 16 is a again.
+%macro PREMULTIPLY_ARGB_ROW 0
+cglobal premultiply_argb_row, 2, 5, 8, argb, n
+    pxor      m4, m4
+    mova      m5, [pw_128]
+    mova      m6, [pw_257]
+    mova      m7, [pw_amask]
+    sub       nd, mmsize / 4
+    jl        .tail
+.loop:
+    movu      m0, [argbq]
+    mova      m1, m0
+    punpcklbw m1, m4
+    mova      m2, m0
+    punpckhbw m2, m4
+    pshuflw   m3, m1, q0000
+    pshufhw   m3, m3, q0000
+    por       m3, m7
+    pmullw    m1, m3
+    paddw     m1, m5
+    pmulhuw   m1, m6
+    pshuflw   m3, m2, q0000
+    pshufhw   m3, m3, q0000
+    por       m3, m7
+    pmullw    m2, m3
+    paddw     m2, m5
+    pmulhuw   m2, m6
+    packuswb  m1, m2
+    movu      [argbq], m1
+    add       argbq, mmsize
+    sub       nd, mmsize / 4
+    jge       .loop
+.tail:
+    add       nd, mmsize / 4
+    jz        .end
+.tail_loop:
+    movzx     r2d, byte [argbq]
+%assign %%i 1
+%rep 3
+    movzx     r3d, byte [argbq + %%i]
+    mov       r4d, r2d
+    MULT_TAIL_PIXEL [argbq + %%i]
+%assign %%i %%i + 1
+%endrep
+    add       argbq, 4
+    sub       nd, 1
+    jnz       .tail_loop
+.end:
+    RET
+%endmacro
+
 %macro PREMULTIPLY_ROW 0
 cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
     test      alpha_firstd, alpha_firstd
@@ -903,6 +1014,8 @@ cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
 INIT_XMM sse2
 PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
+MULTIPLY_ROW
+PREMULTIPLY_ARGB_ROW
 
 INIT_XMM ssse3
 PACK32 rgba
@@ -930,6 +1043,8 @@ PACK16 bgra4444
 PREMULTIPLY_ROW
 PREMULTIPLY_ROW_4444 premultiply_row_4444, 0
 PREMULTIPLY_ROW_4444 premultiply_row_4444_swap, 1
+MULTIPLY_ROW
+PREMULTIPLY_ARGB_ROW
 ARGB_TO_Y
 %if ARCH_X86_64
 ARGB_TO_YUV444

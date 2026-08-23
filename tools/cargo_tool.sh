@@ -66,9 +66,9 @@ esac
 
 cargo_args=()
 built="$OUT_DIR/cargo-tool/$PROFILE"
-target="$sanitize_target"
+target="${WPD_CARGO_TARGET:-$sanitize_target}"
 if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
-    target="$(rustc -vV | awk '/^host: / { print $2 }')"
+    [ -n "$target" ] || target="$(rustc -vV | awk '/^host: / { print $2 }')"
     # Use panic=abort: immediate-abort traps can loop indefinitely on macOS.
     export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=abort -Zlocation-detail=none"
     cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)

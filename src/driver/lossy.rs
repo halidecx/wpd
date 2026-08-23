@@ -1,3 +1,4 @@
+use crate::dsp::filters::FilterDsp;
 use crate::error::{Error, Result, Status};
 use crate::picture::PlaneMut;
 use crate::vp8l::{AlphaDst, Target};
@@ -19,6 +20,7 @@ fn vp8_decoder(vp8: &mut Vec<crate::vp8::Decoder>) -> Result<&mut crate::vp8::De
 }
 
 fn alpha_inverse_prediction(
+    dsp: &FilterDsp,
     plane: &mut PlaneMut<'_>,
     width: usize,
     height: i32,
@@ -28,48 +30,18 @@ fn alpha_inverse_prediction(
         return;
     }
 
-    let top = plane.row_mut(0, 0, width);
+    let unfilter = match mode {
+        ALPHA_FILTER_HORIZONTAL => dsp.horizontal_unfilter,
+        ALPHA_FILTER_VERTICAL => dsp.vertical_unfilter,
+        ALPHA_FILTER_GRADIENT => dsp.gradient_unfilter,
+        _ => return,
+    };
 
-    for x in 1..width {
-        top[x] = top[x].wrapping_add(top[x - 1]);
-    }
+    (dsp.horizontal_unfilter)(None, plane.row_mut(0, 0, width));
     for y in 1..height {
-        let (above, row) = plane.row_pair_mut(y - 1, y, 0, 1);
+        let (above, row) = plane.row_pair_mut(y - 1, y, 0, width);
 
-        row[0] = row[0].wrapping_add(above[0]);
-    }
-
-    match mode {
-        ALPHA_FILTER_HORIZONTAL => {
-            for y in 1..height {
-                let row = plane.row_mut(y, 0, width);
-
-                for x in 1..width {
-                    row[x] = row[x].wrapping_add(row[x - 1]);
-                }
-            }
-        }
-        ALPHA_FILTER_VERTICAL => {
-            for y in 1..height {
-                let (above, row) = plane.row_pair_mut(y - 1, y, 0, width);
-
-                for x in 1..width {
-                    row[x] = row[x].wrapping_add(above[x]);
-                }
-            }
-        }
-        ALPHA_FILTER_GRADIENT => {
-            for y in 1..height {
-                let (above, row) = plane.row_pair_mut(y - 1, y, 0, width);
-
-                for x in 1..width {
-                    let sum = row[x - 1] as i32 + above[x] as i32 - above[x - 1] as i32;
-
-                    row[x] = row[x].wrapping_add(sum.clamp(0, 255) as u8);
-                }
-            }
-        }
-        _ => {}
+        unfilter(Some(above), row);
     }
 }
 
@@ -148,7 +120,7 @@ impl<'a> Decoder<'a> {
             let mode = self.alpha_filter;
             let mut plane = PlaneMut::borrowed(&mut self.alpha_plane[..extent], width);
 
-            alpha_inverse_prediction(&mut plane, width, height, mode);
+            alpha_inverse_prediction(&self.fdsp, &mut plane, width, height, mode);
         }
         Ok(())
     }

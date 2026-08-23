@@ -17,10 +17,14 @@ esac
 
 cargo_args=()
 built="$OUT_DIR/cargo-$NAME/$PROFILE"
+target="${WPD_CARGO_TARGET:-}"
 if [ "${WPD_NIGHTLY_SIZE:-}" = 1 ]; then
-    target="$(rustc -vV | awk '/^host: / { print $2 }')"
+    # -Zbuild-std needs an explicit target even when it is the host.
+    [ -n "$target" ] || target="$(rustc -vV | awk '/^host: / { print $2 }')"
     export RUSTFLAGS="${RUSTFLAGS:-} -Zunstable-options -Cpanic=abort -Zlocation-detail=none"
     cargo_args+=(-Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size)
+fi
+if [ -n "$target" ]; then
     args+=(--target "$target")
     built="$OUT_DIR/cargo-$NAME/$target/$PROFILE"
 fi

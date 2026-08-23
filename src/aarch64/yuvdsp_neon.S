@@ -618,6 +618,96 @@ function ff_premultiply_row_neon, export=1
 9:      ret
 endfunc
 
+/* round(v * a / 255) for eight-bit inputs: with t = v * a + 128, the exact
+ * (t * 257) >> 16 is (t + (t >> 8)) >> 8, since t stays inside sixteen bits
+ * and the dropped 257ths never reach the next integer. */
+.macro  mult_pair dst, src, alpha
+        umull           v4.8h,   v\src\().8b,   v\alpha\().8b
+        umull2          v5.8h,   v\src\().16b,  v\alpha\().16b
+        add             v4.8h,   v4.8h,  v6.8h
+        add             v5.8h,   v5.8h,  v6.8h
+        usra            v4.8h,   v4.8h,  #8
+        usra            v5.8h,   v5.8h,  #8
+        shrn            v\dst\().8b,   v4.8h,  #8
+        shrn2           v\dst\().16b,  v5.8h,  #8
+.endm
+
+/* The same value the scalar tail spells out; w4 holds v, w5 the alpha. */
+.macro  mult_scalar dst
+        mul             \dst, w4,  w5
+        add             \dst, \dst, #128
+        add             \dst, \dst, \dst, lsr #8
+        lsr             \dst, \dst, #8
+.endm
+
+function ff_multiply_row_neon, export=1
+        movi            v6.8h,   #128
+        cmp             w2,  #16
+        b.lt            3f
+1:      ld1             {v0.16b}, [x0]
+        ld1             {v1.16b}, [x1], #16
+        mult_pair       0, 0, 1
+        sub             w2,  w2,  #16
+        st1             {v0.16b}, [x0], #16
+        cmp             w2,  #16
+        b.ge            1b
+3:      cbz             w2,  9f
+4:      ldrb            w4,  [x0]
+        ldrb            w5,  [x1], #1
+        mult_scalar     w4
+        strb            w4,  [x0], #1
+        subs            w2,  w2,  #1
+        b.gt            4b
+9:      ret
+endfunc
+
+const argb_bcasta_tbl, align=4
+        .byte           0, 0, 0, 0, 4, 4, 4, 4
+        .byte           8, 8, 8, 8, 12, 12, 12, 12
+endconst
+
+/* Each pixel's colour channels scale by its own leading alpha byte, which
+ * survives the pass because the alpha lane's multiplier is forced to 255. */
+function ff_premultiply_argb_row_neon, export=1
+        movi            v6.8h,   #128
+        movrel          x2,  argb_bcasta_tbl
+        ld1             {v7.16b}, [x2]
+        movi            v16.4s,  #255
+        cmp             w1,  #16
+        b.lt            2f
+1:      ld1             {v0.16b-v3.16b}, [x0]
+.irp    px, 0, 1, 2, 3
+        tbl             v17.16b, {v\px\().16b}, v7.16b
+        orr             v17.16b, v17.16b, v16.16b
+        mult_pair       \px, \px, 17
+.endr
+        sub             w1,  w1,  #16
+        st1             {v0.16b-v3.16b}, [x0], #64
+        cmp             w1,  #16
+        b.ge            1b
+2:      cmp             w1,  #4
+        b.lt            3f
+5:      ld1             {v0.16b}, [x0]
+        tbl             v17.16b, {v0.16b}, v7.16b
+        orr             v17.16b, v17.16b, v16.16b
+        mult_pair       0, 0, 17
+        sub             w1,  w1,  #4
+        st1             {v0.16b}, [x0], #16
+        cmp             w1,  #4
+        b.ge            5b
+3:      cbz             w1,  9f
+4:      ldrb            w5,  [x0]
+.irp    off, 1, 2, 3
+        ldrb            w4,  [x0, #\off]
+        mult_scalar     w4
+        strb            w4,  [x0, #\off]
+.endr
+        add             x0,  x0,  #4
+        subs            w1,  w1,  #1
+        b.gt            4b
+9:      ret
+endfunc
+
 #define UV_BLOCK  192                   // 16 columns of both rows, for the tail
 #define UV_OUT    320
 #define UV_FRAME  336

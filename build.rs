@@ -40,14 +40,14 @@ fn nasm_common(root: &Path, x86_64: bool) -> nasm_rs::Build {
 fn build_x86(root: &Path, x86_64: bool) {
     let mut avx2 = nasm_common(root, x86_64);
     avx2.define("HAVE_AVX2_EXTERNAL", Some("1"));
-    for f in ["vp8l.asm", "vp8dsp.asm", "vp8_intrapred.asm"] {
+    for f in ["vp8l.asm", "vp8dsp.asm", "vp8_intrapred.asm", "filters.asm"] {
         avx2.file(root.join("src/x86").join(f));
     }
     avx2.compile("wpd_asm_avx2").expect("nasm failed");
     println!("cargo:rustc-link-lib=static=wpd_asm_avx2");
 
     let mut rest = nasm_common(root, x86_64);
-    for f in ["vp8dsp_loopfilter.asm", "yuvdsp.asm"] {
+    for f in ["vp8dsp_loopfilter.asm", "yuvdsp.asm", "rescaler.asm"] {
         rest.file(root.join("src/x86").join(f));
     }
     rest.compile("wpd_asm_x86").expect("nasm failed");
@@ -89,6 +89,8 @@ fn build_aarch64(root: &Path) {
     }
 
     for f in [
+        "filters_neon.S",
+        "rescaler_neon.S",
         "vp8l_neon.S",
         "vp8dsp_neon.S",
         "vp8pred_neon.S",

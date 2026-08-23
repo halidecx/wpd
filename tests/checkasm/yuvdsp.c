@@ -279,6 +279,63 @@ static void check_premultiply_row(WPDYUVDSP *dsp) {
     }
 }
 
+static void check_multiply_row(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, alpha, [MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [MAX_PIXELS + GUARD_PIXELS]);
+    declare_func(void, uint8_t *, const uint8_t *, int);
+
+    if (check_func(dsp->multiply_row, "multiply_row")) {
+        /* Every (value, alpha) pair fits in one 256-wide sweep. */
+        for (int a = 0; a < 256; a++) {
+            const int n =
+                row_lengths[a % (sizeof(row_lengths) / sizeof(*row_lengths))];
+
+            for (int x = 0; x < MAX_PIXELS; x++) alpha[x] = (uint8_t)a;
+            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+                row0[x] = row1[x] = (uint8_t)x;
+
+            call_ref(row0, alpha, 256);
+            call_new(row1, alpha, 256);
+            if (memcmp(row0, row1, MAX_PIXELS + GUARD_PIXELS))
+                fail();
+
+            for (int x = 0; x < MAX_PIXELS; x++) alpha[x] = (uint8_t)rnd();
+            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+                row0[x] = row1[x] = (uint8_t)rnd();
+            call_ref(row0, alpha, n);
+            call_new(row1, alpha, n);
+            if (memcmp(row0, row1, MAX_PIXELS + GUARD_PIXELS))
+                fail();
+        }
+        bench_new(row1, alpha, MAX_PIXELS);
+    }
+}
+
+static void check_premultiply_argb_row(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, row0, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
+    declare_func(void, uint8_t *, int);
+
+    if (check_func(dsp->premultiply_argb_row, "premultiply_argb_row")) {
+        for (int a = 0; a < 256; a++) {
+            const int n =
+                row_lengths[a % (sizeof(row_lengths) / sizeof(*row_lengths))];
+
+            for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                row0[x] = row1[x] = (uint8_t)rnd();
+            for (int x = 0; x < 4 * MAX_PIXELS; x += 4)
+                row0[x] = row1[x] = (uint8_t)(x & 4 ? a : rnd());
+
+            call_ref(row0, n);
+            call_new(row1, n);
+            if (memcmp(row0, row1, 4 * (MAX_PIXELS + GUARD_PIXELS)))
+                fail();
+        }
+        bench_new(row1, MAX_PIXELS);
+    }
+}
+
 #define MAX_W 133
 #define MAX_H 35
 #define MAX_CW ((MAX_W + 1) / 2)
@@ -520,6 +577,9 @@ void checkasm_check_yuvdsp(void) {
     check_premultiply_row_4444(
         dsp.premultiply_row_4444_swap, "premultiply_row_4444_swap", 0);
     report("premultiply_row");
+    check_multiply_row(&dsp);
+    check_premultiply_argb_row(&dsp);
+    report("multiply_row");
     check_argb_to_y(&dsp);
     report("argb_to_y");
     check_argb_to_yuv444(&dsp);

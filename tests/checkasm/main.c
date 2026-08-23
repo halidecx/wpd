@@ -18,7 +18,9 @@ static const CheckasmCpuInfo cpu_flags[] = {
     {0}};
 
 static const CheckasmTest tests[] = {
+    {.name = "filters", .func = checkasm_check_filters},
     {.name = "lossless", .func = checkasm_check_lossless},
+    {.name = "rescaler", .func = checkasm_check_rescaler},
     {.name = "vp8dsp", .func = checkasm_check_vp8dsp},
     {.name = "vp8pred", .func = checkasm_check_vp8pred},
     {.name = "yuvdsp", .func = checkasm_check_yuvdsp},

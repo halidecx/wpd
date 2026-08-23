@@ -12,6 +12,12 @@ debug)   ;;
 *)       args+=(--profile "$PROFILE") ;;
 esac
 
+built="$OUT_DIR/cargo-imagewebpdec/$PROFILE"
+if [ -n "${WPD_CARGO_TARGET:-}" ]; then
+    args+=(--target "$WPD_CARGO_TARGET")
+    built="$OUT_DIR/cargo-imagewebpdec/$WPD_CARGO_TARGET/$PROFILE"
+fi
+
 cargo "${args[@]}"
 
-cp -f "$OUT_DIR/cargo-imagewebpdec/$PROFILE/imagewebpdec" "$OUT_DIR/imagewebpdec"
+cp -f "$built/imagewebpdec" "$OUT_DIR/imagewebpdec"
