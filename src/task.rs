@@ -76,11 +76,19 @@ pub fn join<A: Send, B>(
     })
 }
 
+/// Runs `f` once per element, on up to `threads` threads.
+pub fn for_each<T: Send>(threads: usize, items: &mut [T], f: impl Fn(&mut T) + Sync) {
+    let _ = try_for_each(threads, items, |item| {
+        f(item);
+        Ok(())
+    });
+}
+
 /// Runs `f` once per element, on up to `threads` threads. Every element is
 /// visited whatever the ones before it returned, and the first error in
 /// element order is the one reported, so a failure does not depend on which
 /// thread got there first.
-pub fn for_each<T: Send>(
+pub fn try_for_each<T: Send>(
     threads: usize,
     items: &mut [T],
     f: impl Fn(&mut T) -> Result<()> + Sync,
@@ -177,11 +185,7 @@ mod tests {
         for threads in [1, 2, 3, 5, 8] {
             let mut items: Vec<usize> = (0..17).collect();
 
-            for_each(threads, &mut items, |item| {
-                *item *= 2;
-                Ok(())
-            })
-            .unwrap();
+            for_each(threads, &mut items, |item| *item *= 2);
             assert!(items.iter().enumerate().all(|(i, &v)| v == 2 * i));
         }
     }
@@ -192,7 +196,7 @@ mod tests {
             let mut items: Vec<usize> = (0..17).collect();
             let seen = std::sync::atomic::AtomicUsize::new(0);
 
-            let ret = for_each(threads, &mut items, |item| {
+            let ret = try_for_each(threads, &mut items, |item| {
                 seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 match *item {
                     5 => Err(Error::InvalidData),

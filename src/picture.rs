@@ -190,6 +190,10 @@ pub struct PlaneMut<'a> {
     data: &'a mut [u8],
     stride: usize,
     origin: usize,
+    /// The picture row `data` begins at. A band cut out of a plane keeps the
+    /// row numbers it had in the whole plane, so nothing walking the picture
+    /// in absolute rows has to know it is looking at a piece of one.
+    first: i32,
 }
 
 impl<'a> PlaneMut<'a> {
@@ -198,6 +202,7 @@ impl<'a> PlaneMut<'a> {
             data: &mut plane.data,
             stride: plane.stride,
             origin: 0,
+            first: 0,
         }
     }
 
@@ -206,6 +211,7 @@ impl<'a> PlaneMut<'a> {
             data,
             stride,
             origin: 0,
+            first: 0,
         }
     }
 
@@ -213,14 +219,19 @@ impl<'a> PlaneMut<'a> {
         self.stride
     }
 
+    #[inline(always)]
+    fn at(&self, y: i32, from: usize) -> usize {
+        self.origin + (y - self.first) as usize * self.stride + from
+    }
+
     pub fn row(&self, y: i32, from: usize, len: usize) -> &[u8] {
-        let at = self.origin + y as usize * self.stride + from;
+        let at = self.at(y, from);
 
         &self.data[at..at + len]
     }
 
     pub fn row_mut(&mut self, y: i32, from: usize, len: usize) -> &mut [u8] {
-        let at = self.origin + y as usize * self.stride + from;
+        let at = self.at(y, from);
 
         &mut self.data[at..at + len]
     }
@@ -234,11 +245,44 @@ impl<'a> PlaneMut<'a> {
     ) -> (&mut [u8], &mut [u8]) {
         assert!(a < b, "rows must be asked for in order");
 
-        let at_a = self.origin + a as usize * self.stride + from;
-        let at_b = self.origin + b as usize * self.stride + from;
+        let at_a = self.at(a, from);
+        let at_b = self.at(b, from);
         let (lo, hi) = self.data.split_at_mut(at_b);
 
         (&mut lo[at_a..at_a + len], &mut hi[..len])
+    }
+
+    /// Borrows this plane as one that can be handed on or split.
+    pub fn reborrow(&mut self) -> PlaneMut<'_> {
+        PlaneMut {
+            data: self.data,
+            stride: self.stride,
+            origin: self.origin,
+            first: self.first,
+        }
+    }
+
+    /// Cuts the plane in two at row `y`. Both halves answer to the row numbers
+    /// they had here, so two threads can write disjoint bands of one picture
+    /// without either of them counting rows differently.
+    pub fn split_rows_at(self, y: i32) -> (Self, Self) {
+        let at = self.at(y, 0);
+        let (lo, hi) = self.data.split_at_mut(at);
+
+        (
+            PlaneMut {
+                data: lo,
+                stride: self.stride,
+                origin: self.origin,
+                first: self.first,
+            },
+            PlaneMut {
+                data: hi,
+                stride: self.stride,
+                origin: 0,
+                first: y,
+            },
+        )
     }
 }
 

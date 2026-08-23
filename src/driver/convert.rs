@@ -226,6 +226,7 @@ pub fn yuv_planes<'a>(src: &Frame<'a>) -> YuvPlanes<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn convert_to_packed(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -233,6 +234,7 @@ pub fn convert_to_packed(
     format: i32,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
+    threads: usize,
 ) -> Result<()> {
     let layout = format_layout(format);
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
@@ -245,6 +247,7 @@ pub fn convert_to_packed(
             format,
             no_fancy_upsampling,
             premultiply_packed,
+            threads,
         );
     }
 
@@ -267,13 +270,18 @@ pub fn convert_to_packed(
         return Ok(());
     }
     if no_fancy_upsampling {
-        crate::convert::yuv420_to_packed_simple(dsp, layout, plane, &planes, w, 0, h);
+        crate::convert::yuv420_to_packed_simple(
+            dsp, layout, plane, &planes, w, 0, h, threads,
+        );
     } else {
-        crate::convert::yuv420_to_packed_rows(dsp, layout, plane, &planes, w, h, 0, h);
+        crate::convert::yuv420_to_packed_rows(
+            dsp, layout, plane, &planes, w, h, 0, h, threads,
+        );
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn convert_to_packed_2byte(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -281,6 +289,7 @@ fn convert_to_packed_2byte(
     format: i32,
     no_fancy_upsampling: bool,
     premultiply_packed: bool,
+    threads: usize,
 ) -> Result<()> {
     let mut temp = Buffer::default();
 
@@ -292,6 +301,7 @@ fn convert_to_packed_2byte(
             Format::Argb as i32,
             no_fancy_upsampling,
             premultiply_packed,
+            threads,
         )?;
     }
 
@@ -322,6 +332,7 @@ pub fn convert_to_argb(
     dst: &mut Buffer,
     src: &Frame<'_>,
     no_fancy_upsampling: bool,
+    threads: usize,
 ) -> Result<()> {
     convert_to_packed(
         dsp,
@@ -330,6 +341,7 @@ pub fn convert_to_argb(
         Format::Argb as i32,
         no_fancy_upsampling,
         false,
+        threads,
     )
 }
 

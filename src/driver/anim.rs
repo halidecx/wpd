@@ -23,6 +23,7 @@ pub struct CPlacement {
     pub no_fancy_upsampling: bool,
     pub clear_argb: [u8; 4],
     pub clear_yuva: [u8; 4],
+    pub threads: usize,
 }
 
 pub struct CompositeTargets<'a> {
@@ -144,7 +145,13 @@ fn prepare_canvas(
         if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
             let yuva = mem::take(canvas);
 
-            convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
+            convert_to_argb(
+                ydsp,
+                canvas,
+                &yuva.frame(),
+                pl.no_fancy_upsampling,
+                pl.threads,
+            )?;
         }
         if pl.geom.frame.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE != 0 {
             clear_rect(
@@ -210,6 +217,7 @@ impl<'a> Decoder<'a> {
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva.0,
+            threads: self.threads.0,
         }
     }
 
@@ -350,6 +358,7 @@ impl<'a> Decoder<'a> {
 
         if target == argb && sub_format != argb {
             let no_fancy = self.options.no_fancy_upsampling;
+            let threads = self.threads.0;
             let Self {
                 ydsp,
                 converted,
@@ -367,7 +376,7 @@ impl<'a> Decoder<'a> {
                 *width,
                 *height,
             );
-            convert_to_argb(ydsp, converted, &src, no_fancy)?;
+            convert_to_argb(ydsp, converted, &src, no_fancy, threads)?;
             which = Source::Converted;
         }
 

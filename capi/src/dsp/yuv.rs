@@ -400,6 +400,8 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
             h,
             row_start as usize,
             row_end as usize,
+            /* A checkasm entry point measures one kernel, not a decode. */
+            1,
         ) as c_int
     }
 }

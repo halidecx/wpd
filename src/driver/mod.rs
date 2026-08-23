@@ -351,6 +351,7 @@ impl<'a> Decoder<'a> {
                 self.has_alpha || self.lossless_has_alpha
             },
             timestamp: self.frame_timestamp - self.frame_duration as i64,
+            threads: self.threads.0,
         }
     }
 
