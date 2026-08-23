@@ -109,6 +109,9 @@ const USAGE_TAIL: &str = concat!(
     "    replay the animation this many times, rewinding between\n",
     "    passes; --stream, which cannot be rewound, reopens instead.\n",
     "    only the first pass is written out. default 1\n",
+    " --threads u32\n",
+    "    threads a decode may use, counting this one; 0 asks for the\n",
+    "    processors this process may run on. default 0\n",
 );
 
 fn usage(app: &str, reason: Option<&str>) {
@@ -195,6 +198,7 @@ struct Options {
     repeat: i32,
     loops: i32,
     stream: usize,
+    n_threads: i32,
     info: bool,
     subframe: bool,
     muxer: Option<String>,
@@ -223,6 +227,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("cpumask", None, true),
     ("subframe", None, false),
     ("stream", None, true),
+    ("threads", None, true),
 ];
 
 fn by_prefix(prefix: &str) -> Option<(&'static str, bool)> {
@@ -251,6 +256,13 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
         "repeat" => o.repeat = parse_repeat(&value).ok_or(BAD_REPEAT)?,
         "loops" => o.loops = parse_repeat(&value).ok_or(BAD_LOOPS)?,
         "stream" => o.stream = parse_repeat(&value).ok_or(BAD_STREAM)? as usize,
+        "threads" => {
+            o.n_threads = value
+                .parse::<i32>()
+                .ok()
+                .filter(|&n| n >= 0)
+                .ok_or(BAD_THREADS)?
+        }
         "fmt" => {
             let (pixel_format, out_format) = parse_format(&value).ok_or(BAD_FORMAT)?;
 
@@ -387,6 +399,7 @@ const BAD_CPUMASK: &str = "invalid cpu mask";
 const BAD_REPEAT: &str = "invalid repeat value; expected 1..INT_MAX";
 const BAD_LOOPS: &str = "invalid loop count; expected 1..INT_MAX";
 const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
+const BAD_THREADS: &str = "invalid thread count; expected 0..INT_MAX";
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 
@@ -542,9 +555,20 @@ fn new_decoder(
     out_format: Option<Format>,
     pixel_format: Option<&str>,
     subframe: bool,
+    n_threads: i32,
 ) -> Option<Decoder<'static>> {
     let mut decoder = Decoder::new();
 
+    if decoder
+        .set_options(api::Options {
+            n_threads,
+            ..api::Options::default()
+        })
+        .is_err()
+    {
+        eprintln!("cannot select {n_threads} threads");
+        return None;
+    }
     if let Some(format) = out_format {
         if decoder.set_format(format).is_err() {
             eprintln!("cannot select {} output", pixel_format.unwrap_or("auto"));
@@ -732,7 +756,8 @@ fn run(
             frames: 0,
         };
 
-        let Some(mut decoder) = new_decoder(out_format, pixel_format, opts.subframe)
+        let Some(mut decoder) =
+            new_decoder(out_format, pixel_format, opts.subframe, opts.n_threads)
         else {
             return ExitCode::FAILURE;
         };
@@ -741,9 +766,12 @@ fn run(
         if opts.stream != 0 {
             for loop_index in 0..opts.loops {
                 if loop_index > 0 {
-                    let Some(next) =
-                        new_decoder(out_format, pixel_format, opts.subframe)
-                    else {
+                    let Some(next) = new_decoder(
+                        out_format,
+                        pixel_format,
+                        opts.subframe,
+                        opts.n_threads,
+                    ) else {
                         return ExitCode::FAILURE;
                     };
 

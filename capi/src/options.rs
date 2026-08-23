@@ -17,6 +17,7 @@ pub struct WPDDecoderOptions {
     pub scaled_width: c_int,
     pub scaled_height: c_int,
     pub flip: c_int,
+    pub n_threads: c_int,
 }
 
 impl WPDDecoderOptions {
@@ -24,6 +25,13 @@ impl WPDDecoderOptions {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
     }
 
+    fn v2() -> usize {
+        mem::offset_of!(WPDDecoderOptions, n_threads) + mem::size_of::<c_int>()
+    }
+
+    /// A caller built against the v1 struct reads back as `n_threads == 0`,
+    /// which is the same thing a v2 caller gets from a zeroed struct: let the
+    /// decoder choose.
     pub(crate) fn to_core(&self) -> Options {
         Options {
             bypass_filtering: self.bypass_filtering != 0,
@@ -37,6 +45,11 @@ impl WPDDecoderOptions {
             scale: (self.use_scaling != 0)
                 .then_some((self.scaled_width, self.scaled_height)),
             flip: self.flip != 0,
+            n_threads: if self.struct_size >= Self::v2() {
+                self.n_threads
+            } else {
+                0
+            },
         }
     }
 }

@@ -104,6 +104,12 @@ endif
 if get_option('force_rac32')
   cargo_features += 'force_rac32'
 endif
+threads_enabled = not get_option('threads').disabled()
+if threads_enabled
+  cargo_features += 'threads'
+endif
+
+message('Threads: ' + (threads_enabled ? 'enabled' : 'disabled'))
 
 cargo_profile = {
   'release': 'release',

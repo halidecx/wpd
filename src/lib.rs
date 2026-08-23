@@ -27,5 +27,6 @@ pub mod log;
 pub mod options;
 pub mod picture;
 pub mod rescale;
+pub mod task;
 pub mod vp8;
 pub mod vp8l;

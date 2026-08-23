@@ -55,6 +55,9 @@ pub struct Decoder<'a> {
     pub(crate) fdsp: FilterDsp,
     pub(crate) out_format: OutFormat,
     pub(crate) options: Options,
+    /* options.n_threads resolved once, so the decode paths need not ask
+     * the machine how many processors it has for every frame. */
+    pub(crate) threads: Threads,
 
     pub(crate) input: Input<'a>,
     pub(crate) pos: usize,
@@ -127,7 +130,7 @@ const ALPHA_PREPROCESSED_LEVELS: i32 = 1;
 
 const ERROR_MAX: usize = 128;
 
-/* Both carry a default that is not the zero value, so that a derived
+/* Each carries a default that is not the zero value, so that a derived
  * Default for the decoder is the same decoder new() hands out. */
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -136,6 +139,15 @@ pub(crate) struct OutFormat(pub i32);
 impl Default for OutFormat {
     fn default() -> Self {
         Self(FORMAT_NONE)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Threads(pub usize);
+
+impl Default for Threads {
+    fn default() -> Self {
+        Self(crate::task::resolve(0))
     }
 }
 
@@ -722,7 +734,7 @@ impl Decoder<'_> {
             .scale
             .is_some_and(|(w, h)| w < 0 || h < 0 || (w == 0 && h == 0));
 
-        if bad_crop || bad_scale {
+        if bad_crop || bad_scale || options.n_threads < 0 {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
         }
         if self.anim_mode == ANIM_SUBFRAME && options.transforms() {
@@ -733,6 +745,7 @@ impl Decoder<'_> {
             ));
         }
         self.options = options;
+        self.threads = Threads(crate::task::resolve(options.n_threads));
         Ok(())
     }
 
