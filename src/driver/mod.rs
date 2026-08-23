@@ -83,6 +83,10 @@ pub struct Decoder<'a> {
     pub(crate) transformed: Buffer,
     pub(crate) rescale: Scratches,
 
+    /// Frames decoded before the walk has reached them. Compositing still
+    /// happens in order, on this thread.
+    pub(crate) ahead: slot::Ahead,
+
     pub(crate) canvas: Buffer,
     pub(crate) subframe_out: Option<Source>,
     pub(crate) anim_mode: i32,
@@ -158,12 +162,13 @@ pub(crate) enum InputMode {
     Update,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Source {
     Lossy,
     Lossless,
     Converted,
     Canvas,
+    #[default]
     None,
 }
 
@@ -307,6 +312,22 @@ impl<'a> Decoder<'a> {
         Ok(())
     }
 
+    /// Whether the output format on its own decides an animation frame must
+    /// be ARGB before it is composited. Where it does not, the canvas does,
+    /// and only the walk over the frames knows what the canvas holds.
+    pub(crate) fn frame_to_argb(&self) -> bool {
+        self.animation && format_is_packed(self.out_format.0)
+    }
+
+    /// Whether a frame is premultiplied before it is composited, which is
+    /// what libwebp does.
+    pub(crate) fn frame_premultiply(&self) -> bool {
+        self.animation
+            && format_is_premultiplied(self.out_format.0)
+            && !(convert::premultiply_after_pack(self.animation, self.anim_mode)
+                && convert::format_bpp(self.out_format.0) == 2)
+    }
+
     pub(crate) fn export_settings(&self) -> ExportSettings {
         ExportSettings {
             out_format: self.out_format.0,
@@ -419,6 +440,7 @@ impl<'a> Decoder<'a> {
 
     fn anim_state_reset(&mut self) {
         self.frame.reset();
+        self.ahead.clear();
         self.canvas.release();
         self.still_done = false;
         self.vp8_active = false;
@@ -437,6 +459,7 @@ impl<'a> Decoder<'a> {
         self.meta = [None, None, None];
         self.anim_state_reset();
         self.frame.release();
+        self.ahead.release();
         self.output.release();
         self.transformed.release();
         self.input.reset();

@@ -15,7 +15,14 @@ pub(crate) struct FrameEnv<'e, 'i> {
     pub(crate) input: &'e Input<'i>,
     pub(crate) ldsp: &'e Vp8lDsp,
     pub(crate) fdsp: &'e FilterDsp,
+    pub(crate) ydsp: &'e crate::dsp::yuv::YuvDsp,
     pub(crate) bypass_filtering: bool,
+    pub(crate) no_fancy_upsampling: bool,
+    /// The output format alone decides the frame must become ARGB, whatever
+    /// the frames before it did, so the conversion can happen off the walk.
+    pub(crate) to_argb: bool,
+    /// libwebp premultiplies a frame before compositing it.
+    pub(crate) premultiply: bool,
     pub(crate) threads: usize,
 }
 
@@ -44,6 +51,11 @@ pub(crate) struct FrameSlot {
 
     /// Where a sub-frame was converted to ARGB, when it had to be.
     pub(crate) converted: Buffer,
+
+    /// Set once the image has been put in the form compositing wants, so a
+    /// frame prepared in a batch is not converted or premultiplied twice.
+    prepared: bool,
+    out: Source,
 }
 
 impl FrameSlot {
@@ -90,6 +102,58 @@ impl FrameSlot {
         };
 
         (img, converted)
+    }
+
+    /// Puts the decoded image in the form compositing wants: ARGB where the
+    /// caller says it must be, premultiplied where the output format is.
+    /// Runs at most once per frame, whichever thread gets there first.
+    pub(crate) fn prepare(
+        &mut self,
+        env: &FrameEnv<'_, '_>,
+        which: Source,
+        to_argb: bool,
+    ) -> Result<Source> {
+        if self.prepared {
+            return Ok(self.out);
+        }
+        self.prepared = true;
+        self.out = which;
+
+        if to_argb {
+            let (src, converted) = self.split_converted(which);
+
+            if src.format != crate::image::Format::Argb {
+                crate::driver::convert::convert_to_argb(
+                    env.ydsp,
+                    converted,
+                    &src,
+                    env.no_fancy_upsampling,
+                    env.threads,
+                )?;
+                self.out = Source::Converted;
+            }
+        }
+
+        if env.premultiply {
+            let Self {
+                converted,
+                vp8l,
+                lossless_out,
+                ..
+            } = self;
+            let view = match self.out {
+                Source::Converted => Some(converted.frame_mut()),
+                Source::Lossless => lossless_out.and_then(|w| vp8l.view_mut(w)),
+                Source::Lossy | Source::Canvas | Source::None => None,
+            };
+
+            if let Some(mut view) = view {
+                for y in 0..view.height {
+                    (env.ydsp.premultiply_row)(view.row(0, y), true);
+                }
+            }
+        }
+        Ok(self.out)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -190,6 +254,7 @@ impl FrameSlot {
         self.has_alpha = false;
         self.width = 0;
         self.height = 0;
+        self.prepared = false;
 
         let mut sub: Option<Source> = None;
         let mut at = base + 16;
@@ -243,10 +308,17 @@ impl FrameSlot {
             at += padded_size;
         }
 
-        sub.ok_or_else(|| {
+        let which = sub.ok_or_else(|| {
             crate::log::error("image data not found");
             Error::InvalidData
-        })
+        })?;
+
+        /* Only where the output format decides it on its own; otherwise it
+         * depends on the canvas, which only the walk knows about. */
+        if env.to_argb {
+            return self.prepare(env, which, true);
+        }
+        Ok(which)
     }
 
     /// Whether the image this slot holds carries an alpha channel.
@@ -271,5 +343,41 @@ impl FrameSlot {
             self.vp8.push(crate::vp8::Decoder::new());
         }
         Ok(&mut self.vp8[0])
+    }
+}
+
+/// One frame of a batch decoded ahead of the walk that composites it: where
+/// its bytes are, and what decoding them produced.
+#[derive(Clone, Copy)]
+pub(crate) struct AheadEntry {
+    pub(crate) base: usize,
+    pub(crate) size: usize,
+    pub(crate) out: Result<Source>,
+}
+
+/// Frames decoded ahead of the one being handed out, and the slots holding
+/// them. Empty whenever a decode cannot run ahead: a streamed animation, a
+/// canvas too large to hold several frames, or one thread.
+#[derive(Default)]
+pub(crate) struct Ahead {
+    pub(crate) slots: Vec<FrameSlot>,
+    pub(crate) entries: Vec<AheadEntry>,
+    pub(crate) pos: usize,
+}
+
+impl Ahead {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.pos = 0;
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.clear();
+        self.slots = Vec::new();
+    }
+
+    /// True once every frame decoded ahead has been handed over.
+    pub(crate) fn spent(&self) -> bool {
+        self.pos >= self.entries.len()
     }
 }

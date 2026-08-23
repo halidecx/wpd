@@ -250,7 +250,7 @@ impl FrameSlot {
 
 impl<'a> Decoder<'a> {
     /* Match libwebp's whole-frame threshold for skipping the loop filter. */
-    fn filter_bypass(&self) -> bool {
+    pub(crate) fn filter_bypass(&self) -> bool {
         if self.options.bypass_filtering {
             return true;
         }
@@ -273,11 +273,15 @@ impl<'a> Decoder<'a> {
     /// They come apart because nothing in the environment lives on the slot.
     pub(crate) fn frame_parts(&mut self) -> (&mut FrameSlot, FrameEnv<'_, 'a>) {
         let bypass_filtering = self.filter_bypass();
+        let to_argb = self.frame_to_argb();
+        let premultiply = self.frame_premultiply();
+        let no_fancy_upsampling = self.options.no_fancy_upsampling;
         let Self {
             frame,
             input,
             ldsp,
             fdsp,
+            ydsp,
             threads,
             ..
         } = self;
@@ -288,7 +292,11 @@ impl<'a> Decoder<'a> {
                 input,
                 ldsp,
                 fdsp,
+                ydsp,
                 bypass_filtering,
+                no_fancy_upsampling,
+                to_argb,
+                premultiply,
                 threads: threads.0,
             },
         )
