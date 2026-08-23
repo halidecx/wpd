@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::handout::{Handout, Pixels, RowSink};
 use crate::options::Options;
 use crate::picture::{Buffer, Frame};
-use crate::rescale::Scratch;
+use crate::rescale::Scratches;
 use std::ops::Range;
 
 pub struct ExportSettings {
@@ -34,7 +34,7 @@ pub struct ExportTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub rdsp: &'a RescaleDsp,
     pub options: &'a Options,
-    pub rescale: &'a mut Scratch,
+    pub rescale: &'a mut Scratches,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
@@ -226,7 +226,16 @@ pub fn export_packed<'a>(
         ext,
     } = t;
     let format = set.out_format;
-    let img = transform_image(dsp, rdsp, options, rescale, transformed, img, format)?;
+    let img = transform_image(
+        dsp,
+        rdsp,
+        options,
+        rescale,
+        transformed,
+        img,
+        format,
+        set.threads,
+    )?;
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {

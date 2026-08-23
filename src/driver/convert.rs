@@ -5,8 +5,8 @@ use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use crate::error::{Error, Result};
 use crate::image::{self, ceil_rshift, Crop, Format};
 use crate::options::Options;
-use crate::picture::{Buffer, Frame};
-use crate::rescale::{rescale_plane, rescale_plane_weighted, Scratch};
+use crate::picture::{Buffer, Frame, PlaneMut, PlaneRef};
+use crate::rescale::{rescale_plane, rescale_plane_weighted, Scratch, Scratches};
 
 pub fn format_is_packed(format: i32) -> bool {
     Format::from_raw(format).is_some_and(Format::is_packed)
@@ -83,17 +83,65 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     Ok(src.window(left, top, crop.width, crop.height))
 }
 
+/// One plane's share of a rescale. The rescaler accumulates down the rows and
+/// along x, so neither axis can be cut without reproducing that state; planes
+/// carry nothing between them, so they are the axis that is free.
+struct PlaneScale<'p, 'f> {
+    dst: &'p mut PlaneMut<'f>,
+    scratch: &'p mut Scratch,
+    src: PlaneRef<'f>,
+    alpha: Option<PlaneRef<'f>>,
+    dst_size: (i32, i32),
+    src_size: (i32, i32),
+    weighted: bool,
+    bpp: usize,
+}
+
+fn scale_plane(dsp: &YuvDsp, rdsp: &RescaleDsp, p: &mut PlaneScale<'_, '_>) {
+    let (dw, dh) = p.dst_size;
+    let (sw, sh) = p.src_size;
+
+    if p.weighted {
+        rescale_plane_weighted(
+            dsp,
+            rdsp,
+            p.scratch,
+            p.dst,
+            dw,
+            dh,
+            &p.src,
+            p.alpha.as_ref(),
+            sw,
+            sh,
+            p.bpp,
+        );
+    } else {
+        rescale_plane(
+            rdsp,
+            p.scratch.work_mut(),
+            p.dst,
+            dw,
+            dh,
+            &p.src,
+            sw,
+            sh,
+            p.bpp,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scale_image(
     dsp: &YuvDsp,
     rdsp: &RescaleDsp,
-    scratch: &mut Scratch,
+    scratch: &mut Scratches,
     dst: &mut Buffer,
     src: &Frame<'_>,
     width: i32,
     height: i32,
     chroma_full: bool,
     weight_luma: bool,
+    threads: usize,
 ) -> Result<()> {
     let format = src.format;
     let packed = format.is_packed();
@@ -108,13 +156,22 @@ fn scale_image(
     alloc?;
     dst.format = Some(format);
     dst.chroma_full = !packed && chroma_full;
-    scratch
-        .grow(width, src.width, bpp)
-        .map_err(|_| Error::TooLarge)?;
+
+    let nb = format.nb_components();
+
+    for one in scratch[..nb].iter_mut() {
+        one.grow(width, src.width, bpp)
+            .map_err(|_| Error::TooLarge)?;
+    }
 
     let mut out = dst.frame_mut();
+    let mut work = Vec::with_capacity(nb);
 
-    for p in 0..format.nb_components() {
+    for (p, (plane, one)) in out.planes_mut()[..nb]
+        .iter_mut()
+        .zip(scratch[..nb].iter_mut())
+        .enumerate()
+    {
         let chroma = p == 1 || p == 2;
         let shift = u32::from(chroma && !chroma_full);
         let (sw, sh) = if packed {
@@ -125,38 +182,23 @@ fn scale_image(
                 ceil_rshift(src.height, u32::from(chroma)),
             )
         };
-        let dw = ceil_rshift(width, shift);
-        let dh = ceil_rshift(height, shift);
-        let plane = &mut out.planes_mut()[p];
+        let weighted = premult || (weight_luma && p == 0);
 
-        if premult || (weight_luma && p == 0) {
-            rescale_plane_weighted(
-                dsp,
-                rdsp,
-                scratch,
-                plane,
-                dw,
-                dh,
-                &src.plane[p],
-                (!premult).then_some(&src.plane[3]),
-                sw,
-                sh,
-                bpp,
-            );
-        } else {
-            rescale_plane(
-                rdsp,
-                scratch.work_mut(),
-                plane,
-                dw,
-                dh,
-                &src.plane[p],
-                sw,
-                sh,
-                bpp,
-            );
-        }
+        work.push(PlaneScale {
+            dst: plane,
+            scratch: one,
+            src: src.plane[p],
+            alpha: (!premult).then_some(src.plane[3]),
+            dst_size: (ceil_rshift(width, shift), ceil_rshift(height, shift)),
+            src_size: (sw, sh),
+            weighted,
+            bpp,
+        });
     }
+
+    /* A packed image is one plane, so it is done here rather than paying for
+     * a scope it cannot fill. */
+    crate::task::for_each(threads, &mut work, |p| scale_plane(dsp, rdsp, p));
 
     if premult {
         for y in 0..height {
@@ -178,14 +220,16 @@ fn scale_image(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn transform_image<'a>(
     dsp: &YuvDsp,
     rdsp: &RescaleDsp,
     options: &Options,
-    scratch: &mut Scratch,
+    scratch: &mut Scratches,
     scaled: &'a mut Buffer,
     src: Frame<'a>,
     format: i32,
+    threads: usize,
 ) -> Result<Frame<'a>> {
     let view = crop_image(options, src)?;
 
@@ -213,6 +257,7 @@ pub fn transform_image<'a>(
         height,
         chroma_full,
         weight_luma,
+        threads,
     )?;
     Ok(scaled.frame())
 }

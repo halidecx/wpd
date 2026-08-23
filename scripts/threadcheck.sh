@@ -15,7 +15,8 @@ for input in "$DIR"/*.webp; do
     for fmt in argb rgba bgra rgb bgr Argb rgbA rgb565 rgba4444 rgbA4444 \
                yuv420p yuva420p; do
         # Each mode has its own answer; only the thread count must not move it.
-        for mode in "" "--subframe" "--stream 4096"; do
+        for mode in "" "--subframe" "--stream 4096" \
+                    "--scale 320x240" "--scale 0x64" "--scale 1024x1024"; do
             want=""
             for threads in $COUNTS; do
                 # shellcheck disable=SC2086

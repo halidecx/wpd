@@ -31,6 +31,10 @@ fn grow<T: Clone + Default>(v: &mut Vec<T>, need: usize) -> Result<()> {
     Ok(())
 }
 
+/// One accumulator per plane, so the planes carry nothing between them and can
+/// be rescaled at the same time.
+pub type Scratches = [Scratch; 4];
+
 impl Scratch {
     pub fn grow(
         &mut self,

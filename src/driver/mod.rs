@@ -19,7 +19,7 @@ use crate::info::{FrameInfo, ImageInfo};
 use crate::input::Input;
 use crate::options::Options;
 use crate::picture::{Buffer, Frame, PlaneRef};
-use crate::rescale::Scratch;
+use crate::rescale::Scratches;
 use crate::vp8l::Output as Lossless;
 
 use self::convert::{
@@ -91,7 +91,7 @@ pub struct Decoder<'a> {
     pub(crate) converted: Buffer,
     pub(crate) output: Buffer,
     pub(crate) transformed: Buffer,
-    pub(crate) rescale: Scratch,
+    pub(crate) rescale: Scratches,
 
     pub(crate) canvas: Buffer,
     pub(crate) subframe_out: Option<Source>,
