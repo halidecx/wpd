@@ -8,6 +8,7 @@
 #include "rescaler.h"
 #include "yuvdsp.h"
 
+#include <errno.h>
 #include <setjmp.h>
 #include <signal.h>
 #include <stddef.h>
@@ -15,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 typedef void (*row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
@@ -62,6 +64,51 @@ static uint8_t *guarded(uint8_t **map, size_t *map_size, size_t bytes) {
     }
     memset(*map, 0x5a, body);
     return *map + body - bytes;
+}
+
+/* A guard page only reports an overrun if the fault reaches a handler. Some
+ * hosts never deliver a synchronous access fault: the faulting instruction
+ * retries forever, so an overrun would hang the test instead of failing it
+ * and a clean run would prove nothing. Fault a page in a child under an
+ * alarm and find out before any probe runs. */
+#define FAULT_DELIVERED 42
+
+static void on_child_fault(int sig) {
+    (void)sig;
+    _exit(FAULT_DELIVERED);
+}
+
+static int fault_delivery_works(void) {
+    const pid_t pid = fork();
+    int         status;
+
+    if (pid < 0) {
+        fprintf(stderr, "fork failed\n");
+        return 0;
+    }
+    if (pid == 0) {
+        const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+        uint8_t     *p    = mmap(NULL,
+                                 page,
+                                 PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS,
+                                 -1,
+                                 0);
+
+        if (p == MAP_FAILED || mprotect(p, page, PROT_NONE) < 0)
+            _exit(1);
+        signal(SIGSEGV, on_child_fault);
+        signal(SIGBUS, on_child_fault);
+        /* SIGALRM's default action ends the child, so a store that spins
+         * instead of faulting still lets the parent make progress. */
+        alarm(5);
+        *(volatile uint8_t *)p = 1;
+        _exit(1); /* the store never faulted at all */
+    }
+    while (waitpid(pid, &status, 0) < 0)
+        if (errno != EINTR)
+            return 0;
+    return WIFEXITED(status) && WEXITSTATUS(status) == FAULT_DELIVERED;
 }
 
 static void run(const RowTest *t, uint8_t *dst, const uint8_t *src, int n) {
@@ -434,7 +481,7 @@ static int check_raw_bindings(void) {
 
 /* AVX2 rewrites only the exports, so the imports stay SSE2's and are probed
  * there. */
-static int probe_dirty_args(void) {
+static int probe_dirty_args(int guards) {
     const unsigned have = wpd_get_cpu_flags();
     const RawLevel sse2 = {
         "sse2",
@@ -461,6 +508,8 @@ static int probe_dirty_args(void) {
     if (!(have & WPD_X86_CPU_FLAG_SSE2))
         return 0;
     failed |= check_raw_bindings();
+    if (!guards)
+        return failed;
     failed |= probe_level(&sse2);
     if (have & WPD_X86_CPU_FLAG_AVX2)
         failed |= probe_level(&avx2);
@@ -484,7 +533,7 @@ static int check_raw_bindings(void) {
 /* AAPCS64 leaves the upper half of a 32-bit argument undefined the same way
  * the x86-64 ABI does, and all seven arguments arrive in registers there, so
  * the junk reaches the kernel without a stack slot to launder it. */
-static int probe_dirty_args(void) {
+static int probe_dirty_args(int guards) {
     const RawLevel neon = {
         "neon",
         0,
@@ -500,12 +549,16 @@ static int probe_dirty_args(void) {
     if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
         return 0;
     failed |= check_raw_bindings();
-    failed |= probe_level(&neon);
+    if (guards)
+        failed |= probe_level(&neon);
     return failed;
 }
 #endif
 #else
-static int probe_dirty_args(void) { return 0; }
+static int probe_dirty_args(int guards) {
+    (void)guards;
+    return 0;
+}
 #endif
 
 /* A zero-length row starts on the guard page itself, so a rescaler kernel
@@ -617,12 +670,17 @@ int main(void) {
 #endif
     };
     unsigned have;
-    int      failed = 0;
+    int      guards, failed = 0;
 
     wpd_init_cpu();
-    have = wpd_get_cpu_flags();
+    have   = wpd_get_cpu_flags();
+    guards = fault_delivery_works();
+    if (!guards)
+        printf(
+            "rowbounds: SKIP guard pages: this host does not deliver "
+            "synchronous fault signals\n");
 
-    for (size_t i = 0; i < sizeof(levels) / sizeof(*levels); i++) {
+    for (size_t i = 0; guards && i < sizeof(levels) / sizeof(*levels); i++) {
         WPDYUVDSP     dsp;
         WPDRESCALEDSP rdsp;
 
@@ -635,7 +693,10 @@ int main(void) {
         failed |= probe_rescale(&rdsp);
     }
     wpd_set_cpu_flags_mask(~0u);
-    failed |= probe_dirty_args();
-    printf("rowbounds: %s\n", failed ? "FAILED" : "all rows stayed in bounds");
+    failed |= probe_dirty_args(guards);
+    printf("rowbounds: %s\n",
+           failed       ? "FAILED"
+               : guards ? "all rows stayed in bounds"
+                        : "table bindings checked, rows unprobed");
     return failed;
 }
