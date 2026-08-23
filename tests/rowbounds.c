@@ -10,6 +10,7 @@
 
 #include <setjmp.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -155,7 +156,8 @@ done:
  * The overrun this exposes is read-only and its bytes are discarded, so both
  * implementations agree and no value comparison can see it. Ending each row
  * flush against a guard page turns it into a fault. */
-#if WPD_HAVE_ASM && WPD_ARCH_X86 && UINTPTR_MAX == 0xffffffffffffffffULL
+#if WPD_HAVE_ASM && (WPD_ARCH_X86 || WPD_ARCH_AARCH64) && \
+    UINTPTR_MAX == 0xffffffffffffffffULL
 
 #define DIRTY(v) (0xdeadbeef00000000ULL | (uint32_t)(v))
 
@@ -165,9 +167,16 @@ typedef void (*dirty6)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
 typedef void (*dirty7)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
                        uint64_t, uint64_t);
 
-#define DECL_IMPORT(sym) \
-    void sym(            \
+#define DECL_IMPORT_EXPAND(sym) \
+    void sym(                   \
         uint32_t *frow, const uint8_t *src, int n, int a, int b, int c, int d)
+#define DECL_IMPORT_SHRINK(sym)    \
+    void sym(uint32_t      *frow,  \
+             const uint8_t *src,   \
+             int            n,     \
+             int            x_add, \
+             int            x_sub, \
+             uint32_t       fx)
 #define DECL_EXPORT4(sym) \
     void sym(uint8_t *dst, const uint32_t *a, int n, uint32_t b)
 #define DECL_EXPORT6(sym)          \
@@ -186,9 +195,9 @@ typedef void (*dirty7)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
              uint32_t        b,    \
              uint32_t        c)
 
-DECL_IMPORT(ff_rescale_import_expand_sse2);
-void ff_rescale_import_shrink_sse2(uint32_t *frow, const uint8_t *src, int n,
-                                   int x_add, int x_sub, uint32_t fx);
+#if WPD_ARCH_X86
+DECL_IMPORT_EXPAND(ff_rescale_import_expand_sse2);
+DECL_IMPORT_SHRINK(ff_rescale_import_shrink_sse2);
 DECL_EXPORT4(ff_rescale_export_direct_sse2);
 DECL_EXPORT4(ff_rescale_export_direct_avx2);
 DECL_EXPORT4(ff_rescale_export_shrink0_sse2);
@@ -197,6 +206,14 @@ DECL_EXPORT6(ff_rescale_export_shrink_sse2);
 DECL_EXPORT6(ff_rescale_export_shrink_avx2);
 DECL_EXPORT7(ff_rescale_export_blend_sse2);
 DECL_EXPORT7(ff_rescale_export_blend_avx2);
+#else
+DECL_IMPORT_EXPAND(ff_rescale_import_expand_neon);
+DECL_IMPORT_SHRINK(ff_rescale_import_shrink_neon);
+DECL_EXPORT4(ff_rescale_export_direct_neon);
+DECL_EXPORT4(ff_rescale_export_shrink0_neon);
+DECL_EXPORT6(ff_rescale_export_shrink_neon);
+DECL_EXPORT7(ff_rescale_export_blend_neon);
+#endif
 
 static int faulted(const char *name, int n) {
     if (!trapped)
@@ -217,7 +234,8 @@ static int faulted(const char *name, int n) {
 /* Imports count in elements, so a four-channel row hands the kernel four
  * times the width it was given. Expansion walks the source to its last
  * pixel; shrinking walks it once per accumulated step. */
-static int probe_import(const char *name, int expand, int ch, int src_w) {
+static int probe_import(const char *name, const void *func, int expand, int ch,
+                        int src_w) {
     const int dst_w    = expand ? 2 * src_w : src_w / 2;
     uint8_t  *maps[2]  = {NULL, NULL};
     size_t    sizes[2] = {0, 0};
@@ -234,22 +252,20 @@ static int probe_import(const char *name, int expand, int ch, int src_w) {
 
     GUARD_BEGIN {
         if (expand)
-            ((dirty7)(void *)ff_rescale_import_expand_sse2)(
-                (uint64_t)(uintptr_t)frow,
-                (uint64_t)(uintptr_t)src,
-                DIRTY(dst_w * ch),
-                DIRTY(src_w * ch),
-                DIRTY(ch),
-                DIRTY(dst_w - 1),
-                DIRTY(src_w - 1));
+            ((dirty7)func)((uint64_t)(uintptr_t)frow,
+                           (uint64_t)(uintptr_t)src,
+                           DIRTY(dst_w * ch),
+                           DIRTY(src_w * ch),
+                           DIRTY(ch),
+                           DIRTY(dst_w - 1),
+                           DIRTY(src_w - 1));
         else
-            ((dirty6)(void *)ff_rescale_import_shrink_sse2)(
-                (uint64_t)(uintptr_t)frow,
-                (uint64_t)(uintptr_t)src,
-                DIRTY(dst_w * ch),
-                DIRTY(src_w),
-                DIRTY(dst_w),
-                DIRTY(0x10000 / dst_w));
+            ((dirty6)func)((uint64_t)(uintptr_t)frow,
+                           (uint64_t)(uintptr_t)src,
+                           DIRTY(dst_w * ch),
+                           DIRTY(src_w),
+                           DIRTY(dst_w),
+                           DIRTY(0x10000 / dst_w));
     }
     GUARD_END;
     failed = faulted(name, src_w);
@@ -279,8 +295,8 @@ static int probe_export(const char *name, const void *func, int arity, int n) {
     GUARD_BEGIN {
         switch (arity) {
         case 4:
-            /* export_direct reads frow; export_shrink0 reads irow. Both
-             * take one row, so hand each the one it names. */
+            /* export_direct reads frow; export_shrink0 rewrites the row it
+             * is handed. Both take one row, so one guarded row does. */
             ((dirty4)func)((uint64_t)(uintptr_t)dst,
                            (uint64_t)(uintptr_t)frow,
                            DIRTY(n),
@@ -314,20 +330,79 @@ done:
     return failed;
 }
 
+/* One instruction set's worth of kernels. A level that only rewrites some
+ * of the six leaves the rest null and they are probed under the level that
+ * did write them. `luma` marks an expand kernel that also has a
+ * single-channel path; the rest are four-channel only, and handing one a
+ * row of luma would have it read four times the source it was given. */
+typedef struct {
+    const char *suffix;
+    int         luma;
+    const void *import_expand;
+    const void *import_shrink;
+    const void *export_direct;
+    const void *export_shrink0;
+    const void *export_shrink;
+    const void *export_blend;
+} RawLevel;
+
+static int probe_level(const RawLevel *lvl) {
+    char name[64];
+    int  failed = 0;
+
+    for (int src_w = 8; src_w <= 40; src_w++) {
+        if (lvl->import_expand) {
+            for (int ch = 1; ch <= 4; ch += 3) {
+                if (ch == 1 && !lvl->luma)
+                    continue;
+                snprintf(name,
+                         sizeof name,
+                         "rescale_import_expand_%s ch=%d",
+                         lvl->suffix,
+                         ch);
+                failed |= probe_import(name, lvl->import_expand, 1, ch, src_w);
+            }
+        }
+        if (lvl->import_shrink) {
+            snprintf(
+                name, sizeof name, "rescale_import_shrink_%s", lvl->suffix);
+            failed |= probe_import(name, lvl->import_shrink, 0, 4, src_w);
+        }
+    }
+
+    for (int n = 1; n <= 64; n++) {
+        static const struct {
+            size_t      slot;
+            const char *stem;
+            int         arity;
+        } exports[] = {
+            {offsetof(RawLevel, export_direct), "direct", 4},
+            {offsetof(RawLevel, export_shrink0), "shrink0", 4},
+            {offsetof(RawLevel, export_shrink), "shrink", 6},
+            {offsetof(RawLevel, export_blend), "blend", 7},
+        };
+
+        for (size_t i = 0; i < sizeof(exports) / sizeof(*exports); i++) {
+            const void *func = *(const void *const *)((const char *)lvl +
+                                                      exports[i].slot);
+
+            if (!func)
+                continue;
+            snprintf(name,
+                     sizeof name,
+                     "rescale_export_%s_%s",
+                     exports[i].stem,
+                     lvl->suffix);
+            failed |= probe_export(name, func, exports[i].arity, n);
+        }
+    }
+    return failed;
+}
+
 /* WPDRESCALERAWDSP is written out twice, once in Rust and once in the
  * header, and two of its six entries take the same argument list -- swapping
  * those two would compile, run, and quietly test the wrong kernel twice.
  * Pin every entry to the symbol it is supposed to be. */
-static int check_raw_bindings(void) {
-    const unsigned   have = wpd_get_cpu_flags();
-    const int        avx2 = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
-    WPDRESCALERAWDSP raw;
-    int              failed = 0;
-
-    if (!(have & WPD_X86_CPU_FLAG_SSE2))
-        return 0;
-    wpd_rescale_raw_dsp_init(&raw);
-
 #define PIN(field, want)                                             \
     do {                                                             \
         if ((void *)raw.field != (void *)(want)) {                   \
@@ -336,6 +411,14 @@ static int check_raw_bindings(void) {
         }                                                            \
     } while (0)
 
+#if WPD_ARCH_X86
+static int check_raw_bindings(void) {
+    const unsigned   have = wpd_get_cpu_flags();
+    const int        avx2 = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
+    WPDRESCALERAWDSP raw;
+    int              failed = 0;
+
+    wpd_rescale_raw_dsp_init(&raw);
     PIN(import_expand, ff_rescale_import_expand_sse2);
     PIN(import_shrink, ff_rescale_import_shrink_sse2);
     PIN(export_direct,
@@ -346,50 +429,81 @@ static int check_raw_bindings(void) {
         avx2 ? ff_rescale_export_shrink_avx2 : ff_rescale_export_shrink_sse2);
     PIN(export_shrink0,
         avx2 ? ff_rescale_export_shrink0_avx2 : ff_rescale_export_shrink0_sse2);
-#undef PIN
     return failed;
 }
 
+/* AVX2 rewrites only the exports, so the imports stay SSE2's and are probed
+ * there. */
 static int probe_dirty_args(void) {
-    const unsigned have   = wpd_get_cpu_flags();
-    const int      avx2   = (have & WPD_X86_CPU_FLAG_AVX2) != 0;
-    int            failed = 0;
+    const unsigned have = wpd_get_cpu_flags();
+    const RawLevel sse2 = {
+        "sse2",
+        1,
+        ff_rescale_import_expand_sse2,
+        ff_rescale_import_shrink_sse2,
+        ff_rescale_export_direct_sse2,
+        ff_rescale_export_shrink0_sse2,
+        ff_rescale_export_shrink_sse2,
+        ff_rescale_export_blend_sse2,
+    };
+    const RawLevel avx2 = {
+        "avx2",
+        0,
+        NULL,
+        NULL,
+        ff_rescale_export_direct_avx2,
+        ff_rescale_export_shrink0_avx2,
+        ff_rescale_export_shrink_avx2,
+        ff_rescale_export_blend_avx2,
+    };
+    int failed = 0;
 
     if (!(have & WPD_X86_CPU_FLAG_SSE2))
         return 0;
     failed |= check_raw_bindings();
-
-    for (int src_w = 8; src_w <= 40; src_w++) {
-        failed |= probe_import("rescale_import_expand_sse2 ch=1", 1, 1, src_w);
-        failed |= probe_import("rescale_import_expand_sse2 ch=4", 1, 4, src_w);
-        failed |= probe_import("rescale_import_shrink_sse2", 0, 4, src_w);
-    }
-    for (int n = 1; n <= 64; n++) {
-        failed |= probe_export(
-            "rescale_export_direct_sse2", ff_rescale_export_direct_sse2, 4, n);
-        failed |= probe_export("rescale_export_shrink0_sse2",
-                               ff_rescale_export_shrink0_sse2,
-                               4,
-                               n);
-        failed |= probe_export(
-            "rescale_export_shrink_sse2", ff_rescale_export_shrink_sse2, 6, n);
-        failed |= probe_export(
-            "rescale_export_blend_sse2", ff_rescale_export_blend_sse2, 7, n);
-        if (!avx2)
-            continue;
-        failed |= probe_export(
-            "rescale_export_direct_avx2", ff_rescale_export_direct_avx2, 4, n);
-        failed |= probe_export("rescale_export_shrink0_avx2",
-                               ff_rescale_export_shrink0_avx2,
-                               4,
-                               n);
-        failed |= probe_export(
-            "rescale_export_shrink_avx2", ff_rescale_export_shrink_avx2, 6, n);
-        failed |= probe_export(
-            "rescale_export_blend_avx2", ff_rescale_export_blend_avx2, 7, n);
-    }
+    failed |= probe_level(&sse2);
+    if (have & WPD_X86_CPU_FLAG_AVX2)
+        failed |= probe_level(&avx2);
     return failed;
 }
+#else
+static int check_raw_bindings(void) {
+    WPDRESCALERAWDSP raw;
+    int              failed = 0;
+
+    wpd_rescale_raw_dsp_init(&raw);
+    PIN(import_expand, ff_rescale_import_expand_neon);
+    PIN(import_shrink, ff_rescale_import_shrink_neon);
+    PIN(export_direct, ff_rescale_export_direct_neon);
+    PIN(export_blend, ff_rescale_export_blend_neon);
+    PIN(export_shrink, ff_rescale_export_shrink_neon);
+    PIN(export_shrink0, ff_rescale_export_shrink0_neon);
+    return failed;
+}
+
+/* AAPCS64 leaves the upper half of a 32-bit argument undefined the same way
+ * the x86-64 ABI does, and all seven arguments arrive in registers there, so
+ * the junk reaches the kernel without a stack slot to launder it. */
+static int probe_dirty_args(void) {
+    const RawLevel neon = {
+        "neon",
+        0,
+        ff_rescale_import_expand_neon,
+        ff_rescale_import_shrink_neon,
+        ff_rescale_export_direct_neon,
+        ff_rescale_export_shrink0_neon,
+        ff_rescale_export_shrink_neon,
+        ff_rescale_export_blend_neon,
+    };
+    int failed = 0;
+
+    if (!(wpd_get_cpu_flags() & WPD_ARM_CPU_FLAG_NEON))
+        return 0;
+    failed |= check_raw_bindings();
+    failed |= probe_level(&neon);
+    return failed;
+}
+#endif
 #else
 static int probe_dirty_args(void) { return 0; }
 #endif
