@@ -11,9 +11,9 @@ use super::convert::{
     convert_to_argb, format_bpp, format_is_packed, format_is_premultiplied,
     premultiply_after_pack,
 };
+use super::slot::FrameSlot;
 use super::{Decoder, Source, ANIM_SUBFRAME};
-use crate::bits::{rl24, rl32};
-use crate::container::{TAG_ALPH, TAG_VP8, TAG_VP8L};
+use crate::bits::rl24;
 use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
 
@@ -254,68 +254,17 @@ impl<'a> Decoder<'a> {
             return Err(Error::InvalidData);
         }
 
-        self.has_alpha = false;
-        self.width = 0;
-        self.height = 0;
+        let sub = {
+            let (frame, env) = self.frame_parts();
 
-        let mut sub: Option<Source> = None;
-        let mut at = base + 16;
-        let end = base + size;
-
-        while end - at >= 8 {
-            let (chunk_type, payload_size) = {
-                let head = self.input.chunk(at, 8);
-
-                if head.len() < 8 {
-                    break;
-                }
-                (rl32(head), rl32(&head[4..]))
-            };
-
-            if payload_size == u32::MAX {
-                return Err(Error::InvalidData);
-            }
-            let payload_size = payload_size as usize;
-            let padded_size = payload_size + (payload_size & 1);
-
-            at += 8;
-            if end - at < padded_size {
-                break;
-            }
-
-            match chunk_type {
-                TAG_ALPH => {
-                    if payload_size == 0 {
-                        crate::log::error("invalid ALPHA chunk size");
-                        return Err(Error::InvalidData);
-                    }
-                    if sub.is_some() {
-                        crate::log::error("ALPHA chunk after the image it belongs to");
-                        return Err(Error::InvalidData);
-                    }
-                    let header = self.input.chunk(at, 1)[0] as i32;
-
-                    self.set_alpha_chunk(header, at + 1, payload_size - 1)?;
-                }
-                TAG_VP8 if sub.is_none() => {
-                    self.vp8_lossy_decode_frame(at, payload_size)?;
-                    sub = Some(Source::Lossy);
-                    self.anim.frame_has_alpha = self.has_alpha;
-                }
-                TAG_VP8L if sub.is_none() => {
-                    self.lossless_decode(at, payload_size)?;
-                    sub = Some(Source::Lossless);
-                    self.anim.frame_has_alpha = self.lossless_has_alpha;
-                }
-                _ => {}
-            }
-            at += padded_size;
-        }
-
-        let Some(mut which) = sub else {
-            crate::log::error("image data not found");
-            return Err(Error::InvalidData);
+            frame.decode_anmf_image(&env, base, size)
         };
+
+        self.alpha_pending = false;
+
+        let mut which = sub?;
+
+        self.anim.frame_has_alpha = self.frame.frame_has_alpha(which);
         let (sub_width, sub_height, sub_format) = {
             let img = self.frame_of(which);
 
@@ -359,16 +308,16 @@ impl<'a> Decoder<'a> {
         if target == argb && sub_format != argb {
             let no_fancy = self.options.no_fancy_upsampling;
             let threads = self.threads.0;
-            let Self {
-                ydsp,
-                converted,
+            let Self { ydsp, frame, .. } = self;
+            let FrameSlot {
                 vp8,
                 alpha_plane,
                 has_alpha,
                 width,
                 height,
+                converted,
                 ..
-            } = self;
+            } = frame;
             let src = super::lossy_view(
                 vp8.first(),
                 alpha_plane,
@@ -376,6 +325,7 @@ impl<'a> Decoder<'a> {
                 *width,
                 *height,
             );
+
             convert_to_argb(ydsp, converted, &src, no_fancy, threads)?;
             which = Source::Converted;
         }
@@ -385,13 +335,13 @@ impl<'a> Decoder<'a> {
             && !(premultiply_after_pack(self.animation, self.anim_mode)
                 && format_bpp(self.out_format.0) == 2)
         {
-            let Self {
-                ydsp,
+            let Self { ydsp, frame, .. } = self;
+            let FrameSlot {
                 converted,
                 vp8l,
                 lossless_out,
                 ..
-            } = self;
+            } = frame;
             let view = match which {
                 Source::Converted => Some(converted.frame_mut()),
                 Source::Lossless => lossless_out.and_then(|which| vp8l.view_mut(which)),
@@ -434,28 +384,10 @@ impl<'a> Decoder<'a> {
             ldsp,
             ydsp,
             canvas,
-            converted,
-            vp8,
-            vp8l,
-            lossless_out,
-            alpha_plane,
-            has_alpha,
-            width,
-            height,
+            frame,
             ..
         } = self;
-        let src = super::source_view(
-            which,
-            vp8.first(),
-            vp8l,
-            *lossless_out,
-            alpha_plane,
-            *has_alpha,
-            *width,
-            *height,
-            Some(converted),
-            None,
-        );
+        let src = super::source_view(which, frame, None);
 
         anim_composite(pl, CompositeTargets { ldsp, ydsp, canvas }, &src, target)
     }

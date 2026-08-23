@@ -2,6 +2,7 @@ pub mod anim;
 pub mod convert;
 pub mod export;
 pub mod lossy;
+pub mod slot;
 
 use crate::anim::AnimState;
 use crate::bits::rl32;
@@ -21,6 +22,8 @@ use crate::options::Options;
 use crate::picture::{Buffer, Frame, PlaneRef};
 use crate::rescale::Scratches;
 use crate::vp8l::Output as Lossless;
+
+use self::slot::FrameSlot;
 
 use self::convert::{
     ensure_yuva_rows, format_is_packed, format_is_premultiplied, format_valid,
@@ -48,7 +51,9 @@ pub(crate) struct StillLatch<'a> {
 
 #[derive(Default)]
 pub struct Decoder<'a> {
-    pub(crate) vp8: Vec<crate::vp8::Decoder>,
+    /// What the frame being worked on has produced. A still uses this and
+    /// nothing else; an animation fills it from the batch decoded ahead.
+    pub(crate) frame: slot::FrameSlot,
     pub(crate) ldsp: Vp8lDsp,
     pub(crate) ydsp: YuvDsp,
     pub(crate) rdsp: RescaleDsp,
@@ -74,21 +79,6 @@ pub struct Decoder<'a> {
     pub(crate) canvas_width: i32,
     pub(crate) canvas_height: i32,
 
-    pub(crate) has_alpha: bool,
-    pub(crate) alpha_compression: i32,
-    pub(crate) alpha_filter: i32,
-    pub(crate) alpha_data_offset: usize,
-    pub(crate) alpha_data_size: usize,
-    pub(crate) alpha_plane: Vec<u8>,
-
-    pub(crate) vp8l: crate::vp8l::Decoder,
-    pub(crate) width: i32,
-    pub(crate) height: i32,
-    pub(crate) lossless_has_alpha: bool,
-
-    pub(crate) lossless_out: Option<Lossless>,
-
-    pub(crate) converted: Buffer,
     pub(crate) output: Buffer,
     pub(crate) transformed: Buffer,
     pub(crate) rescale: Scratches,
@@ -219,25 +209,16 @@ pub(crate) fn empty_view<'a>() -> Frame<'a> {
     Frame::packed(&[], 0, 0, 0, Format::Argb)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Everything but the canvas comes out of the frame that produced it; the
+/// canvas belongs to the animation rather than to any one frame.
 pub(crate) fn source_view<'a>(
     which: Source,
-    vp8: Option<&'a crate::vp8::Decoder>,
-    vp8l: &'a crate::vp8l::Decoder,
-    lossless_out: Option<Lossless>,
-    alpha: &'a [u8],
-    has_alpha: bool,
-    width: i32,
-    height: i32,
-    converted: Option<&'a Buffer>,
+    frame: &'a FrameSlot,
     canvas: Option<&'a Buffer>,
 ) -> Frame<'a> {
     match which {
-        Source::Lossy => lossy_view(vp8, alpha, has_alpha, width, height),
-        Source::Lossless => lossless_view(vp8l, lossless_out),
-        Source::Converted => converted.map_or_else(empty_view, Buffer::frame),
         Source::Canvas => canvas.map_or_else(empty_view, Buffer::frame),
-        Source::None => empty_view(),
+        which => frame.view(which),
     }
 }
 
@@ -273,45 +254,36 @@ impl<'a> Decoder<'a> {
     }
 
     pub(crate) fn frame_of(&self, which: Source) -> Frame<'_> {
-        source_view(
-            which,
-            self.vp8.first(),
-            &self.vp8l,
-            self.lossless_out,
-            &self.alpha_plane,
-            self.has_alpha,
-            self.width,
-            self.height,
-            Some(&self.converted),
-            Some(&self.canvas),
-        )
+        source_view(which, &self.frame, Some(&self.canvas))
     }
 
     pub(crate) fn update_canvas_size(&mut self, w: i32, h: i32) {
-        if self.width != 0 && self.width != w {
+        if self.frame.width != 0 && self.frame.width != w {
             crate::log::warning_args(format_args!(
                 "Width mismatch. {} != {w}",
-                self.width
+                self.frame.width
             ));
         }
-        self.width = w;
-        if self.height != 0 && self.height != h {
+        self.frame.width = w;
+        if self.frame.height != 0 && self.frame.height != h {
             crate::log::warning_args(format_args!(
                 "Height mismatch. {} != {h}",
-                self.height
+                self.frame.height
             ));
         }
-        self.height = h;
+        self.frame.height = h;
     }
 
     pub(crate) fn lossless_canvas_in(&mut self) {
-        self.vp8l.set_canvas(self.width, self.height);
+        self.frame
+            .vp8l
+            .set_canvas(self.frame.width, self.frame.height);
     }
 
     pub(crate) fn lossless_canvas_out(&mut self) {
-        self.width = self.vp8l.width;
-        self.height = self.vp8l.height;
-        self.lossless_has_alpha = self.vp8l.has_alpha;
+        self.frame.width = self.frame.vp8l.width;
+        self.frame.height = self.frame.vp8l.height;
+        self.frame.lossless_has_alpha = self.frame.vp8l.has_alpha;
     }
 
     pub(crate) fn lossless_decode(
@@ -321,8 +293,8 @@ impl<'a> Decoder<'a> {
     ) -> Result<(), Error> {
         self.lossless_canvas_in();
 
-        let Self { vp8l, input, .. } = self;
-        let ret = vp8l.decode_frame(
+        let Self { frame, input, .. } = self;
+        let ret = frame.vp8l.decode_frame(
             crate::vp8l::Target::Argb,
             input.chunk(offset, size),
             false,
@@ -331,7 +303,7 @@ impl<'a> Decoder<'a> {
 
         self.lossless_canvas_out();
         ret?;
-        self.lossless_out = Some(Lossless::Argb);
+        self.frame.lossless_out = Some(Lossless::Argb);
         Ok(())
     }
 
@@ -348,7 +320,7 @@ impl<'a> Decoder<'a> {
             has_alpha: if self.animation {
                 self.anim.frame_has_alpha
             } else {
-                self.has_alpha || self.lossless_has_alpha
+                self.frame.has_alpha || self.frame.lossless_has_alpha
             },
             timestamp: self.frame_timestamp - self.frame_duration as i64,
             threads: self.threads.0,
@@ -377,30 +349,12 @@ impl<'a> Decoder<'a> {
             rescale,
             transformed,
             output,
-            converted,
             sink,
-            vp8,
-            vp8l,
-            lossless_out,
-            alpha_plane,
+            frame,
             canvas,
-            has_alpha,
-            width,
-            height,
             ..
         } = self;
-        let img = source_view(
-            which,
-            vp8.first(),
-            vp8l,
-            *lossless_out,
-            alpha_plane,
-            *has_alpha,
-            *width,
-            *height,
-            Some(converted),
-            Some(canvas),
-        );
+        let img = source_view(which, frame, Some(canvas));
 
         (
             ExportTargets {
@@ -441,31 +395,13 @@ impl<'a> Decoder<'a> {
             ydsp,
             options,
             output,
-            converted,
             sink,
             converted_rows,
             converted_format,
-            vp8,
-            vp8l,
-            lossless_out,
-            alpha_plane,
-            has_alpha,
-            width,
-            height,
+            frame,
             ..
         } = self;
-        let img = source_view(
-            which,
-            vp8.first(),
-            vp8l,
-            *lossless_out,
-            alpha_plane,
-            *has_alpha,
-            *width,
-            *height,
-            None,
-            None,
-        );
+        let (img, converted) = frame.split_converted(which);
 
         (
             RowTargets {
@@ -482,7 +418,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn anim_state_reset(&mut self) {
-        self.vp8l.reset();
+        self.frame.reset();
         self.canvas.release();
         self.still_done = false;
         self.vp8_active = false;
@@ -491,12 +427,7 @@ impl<'a> Decoder<'a> {
         self.converted_rows = 0;
         self.converted_format = OutFormat::default();
         self.still_lossless = false;
-        self.lossless_out = None;
         self.subframe_out = None;
-        self.width = 0;
-        self.height = 0;
-        self.has_alpha = false;
-        self.lossless_has_alpha = false;
         self.anim = AnimState::default();
         self.frame_duration = 0;
         self.frame_timestamp = 0;
@@ -505,8 +436,7 @@ impl<'a> Decoder<'a> {
     fn reset(&mut self) {
         self.meta = [None, None, None];
         self.anim_state_reset();
-        self.vp8l.release();
-        self.converted.release();
+        self.frame.release();
         self.output.release();
         self.transformed.release();
         self.input.reset();
@@ -536,8 +466,8 @@ impl<'a> Decoder<'a> {
     fn file_compact(&mut self) {
         let mut keep = self.pos;
 
-        if self.alpha_pending && self.alpha_data_offset < keep {
-            keep = self.alpha_data_offset;
+        if self.alpha_pending && self.frame.alpha_data_offset < keep {
+            keep = self.frame.alpha_data_offset;
         }
         self.input.compact(keep);
     }
@@ -912,23 +842,25 @@ impl<'a> Decoder<'a> {
     ) -> Result<bool, Error> {
         self.lossless_canvas_in();
 
-        let Self { vp8l, input, .. } = self;
-        let ret = vp8l.still_step(input.chunk(offset, avail), size, complete);
+        let Self { frame, input, .. } = self;
+        let ret = frame
+            .vp8l
+            .still_step(input.chunk(offset, avail), size, complete);
 
         self.lossless_canvas_out();
 
         let done = ret? == crate::error::Status::Done;
 
-        if self.vp8l.still_active() || done {
+        if self.frame.vp8l.still_active() || done {
             self.still_lossless = true;
-            self.lossless_out = Some(Lossless::Still);
+            self.frame.lossless_out = Some(Lossless::Still);
         }
         Ok(done)
     }
 
     fn lossless_peek(&mut self) -> Result<(), Error> {
-        self.vp8l.still_peek()?;
-        self.lossless_out = Some(Lossless::Still);
+        self.frame.vp8l.still_peek()?;
+        self.frame.lossless_out = Some(Lossless::Still);
         Ok(())
     }
 
@@ -978,33 +910,6 @@ impl<'a> Decoder<'a> {
         Ok(true)
     }
 
-    pub(crate) fn set_alpha_chunk(
-        &mut self,
-        header: i32,
-        offset: usize,
-        size: usize,
-    ) -> Result<(), Error> {
-        if header >> 4 & 3 > ALPHA_PREPROCESSED_LEVELS || header >> 6 != 0 {
-            crate::log::error_args(format_args!(
-                "invalid ALPHA chunk header 0x{header:02x}"
-            ));
-            return Err(Error::InvalidData);
-        }
-        self.alpha_data_offset = offset;
-        self.alpha_data_size = size;
-
-        let compression = header & 3;
-
-        if compression > ALPHA_COMPRESSION_VP8L {
-            crate::log::warning("skipping unsupported ALPHA chunk");
-            return Ok(());
-        }
-        self.has_alpha = true;
-        self.alpha_compression = compression;
-        self.alpha_filter = header >> 2 & 3;
-        Ok(())
-    }
-
     fn decode_raw<'o>(&'o mut self, out: &mut Handout<'o>) -> Result<bool, Failure> {
         let hs = self.scanned();
 
@@ -1017,8 +922,8 @@ impl<'a> Decoder<'a> {
         if hs.raw_image_size > i32::MAX as usize {
             return Err(("raw image is too large", Error::TooLarge));
         }
-        self.width = 0;
-        self.height = 0;
+        self.frame.width = 0;
+        self.frame.height = 0;
 
         if hs.raw == Raw::Lossless {
             self.lossless_decode(hs.raw_image_offset, hs.raw_image_size)
@@ -1039,12 +944,9 @@ impl<'a> Decoder<'a> {
             if header & 3 > ALPHA_COMPRESSION_VP8L {
                 return Err(("unsupported ALPHA compression", Error::Unsupported));
             }
-            self.set_alpha_chunk(
-                header,
-                hs.raw_alpha_offset + 1,
-                hs.raw_alpha_size - 1,
-            )
-            .map_err(|e| ("invalid ALPHA chunk", e))?;
+            self.frame
+                .set_alpha_chunk(header, hs.raw_alpha_offset + 1, hs.raw_alpha_size - 1)
+                .map_err(|e| ("invalid ALPHA chunk", e))?;
         }
         self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size)
             .map_err(|e| ("VP8 decode failed", e))?;
@@ -1138,6 +1040,7 @@ impl Decoder<'_> {
 
                     decoder.alpha_pending = true;
                     decoder
+                        .frame
                         .set_alpha_chunk(header, payload_pos + 1, size - 1)
                         .map_err(|e| ("invalid ALPHA chunk", e))?;
                 }
@@ -1150,8 +1053,8 @@ impl Decoder<'_> {
                             |done| done.then_some(()).ok_or(Error::InvalidData),
                         )
                     } else {
-                        decoder.width = 0;
-                        decoder.height = 0;
+                        decoder.frame.width = 0;
+                        decoder.frame.height = 0;
                         decoder.vp8_lossy_decode_frame(payload_pos, size)
                     };
 
@@ -1162,7 +1065,7 @@ impl Decoder<'_> {
                     if decoder.animation || decoder.still_done {
                         continue;
                     }
-                    if decoder.vp8l.still_active() {
+                    if decoder.frame.vp8l.still_active() {
                         decoder
                             .lossless_step(payload_pos, size, size, true)
                             .and_then(|done| {
@@ -1171,8 +1074,8 @@ impl Decoder<'_> {
                             .map_err(|e| ("VP8L decode failed", e))?;
                         return decoder.emit_still_lossless(out);
                     }
-                    decoder.width = 0;
-                    decoder.height = 0;
+                    decoder.frame.width = 0;
+                    decoder.frame.height = 0;
                     decoder
                         .lossless_decode(payload_pos, size)
                         .map_err(|e| ("VP8L decode failed", e))?;
@@ -1229,24 +1132,24 @@ impl Decoder<'_> {
 
         let set = decoder.export_settings();
 
-        if decoder.still_lossless && decoder.vp8l.still_active() {
+        if decoder.still_lossless && decoder.frame.vp8l.still_active() {
             decoder
                 .lossless_peek()
                 .map_err(|e| ("VP8L decode failed", e))?;
         }
 
         fn lossless_rows(d: &Decoder<'_>) -> i32 {
-            if d.vp8l.still_active() {
-                d.vp8l.still_rows_out()
+            if d.frame.vp8l.still_active() {
+                d.frame.vp8l.still_rows_out()
             } else {
                 d.frame_of(Source::Lossless).height
             }
         }
         fn lossy_rows(d: &Decoder<'_>) -> i32 {
-            match (d.vp8_active, d.vp8.first()) {
+            match (d.vp8_active, d.frame.vp8.first()) {
                 (true, Some(vp8)) => vp8.rows_finalized(),
                 (true, None) => 0,
-                (false, _) => d.height,
+                (false, _) => d.frame.height,
             }
         }
 
@@ -1257,7 +1160,7 @@ impl Decoder<'_> {
                 }
                 Source::Lossless
             } else if decoder.still_lossy {
-                if lossy_rows(decoder) < decoder.height {
+                if lossy_rows(decoder) < decoder.frame.height {
                     return Ok(false);
                 }
                 Source::Lossy
@@ -1311,15 +1214,11 @@ impl Decoder<'_> {
                 let Decoder {
                     ydsp,
                     output,
-                    vp8,
-                    alpha_plane,
-                    has_alpha,
-                    width,
-                    height,
+                    frame,
                     ..
                 } = &mut *decoder;
-                let src =
-                    lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height);
+                let src = frame.view(Source::Lossy);
+
                 ensure_yuva_rows(ydsp, output, &src, want_alpha, first, rows)
                     .map_err(|e| ("cannot output frame", e))?;
             }
@@ -1331,17 +1230,13 @@ impl Decoder<'_> {
                 let Decoder {
                     sink,
                     output,
-                    vp8,
-                    alpha_plane,
-                    has_alpha,
-                    width,
-                    height,
+                    frame,
                     ..
                 } = &mut *decoder;
                 let plane = if planar {
                     output.frame()
                 } else {
-                    lossy_view(vp8.first(), alpha_plane, *has_alpha, *width, *height)
+                    frame.view(Source::Lossy)
                 };
 
                 match sink.as_deref_mut() {
@@ -1360,7 +1255,7 @@ impl Decoder<'_> {
             return Ok(true);
         }
 
-        if rows != 0 && rows < decoder.height {
+        if rows != 0 && rows < decoder.frame.height {
             rows -= 1;
         }
 
