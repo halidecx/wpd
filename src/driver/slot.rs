@@ -24,6 +24,12 @@ pub(crate) struct FrameEnv<'e, 'i> {
     pub(crate) to_argb: bool,
     /// libwebp premultiplies a frame before compositing it.
     pub(crate) premultiply: bool,
+    /// An animation's parallelism is whole frames, so a frame belonging to one
+    /// does not also split its alpha off. Where the frames can be batched the
+    /// slot is on a thread of its own already; where they cannot, because the
+    /// animation is streamed, the frames are small enough that the split costs
+    /// a spawn per frame and returns less.
+    pub(crate) animation: bool,
     pub(crate) threads: usize,
 }
 

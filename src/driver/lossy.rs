@@ -200,8 +200,10 @@ impl FrameSlot {
         self.alpha_plane_reserve()?;
 
         /* A plane this small is done before the row loop has got going, so
-         * the handoff would cost more than it saves. */
-        let threads = if (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS {
+         * the handoff would cost more than it saves, and an animation frame
+         * gets its parallelism from being one frame of several. */
+        let big_enough = (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS;
+        let threads = if big_enough && !env.animation {
             env.threads
         } else {
             1
@@ -276,6 +278,7 @@ impl<'a> Decoder<'a> {
         let to_argb = self.frame_to_argb();
         let premultiply = self.frame_premultiply();
         let no_fancy_upsampling = self.options.no_fancy_upsampling;
+        let animation = self.animation;
         let Self {
             frame,
             input,
@@ -297,6 +300,7 @@ impl<'a> Decoder<'a> {
                 no_fancy_upsampling,
                 to_argb,
                 premultiply,
+                animation,
                 threads: threads.0,
             },
         )

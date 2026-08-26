@@ -357,6 +357,7 @@ impl<'a> Decoder<'a> {
             no_fancy_upsampling,
             to_argb,
             premultiply,
+            animation: true,
             threads: 1,
         };
         let mut jobs: Vec<(&mut FrameSlot, &mut AheadEntry)> = ahead

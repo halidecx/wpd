@@ -145,8 +145,15 @@ fn dispatch_alpha_rows(
     }
 }
 
-/// The fewest rows worth putting on a thread of their own. Below this the
-/// spawn costs more than the conversion it takes away.
+/// The least work worth putting on a thread of its own, in pixels. A spawn
+/// costs about 17us and the conversion runs at roughly 0.37ns a pixel, so a
+/// band has to be about this big before taking it off the caller returns more
+/// than it costs. Counting pixels rather than rows is what keeps a narrow
+/// image, such as an animation's sub-frame, off the queue: its rows are cheap
+/// however many of them there are.
+const MIN_BAND_PIXELS: usize = 96 * 1024;
+
+/// However wide the image, a band below this many rows is not worth cutting.
 const MIN_BAND_ROWS: usize = 64;
 
 /// The conversion reads three planes and writes up to four bytes a pixel, so
@@ -155,6 +162,11 @@ const MIN_BAND_ROWS: usize = 64;
 /// more than the rows they take away, and a decode asked for ten threads is
 /// slower than one asked for three.
 const MAX_BANDS: usize = 3;
+
+/// The fewest rows a band may hold at this width.
+fn min_band_rows(width: usize) -> usize {
+    MIN_BAND_ROWS.max(MIN_BAND_PIXELS / width.max(1))
+}
 
 /// Cuts `[row_start, row_end)` into one band per thread.
 ///
@@ -209,8 +221,11 @@ pub fn yuv420_to_packed_rows(
         return row_start;
     }
 
-    let n =
-        crate::task::pieces(row_end - row_start, MIN_BAND_ROWS, threads.min(MAX_BANDS));
+    let n = crate::task::pieces(
+        row_end - row_start,
+        min_band_rows(width),
+        threads.min(MAX_BANDS),
+    );
 
     if n < 2 {
         packed_rows_span(dsp, layout, dst, src, width, height, row_start, row_end);
@@ -266,8 +281,11 @@ pub fn yuv420_to_packed_simple(
         return;
     }
 
-    let n =
-        crate::task::pieces(row_end - row_start, MIN_BAND_ROWS, threads.min(MAX_BANDS));
+    let n = crate::task::pieces(
+        row_end - row_start,
+        min_band_rows(width),
+        threads.min(MAX_BANDS),
+    );
 
     if n < 2 {
         packed_simple_span(dsp, layout, dst, src, width, row_start, row_end);
@@ -478,7 +496,15 @@ mod tests {
     #[test]
     fn bands_write_exactly_what_one_pass_writes() {
         let dsp = YuvDsp::new();
-        let (w, h) = (37usize, 200usize);
+        /* Wide enough that the width-aware floor actually cuts bands; the
+         * assertion below fails loudly rather than quietly testing nothing if
+         * that stops being true. */
+        let (w, h) = (1024usize, 400usize);
+
+        assert!(
+            crate::task::pieces(h, min_band_rows(w), MAX_BANDS) > 1,
+            "this size no longer splits, so the test proves nothing"
+        );
         let mut src = Buffer::default();
 
         src.alloc_planar(w as i32, h as i32, true).unwrap();
@@ -507,7 +533,7 @@ mod tests {
 
         /* Every start parity, so a band that has to move to the next odd row
          * is covered alongside one that does not. */
-        for start in [0usize, 1, 2, 63, 64] {
+        for start in [0usize, 1, 2, 99, 100] {
             let mut whole = Buffer::default();
 
             whole.alloc_argb(w as i32, h as i32).unwrap();
@@ -547,6 +573,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_band_is_measured_in_pixels_rather_than_rows() {
+        /* An animation's sub-frame is narrow, so its rows are cheap however
+         * many of them there are; splitting it costs a spawn and returns less
+         * than the spawn. A wide frame of the same height is worth cutting. */
+        assert_eq!(crate::task::pieces(364, min_band_rows(219), MAX_BANDS), 1);
+        assert_eq!(crate::task::pieces(400, min_band_rows(1024), MAX_BANDS), 3);
+        assert_eq!(crate::task::pieces(2048, min_band_rows(2048), MAX_BANDS), 3);
+        assert_eq!(crate::task::pieces(600, min_band_rows(600), MAX_BANDS), 3);
+        /* Never below the row floor, however wide. */
+        assert!(min_band_rows(usize::MAX) >= MIN_BAND_ROWS);
     }
 
     #[test]
