@@ -2698,6 +2698,24 @@ done:
     free(data);
 }
 
+/* WPDDecoderOptions as it shipped before n_threads was added, so that a v1
+   caller can be spelled out here exactly as one really looks: the size it
+   passes in struct_size is sizeof this, tail padding included. */
+typedef struct WPDDecoderOptionsV1 {
+    size_t struct_size;
+    int    bypass_filtering;
+    int    no_fancy_upsampling;
+    int    use_cropping;
+    int    crop_left;
+    int    crop_top;
+    int    crop_width;
+    int    crop_height;
+    int    use_scaling;
+    int    scaled_width;
+    int    scaled_height;
+    int    flip;
+} WPDDecoderOptionsV1;
+
 /* Output must not depend on how many threads produced it, and a caller built
    against the options struct as it was before n_threads existed must still get
    the same pixels it always did. */
@@ -2712,21 +2730,28 @@ static void test_threads_match(const char *path, WPDPixelFormat format) {
         return;
 
     for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]) + 1; i++) {
-        WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
-        WPDDecoder       *decoder = wpd_decoder_create();
-        WPDFrame          frame   = WPD_FRAME_INIT;
-        uint8_t          *flat    = NULL;
-        size_t            used    = 0;
+        WPDDecoderOptions        options = WPD_DECODER_OPTIONS_INIT;
+        WPDDecoderOptionsV1      v1;
+        const WPDDecoderOptions *pass    = &options;
+        WPDDecoder              *decoder = wpd_decoder_create();
+        WPDFrame                 frame   = WPD_FRAME_INIT;
+        uint8_t                 *flat    = NULL;
+        size_t                   used    = 0;
 
         if (!decoder)
             break;
         if (i < sizeof(counts) / sizeof(counts[0])) {
             options.n_threads = counts[i];
         } else {
-            /* The struct as it was before n_threads was appended to it. */
-            options.struct_size = offsetof(WPDDecoderOptions, n_threads);
+            /* The tail padding is dirty on purpose: it is not the caller's to
+               zero, and it is where a field appended to the old struct would
+               land, so reading n_threads out of it has to be impossible. */
+            memset(&v1, 0xFF, sizeof(v1));
+            memset(&v1, 0, offsetof(WPDDecoderOptionsV1, flip) + sizeof(int));
+            v1.struct_size = sizeof(v1);
+            pass           = (const WPDDecoderOptions *)&v1;
         }
-        CHECK(wpd_decoder_set_options(decoder, &options) == WPD_OK);
+        CHECK(wpd_decoder_set_options(decoder, pass) == WPD_OK);
         CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
         CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
 
