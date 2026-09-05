@@ -130,6 +130,14 @@ fn scale_plane(dsp: &YuvDsp, rdsp: &RescaleDsp, p: &mut PlaneScale<'_, '_>) {
     }
 }
 
+/// The least rescaling worth putting on a thread of its own, in source pixels.
+/// The rescaler walks every source row at roughly 0.2ns a pixel, so below this
+/// the spawns cost more than the planes they take away: a 35x67 frame scaled
+/// down measures 1.69x faster for not splitting, and 480x310 upwards is
+/// unchanged. Counting the source rather than the target is what keeps a large
+/// image taken down to a thumbnail on threads of its own.
+const MIN_RESCALE_PIXELS: usize = 96 * 1024;
+
 #[allow(clippy::too_many_arguments)]
 fn scale_image(
     dsp: &YuvDsp,
@@ -158,12 +166,6 @@ fn scale_image(
     dst.chroma_full = !packed && chroma_full;
 
     let nb = format.nb_components();
-
-    for one in scratch[..nb].iter_mut() {
-        one.grow(width, src.width, bpp)
-            .map_err(|_| Error::TooLarge)?;
-    }
-
     let mut out = dst.frame_mut();
     let mut work = Vec::with_capacity(nb);
 
@@ -183,13 +185,19 @@ fn scale_image(
             )
         };
         let weighted = premult || (weight_luma && p == 0);
+        let dst_size = (ceil_rshift(width, shift), ceil_rshift(height, shift));
+
+        /* Each plane accumulates over its own width, so a subsampled one asks
+         * for half of what the luma does rather than being grown to match it.
+         */
+        one.grow(dst_size.0, sw, bpp).map_err(|_| Error::TooLarge)?;
 
         work.push(PlaneScale {
             dst: plane,
             scratch: one,
             src: src.plane[p],
             alpha: (!premult).then_some(src.plane[3]),
-            dst_size: (ceil_rshift(width, shift), ceil_rshift(height, shift)),
+            dst_size,
             src_size: (sw, sh),
             weighted,
             bpp,
@@ -197,7 +205,14 @@ fn scale_image(
     }
 
     /* A packed image is one plane, so it is done here rather than paying for
-     * a scope it cannot fill. */
+     * a scope it cannot fill, and a small one is scaled here whatever its
+     * plane count. */
+    let threads = crate::task::pieces(
+        (src.width as usize).saturating_mul(src.height as usize),
+        MIN_RESCALE_PIXELS,
+        threads,
+    );
+
     crate::task::for_each(threads, &mut work, |p| scale_plane(dsp, rdsp, p));
 
     if premult {
