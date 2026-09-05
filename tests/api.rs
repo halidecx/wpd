@@ -283,3 +283,74 @@ fn a_scaled_decode_is_the_same_at_any_thread_count() {
         }
     }
 }
+
+/// Settings changed between frames apply to the frames that follow. A batch
+/// decoded ahead bakes in the settings that were current when it ran, so it
+/// has to be dropped when they change; otherwise the frames still in the
+/// batch come out under the old ones and the decode stops agreeing with the
+/// same call sequence on one thread.
+#[test]
+fn settings_changed_mid_animation_reach_the_next_frame() {
+    type Switch = fn(&mut Decoder);
+
+    fn decode(bytes: &[u8], n_threads: i32, switch: Switch) -> Vec<u8> {
+        let mut d = Decoder::new();
+
+        d.set_format(Format::Rgba).unwrap();
+        d.set_options(Options {
+            n_threads,
+            ..Options::default()
+        })
+        .unwrap();
+        d.open(bytes).unwrap();
+
+        let mut out = Vec::new();
+        let mut index = 0;
+
+        loop {
+            /* After the first frame, which is what fills the batch. */
+            if index == 1 {
+                switch(&mut d);
+            }
+            let Some(picture) = d.next_frame().unwrap() else {
+                break;
+            };
+
+            for plane in 0..picture.planes() {
+                for row in picture.rows_of(plane) {
+                    out.extend_from_slice(row);
+                }
+            }
+            index += 1;
+        }
+        out
+    }
+
+    let switches: [(&str, Switch); 2] = [
+        ("format", |d| d.set_format(Format::RgbaPre).unwrap()),
+        ("options", |d| {
+            d.set_options(Options {
+                no_fancy_upsampling: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
+    ];
+
+    for path in corpus() {
+        let bytes = fs::read(&path).unwrap();
+
+        for (name, switch) in switches {
+            let want = decode(&bytes, 1, switch);
+
+            for n_threads in [2, 3, 5, 8, 16] {
+                assert_eq!(
+                    decode(&bytes, n_threads, switch),
+                    want,
+                    "{} switching {name} at {n_threads} threads",
+                    path.display()
+                );
+            }
+        }
+    }
+}

@@ -700,6 +700,9 @@ impl Decoder<'_> {
         }
         self.options = options;
         self.threads = Threads(crate::task::resolve(options.n_threads));
+        /* A batch decoded ahead baked in the settings that were current when
+         * it ran, so it is no longer about the decode being asked for. */
+        self.ahead.clear();
         Ok(())
     }
 
@@ -728,6 +731,7 @@ impl Decoder<'_> {
             return Err(self.fail("invalid output format", Error::InvalidArgument));
         }
         self.out_format = OutFormat(format);
+        self.ahead.clear();
         Ok(())
     }
 
