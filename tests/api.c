@@ -1,6 +1,7 @@
 #include "wpd.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2697,6 +2698,94 @@ done:
     free(data);
 }
 
+/* WPDDecoderOptions as it shipped before n_threads was added, so that a v1
+   caller can be spelled out here exactly as one really looks: the size it
+   passes in struct_size is sizeof this, tail padding included. */
+typedef struct WPDDecoderOptionsV1 {
+    size_t struct_size;
+    int    bypass_filtering;
+    int    no_fancy_upsampling;
+    int    use_cropping;
+    int    crop_left;
+    int    crop_top;
+    int    crop_width;
+    int    crop_height;
+    int    use_scaling;
+    int    scaled_width;
+    int    scaled_height;
+    int    flip;
+} WPDDecoderOptionsV1;
+
+/* Output must not depend on how many threads produced it, and a caller built
+   against the options struct as it was before n_threads existed must still get
+   the same pixels it always did. */
+static void test_threads_match(const char *path, WPDPixelFormat format) {
+    static const int counts[] = {0, 1, 2, 3, 5, 8, 16};
+    size_t           size;
+    uint8_t         *data        = read_file(path, &size);
+    uint8_t         *first       = NULL;
+    size_t           first_bytes = 0;
+
+    if (!data)
+        return;
+
+    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]) + 1; i++) {
+        WPDDecoderOptions        options = WPD_DECODER_OPTIONS_INIT;
+        WPDDecoderOptionsV1      v1;
+        const WPDDecoderOptions *pass    = &options;
+        WPDDecoder              *decoder = wpd_decoder_create();
+        WPDFrame                 frame   = WPD_FRAME_INIT;
+        uint8_t                 *flat    = NULL;
+        size_t                   used    = 0;
+
+        if (!decoder)
+            break;
+        if (i < sizeof(counts) / sizeof(counts[0])) {
+            options.n_threads = counts[i];
+        } else {
+            /* The tail padding is dirty on purpose: it is not the caller's to
+               zero, and it is where a field appended to the old struct would
+               land, so reading n_threads out of it has to be impossible. */
+            memset(&v1, 0xFF, sizeof(v1));
+            memset(&v1, 0, offsetof(WPDDecoderOptionsV1, flip) + sizeof(int));
+            v1.struct_size = sizeof(v1);
+            pass           = (const WPDDecoderOptions *)&v1;
+        }
+        CHECK(wpd_decoder_set_options(decoder, pass) == WPD_OK);
+        CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
+        CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
+
+        while (wpd_decoder_next_frame(decoder, &frame) > 0) {
+            const size_t row = (size_t)frame.width *
+                (size_t)packed_bpp(frame.format);
+            const size_t plane = row * (size_t)frame.height;
+            uint8_t     *grown = realloc(flat, used + plane);
+
+            CHECK(grown != NULL);
+            if (!grown)
+                break;
+            flat = grown;
+            for (int y = 0; y < frame.height; y++)
+                memcpy(flat + used + (size_t)y * row,
+                       frame.data[0] + (ptrdiff_t)y * frame.stride[0],
+                       row);
+            used += plane;
+        }
+        CHECK(used > 0);
+        if (!first) {
+            first       = flat;
+            first_bytes = used;
+        } else {
+            CHECK(used == first_bytes);
+            CHECK(used == first_bytes && !memcmp(first, flat, used));
+            free(flat);
+        }
+        wpd_decoder_free(decoder);
+    }
+    free(first);
+    free(data);
+}
+
 static void test_rewind_errors(const char *path) {
     size_t      size;
     uint8_t    *data    = read_file(path, &size);
@@ -3188,9 +3277,12 @@ int main(int argc, char **argv) {
         test_composited_4444_premultiply(path);
         test_frame_table(path);
         test_rewind(path, WPD_PIX_FMT_RGBA, WPD_ANIM_SUBFRAME);
+        test_threads_match(path, WPD_PIX_FMT_RGBA);
 
         {
             snprintf(path, sizeof(path), "%s/lossy.webp", dir);
+            test_threads_match(path, WPD_PIX_FMT_RGBA);
+            test_threads_match(path, WPD_PIX_FMT_RGB565);
             test_partial_format_change(
                 path, 1021, WPD_PIX_FMT_BGR, WPD_PIX_FMT_RGBA, 0);
             test_partial_format_change(
@@ -3235,6 +3327,7 @@ int main(int argc, char **argv) {
             test_partial_frame(path, WPD_PIX_FMT_NONE, 2053, 0);
 
             snprintf(path, sizeof(path), "%s/a_lossy.webp", dir);
+            test_threads_match(path, WPD_PIX_FMT_RGBA_PRE);
             test_partial_frame(path, WPD_PIX_FMT_RGBA, 337, 0);
             test_partial_frame(path, WPD_PIX_FMT_NONE, 337, 0);
             test_partial_frame(path, WPD_PIX_FMT_RGBA4444, 337, 0);

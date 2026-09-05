@@ -39,3 +39,8 @@ option('nightly_size',
   type: 'boolean',
   value: false,
   description: 'Rebuild Rust std with nightly for the smallest minsize artifacts')
+
+option('threads',
+    type: 'feature',
+    value: 'auto',
+    description: 'Hand work a decode does not need to do in order to other threads')

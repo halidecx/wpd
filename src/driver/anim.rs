@@ -1,21 +1,18 @@
 use std::mem;
 
 use crate::anim::{regions, AnimState, Placement, Region};
+use crate::bits::{rl24, rl32};
+use crate::blit::{self, Rect};
+use crate::container::TAG_ANMF;
+use crate::dsp::vp8l::Vp8lDsp;
+use crate::dsp::yuv::YuvDsp;
 use crate::error::{Error, Result};
 use crate::image::Format;
-
-use crate::blit::{self, Rect};
-use crate::dsp::vp8l::Vp8lDsp;
-
-use super::convert::{
-    convert_to_argb, format_bpp, format_is_packed, format_is_premultiplied,
-    premultiply_after_pack,
-};
-use super::{Decoder, Source, ANIM_SUBFRAME};
-use crate::bits::{rl24, rl32};
-use crate::container::{TAG_ALPH, TAG_VP8, TAG_VP8L};
-use crate::dsp::yuv::YuvDsp;
 use crate::picture::{Buffer, Frame};
+
+use super::convert::{convert_to_argb, format_is_packed, format_is_premultiplied};
+use super::slot::{AheadEntry, FrameEnv, FrameSlot};
+use super::{Decoder, InputMode, Source, ANIM_SUBFRAME};
 
 pub struct CPlacement {
     pub geom: Placement,
@@ -23,6 +20,7 @@ pub struct CPlacement {
     pub no_fancy_upsampling: bool,
     pub clear_argb: [u8; 4],
     pub clear_yuva: [u8; 4],
+    pub threads: usize,
 }
 
 pub struct CompositeTargets<'a> {
@@ -144,7 +142,13 @@ fn prepare_canvas(
         if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
             let yuva = mem::take(canvas);
 
-            convert_to_argb(ydsp, canvas, &yuva.frame(), pl.no_fancy_upsampling)?;
+            convert_to_argb(
+                ydsp,
+                canvas,
+                &yuva.frame(),
+                pl.no_fancy_upsampling,
+                pl.threads,
+            )?;
         }
         if pl.geom.frame.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE != 0 {
             clear_rect(
@@ -210,6 +214,7 @@ impl<'a> Decoder<'a> {
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva.0,
+            threads: self.threads.0,
         }
     }
 
@@ -222,6 +227,166 @@ impl<'a> Decoder<'a> {
         self.frame_duration = rl24(&header[12..]) as i32;
         self.anim.anmf_flags = header[15];
         Some((rl24(&header[6..]) as i32 + 1, rl24(&header[9..]) as i32 + 1))
+    }
+
+    /// How many frames may be decoded ahead of the one being composited.
+    ///
+    /// Bounded by threads, by a ceiling of eight, and by memory: every slot
+    /// holds a decoded frame, so the count comes down as the canvas grows. A
+    /// canvas too small to earn a thread, a streamed animation, and an
+    /// animation whose input may still be replaced under it all get one.
+    fn ahead_count(&self) -> usize {
+        const MAX_SLOTS: usize = 8;
+        const MIN_CANVAS_PIXELS: i64 = 96 * 96;
+        /* Y, U, V, alpha and the ARGB a sub-frame may be converted into. */
+        const BYTES_PER_PIXEL: i64 = 6;
+        const BUDGET: i64 = 96 << 20;
+
+        if self.threads.0 < 2 || self.streaming || !self.eos {
+            return 1;
+        }
+        if self.input_mode != InputMode::Untouched {
+            return 1;
+        }
+
+        let pixels = i64::from(self.canvas_width) * i64::from(self.canvas_height);
+
+        if pixels < MIN_CANVAS_PIXELS {
+            return 1;
+        }
+
+        let by_memory = BUDGET / (pixels * BYTES_PER_PIXEL).max(1);
+
+        (by_memory.max(1) as usize)
+            .min(self.threads.0)
+            .min(MAX_SLOTS)
+    }
+
+    /// The ANMF payloads from `first` onwards, at most `want` of them. The
+    /// walk that calls this has already stepped past `first`, so self.pos is
+    /// where the frame after it begins.
+    fn anmf_lookahead(&self, first: (usize, usize), want: usize) -> Vec<AheadEntry> {
+        let mut found = Vec::with_capacity(want);
+        let mut at = self.pos;
+
+        found.push(AheadEntry {
+            base: first.0,
+            size: first.1,
+            out: Err(Error::InvalidData),
+        });
+
+        while found.len() < want && at + 8 <= self.end {
+            let (chunk_type, size) = {
+                let head = self.file_at(at);
+
+                (rl32(head), rl32(&head[4..]))
+            };
+
+            /* Anything that is not another frame ends the run: the metadata
+             * that follows the last one is not worth walking past. */
+            if chunk_type != TAG_ANMF || size == u32::MAX {
+                break;
+            }
+
+            let size = size as usize;
+            let padded = size + (size & 1);
+
+            if self.end - (at + 8) < padded {
+                break;
+            }
+            found.push(AheadEntry {
+                base: at + 8,
+                size,
+                out: Err(Error::InvalidData),
+            });
+            at += 8 + padded;
+        }
+        found
+    }
+
+    /// Decodes the next run of frames into a slot each. Their images depend on
+    /// nothing but their own bytes, so they are independent; everything that
+    /// depends on the frames before it stays in decode_anmf().
+    fn fill_ahead(&mut self, base: usize, size: usize) {
+        let want = self.ahead_count();
+
+        if want < 2 {
+            return;
+        }
+
+        let entries = self.anmf_lookahead((base, size), want);
+
+        if entries.len() < 2 {
+            return;
+        }
+
+        if self.ahead.slots.len() < entries.len() {
+            let more = entries.len() - self.ahead.slots.len();
+
+            if self.ahead.slots.try_reserve(more).is_err() {
+                return;
+            }
+            self.ahead
+                .slots
+                .resize_with(entries.len(), FrameSlot::default);
+        }
+        self.ahead.entries = entries;
+        self.ahead.pos = 0;
+
+        let bypass_filtering = self.filter_bypass();
+        let to_argb = self.frame_to_argb();
+        let premultiply = self.frame_premultiply();
+        let no_fancy_upsampling = self.options.no_fancy_upsampling;
+        let threads = self.threads.0;
+        let Self {
+            ahead,
+            input,
+            ldsp,
+            fdsp,
+            ydsp,
+            ..
+        } = self;
+        /* Each slot is already on a thread of its own, so a frame does not
+         * also split its alpha or its conversion off onto another one. */
+        let env = FrameEnv {
+            input,
+            ldsp,
+            fdsp,
+            ydsp,
+            bypass_filtering,
+            no_fancy_upsampling,
+            to_argb,
+            premultiply,
+            animation: true,
+            threads: 1,
+        };
+        let mut jobs: Vec<(&mut FrameSlot, &mut AheadEntry)> = ahead
+            .slots
+            .iter_mut()
+            .zip(ahead.entries.iter_mut())
+            .collect();
+
+        crate::task::for_each(threads, &mut jobs, |(slot, entry)| {
+            entry.out = slot.decode_anmf_image(&env, entry.base, entry.size);
+        });
+    }
+
+    /// Takes the frame decoded ahead for the chunk at `base`, if there is one.
+    /// The slot it was decoded into is swapped in whole, which recycles the
+    /// buffers the outgoing frame was using.
+    fn take_ahead(&mut self, base: usize) -> Option<Result<Source>> {
+        let i = self.ahead.pos;
+        let entry = *self.ahead.entries.get(i)?;
+
+        if entry.base != base {
+            /* The walk did not arrive where the batch expected, so the batch
+             * is about something else; drop it and decode here. */
+            self.ahead.clear();
+            return None;
+        }
+        self.ahead.pos += 1;
+        std::mem::swap(&mut self.frame, &mut self.ahead.slots[i]);
+        Some(entry.out)
     }
 
     pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {
@@ -246,68 +411,24 @@ impl<'a> Decoder<'a> {
             return Err(Error::InvalidData);
         }
 
-        self.has_alpha = false;
-        self.width = 0;
-        self.height = 0;
-
-        let mut sub: Option<Source> = None;
-        let mut at = base + 16;
-        let end = base + size;
-
-        while end - at >= 8 {
-            let (chunk_type, payload_size) = {
-                let head = self.input.chunk(at, 8);
-
-                if head.len() < 8 {
-                    break;
-                }
-                (rl32(head), rl32(&head[4..]))
-            };
-
-            if payload_size == u32::MAX {
-                return Err(Error::InvalidData);
-            }
-            let payload_size = payload_size as usize;
-            let padded_size = payload_size + (payload_size & 1);
-
-            at += 8;
-            if end - at < padded_size {
-                break;
-            }
-
-            match chunk_type {
-                TAG_ALPH => {
-                    if payload_size == 0 {
-                        crate::log::error("invalid ALPHA chunk size");
-                        return Err(Error::InvalidData);
-                    }
-                    if sub.is_some() {
-                        crate::log::error("ALPHA chunk after the image it belongs to");
-                        return Err(Error::InvalidData);
-                    }
-                    let header = self.input.chunk(at, 1)[0] as i32;
-
-                    self.set_alpha_chunk(header, at + 1, payload_size - 1)?;
-                }
-                TAG_VP8 if sub.is_none() => {
-                    self.vp8_lossy_decode_frame(at, payload_size)?;
-                    sub = Some(Source::Lossy);
-                    self.anim.frame_has_alpha = self.has_alpha;
-                }
-                TAG_VP8L if sub.is_none() => {
-                    self.lossless_decode(at, payload_size)?;
-                    sub = Some(Source::Lossless);
-                    self.anim.frame_has_alpha = self.lossless_has_alpha;
-                }
-                _ => {}
-            }
-            at += padded_size;
+        if self.ahead.spent() {
+            self.fill_ahead(base, size);
         }
 
-        let Some(mut which) = sub else {
-            crate::log::error("image data not found");
-            return Err(Error::InvalidData);
+        let sub = match self.take_ahead(base) {
+            Some(out) => out,
+            None => {
+                let (frame, env) = self.frame_parts();
+
+                frame.decode_anmf_image(&env, base, size)
+            }
         };
+
+        self.alpha_pending = false;
+
+        let mut which = sub?;
+
+        self.anim.frame_has_alpha = self.frame.frame_has_alpha(which);
         let (sub_width, sub_height, sub_format) = {
             let img = self.frame_of(which);
 
@@ -348,53 +469,11 @@ impl<'a> Decoder<'a> {
             target = argb;
         }
 
-        if target == argb && sub_format != argb {
-            let no_fancy = self.options.no_fancy_upsampling;
-            let Self {
-                ydsp,
-                converted,
-                vp8,
-                alpha_plane,
-                has_alpha,
-                width,
-                height,
-                ..
-            } = self;
-            let src = super::lossy_view(
-                vp8.first(),
-                alpha_plane,
-                *has_alpha,
-                *width,
-                *height,
-            );
-            convert_to_argb(ydsp, converted, &src, no_fancy)?;
-            which = Source::Converted;
-        }
+        which = {
+            let (frame, env) = self.frame_parts();
 
-        /* libwebp premultiplies frames before compositing, so this uses ARGB. */
-        if format_is_premultiplied(self.out_format.0)
-            && !(premultiply_after_pack(self.animation, self.anim_mode)
-                && format_bpp(self.out_format.0) == 2)
-        {
-            let Self {
-                ydsp,
-                converted,
-                vp8l,
-                lossless_out,
-                ..
-            } = self;
-            let view = match which {
-                Source::Converted => Some(converted.frame_mut()),
-                Source::Lossless => lossless_out.and_then(|which| vp8l.view_mut(which)),
-                Source::Lossy | Source::Canvas | Source::None => None,
-            };
-
-            if let Some(mut view) = view {
-                for y in 0..view.height {
-                    (ydsp.premultiply_row)(view.row(0, y), true);
-                }
-            }
-        }
+            frame.prepare(&env, which, target == argb)?
+        };
 
         self.subframe_out = Some(which);
 
@@ -425,28 +504,10 @@ impl<'a> Decoder<'a> {
             ldsp,
             ydsp,
             canvas,
-            converted,
-            vp8,
-            vp8l,
-            lossless_out,
-            alpha_plane,
-            has_alpha,
-            width,
-            height,
+            frame,
             ..
         } = self;
-        let src = super::source_view(
-            which,
-            vp8.first(),
-            vp8l,
-            *lossless_out,
-            alpha_plane,
-            *has_alpha,
-            *width,
-            *height,
-            Some(converted),
-            None,
-        );
+        let src = super::source_view(which, frame, None);
 
         anim_composite(pl, CompositeTargets { ldsp, ydsp, canvas }, &src, target)
     }

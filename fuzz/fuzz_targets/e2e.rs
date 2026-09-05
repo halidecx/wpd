@@ -116,6 +116,8 @@ fn decode_external(data: &[u8], options: Options) {
         scaled_width: options.scale.map_or(0, |v| v.0),
         scaled_height: options.scale.map_or(0, |v| v.1),
         flip: i32::from(options.flip),
+        reserved: 0,
+        n_threads: options.n_threads,
     };
     let mut frame = WPDFrame {
         struct_size: mem::size_of::<WPDFrame>(),

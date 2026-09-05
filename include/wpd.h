@@ -205,10 +205,32 @@ typedef struct WPDDecoderOptions {
     int    scaled_width;
     int    scaled_height;
     int    flip; ///< Flip output vertically.
+    /**
+     * Must be zero.
+     *
+     * The struct ended at flip once, and its tail padded out to the same size
+     * this one reaches with a field in that padding, so struct_size could not
+     * have told the two apart. This takes the padding, which puts every field
+     * after it at a size no older caller can present.
+     */
+    int reserved;
+    /**
+     * Threads a decode may use, counting the calling thread.
+     *
+     * 0 lets the decoder choose, which is the number of processors it is
+     * allowed to run on; 1 keeps everything on the calling thread. Threads are
+     * started where a decode has work that need not be done in order, and are
+     * joined before the call that started them returns. Output is identical
+     * whatever the number.
+     *
+     * A caller that sets struct_size to the size of an older struct, which had
+     * no such field, reads back as 0 and so gets threads.
+     */
+    int n_threads;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 /**
  * Set processing options. Cropping precedes scaling.

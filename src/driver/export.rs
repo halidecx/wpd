@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::handout::{Handout, Pixels, RowSink};
 use crate::options::Options;
 use crate::picture::{Buffer, Frame};
-use crate::rescale::Scratch;
+use crate::rescale::Scratches;
 use std::ops::Range;
 
 pub struct ExportSettings {
@@ -27,13 +27,14 @@ pub struct ExportSettings {
     pub anmf_flags: u8,
     pub has_alpha: bool,
     pub timestamp: i64,
+    pub threads: usize,
 }
 
 pub struct ExportTargets<'a> {
     pub dsp: &'a YuvDsp,
     pub rdsp: &'a RescaleDsp,
     pub options: &'a Options,
-    pub rescale: &'a mut Scratch,
+    pub rescale: &'a mut Scratches,
     pub transformed: &'a mut Buffer,
     pub output: &'a mut Buffer,
     pub ext: Option<&'a mut (dyn RowSink + 'static)>,
@@ -225,7 +226,16 @@ pub fn export_packed<'a>(
         ext,
     } = t;
     let format = set.out_format;
-    let img = transform_image(dsp, rdsp, options, rescale, transformed, img, format)?;
+    let img = transform_image(
+        dsp,
+        rdsp,
+        options,
+        rescale,
+        transformed,
+        img,
+        format,
+        set.threads,
+    )?;
     let target = Format::from_raw(format);
 
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
@@ -304,6 +314,7 @@ pub fn export_packed<'a>(
                         format,
                         options.no_fancy_upsampling,
                         premultiply_after_pack(set.animation, set.anim_mode),
+                        set.threads,
                     )?;
                 }
                 Route::Pack(pack) => {
@@ -391,9 +402,10 @@ fn still_packed_direct(
         dst.alloc_packed(src.width, src.height, target.bpp(), target)?;
     }
     if options.no_fancy_upsampling {
-        upsample_simple(dsp, dst, src, layout, first, upto);
+        upsample_simple(dsp, dst, src, layout, first, upto, set.threads);
     } else if upto > first {
-        converted_from = upsample_fancy(dsp, dst, src, layout, first, upto);
+        converted_from =
+            upsample_fancy(dsp, dst, src, layout, first, upto, set.threads);
     }
     if set.premultiply {
         premultiply_rows(dsp, dst, format, converted_from..upto);
@@ -427,9 +439,10 @@ fn still_packed_2byte(
         let premultiply = format_premultiplier_4444(dsp, format);
 
         if options.no_fancy_upsampling {
-            upsample_simple(dsp, argb, src, LAYOUT_ARGB, first, upto);
+            upsample_simple(dsp, argb, src, LAYOUT_ARGB, first, upto, set.threads);
         } else {
-            converted_from = upsample_fancy(dsp, argb, src, LAYOUT_ARGB, first, upto);
+            converted_from =
+                upsample_fancy(dsp, argb, src, LAYOUT_ARGB, first, upto, set.threads);
         }
         pack_2byte_rows(
             set,
@@ -465,6 +478,7 @@ fn pack_2byte_rows(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsample_simple(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -472,6 +486,7 @@ fn upsample_simple(
     layout: usize,
     first: i32,
     upto: i32,
+    threads: usize,
 ) {
     let width = src.width as usize;
     let planes = yuv_planes(src);
@@ -485,9 +500,11 @@ fn upsample_simple(
         width,
         first as usize,
         upto as usize,
+        threads,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsample_fancy(
     dsp: &YuvDsp,
     dst: &mut Buffer,
@@ -495,6 +512,7 @@ fn upsample_fancy(
     layout: usize,
     first: i32,
     upto: i32,
+    threads: usize,
 ) -> i32 {
     let (width, height) = (src.width as usize, src.height as usize);
     let planes = yuv_planes(src);
@@ -509,6 +527,7 @@ fn upsample_fancy(
         height,
         first as usize,
         upto as usize,
+        threads,
     ) as i32
 }
 

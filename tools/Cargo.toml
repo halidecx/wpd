@@ -17,7 +17,8 @@ doc = false
 wpd = { path = "..", default-features = false }
 
 [features]
-default = ["asm"]
+default = ["asm", "threads"]
 asm = ["wpd/asm"]
+threads = ["wpd/threads"]
 trim_dsp = ["wpd/trim_dsp"]
 force_rac32 = ["wpd/force_rac32"]
