@@ -262,23 +262,6 @@ impl<'a> Decoder<'a> {
         source_view(which, &self.frame, Some(&self.canvas))
     }
 
-    pub(crate) fn update_canvas_size(&mut self, w: i32, h: i32) {
-        if self.frame.width != 0 && self.frame.width != w {
-            crate::log::warning_args(format_args!(
-                "Width mismatch. {} != {w}",
-                self.frame.width
-            ));
-        }
-        self.frame.width = w;
-        if self.frame.height != 0 && self.frame.height != h {
-            crate::log::warning_args(format_args!(
-                "Height mismatch. {} != {h}",
-                self.frame.height
-            ));
-        }
-        self.frame.height = h;
-    }
-
     pub(crate) fn lossless_canvas_in(&mut self) {
         self.frame
             .vp8l
@@ -296,20 +279,9 @@ impl<'a> Decoder<'a> {
         offset: usize,
         size: usize,
     ) -> Result<(), Error> {
-        self.lossless_canvas_in();
+        let (frame, env) = self.frame_parts();
 
-        let Self { frame, input, .. } = self;
-        let ret = frame.vp8l.decode_frame(
-            crate::vp8l::Target::Argb,
-            input.chunk(offset, size),
-            false,
-            None,
-        );
-
-        self.lossless_canvas_out();
-        ret?;
-        self.frame.lossless_out = Some(Lossless::Argb);
-        Ok(())
+        frame.lossless_decode(&env, offset, size)
     }
 
     /// Whether the output format on its own decides an animation frame must

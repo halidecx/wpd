@@ -205,6 +205,32 @@ fn split_bands<'p>(
     bands
 }
 
+/// Runs `span` over `[row_start, row_end)`: cut into one band per thread where
+/// the rows are worth the spawns, and whole on this thread where they are not.
+fn in_bands(
+    dst: &mut PlaneMut<'_>,
+    width: usize,
+    row_start: usize,
+    row_end: usize,
+    threads: usize,
+    span: impl Fn(&mut PlaneMut<'_>, usize, usize) + Sync,
+) {
+    let n = crate::task::pieces(
+        row_end - row_start,
+        min_band_rows(width),
+        threads.min(MAX_BANDS),
+    );
+
+    if n < 2 {
+        span(dst, row_start, row_end);
+        return;
+    }
+
+    let mut bands = split_bands(dst, row_start, row_end, n);
+
+    crate::task::for_each(n, &mut bands, |(dst, from, to)| span(dst, *from, *to));
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn yuv420_to_packed_rows(
     dsp: &YuvDsp,
@@ -221,21 +247,8 @@ pub fn yuv420_to_packed_rows(
         return row_start;
     }
 
-    let n = crate::task::pieces(
-        row_end - row_start,
-        min_band_rows(width),
-        threads.min(MAX_BANDS),
-    );
-
-    if n < 2 {
-        packed_rows_span(dsp, layout, dst, src, width, height, row_start, row_end);
-        return first_row(row_start);
-    }
-
-    let mut bands = split_bands(dst, row_start, row_end, n);
-
-    crate::task::for_each(n, &mut bands, |(dst, from, to)| {
-        packed_rows_span(dsp, layout, dst, src, width, height, *from, *to);
+    in_bands(dst, width, row_start, row_end, threads, |dst, from, to| {
+        packed_rows_span(dsp, layout, dst, src, width, height, from, to);
     });
     first_row(row_start)
 }
@@ -281,21 +294,8 @@ pub fn yuv420_to_packed_simple(
         return;
     }
 
-    let n = crate::task::pieces(
-        row_end - row_start,
-        min_band_rows(width),
-        threads.min(MAX_BANDS),
-    );
-
-    if n < 2 {
-        packed_simple_span(dsp, layout, dst, src, width, row_start, row_end);
-        return;
-    }
-
-    let mut bands = split_bands(dst, row_start, row_end, n);
-
-    crate::task::for_each(n, &mut bands, |(dst, from, to)| {
-        packed_simple_span(dsp, layout, dst, src, width, *from, *to);
+    in_bands(dst, width, row_start, row_end, threads, |dst, from, to| {
+        packed_simple_span(dsp, layout, dst, src, width, from, to);
     });
 }
 

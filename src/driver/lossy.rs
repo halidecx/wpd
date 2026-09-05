@@ -147,25 +147,46 @@ impl FrameSlot {
         Ok(())
     }
 
-    fn alpha_work<'p, 'i>(&'p mut self, env: &FrameEnv<'p, 'i>) -> Alpha<'p, 'i> {
-        Alpha {
-            vp8l: &mut self.vp8l,
-            ldsp: env.ldsp,
-            fdsp: env.fdsp,
-            plane: &mut self.alpha_plane,
-            input: env.input,
-            offset: self.alpha_data_offset,
-            size: self.alpha_data_size,
-            width: self.width.max(0) as usize,
-            height: self.height.max(0),
-            compression: self.alpha_compression,
-            filter: self.alpha_filter,
-        }
+    /// The alpha channel's work beside the VP8 decoder that produces the
+    /// colour planes, so a caller wanting both gets them from one borrow.
+    fn alpha_work<'p, 'i>(
+        &'p mut self,
+        env: &FrameEnv<'p, 'i>,
+    ) -> (Alpha<'p, 'i>, Option<&'p mut crate::vp8::Decoder>) {
+        let Self {
+            vp8l,
+            alpha_plane,
+            alpha_data_offset,
+            alpha_data_size,
+            alpha_compression,
+            alpha_filter,
+            width,
+            height,
+            vp8,
+            ..
+        } = self;
+
+        (
+            Alpha {
+                vp8l,
+                ldsp: env.ldsp,
+                fdsp: env.fdsp,
+                plane: alpha_plane,
+                input: env.input,
+                offset: *alpha_data_offset,
+                size: *alpha_data_size,
+                width: (*width).max(0) as usize,
+                height: (*height).max(0),
+                compression: *alpha_compression,
+                filter: *alpha_filter,
+            },
+            vp8.first_mut(),
+        )
     }
 
     pub(crate) fn alpha_plane_decode(&mut self, env: &FrameEnv<'_, '_>) -> Result<()> {
         self.alpha_plane_reserve()?;
-        decode_alpha(self.alpha_work(env))
+        decode_alpha(self.alpha_work(env).0)
     }
 
     /// Decodes a whole lossy frame: the header, then the colour planes with
@@ -209,32 +230,8 @@ impl FrameSlot {
             1
         };
         let chunk = env.input.chunk(offset, size);
-        let Self {
-            vp8l,
-            alpha_plane,
-            alpha_data_offset,
-            alpha_data_size,
-            alpha_compression,
-            alpha_filter,
-            width,
-            height,
-            vp8,
-            ..
-        } = self;
-        let alpha = Alpha {
-            vp8l,
-            ldsp: env.ldsp,
-            fdsp: env.fdsp,
-            plane: alpha_plane,
-            input: env.input,
-            offset: *alpha_data_offset,
-            size: *alpha_data_size,
-            width: (*width).max(0) as usize,
-            height: (*height).max(0),
-            compression: *alpha_compression,
-            filter: *alpha_filter,
-        };
-        let Some(vp8) = vp8.first_mut() else {
+        let (alpha, vp8) = self.alpha_work(env);
+        let Some(vp8) = vp8 else {
             return Err(Error::InvalidData);
         };
         let (alpha_ret, rows_ret) = crate::task::join(
@@ -326,7 +323,7 @@ impl<'a> Decoder<'a> {
 
             let (w, h) = self.frame.size();
 
-            self.update_canvas_size(w, h);
+            self.frame.set_size(w, h);
             if self.frame.has_alpha {
                 /* A resumable decode keeps its alpha here: it is decoded once
                  * at frame start, with no row loop yet to run beside it. */
@@ -372,7 +369,7 @@ impl<'a> Decoder<'a> {
         };
         let (w, h) = self.frame.size();
 
-        self.update_canvas_size(w, h);
+        self.frame.set_size(w, h);
         self.alpha_pending = false;
         ret?;
         self.still_lossy = !self.animation;
