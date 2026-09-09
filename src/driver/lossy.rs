@@ -264,8 +264,7 @@ impl<'a> Decoder<'a> {
         width < self.canvas_width * 3 / 4 && height < self.canvas_height * 3 / 4
     }
 
-    /// The slot a frame decodes into beside everything that decode reads.
-    /// They come apart because nothing in the environment lives on the slot.
+    /// Settings captured by a batch and checked before handing a frame out.
     pub(crate) fn frame_settings(&self) -> super::slot::FrameSettings {
         super::slot::FrameSettings {
             bypass_filtering: self.filter_bypass(),
@@ -275,6 +274,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// The slots beside their environment, whose fields live outside the slots.
     pub(crate) fn frame_parts(
         &mut self,
     ) -> (&mut FrameSlot, &mut super::slot::Ahead, FrameEnv<'_, 'a>) {

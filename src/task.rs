@@ -147,10 +147,17 @@ mod tests {
     #[test]
     fn a_thread_count_of_zero_asks_the_machine_and_one_is_taken_at_its_word() {
         assert_eq!(resolve(1), 1);
-        assert_eq!(resolve(3), 3);
+        assert_eq!(resolve(3), if cfg!(feature = "threads") { 3 } else { 1 });
         assert_eq!(resolve(-4), resolve(0));
         assert!(resolve(0) >= 1);
-        assert_eq!(resolve(i32::MAX), MAX_THREADS.min(resolve(i32::MAX)));
+        assert_eq!(
+            resolve(i32::MAX),
+            if cfg!(feature = "threads") {
+                MAX_THREADS
+            } else {
+                1
+            }
+        );
     }
 
     #[test]

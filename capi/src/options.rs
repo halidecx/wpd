@@ -38,7 +38,7 @@ impl WPDDecoderOptions {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
     }
 
-    const fn v2() -> usize {
+    pub(crate) const fn v2() -> usize {
         mem::offset_of!(WPDDecoderOptions, n_threads) + mem::size_of::<c_int>()
     }
 

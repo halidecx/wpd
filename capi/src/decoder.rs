@@ -273,8 +273,11 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
         ptr::copy_nonoverlapping(
             options.cast::<u8>(),
             ptr::addr_of_mut!(local).cast::<u8>(),
-            size.min(std::mem::size_of::<WPDDecoderOptions>()),
+            WPDDecoderOptions::v1(),
         );
+    }
+    if size >= WPDDecoderOptions::v2() {
+        local.n_threads = unsafe { ptr::addr_of!((*options).n_threads).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
