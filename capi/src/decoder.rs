@@ -22,8 +22,19 @@ pub struct WPDDecoder<'a> {
 
 impl WPDDecoder<'_> {
     pub(crate) fn new() -> Self {
+        let mut decoder = Decoder::new();
+
+        // Legacy callers may omit set_options entirely; their log callbacks
+        // must stay on the calling thread until they opt into threading.
+        decoder
+            .set_core_options(wpd::options::Options {
+                n_threads: 1,
+                ..Default::default()
+            })
+            .expect("default C decoder options are valid");
+
         WPDDecoder {
-            decoder: Decoder::new(),
+            decoder,
             poisoned: false,
             planes: [WPDOutputPlane::empty(); 4],
         }
@@ -259,11 +270,27 @@ unsafe fn set_output_buffer(
 }
 
 entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
-    let Some(options) = (unsafe { options.as_ref() }) else {
+    if options.is_null() {
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    reported(set_options(decoder, options).map(|()| WPD_OK))
+    // Read only the caller's allocation; a v1 pointer cannot become a v2 reference.
+    let size = unsafe { ptr::addr_of!((*options).struct_size).read() };
+    if size < WPDDecoderOptions::v1() {
+        return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
+    }
+    let mut local: WPDDecoderOptions = unsafe { std::mem::zeroed() };
+    unsafe {
+        ptr::copy_nonoverlapping(
+            options.cast::<u8>(),
+            ptr::addr_of_mut!(local).cast::<u8>(),
+            WPDDecoderOptions::v1(),
+        );
+    }
+    if size >= WPDDecoderOptions::v2() {
+        local.n_threads = unsafe { ptr::addr_of!((*options).n_threads).read() };
+    }
+    reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
 
 entry!(fn wpd_decoder_set_animation_mode(decoder, mode: c_int) {
@@ -730,6 +757,74 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn threading_requires_current_options_from_the_c_caller() {
+        thread_local! {
+            static ALPHA_ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+
+        unsafe extern "C" fn log(_: *mut c_void, _: c_int, message: *const c_char) {
+            if unsafe { CStr::from_ptr(message) }
+                .to_bytes()
+                .starts_with(b"ALPHA chunk carries ")
+            {
+                ALPHA_ERRORS.with(|n| n.set(n.get() + 1));
+            }
+        }
+
+        let mut data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../wpd-test-data/a_lossy.webp"
+        ))
+        .unwrap();
+        let alpha = data.windows(4).position(|v| v == b"ALPH").unwrap() + 8;
+
+        // Treat the compressed payload as raw alpha, producing a diagnostic
+        // in the alpha job, which can run on a worker for this large image.
+        data[alpha] = 0;
+        let decoder = wpd_decoder_create();
+
+        assert!(!decoder.is_null());
+        unsafe { crate::compat::wpd_set_log_callback(Some(log), ptr::null_mut()) };
+        let mut counts = Vec::new();
+        for version in [
+            None,
+            Some(mem::size_of::<WPDDecoderOptions>()),
+            Some(WPDDecoderOptions::v1()),
+        ] {
+            if let Some(size) = version {
+                let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
+
+                options.struct_size = size;
+                options.n_threads = 2;
+                assert_eq!(
+                    unsafe { wpd_decoder_set_options(decoder, &options) },
+                    WPD_OK
+                );
+            }
+            assert_eq!(
+                unsafe {
+                    wpd_decoder_open_borrowed(decoder, data.as_ptr(), data.len())
+                },
+                WPD_OK
+            );
+            let mut frame: WPDFrame = unsafe { mem::zeroed() };
+
+            frame.struct_size = mem::size_of::<WPDFrame>();
+            ALPHA_ERRORS.with(|n| n.set(0));
+            assert_eq!(
+                unsafe { wpd_decoder_next_frame(decoder, &mut frame) },
+                WPD_ERR_BITSTREAM
+            );
+            counts.push(ALPHA_ERRORS.with(|n| n.get()));
+        }
+        unsafe {
+            crate::compat::wpd_set_log_callback(None, ptr::null_mut());
+            wpd_decoder_free(decoder);
+        }
+        assert_eq!(counts, [1, usize::from(!cfg!(feature = "threads")), 1]);
+    }
 
     #[test]
     #[cfg(not(panic = "abort"))]

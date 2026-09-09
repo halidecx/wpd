@@ -1,4 +1,3 @@
-
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -41,6 +40,7 @@ fn decode_options(data: &[u8]) -> (Options, bool) {
     let flags = byte(data, 1);
     let subframe = flags & 4 != 0;
     let mut options = Options {
+        n_threads: [1, 2, 3, 8][usize::from(flags >> 6)],
         bypass_filtering: flags & 8 != 0,
         no_fancy_upsampling: flags & 16 != 0,
         flip: !subframe && flags & 32 != 0,
@@ -71,7 +71,12 @@ fn decode_options(data: &[u8]) -> (Options, bool) {
     (options, subframe)
 }
 
-fn configure(decoder: &mut Decoder<'_>, format: Format, options: Options, subframe: bool) {
+fn configure(
+    decoder: &mut Decoder<'_>,
+    format: Format,
+    options: Options,
+    subframe: bool,
+) {
     let _ = decoder.set_format(format);
     let _ = decoder.set_options(options);
     if subframe {
@@ -82,8 +87,8 @@ fn configure(decoder: &mut Decoder<'_>, format: Format, options: Options, subfra
 fn decode_external(data: &[u8], options: Options) {
     let size = usize::from(u16::from_le_bytes([byte(data, 8), byte(data, 9)]));
     let mut storage = vec![0; size];
-    let stride = 1
-        + isize::try_from(u16::from_le_bytes([byte(data, 10), byte(data, 11)]))
+    let stride =
+        1 + isize::try_from(u16::from_le_bytes([byte(data, 10), byte(data, 11)]))
             .unwrap_or(1);
     let empty = WPDOutputPlane {
         data: ptr::null_mut(),
@@ -116,6 +121,8 @@ fn decode_external(data: &[u8], options: Options) {
         scaled_width: options.scale.map_or(0, |v| v.0),
         scaled_height: options.scale.map_or(0, |v| v.1),
         flip: i32::from(options.flip),
+        reserved: 0,
+        n_threads: options.n_threads,
     };
     let mut frame = WPDFrame {
         struct_size: mem::size_of::<WPDFrame>(),
@@ -153,17 +160,47 @@ fuzz_target!(|data: &[u8]| {
     let format = FORMATS[first as usize % FORMATS.len()];
     let (options, subframe) = decode_options(data);
 
+    let mut serial = Decoder::new();
+    configure(
+        &mut serial,
+        format,
+        Options {
+            n_threads: 1,
+            ..options
+        },
+        subframe,
+    );
+    let serial_open = serial.open(data);
+
     let mut whole = Decoder::new();
     configure(&mut whole, format, options, subframe);
 
-    if whole.open(data).is_ok() {
+    let whole_open = whole.open(data);
+    assert_eq!(whole_open, serial_open);
+    if whole_open.is_ok() {
         let _ = whole.info();
         for i in 0..4 {
             let _ = whole.frame_info(i);
         }
         for _ in 0..FRAMES {
-            if whole.next_frame().is_err() {
-                break;
+            let got = whole.next_frame();
+            let want = serial.next_frame();
+            match (got, want) {
+                (Ok(Some(got)), Ok(Some(want))) => {
+                    assert_eq!(
+                        (got.width(), got.height(), got.planes()),
+                        (want.width(), want.height(), want.planes())
+                    );
+                    for plane in 0..got.planes() {
+                        assert!(got.rows_of(plane).eq(want.rows_of(plane)));
+                    }
+                }
+                (Ok(None), Ok(None)) => break,
+                (Err(got), Err(want)) => {
+                    assert_eq!(got, want);
+                    break;
+                }
+                _ => panic!("thread count changed decode outcome"),
             }
         }
     }

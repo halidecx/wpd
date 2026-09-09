@@ -58,9 +58,11 @@ cargo +nightly fuzz run container|vp8l|vp8|e2e  # coverage-guided; e2e is the dr
 ./scripts/animcheck.sh  # correctness, bit-exact argb, wpd vs libwebp
 ./scripts/rac32.sh      # correctness, forced 32-bit range coder
 ./scripts/sanitize.sh   # memory safety, C harnesses under sanitizers
-./scripts/rustsan.sh    # memory safety, Rust w/ ASan (needs nightly)
-./scripts/miri.sh       # UB in the safe core (needs nightly)
-./scripts/stylecheck.sh # format & lint codebase
+./scripts/rustsan.sh    # memory safety, the Rust under ASan (needs nightly)
+./scripts/tsan.sh       # races in the threaded paths (needs nightly)
+./scripts/threadcheck.sh # correctness, output must not depend on thread count
+./scripts/miri.sh       # undefined behaviour in the safe core (needs nightly)
+./scripts/stylecheck.sh # format and lint the codebase
 ```
 
 Inspect the structure of a WebP file (still or animated):

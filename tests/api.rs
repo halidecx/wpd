@@ -183,3 +183,197 @@ fn flipping_reverses_the_rows() {
         }
     }
 }
+
+fn decode_bytes(
+    bytes: &[u8],
+    format: Format,
+    options: Options,
+    subframe: bool,
+    switch: Option<fn(&mut Decoder)>,
+) -> Vec<u8> {
+    let mut d = Decoder::new();
+
+    d.set_format(format).unwrap();
+    d.set_options(options).unwrap();
+    if subframe {
+        d.set_animation(Animation::Subframe).unwrap();
+    }
+    d.open(bytes).unwrap();
+
+    let mut out = Vec::new();
+    let mut index = 0;
+
+    loop {
+        // Change settings while the first batch is still pending.
+        if index == 1 {
+            if let Some(switch) = switch {
+                switch(&mut d);
+            }
+        }
+        let Some(picture) = d.next_frame().unwrap() else {
+            break;
+        };
+
+        out.extend_from_slice(&picture.width().to_le_bytes());
+        out.extend_from_slice(&picture.height().to_le_bytes());
+        for plane in 0..picture.planes() {
+            for row in picture.rows_of(plane) {
+                out.extend_from_slice(row);
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
+/// Every decode, at every thread count, must produce the same bytes. Counts
+/// that are not powers of two matter once work is divided into bands and
+/// batches rather than handed over whole.
+#[test]
+fn the_thread_count_does_not_change_a_single_byte() {
+    const COUNTS: [i32; 6] = [1, 2, 3, 5, 8, 16];
+
+    for path in corpus() {
+        let bytes = fs::read(&path).unwrap();
+
+        for format in [Format::Rgba, Format::RgbaPre, Format::Rgb565, Format::Argb] {
+            for subframe in [false, true] {
+                let want = decode_bytes(
+                    &bytes,
+                    format,
+                    Options {
+                        n_threads: 1,
+                        ..Options::default()
+                    },
+                    subframe,
+                    None,
+                );
+
+                assert!(!want.is_empty(), "{} decoded nothing", path.display());
+                for n_threads in COUNTS {
+                    assert_eq!(
+                        decode_bytes(
+                            &bytes,
+                            format,
+                            Options {
+                                n_threads,
+                                ..Options::default()
+                            },
+                            subframe,
+                            None
+                        ),
+                        want,
+                        "{} in {format:?} at {n_threads} threads",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Scaling splits the planes across threads and the rescaler carries state
+/// down each one, so a scaled decode is swept separately.
+#[test]
+fn a_scaled_decode_is_the_same_at_any_thread_count() {
+    for path in corpus() {
+        let bytes = fs::read(&path).unwrap();
+
+        for scale in [(64, 64), (0, 37), (320, 0)] {
+            let want = decode_bytes(
+                &bytes,
+                Format::Rgba,
+                Options {
+                    n_threads: 1,
+                    scale: Some(scale),
+                    ..Options::default()
+                },
+                false,
+                None,
+            );
+
+            for n_threads in [2, 3, 5, 8] {
+                assert_eq!(
+                    decode_bytes(
+                        &bytes,
+                        Format::Rgba,
+                        Options {
+                            n_threads,
+                            scale: Some(scale),
+                            ..Options::default()
+                        },
+                        false,
+                        None
+                    ),
+                    want,
+                    "{} scaled to {scale:?} at {n_threads} threads",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Settings changed between frames apply to the frames that follow. A batch
+/// decoded ahead bakes in the settings that were current when it ran, so it
+/// has to be dropped when they change; otherwise the frames still in the
+/// batch come out under the old ones and the decode stops agreeing with the
+/// same call sequence on one thread.
+#[test]
+fn settings_changed_mid_animation_reach_the_next_frame() {
+    type Switch = fn(&mut Decoder);
+
+    let switches: [(&str, Switch); 4] = [
+        ("planar", |d| d.set_format(Format::Yuv420p).unwrap()),
+        ("filter", |d| {
+            d.set_options(Options {
+                bypass_filtering: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
+        ("format", |d| d.set_format(Format::RgbaPre).unwrap()),
+        ("options", |d| {
+            d.set_options(Options {
+                no_fancy_upsampling: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
+    ];
+
+    for path in corpus() {
+        let bytes = fs::read(&path).unwrap();
+
+        for (name, switch) in switches {
+            let want = decode_bytes(
+                &bytes,
+                Format::Rgba,
+                Options {
+                    n_threads: 1,
+                    ..Options::default()
+                },
+                false,
+                Some(switch),
+            );
+
+            for n_threads in [2, 3, 5, 8, 16] {
+                assert_eq!(
+                    decode_bytes(
+                        &bytes,
+                        Format::Rgba,
+                        Options {
+                            n_threads,
+                            ..Options::default()
+                        },
+                        false,
+                        Some(switch)
+                    ),
+                    want,
+                    "{} switching {name} at {n_threads} threads",
+                    path.display()
+                );
+            }
+        }
+    }
+}

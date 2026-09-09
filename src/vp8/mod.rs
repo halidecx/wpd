@@ -1323,6 +1323,13 @@ impl Decoder {
         if self.frame_init(chunk, chunk.len(), chunk.len())? == Status::NeedMore {
             return Err(Error::InvalidData);
         }
+        self.decode_rows_whole(chunk)
+    }
+
+    /// Reconstructs the whole frame, which frame_init() must have opened.
+    /// Apart from decode_frame() this is for a caller that wants to put
+    /// something else on another thread in between the two.
+    pub fn decode_rows_whole(&mut self, chunk: &[u8]) -> Result<()> {
         self.decode_rows_tmpl(chunk, false)?;
         Ok(())
     }

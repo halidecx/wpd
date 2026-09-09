@@ -5,6 +5,9 @@ pub struct Options {
     pub crop: Option<(i32, i32, i32, i32)>,
     pub scale: Option<(i32, i32)>,
     pub flip: bool,
+    /// Threads a decode may use, counting the calling thread. Zero asks the
+    /// decoder to choose, one keeps everything here.
+    pub n_threads: i32,
 }
 
 impl Options {

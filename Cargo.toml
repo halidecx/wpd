@@ -24,8 +24,9 @@ exclude = ["*.c", "*.h", "meson*", "scripts/", "tests/", "tools/", "wpd-test-dat
 crate-type = ["rlib"]
 
 [features]
-default = ["asm"]
+default = ["asm", "threads"]
 asm = []
+threads = []
 trim_dsp = []
 force_rac32 = []
 
