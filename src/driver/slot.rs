@@ -17,6 +17,20 @@ pub(crate) struct FrameEnv<'e, 'i> {
     pub(crate) ldsp: &'e Vp8lDsp,
     pub(crate) fdsp: &'e FilterDsp,
     pub(crate) ydsp: &'e YuvDsp,
+    pub(crate) settings: FrameSettings,
+    pub(crate) threads: usize,
+}
+
+impl std::ops::Deref for FrameEnv<'_, '_> {
+    type Target = FrameSettings;
+
+    fn deref(&self) -> &FrameSettings {
+        &self.settings
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FrameSettings {
     pub(crate) bypass_filtering: bool,
     pub(crate) no_fancy_upsampling: bool,
     /// The output format alone decides the frame must become ARGB, whatever
@@ -24,13 +38,6 @@ pub(crate) struct FrameEnv<'e, 'i> {
     pub(crate) to_argb: bool,
     /// libwebp premultiplies a frame before compositing it.
     pub(crate) premultiply: bool,
-    /// An animation's parallelism is whole frames, so a frame belonging to one
-    /// does not also split its alpha off. Where the frames can be batched the
-    /// slot is on a thread of its own already; where they cannot, because the
-    /// animation is streamed, the frames are small enough that the split costs
-    /// a spawn per frame and returns less.
-    pub(crate) animation: bool,
-    pub(crate) threads: usize,
 }
 
 /// Everything one frame's decode produces and nothing that outlives it.
@@ -61,8 +68,7 @@ pub(crate) struct FrameSlot {
 
     /// Set once the image has been put in the form compositing wants, so a
     /// frame prepared in a batch is not converted or premultiplied twice.
-    prepared: bool,
-    out: Source,
+    prepared: Option<Source>,
 }
 
 impl FrameSlot {
@@ -120,11 +126,10 @@ impl FrameSlot {
         which: Source,
         to_argb: bool,
     ) -> Result<Source> {
-        if self.prepared {
-            return Ok(self.out);
+        if let Some(out) = self.prepared {
+            return Ok(out);
         }
-        self.prepared = true;
-        self.out = which;
+        let mut out = which;
 
         if to_argb {
             let (src, converted) = self.split_converted(which);
@@ -137,7 +142,7 @@ impl FrameSlot {
                     env.no_fancy_upsampling,
                     env.threads,
                 )?;
-                self.out = Source::Converted;
+                out = Source::Converted;
             }
         }
 
@@ -148,7 +153,7 @@ impl FrameSlot {
                 lossless_out,
                 ..
             } = self;
-            let view = match self.out {
+            let view = match out {
                 Source::Converted => Some(converted.frame_mut()),
                 Source::Lossless => lossless_out.and_then(|w| vp8l.view_mut(w)),
                 Source::Lossy | Source::Canvas | Source::None => None,
@@ -160,10 +165,12 @@ impl FrameSlot {
                 }
             }
         }
-        Ok(self.out)
+        self.prepared = Some(out);
+        Ok(out)
     }
 
     pub(crate) fn reset(&mut self) {
+        self.prepared = None;
         self.vp8l.reset();
         self.width = 0;
         self.height = 0;
@@ -196,6 +203,16 @@ impl FrameSlot {
         self.height = h;
     }
 
+    pub(crate) fn lossless_canvas_in(&mut self) {
+        self.vp8l.set_canvas(self.width, self.height);
+    }
+
+    pub(crate) fn lossless_canvas_out(&mut self) {
+        self.width = self.vp8l.width;
+        self.height = self.vp8l.height;
+        self.lossless_has_alpha = self.vp8l.has_alpha;
+    }
+
     pub(crate) fn lossless_decode(
         &mut self,
         env: &FrameEnv<'_, '_>,
@@ -205,7 +222,7 @@ impl FrameSlot {
         /* The canvas a lossless image is decoded against is whatever this
          * slot has been told to expect, which is nothing for a still and the
          * sub-frame's declared size inside an ANMF. */
-        self.vp8l.set_canvas(self.width, self.height);
+        self.lossless_canvas_in();
 
         let ret = self.vp8l.decode_frame(
             crate::vp8l::Target::Argb,
@@ -214,9 +231,7 @@ impl FrameSlot {
             None,
         );
 
-        self.width = self.vp8l.width;
-        self.height = self.vp8l.height;
-        self.lossless_has_alpha = self.vp8l.has_alpha;
+        self.lossless_canvas_out();
         ret?;
         self.lossless_out = Some(Lossless::Argb);
         Ok(())
@@ -261,7 +276,7 @@ impl FrameSlot {
         self.has_alpha = false;
         self.width = 0;
         self.height = 0;
-        self.prepared = false;
+        self.prepared = None;
 
         let mut sub: Option<Source> = None;
         let mut at = base + 16;
@@ -370,6 +385,7 @@ pub(crate) struct Ahead {
     pub(crate) slots: Vec<FrameSlot>,
     pub(crate) entries: Vec<AheadEntry>,
     pub(crate) pos: usize,
+    pub(crate) settings: FrameSettings,
 }
 
 impl Ahead {
@@ -380,7 +396,9 @@ impl Ahead {
 
     pub(crate) fn release(&mut self) {
         self.clear();
-        self.slots = Vec::new();
+        for slot in &mut self.slots {
+            slot.release();
+        }
     }
 
     /// True once every frame decoded ahead has been handed over.

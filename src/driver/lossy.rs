@@ -224,11 +224,7 @@ impl FrameSlot {
          * the handoff would cost more than it saves, and an animation frame
          * gets its parallelism from being one frame of several. */
         let big_enough = (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS;
-        let threads = if big_enough && !env.animation {
-            env.threads
-        } else {
-            1
-        };
+        let threads = if big_enough { env.threads } else { 1 };
         let chunk = env.input.chunk(offset, size);
         let (alpha, vp8) = self.alpha_work(env);
         let Some(vp8) = vp8 else {
@@ -270,35 +266,41 @@ impl<'a> Decoder<'a> {
 
     /// The slot a frame decodes into beside everything that decode reads.
     /// They come apart because nothing in the environment lives on the slot.
-    pub(crate) fn frame_parts(&mut self) -> (&mut FrameSlot, FrameEnv<'_, 'a>) {
-        let bypass_filtering = self.filter_bypass();
-        let to_argb = self.frame_to_argb();
-        let premultiply = self.frame_premultiply();
-        let no_fancy_upsampling = self.options.no_fancy_upsampling;
-        let animation = self.animation;
+    pub(crate) fn frame_settings(&self) -> super::slot::FrameSettings {
+        super::slot::FrameSettings {
+            bypass_filtering: self.filter_bypass(),
+            no_fancy_upsampling: self.options.no_fancy_upsampling,
+            to_argb: self.frame_to_argb(),
+            premultiply: self.frame_premultiply(),
+        }
+    }
+
+    pub(crate) fn frame_parts(
+        &mut self,
+    ) -> (&mut FrameSlot, &mut super::slot::Ahead, FrameEnv<'_, 'a>) {
+        let settings = self.frame_settings();
+        // Animation parallelism belongs to whole frames, including streaming.
+        let threads = if self.animation { 1 } else { self.threads.0 };
         let Self {
             frame,
+            ahead,
             input,
             ldsp,
             fdsp,
             ydsp,
-            threads,
             ..
         } = self;
 
         (
             frame,
+            ahead,
             FrameEnv {
                 input,
                 ldsp,
                 fdsp,
                 ydsp,
-                bypass_filtering,
-                no_fancy_upsampling,
-                to_argb,
-                premultiply,
-                animation,
-                threads: threads.0,
+                settings,
+                threads,
             },
         )
     }
@@ -327,10 +329,12 @@ impl<'a> Decoder<'a> {
             if self.frame.has_alpha {
                 /* A resumable decode keeps its alpha here: it is decoded once
                  * at frame start, with no row loop yet to run beside it. */
-                let (frame, env) = self.frame_parts();
+                let (frame, _, env) = self.frame_parts();
 
-                frame.alpha_plane_decode(&env)?;
+                let ret = frame.alpha_plane_decode(&env);
+
                 self.alpha_pending = false;
+                ret?;
             }
             self.still_lossy = !self.animation;
             self.vp8_active = true;
@@ -363,13 +367,10 @@ impl<'a> Decoder<'a> {
         size: usize,
     ) -> Result<()> {
         let ret = {
-            let (frame, env) = self.frame_parts();
+            let (frame, _, env) = self.frame_parts();
 
             frame.lossy_decode_frame(&env, offset, size)
         };
-        let (w, h) = self.frame.size();
-
-        self.frame.set_size(w, h);
         self.alpha_pending = false;
         ret?;
         self.still_lossy = !self.animation;

@@ -262,24 +262,12 @@ impl<'a> Decoder<'a> {
         source_view(which, &self.frame, Some(&self.canvas))
     }
 
-    pub(crate) fn lossless_canvas_in(&mut self) {
-        self.frame
-            .vp8l
-            .set_canvas(self.frame.width, self.frame.height);
-    }
-
-    pub(crate) fn lossless_canvas_out(&mut self) {
-        self.frame.width = self.frame.vp8l.width;
-        self.frame.height = self.frame.vp8l.height;
-        self.frame.lossless_has_alpha = self.frame.vp8l.has_alpha;
-    }
-
     pub(crate) fn lossless_decode(
         &mut self,
         offset: usize,
         size: usize,
     ) -> Result<(), Error> {
-        let (frame, env) = self.frame_parts();
+        let (frame, _, env) = self.frame_parts();
 
         frame.lossless_decode(&env, offset, size)
     }
@@ -672,9 +660,6 @@ impl Decoder<'_> {
         }
         self.options = options;
         self.threads = Threads(crate::task::resolve(options.n_threads));
-        /* A batch decoded ahead baked in the settings that were current when
-         * it ran, so it is no longer about the decode being asked for. */
-        self.ahead.clear();
         Ok(())
     }
 
@@ -703,7 +688,6 @@ impl Decoder<'_> {
             return Err(self.fail("invalid output format", Error::InvalidArgument));
         }
         self.out_format = OutFormat(format);
-        self.ahead.clear();
         Ok(())
     }
 
@@ -839,14 +823,14 @@ impl<'a> Decoder<'a> {
         size: usize,
         complete: bool,
     ) -> Result<bool, Error> {
-        self.lossless_canvas_in();
+        self.frame.lossless_canvas_in();
 
         let Self { frame, input, .. } = self;
         let ret = frame
             .vp8l
             .still_step(input.chunk(offset, avail), size, complete);
 
-        self.lossless_canvas_out();
+        self.frame.lossless_canvas_out();
 
         let done = ret? == crate::error::Status::Done;
 
@@ -1302,6 +1286,79 @@ mod tests {
         out.extend_from_slice(&(RAW_LOSSLESS.len() as u32).to_le_bytes());
         out.extend_from_slice(RAW_LOSSLESS);
         out
+    }
+
+    #[test]
+    fn a_failed_frame_header_does_not_copy_stale_dimensions() {
+        let mut decoder = Decoder::new();
+
+        decoder.frame.set_size(7, 9);
+        assert!(decoder.vp8_lossy_decode_frame(0, 0).is_err());
+        assert_eq!((decoder.frame.width, decoder.frame.height), (7, 9));
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn a_failed_streamed_alpha_decode_releases_its_input_pin() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/a_lossy.webp"
+        ))
+        .unwrap();
+        let offset = data.windows(4).position(|v| v == b"VP8 ").unwrap() + 8;
+        let size = crate::bits::rl32(&data[offset - 4..]) as usize;
+        let mut decoder = Decoder::new();
+
+        decoder.open(&data).unwrap();
+        decoder.frame.has_alpha = true;
+        decoder.frame.alpha_compression = ALPHA_COMPRESSION_VP8L;
+        decoder.frame.alpha_data_size = 0;
+        decoder.alpha_pending = true;
+        assert!(decoder.vp8_lossy_step(offset, size, size).is_err());
+        assert!(!decoder.alpha_pending);
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn first_frames_are_lazy_and_reopen_reuses_batch_decoders() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuv.webp"
+        ))
+        .unwrap();
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(Options {
+                n_threads: 8,
+                ..Options::default()
+            })
+            .unwrap();
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(decoder.ahead.slots.is_empty());
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.ahead.spent());
+        let count = decoder.ahead.slots.len();
+        let allocated: Vec<_> =
+            decoder.ahead.slots.iter().map(|s| s.vp8.as_ptr()).collect();
+
+        decoder.open(&data).unwrap();
+        assert_eq!(decoder.ahead.slots.len(), count);
+        assert_eq!(
+            decoder
+                .ahead
+                .slots
+                .iter()
+                .map(|s| s.vp8.as_ptr())
+                .collect::<Vec<_>>(),
+            allocated
+        );
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(decoder.ahead.spent());
+        decoder.rewind().unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(decoder.ahead.spent());
     }
 
     struct NeverFits;

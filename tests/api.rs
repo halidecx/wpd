@@ -184,6 +184,48 @@ fn flipping_reverses_the_rows() {
     }
 }
 
+fn decode_bytes(
+    bytes: &[u8],
+    format: Format,
+    options: Options,
+    subframe: bool,
+    switch: Option<fn(&mut Decoder)>,
+) -> Vec<u8> {
+    let mut d = Decoder::new();
+
+    d.set_format(format).unwrap();
+    d.set_options(options).unwrap();
+    if subframe {
+        d.set_animation(Animation::Subframe).unwrap();
+    }
+    d.open(bytes).unwrap();
+
+    let mut out = Vec::new();
+    let mut index = 0;
+
+    loop {
+        // The second frame fills lookahead; change settings while it is pending.
+        if index == 2 {
+            if let Some(switch) = switch {
+                switch(&mut d);
+            }
+        }
+        let Some(picture) = d.next_frame().unwrap() else {
+            break;
+        };
+
+        out.extend_from_slice(&picture.width().to_le_bytes());
+        out.extend_from_slice(&picture.height().to_le_bytes());
+        for plane in 0..picture.planes() {
+            for row in picture.rows_of(plane) {
+                out.extend_from_slice(row);
+            }
+        }
+        index += 1;
+    }
+    out
+}
+
 /// Every decode, at every thread count, must produce the same bytes. Counts
 /// that are not powers of two matter once work is divided into bands and
 /// batches rather than handed over whole.
@@ -191,45 +233,35 @@ fn flipping_reverses_the_rows() {
 fn the_thread_count_does_not_change_a_single_byte() {
     const COUNTS: [i32; 6] = [1, 2, 3, 5, 8, 16];
 
-    fn decode(bytes: &[u8], format: Format, n_threads: i32, subframe: bool) -> Vec<u8> {
-        let mut d = Decoder::new();
-
-        d.set_format(format).unwrap();
-        d.set_options(Options {
-            n_threads,
-            ..Options::default()
-        })
-        .unwrap();
-        if subframe {
-            d.set_animation(Animation::Subframe).unwrap();
-        }
-        d.open(bytes).unwrap();
-
-        let mut out = Vec::new();
-
-        while let Some(picture) = d.next_frame().unwrap() {
-            out.extend_from_slice(&picture.width().to_le_bytes());
-            out.extend_from_slice(&picture.height().to_le_bytes());
-            for plane in 0..picture.planes() {
-                for row in picture.rows_of(plane) {
-                    out.extend_from_slice(row);
-                }
-            }
-        }
-        out
-    }
-
     for path in corpus() {
         let bytes = fs::read(&path).unwrap();
 
         for format in [Format::Rgba, Format::RgbaPre, Format::Rgb565, Format::Argb] {
             for subframe in [false, true] {
-                let want = decode(&bytes, format, 1, subframe);
+                let want = decode_bytes(
+                    &bytes,
+                    format,
+                    Options {
+                        n_threads: 1,
+                        ..Options::default()
+                    },
+                    subframe,
+                    None,
+                );
 
                 assert!(!want.is_empty(), "{} decoded nothing", path.display());
                 for n_threads in COUNTS {
                     assert_eq!(
-                        decode(&bytes, format, n_threads, subframe),
+                        decode_bytes(
+                            &bytes,
+                            format,
+                            Options {
+                                n_threads,
+                                ..Options::default()
+                            },
+                            subframe,
+                            None
+                        ),
                         want,
                         "{} in {format:?} at {n_threads} threads",
                         path.display()
@@ -244,37 +276,35 @@ fn the_thread_count_does_not_change_a_single_byte() {
 /// down each one, so a scaled decode is swept separately.
 #[test]
 fn a_scaled_decode_is_the_same_at_any_thread_count() {
-    fn decode(bytes: &[u8], scale: (i32, i32), n_threads: i32) -> Vec<u8> {
-        let mut d = Decoder::new();
-
-        d.set_format(Format::Rgba).unwrap();
-        d.set_options(Options {
-            n_threads,
-            scale: Some(scale),
-            ..Options::default()
-        })
-        .unwrap();
-        d.open(bytes).unwrap();
-
-        let mut out = Vec::new();
-
-        while let Some(picture) = d.next_frame().unwrap() {
-            for row in picture.rows_of(0) {
-                out.extend_from_slice(row);
-            }
-        }
-        out
-    }
-
     for path in corpus() {
         let bytes = fs::read(&path).unwrap();
 
         for scale in [(64, 64), (0, 37), (320, 0)] {
-            let want = decode(&bytes, scale, 1);
+            let want = decode_bytes(
+                &bytes,
+                Format::Rgba,
+                Options {
+                    n_threads: 1,
+                    scale: Some(scale),
+                    ..Options::default()
+                },
+                false,
+                None,
+            );
 
             for n_threads in [2, 3, 5, 8] {
                 assert_eq!(
-                    decode(&bytes, scale, n_threads),
+                    decode_bytes(
+                        &bytes,
+                        Format::Rgba,
+                        Options {
+                            n_threads,
+                            scale: Some(scale),
+                            ..Options::default()
+                        },
+                        false,
+                        None
+                    ),
                     want,
                     "{} scaled to {scale:?} at {n_threads} threads",
                     path.display()
@@ -293,40 +323,15 @@ fn a_scaled_decode_is_the_same_at_any_thread_count() {
 fn settings_changed_mid_animation_reach_the_next_frame() {
     type Switch = fn(&mut Decoder);
 
-    fn decode(bytes: &[u8], n_threads: i32, switch: Switch) -> Vec<u8> {
-        let mut d = Decoder::new();
-
-        d.set_format(Format::Rgba).unwrap();
-        d.set_options(Options {
-            n_threads,
-            ..Options::default()
-        })
-        .unwrap();
-        d.open(bytes).unwrap();
-
-        let mut out = Vec::new();
-        let mut index = 0;
-
-        loop {
-            /* After the first frame, which is what fills the batch. */
-            if index == 1 {
-                switch(&mut d);
-            }
-            let Some(picture) = d.next_frame().unwrap() else {
-                break;
-            };
-
-            for plane in 0..picture.planes() {
-                for row in picture.rows_of(plane) {
-                    out.extend_from_slice(row);
-                }
-            }
-            index += 1;
-        }
-        out
-    }
-
-    let switches: [(&str, Switch); 2] = [
+    let switches: [(&str, Switch); 4] = [
+        ("planar", |d| d.set_format(Format::Yuv420p).unwrap()),
+        ("filter", |d| {
+            d.set_options(Options {
+                bypass_filtering: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
         ("format", |d| d.set_format(Format::RgbaPre).unwrap()),
         ("options", |d| {
             d.set_options(Options {
@@ -341,11 +346,29 @@ fn settings_changed_mid_animation_reach_the_next_frame() {
         let bytes = fs::read(&path).unwrap();
 
         for (name, switch) in switches {
-            let want = decode(&bytes, 1, switch);
+            let want = decode_bytes(
+                &bytes,
+                Format::Rgba,
+                Options {
+                    n_threads: 1,
+                    ..Options::default()
+                },
+                false,
+                Some(switch),
+            );
 
             for n_threads in [2, 3, 5, 8, 16] {
                 assert_eq!(
-                    decode(&bytes, n_threads, switch),
+                    decode_bytes(
+                        &bytes,
+                        Format::Rgba,
+                        Options {
+                            n_threads,
+                            ..Options::default()
+                        },
+                        false,
+                        Some(switch)
+                    ),
                     want,
                     "{} switching {name} at {n_threads} threads",
                     path.display()

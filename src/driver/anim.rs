@@ -11,7 +11,7 @@ use crate::image::Format;
 use crate::picture::{Buffer, Frame};
 
 use super::convert::{convert_to_argb, format_is_packed, format_is_premultiplied};
-use super::slot::{AheadEntry, FrameEnv, FrameSlot};
+use super::slot::{AheadEntry, FrameSlot};
 use super::{Decoder, InputMode, Source, ANIM_SUBFRAME};
 
 pub struct CPlacement {
@@ -233,11 +233,10 @@ impl<'a> Decoder<'a> {
     ///
     /// Bounded by threads, by a ceiling of eight, and by memory: every slot
     /// holds a decoded frame, so the count comes down as the canvas grows. A
-    /// canvas too small to earn a thread, a streamed animation, and an
-    /// animation whose input may still be replaced under it all get one.
+    /// streamed animation or replaceable input gets one. The work threshold
+    /// is checked against sub-frame dimensions after lookahead.
     fn ahead_count(&self) -> usize {
         const MAX_SLOTS: usize = 8;
-        const MIN_CANVAS_PIXELS: i64 = 96 * 96;
         /* Y, U, V, alpha and the ARGB a sub-frame may be converted into. */
         const BYTES_PER_PIXEL: i64 = 6;
         const BUDGET: i64 = 96 << 20;
@@ -250,10 +249,6 @@ impl<'a> Decoder<'a> {
         }
 
         let pixels = i64::from(self.canvas_width) * i64::from(self.canvas_height);
-
-        if pixels < MIN_CANVAS_PIXELS {
-            return 1;
-        }
 
         let by_memory = BUDGET / (pixels * BYTES_PER_PIXEL).max(1);
 
@@ -310,13 +305,27 @@ impl<'a> Decoder<'a> {
     fn fill_ahead(&mut self, base: usize, size: usize) {
         let want = self.ahead_count();
 
-        if want < 2 {
+        if want < 2 || self.anim.frame_index == 0 {
             return;
         }
 
         let entries = self.anmf_lookahead((base, size), want);
 
-        if entries.len() < 2 {
+        // Use declared sub-frame work; a large canvas may only blink a pixel.
+        let pixels: u64 = entries
+            .iter()
+            .map(|entry| {
+                let header = self.input.chunk(entry.base, entry.size.min(16));
+                if header.len() < 16 {
+                    return 0;
+                }
+                let width = u64::from(rl24(&header[6..])) + 1;
+                let height = u64::from(rl24(&header[9..])) + 1;
+                width * height
+            })
+            .sum();
+
+        if entries.len() < 2 || pixels < entries.len() as u64 * 96 * 96 {
             return;
         }
 
@@ -333,33 +342,11 @@ impl<'a> Decoder<'a> {
         self.ahead.entries = entries;
         self.ahead.pos = 0;
 
-        let bypass_filtering = self.filter_bypass();
-        let to_argb = self.frame_to_argb();
-        let premultiply = self.frame_premultiply();
-        let no_fancy_upsampling = self.options.no_fancy_upsampling;
         let threads = self.threads.0;
-        let Self {
-            ahead,
-            input,
-            ldsp,
-            fdsp,
-            ydsp,
-            ..
-        } = self;
-        /* Each slot is already on a thread of its own, so a frame does not
-         * also split its alpha or its conversion off onto another one. */
-        let env = FrameEnv {
-            input,
-            ldsp,
-            fdsp,
-            ydsp,
-            bypass_filtering,
-            no_fancy_upsampling,
-            to_argb,
-            premultiply,
-            animation: true,
-            threads: 1,
-        };
+        let (_, ahead, mut env) = self.frame_parts();
+
+        env.threads = 1;
+        ahead.settings = env.settings;
         let mut jobs: Vec<(&mut FrameSlot, &mut AheadEntry)> = ahead
             .slots
             .iter_mut()
@@ -378,7 +365,7 @@ impl<'a> Decoder<'a> {
         let i = self.ahead.pos;
         let entry = *self.ahead.entries.get(i)?;
 
-        if entry.base != base {
+        if entry.base != base || self.ahead.settings != self.frame_settings() {
             /* The walk did not arrive where the batch expected, so the batch
              * is about something else; drop it and decode here. */
             self.ahead.clear();
@@ -418,7 +405,7 @@ impl<'a> Decoder<'a> {
         let sub = match self.take_ahead(base) {
             Some(out) => out,
             None => {
-                let (frame, env) = self.frame_parts();
+                let (frame, _, env) = self.frame_parts();
 
                 frame.decode_anmf_image(&env, base, size)
             }
@@ -470,7 +457,7 @@ impl<'a> Decoder<'a> {
         }
 
         which = {
-            let (frame, env) = self.frame_parts();
+            let (frame, _, env) = self.frame_parts();
 
             frame.prepare(&env, which, target == argb)?
         };
@@ -510,5 +497,48 @@ impl<'a> Decoder<'a> {
         let src = super::source_view(which, frame, None);
 
         anim_composite(pl, CompositeTargets { ldsp, ydsp, canvas }, &src, target)
+    }
+}
+
+#[cfg(all(test, feature = "threads", not(miri)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_large_canvas_with_tiny_subframes_does_not_fill_a_batch() {
+        let original = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuv.webp"
+        ))
+        .unwrap();
+        let mut tiny = original.clone();
+        let mut at = 12;
+        let mut first = None;
+
+        while at + 8 <= tiny.len() {
+            let size = rl32(&tiny[at + 4..]) as usize;
+            if &tiny[at..at + 4] == b"ANMF" {
+                first.get_or_insert((at + 8, size));
+                tiny[at + 14..at + 20].fill(0);
+            }
+            at += 8 + size + (size & 1);
+        }
+        let (base, size) = first.unwrap();
+
+        for (data, batch) in [(&original, true), (&tiny, false)] {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(crate::options::Options {
+                    n_threads: 8,
+                    ..Default::default()
+                })
+                .unwrap();
+            decoder.open(data).unwrap();
+            decoder.anim.frame_index = 1;
+            decoder.pos = base + size + (size & 1);
+            decoder.fill_ahead(base, size);
+            assert_eq!(!decoder.ahead.spent(), batch);
+        }
     }
 }
