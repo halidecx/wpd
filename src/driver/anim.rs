@@ -305,7 +305,7 @@ impl<'a> Decoder<'a> {
     fn fill_ahead(&mut self, base: usize, size: usize) {
         let want = self.ahead_count();
 
-        if want < 2 || self.anim.frame_index == 0 {
+        if want < 2 {
             return;
         }
 

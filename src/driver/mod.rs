@@ -1320,7 +1320,7 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "threads", not(miri)))]
-    fn first_frames_are_lazy_and_reopen_reuses_batch_decoders() {
+    fn reopen_reuses_batch_decoders_and_rewind_discards_pending_frames() {
         let data = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/wpd-test-data/anim_yuv.webp"
@@ -1336,8 +1336,7 @@ mod tests {
             .unwrap();
         decoder.open(&data).unwrap();
         assert!(decoder.next_picture(&mut Handout::default()).unwrap());
-        assert!(decoder.ahead.slots.is_empty());
-        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.ahead.slots.is_empty());
         assert!(!decoder.ahead.spent());
         let count = decoder.ahead.slots.len();
         let allocated: Vec<_> =
@@ -1354,11 +1353,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             allocated
         );
-        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
         assert!(decoder.ahead.spent());
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.ahead.spent());
         decoder.rewind().unwrap();
-        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
         assert!(decoder.ahead.spent());
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.ahead.spent());
     }
 
     struct NeverFits;

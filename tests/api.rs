@@ -204,8 +204,8 @@ fn decode_bytes(
     let mut index = 0;
 
     loop {
-        // The second frame fills lookahead; change settings while it is pending.
-        if index == 2 {
+        // Change settings while the first batch is still pending.
+        if index == 1 {
             if let Some(switch) = switch {
                 switch(&mut d);
             }
