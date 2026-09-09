@@ -2731,7 +2731,7 @@ static void test_threads_match(const char *path, WPDPixelFormat format) {
 
     for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]) + 1; i++) {
         WPDDecoderOptions        options = WPD_DECODER_OPTIONS_INIT;
-        WPDDecoderOptionsV1      v1;
+        WPDDecoderOptionsV1     *v1      = NULL;
         const WPDDecoderOptions *pass    = &options;
         WPDDecoder              *decoder = wpd_decoder_create();
         WPDFrame                 frame   = WPD_FRAME_INIT;
@@ -2746,12 +2746,19 @@ static void test_threads_match(const char *path, WPDPixelFormat format) {
             /* The tail padding is dirty on purpose: it is not the caller's to
                zero, and it is where a field appended to the old struct would
                land, so reading n_threads out of it has to be impossible. */
-            memset(&v1, 0xFF, sizeof(v1));
-            memset(&v1, 0, offsetof(WPDDecoderOptionsV1, flip) + sizeof(int));
-            v1.struct_size = sizeof(v1);
-            pass           = (const WPDDecoderOptions *)&v1;
+            v1 = malloc(sizeof(*v1));
+            CHECK(v1 != NULL);
+            if (!v1) {
+                wpd_decoder_free(decoder);
+                break;
+            }
+            memset(v1, 0xFF, sizeof(*v1));
+            memset(v1, 0, offsetof(WPDDecoderOptionsV1, flip) + sizeof(int));
+            v1->struct_size = sizeof(*v1);
+            pass            = (const WPDDecoderOptions *)v1;
         }
         CHECK(wpd_decoder_set_options(decoder, pass) == WPD_OK);
+        free(v1);
         CHECK(wpd_decoder_set_output_format(decoder, format) == WPD_OK);
         CHECK(wpd_decoder_open_borrowed(decoder, data, size) == WPD_OK);
 

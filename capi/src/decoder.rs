@@ -259,11 +259,24 @@ unsafe fn set_output_buffer(
 }
 
 entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
-    let Some(options) = (unsafe { options.as_ref() }) else {
+    if options.is_null() {
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    reported(set_options(decoder, options).map(|()| WPD_OK))
+    // Read only the caller's allocation; a v1 pointer cannot become a v2 reference.
+    let size = unsafe { ptr::addr_of!((*options).struct_size).read() };
+    if size < WPDDecoderOptions::v1() {
+        return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
+    }
+    let mut local: WPDDecoderOptions = unsafe { std::mem::zeroed() };
+    unsafe {
+        ptr::copy_nonoverlapping(
+            options.cast::<u8>(),
+            ptr::addr_of_mut!(local).cast::<u8>(),
+            size.min(std::mem::size_of::<WPDDecoderOptions>()),
+        );
+    }
+    reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
 
 entry!(fn wpd_decoder_set_animation_mode(decoder, mode: c_int) {

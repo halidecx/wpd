@@ -224,7 +224,7 @@ typedef struct WPDDecoderOptions {
      * whatever the number.
      *
      * A caller that sets struct_size to the size of an older struct, which had
-     * no such field, reads back as 0 and so gets threads.
+     * no such field, retains one thread and serial log callbacks.
      */
     int n_threads;
 } WPDDecoderOptions;

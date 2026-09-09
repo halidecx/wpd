@@ -8,6 +8,7 @@ BIN="${1:-./build/wpd}"
 COUNTS="${2:-1 2 3 5 8 16}"
 DIR="${TESTDATA_DIR:-wpd-test-data}"
 
+set -o pipefail
 shopt -s nullglob
 checked=0
 
@@ -18,11 +19,19 @@ for input in "$DIR"/*.webp; do
         for mode in "" "--subframe" "--stream 4096" \
                     "--scale 320x240" "--scale 0x64" "--scale 1024x1024"; do
             want=""
+            outcome=""
             for threads in $COUNTS; do
                 # shellcheck disable=SC2086
+                ok=false
                 got=$("$BIN" --threads "$threads" $mode --muxer md5 \
-                      -f "$fmt" "$input" - 2>/dev/null | tail -1) || continue
-                [ -n "$got" ] || continue
+                      -f "$fmt" "$input" - 2>/dev/null | tail -1) && [ -n "$got" ] && ok=true
+                if [ -n "$outcome" ] && [ "$outcome" != "$ok" ]; then
+                    printf 'decode status mismatch: %s (%s %s) at %s threads\n' \
+                        "$input" "$fmt" "$mode" "$threads" >&2
+                    exit 1
+                fi
+                outcome="$ok"
+                [ "$ok" = true ] || continue
                 if [ -z "$want" ]; then
                     want="$got"
                 elif [ "$got" != "$want" ]; then

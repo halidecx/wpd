@@ -11,8 +11,6 @@
 //! thread to run it on, so a caller needs no second path for `n_threads == 1`,
 //! for a build without the `threads` feature, or for work too small to split.
 
-use crate::error::Result;
-
 /// More than this many threads buys nothing and costs a spawn each.
 const MAX_THREADS: usize = 64;
 
@@ -68,77 +66,71 @@ pub fn join<A: Send, B>(
         return (side(), b);
     }
 
+    let side = std::sync::Mutex::new(Some(side));
+
     std::thread::scope(|s| {
-        let handle = s.spawn(side);
+        let job = &side;
+        let handle = std::thread::Builder::new()
+            .spawn_scoped(s, move || job.lock().unwrap().take().unwrap()());
         let b = main();
 
-        (unwrap_joined(handle.join()), b)
+        let a = match handle {
+            Ok(handle) => unwrap_joined(handle.join()),
+            Err(_) => side.lock().unwrap().take().unwrap()(),
+        };
+        (a, b)
     })
 }
 
 /// Runs `f` once per element, on up to `threads` threads.
 pub fn for_each<T: Send>(threads: usize, items: &mut [T], f: impl Fn(&mut T) + Sync) {
-    let _ = try_for_each(threads, items, |item| {
-        f(item);
-        Ok(())
-    });
-}
-
-/// Runs `f` once per element, on up to `threads` threads. Every element is
-/// visited whatever the ones before it returned, and the first error in
-/// element order is the one reported, so a failure does not depend on which
-/// thread got there first.
-pub fn try_for_each<T: Send>(
-    threads: usize,
-    items: &mut [T],
-    f: impl Fn(&mut T) -> Result<()> + Sync,
-) -> Result<()> {
     if !cfg!(feature = "threads") || threads < 2 || items.len() < 2 {
-        return run(items, &f);
+        return items.iter_mut().for_each(&f);
     }
 
     let n = threads.min(items.len());
     let per = items.len().div_ceil(n);
     let f = &f;
 
-    std::thread::scope(|s| {
+    {
         let mut chunks = items.chunks_mut(per);
         /* The last chunk stays here: the caller has to wait for the others
          * anyway, and running one of them costs no spawn. */
         let last = chunks.next_back();
-        let mut handles = Vec::with_capacity(chunks.len());
 
-        for chunk in chunks {
-            handles.push(s.spawn(move || run(chunk, f)));
-        }
+        let jobs: Vec<_> = chunks
+            .map(|chunk| std::sync::Mutex::new(Some(chunk)))
+            .collect();
 
-        let mut first = match last {
-            Some(chunk) => run(chunk, f),
-            None => Ok(()),
-        };
-
-        for handle in handles.into_iter().rev() {
-            let ret = unwrap_joined(handle.join());
-
-            if ret.is_err() {
-                first = ret;
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(jobs.len());
+            for job in &jobs {
+                let borrowed = job;
+                // A failed spawn leaves the job here, so resource limits only
+                // reduce parallelism.
+                match std::thread::Builder::new().spawn_scoped(s, move || {
+                    borrowed
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .iter_mut()
+                        .for_each(f);
+                }) {
+                    Ok(handle) => handles.push(handle),
+                    Err(_) => {
+                        job.lock().unwrap().take().unwrap().iter_mut().for_each(f)
+                    }
+                }
             }
-        }
-        first
-    })
-}
-
-fn run<T>(items: &mut [T], f: &(impl Fn(&mut T) -> Result<()> + ?Sized)) -> Result<()> {
-    let mut first = Ok(());
-
-    for item in items {
-        let ret = f(item);
-
-        if first.is_ok() {
-            first = ret;
-        }
+            if let Some(chunk) = last {
+                chunk.iter_mut().for_each(f);
+            }
+            for handle in handles {
+                unwrap_joined(handle.join());
+            }
+        });
     }
-    first
 }
 
 fn unwrap_joined<T>(joined: std::thread::Result<T>) -> T {
@@ -151,7 +143,6 @@ fn unwrap_joined<T>(joined: std::thread::Result<T>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
 
     #[test]
     fn a_thread_count_of_zero_asks_the_machine_and_one_is_taken_at_its_word() {
@@ -187,26 +178,6 @@ mod tests {
 
             for_each(threads, &mut items, |item| *item *= 2);
             assert!(items.iter().enumerate().all(|(i, &v)| v == 2 * i));
-        }
-    }
-
-    #[test]
-    fn the_first_failure_in_element_order_is_the_one_reported() {
-        for threads in [1, 2, 3, 5, 8] {
-            let mut items: Vec<usize> = (0..17).collect();
-            let seen = std::sync::atomic::AtomicUsize::new(0);
-
-            let ret = try_for_each(threads, &mut items, |item| {
-                seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                match *item {
-                    5 => Err(Error::InvalidData),
-                    9 => Err(Error::NoMemory),
-                    _ => Ok(()),
-                }
-            });
-
-            assert_eq!(ret, Err(Error::InvalidData));
-            assert_eq!(seen.load(std::sync::atomic::Ordering::Relaxed), 17);
         }
     }
 }

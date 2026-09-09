@@ -42,9 +42,7 @@ impl WPDDecoderOptions {
         mem::offset_of!(WPDDecoderOptions, n_threads) + mem::size_of::<c_int>()
     }
 
-    /// A caller built against the v1 struct reads back as `n_threads == 0`,
-    /// which is the same thing a v2 caller gets from a zeroed struct: let the
-    /// decoder choose.
+    /// Legacy callers retain serial decoding and serial log callbacks.
     pub(crate) fn to_core(&self) -> Options {
         Options {
             bypass_filtering: self.bypass_filtering != 0,
@@ -61,8 +59,24 @@ impl WPDDecoderOptions {
             n_threads: if self.struct_size >= Self::v2() {
                 self.n_threads
             } else {
-                0
+                1
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_options_keep_callbacks_on_the_calling_thread() {
+        let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
+
+        options.struct_size = V1_SIZE;
+        options.n_threads = 8;
+        assert_eq!(options.to_core().n_threads, 1);
+        options.struct_size = mem::size_of::<WPDDecoderOptions>();
+        assert_eq!(options.to_core().n_threads, 8);
     }
 }
