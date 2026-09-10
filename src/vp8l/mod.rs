@@ -803,6 +803,13 @@ impl Decoder {
         target: Target,
         mut alpha_dst: Option<AlphaDst<'_>>,
     ) -> Result<()> {
+        // Palette expansion changes the row layout and keeps its whole-image path.
+        if self.nb_transforms > 1
+            && !self.transforms[..self.nb_transforms]
+                .contains(&Transform::ColorIndexing)
+        {
+            return self.apply_transform_batches(target);
+        }
         for i in (0..self.nb_transforms).rev() {
             match self.transforms[i] {
                 Transform::Predictor => self.apply_predictor(target)?,
@@ -820,6 +827,74 @@ impl Decoder {
                     };
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn apply_transform_batches(&mut self, target: Target) -> Result<()> {
+        let width = self.reduced_width as usize;
+        let has_predictor =
+            self.transforms[..self.nb_transforms].contains(&Transform::Predictor);
+        if has_predictor {
+            grow(&mut self.scratch, 2 * width + 1, 0)?;
+        }
+        let pic = target_picture(target, &mut self.argb, &mut self.alpha_argb);
+        let stride = pic.stride;
+        let mut y0 = 0;
+
+        while y0 < pic.height {
+            let y1 = (y0 + ROW_BATCH).min(pic.height);
+            let base = y0 as usize * stride;
+            for i in (0..self.nb_transforms).rev() {
+                match self.transforms[i] {
+                    Transform::Predictor => {
+                        predict_batch(
+                            &self.dsp,
+                            &mut pic.data,
+                            &mut self.scratch,
+                            base,
+                            stride,
+                            width,
+                            width,
+                            &self.image[ROLE_PREDICTOR],
+                            y0,
+                            y1,
+                        )?;
+                        // Later transforms must not change the predictor's upper row.
+                        if y1 < pic.height {
+                            let last = (y1 - 1) as usize * stride;
+                            self.scratch[..width]
+                                .copy_from_slice(&pic.data[last..][..width]);
+                        }
+                    }
+                    Transform::Color => {
+                        let mult = &self.image[ROLE_COLOR];
+                        transform::color_rows(
+                            &self.dsp,
+                            &mut pic.data,
+                            base,
+                            stride,
+                            width,
+                            &mult.storage.data,
+                            mult.storage.stride,
+                            mult.size_reduction,
+                            y0,
+                            y1,
+                        );
+                    }
+                    Transform::SubtractGreen => {
+                        transform::subtract_green_rows(
+                            &mut pic.data,
+                            base,
+                            stride,
+                            width,
+                            y1 - y0,
+                        );
+                    }
+                    Transform::ColorIndexing => unreachable!(),
+                }
+            }
+            y0 = y1;
         }
         Ok(())
     }
@@ -1230,6 +1305,83 @@ fn predict_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transform_batches_preserve_predictor_rows_in_every_transform_order() {
+        use Transform::{Color, Predictor, SubtractGreen};
+        let orders = [
+            [Predictor, Color, SubtractGreen],
+            [Predictor, SubtractGreen, Color],
+            [Color, Predictor, SubtractGreen],
+            [Color, SubtractGreen, Predictor],
+            [SubtractGreen, Predictor, Color],
+            [SubtractGreen, Color, Predictor],
+        ];
+        for order in orders {
+            for count in [2, 3] {
+                for (width, height) in
+                    [(1, 33), (2, 17), (17, 15), (65, 16), (65, 17), (65, 33)]
+                {
+                    for target in [Target::Argb, Target::Alpha] {
+                        let make = || {
+                            let mut d = Decoder::new();
+                            d.reduced_width = width;
+                            d.transforms[..3].copy_from_slice(&order);
+                            d.nb_transforms = count;
+                            let pic =
+                                target_picture(target, &mut d.argb, &mut d.alpha_argb);
+                            pic.alloc(width, height).unwrap();
+                            let mut v = 42u32;
+                            for px in &mut pic.data {
+                                v = v.wrapping_mul(1664525).wrapping_add(1013904223);
+                                *px = v;
+                            }
+                            for role in [ROLE_PREDICTOR, ROLE_COLOR] {
+                                let img = &mut d.image[role];
+                                img.size_reduction = 2;
+                                img.storage
+                                    .alloc(ceil_shift(width, 2), ceil_shift(height, 2))
+                                    .unwrap();
+                                for (i, px) in img.storage.data.iter_mut().enumerate() {
+                                    *px = if role == ROLE_PREDICTOR {
+                                        u32::from_ne_bytes([0, 0, (i % 14) as u8, 0])
+                                    } else {
+                                        (i as u32).wrapping_mul(0x7313_fa19)
+                                    };
+                                }
+                            }
+                            d
+                        };
+                        let mut actual = make();
+                        let mut expected = make();
+                        for &t in order[..count].iter().rev() {
+                            match t {
+                                Predictor => expected.apply_predictor(target).unwrap(),
+                                Color => expected.apply_color(target),
+                                SubtractGreen => expected.apply_subtract_green(target),
+                                _ => unreachable!(),
+                            }
+                        }
+                        actual.apply_transforms(target, None).unwrap();
+                        let a = target_picture(
+                            target,
+                            &mut actual.argb,
+                            &mut actual.alpha_argb,
+                        );
+                        let b = target_picture(
+                            target,
+                            &mut expected.argb,
+                            &mut expected.alpha_argb,
+                        );
+                        assert_eq!(
+                            a.data, b.data,
+                            "{order:?} {count} {width}x{height} {target:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     const WIDE: &[u8] = &[
         0x2f, 0x31, 0x1a, 0x8e, 0x1a, 0x8e, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
