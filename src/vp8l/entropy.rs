@@ -236,11 +236,13 @@ fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize)
 
     let mut i = 0;
 
+    // The source grows with the output, so short patterns take logarithmically
+    // many copies while each individual copy remains non-overlapping.
     while i < length {
-        let step = dist.min(length - i);
+        let step = (dist + i).min(length - i);
         let (done, rest) = pixels.split_at_mut(pos + i);
 
-        rest[..step].copy_from_slice(&done[pos + i - dist..][..step]);
+        rest[..step].copy_from_slice(&done[pos - dist..][..step]);
         i += step;
     }
 }
@@ -576,6 +578,28 @@ fn extend(gb: &mut BitReader, buf: &[u8], prefix: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_overlaps<T: Copy + Eq + std::fmt::Debug>(seed: [T; 64]) {
+        for dist in 1..=seed.len() {
+            for length in (0..=256).chain([4095, 4096]) {
+                let mut actual = vec![seed[0]; seed.len() + length + 8];
+                actual[..seed.len()].copy_from_slice(&seed);
+                let mut expected = actual.clone();
+
+                for i in seed.len()..seed.len() + length {
+                    expected[i] = expected[i - dist];
+                }
+                copy_block(&mut actual, seed.len(), dist, length);
+                assert_eq!(actual, expected, "distance {dist}, length {length}");
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_copies_match_the_pixel_at_a_time_definition() {
+        check_overlaps(std::array::from_fn(|i| i as u8));
+        check_overlaps(std::array::from_fn(|i| 0x1234_5600u32 + i as u32));
+    }
 
     #[test]
     fn a_reference_that_reaches_back_further_than_it_is_long_is_a_copy() {
