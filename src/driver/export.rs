@@ -170,10 +170,17 @@ fn export_external_planar(
     export_external_planar_rows(set, ext, img, format, out, 0, height)
 }
 
-/* Rows go out packed, copied when the layout already matches, and are
- * premultiplied in place afterwards. Four callers want some of that. */
-fn pack_rows(dst: &mut Buffer, src: &Frame<'_>, pack: Option<RowFn>, rows: Range<i32>) {
+// Premultiply while the freshly packed row is still in cache.
+fn pack_rows(
+    set: &ExportSettings,
+    dsp: &YuvDsp,
+    dst: &mut Buffer,
+    src: &Frame<'_>,
+    pack: Option<RowFn>,
+    rows: Range<i32>,
+) {
     let mut view = dst.frame_mut();
+    let packed = format_premultiplier_4444(dsp, set.out_format);
 
     for y in rows {
         let row = view.row(0, y);
@@ -181,6 +188,9 @@ fn pack_rows(dst: &mut Buffer, src: &Frame<'_>, pack: Option<RowFn>, rows: Range
         match pack {
             Some(pack) => pack(row, src.row(0, y)),
             None => row.copy_from_slice(src.row(0, y)),
+        }
+        if set.premultiply && !set.animation {
+            premultiply_row(dsp, row, set.out_format, packed);
         }
     }
 }
@@ -316,18 +326,18 @@ pub fn export_packed<'a>(
                         premultiply_after_pack(set.animation, set.anim_mode),
                         set.threads,
                     )?;
+                    if premultiply {
+                        premultiply_rows(dsp, output, format, 0..img.height);
+                    }
                 }
                 Route::Pack(pack) => {
                     output.alloc_packed(img.width, img.height, packed.bpp(), packed)?;
-                    pack_rows(output, &img, Some(pack), 0..img.height);
+                    pack_rows(set, dsp, output, &img, Some(pack), 0..img.height);
                 }
                 _ => {
                     output.alloc_packed(img.width, img.height, 4, Format::ArgbPre)?;
-                    pack_rows(output, &img, None, 0..img.height);
+                    pack_rows(set, dsp, output, &img, None, 0..img.height);
                 }
-            }
-            if premultiply {
-                premultiply_rows(dsp, output, format, 0..img.height);
             }
             output.frame()
         }
@@ -614,10 +624,7 @@ pub fn export_still_lossless<'a>(
         output.alloc_packed(img.width, img.height, target.bpp(), target)?;
     }
 
-    pack_rows(output, img, pack, first..upto);
-    if set.premultiply {
-        premultiply_rows(dsp, output, format, first..upto);
-    }
+    pack_rows(set, dsp, output, img, pack, first..upto);
 
     export_own(set, output.frame(), format, out);
     finish();
