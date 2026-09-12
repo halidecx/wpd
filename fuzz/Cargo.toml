@@ -15,10 +15,12 @@ libfuzzer-sys = "0.4"
 [dependencies.wpd]
 path = ".."
 default-features = false
+features = ["threads"]
 
 [dependencies.wpd-capi]
 path = "../capi"
 default-features = false
+features = ["threads"]
 
 [profile.release]
 debug = true

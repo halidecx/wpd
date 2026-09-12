@@ -9,3 +9,5 @@ fi
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-disable-isolation}"
 
 cargo +nightly miri test -p wpd --no-default-features "$@"
+cargo +nightly miri test -p wpd-capi --no-default-features \
+    legacy_frame_storage_is_only_accessed_through_its_extent

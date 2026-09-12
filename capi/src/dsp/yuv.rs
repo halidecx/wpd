@@ -359,7 +359,13 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     row_start: c_int,
     row_end: c_int,
 ) -> c_int {
-    if width <= 0 || height <= 0 || row_start >= row_end {
+    if width <= 0
+        || height <= 0
+        || row_start < 0
+        || row_start >= row_end
+        || row_end > height
+        || !(0..LAYOUT_NB as c_int).contains(&layout)
+    {
         return row_start;
     }
     if dst_stride <= 0 || y_stride <= 0 || uv_stride <= 0 {
@@ -368,27 +374,59 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     if !a.is_null() && a_stride <= 0 {
         return row_start;
     }
+    if dst.is_null() || y.is_null() || u.is_null() || v.is_null() {
+        return row_start;
+    }
 
     let layout = layout as usize;
     let (w, h) = (width as usize, height as usize);
-    let rows = |stride: isize, n: usize, len: usize| (n - 1) * stride as usize + len;
+    let rows = |stride: isize, n: usize, len: usize| {
+        let stride = stride as usize;
+
+        if stride < len {
+            return None;
+        }
+        (n - 1)
+            .checked_mul(stride)?
+            .checked_add(len)
+            .filter(|&size| size <= isize::MAX as usize)
+    };
+    let Some(dst_row) = bpp(layout).checked_mul(w) else {
+        return row_start;
+    };
+    let Some(dst_len) = rows(dst_stride, h, dst_row) else {
+        return row_start;
+    };
+    let Some(y_len) = rows(y_stride, h, w) else {
+        return row_start;
+    };
+    let chroma_h = h.div_ceil(2);
+    let chroma_w = w.div_ceil(2);
+    let Some(uv_len) = rows(uv_stride, chroma_h, chroma_w) else {
+        return row_start;
+    };
+    let alpha_len = if a.is_null() {
+        None
+    } else {
+        let Some(len) = rows(a_stride, h, w) else {
+            return row_start;
+        };
+        Some(len)
+    };
 
     unsafe {
         let mut out = PlaneMut::borrowed(
-            slice::from_raw_parts_mut(dst, rows(dst_stride, h, bpp(layout) * w)),
+            slice::from_raw_parts_mut(dst, dst_len),
             dst_stride as usize,
         );
-        let plane = |p: *const u8, stride: isize, n: usize, len: usize| {
-            PlaneRef::borrowed(
-                slice::from_raw_parts(p, rows(stride, n, len)),
-                stride as usize,
-            )
+        let plane = |p: *const u8, stride: isize, len: usize| {
+            PlaneRef::borrowed(slice::from_raw_parts(p, len), stride as usize)
         };
         let src = YuvPlanes {
-            y: plane(y, y_stride, h, w),
-            u: plane(u, uv_stride, h.div_ceil(2), w.div_ceil(2)),
-            v: plane(v, uv_stride, h.div_ceil(2), w.div_ceil(2)),
-            a: (!a.is_null()).then(|| plane(a, a_stride, h, w)),
+            y: plane(y, y_stride, y_len),
+            u: plane(u, uv_stride, uv_len),
+            v: plane(v, uv_stride, uv_len),
+            a: alpha_len.map(|len| plane(a, a_stride, len)),
         };
 
         wpd::convert::yuv420_to_packed_rows(
@@ -429,4 +467,36 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed(
             height, 0, height,
         )
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_conversion_bounds_return_before_touching_pointers() {
+        for (start, end) in [(-1, 1), (0, 0), (1, 1), (0, 3)] {
+            assert_eq!(
+                unsafe {
+                    wpd_yuv420_to_packed_rows(
+                        LAYOUT_ARGB as c_int,
+                        std::ptr::null_mut(),
+                        8,
+                        std::ptr::null(),
+                        2,
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        1,
+                        std::ptr::null(),
+                        0,
+                        2,
+                        2,
+                        start,
+                        end,
+                    )
+                },
+                start
+            );
+        }
+    }
 }
