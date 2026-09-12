@@ -20,6 +20,14 @@ pub fn group_index(pixel: u32) -> u32 {
     u32::from(b[1]) << 8 | u32::from(b[2])
 }
 
+pub fn set_group_index(pixel: &mut u32, index: u32) {
+    let mut b = pixel.to_ne_bytes();
+
+    b[1] = (index >> 8) as u8;
+    b[2] = index as u8;
+    *pixel = u32::from_ne_bytes(b);
+}
+
 struct GroupMap<'a> {
     entropy: Option<Entropy<'a>>,
     bits: u32,

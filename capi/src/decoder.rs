@@ -10,7 +10,8 @@ use wpd::handout::Handout;
 
 use crate::container::{info_clear, WPDImageInfo};
 use crate::frame::{
-    frame_clear, frame_valid, write_frame, External, WPDFrame, WPDOutputPlane,
+    frame_clear, frame_private_data, frame_set_plane, frame_set_private_data,
+    frame_valid, write_frame, External, WPDFrame, WPDOutputPlane,
 };
 use crate::options::WPDDecoderOptions;
 
@@ -607,7 +608,7 @@ pub unsafe extern "C" fn wpd_decode_into(
         if data.is_null() || buffer.is_null() || !unsafe { frame_valid(frame) } {
             return WPD_ERR_INVALID_ARG;
         }
-        if !unsafe { (*frame).private_data }.is_null() {
+        if !unsafe { frame_private_data(frame) }.is_null() {
             unsafe { wpd_frame_free(frame) };
         }
         let (decoder, ret) =
@@ -639,7 +640,7 @@ pub unsafe extern "C" fn wpd_decode(
         if data.is_null() || !unsafe { frame_valid(frame) } {
             return WPD_ERR_INVALID_ARG;
         }
-        if !unsafe { (*frame).private_data }.is_null() {
+        if !unsafe { frame_private_data(frame) }.is_null() {
             unsafe { wpd_frame_free(frame) };
         }
         let mut decoded = WPDFrame {
@@ -684,11 +685,11 @@ pub unsafe extern "C" fn wpd_decode(
         unsafe { frame_clear(frame) };
         frame_copy(frame, &decoded);
 
-        let out = unsafe { &mut *frame };
+        let owner = Box::into_raw(owner);
 
-        out.private_data = Box::into_raw(owner).cast::<c_void>();
+        unsafe { frame_set_private_data(frame, owner.cast::<c_void>()) };
 
-        let owner = unsafe { &mut *out.private_data.cast::<WPDFrameOwner>() };
+        let owner = unsafe { &mut *owner };
         let mut status = WPD_OK;
 
         for p in 0..planes {
@@ -711,8 +712,7 @@ pub unsafe extern "C" fn wpd_decode(
                     .extend_from_slice(unsafe { slice::from_raw_parts(src, w) });
             }
             debug_assert_eq!(owner.plane[p].len(), bytes);
-            out.data[p] = owner.plane[p].as_ptr();
-            out.stride[p] = w as isize;
+            unsafe { frame_set_plane(frame, p, owner.plane[p].as_ptr(), w as isize) };
         }
         unsafe { wpd_decoder_free(decoder) };
 
@@ -744,7 +744,7 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
     if !unsafe { frame_valid(frame) } {
         return;
     }
-    let owner = unsafe { (*frame).private_data };
+    let owner = unsafe { frame_private_data(frame) };
 
     if !owner.is_null() {
         crate::guard((), || {

@@ -219,6 +219,9 @@ pub struct Decoder {
     transforms: [Transform; 4],
     nb_transforms: usize,
     nb_huffman_groups: usize,
+    nb_huffman_group_codes: usize,
+    huffman_groups_mapped: bool,
+    huffman_group_map: Vec<u32>,
     image: [ImageContext; ROLE_NB],
 
     alpha_dst_used: bool,
@@ -258,6 +261,9 @@ impl Decoder {
         self.resume = Resume::default();
         self.rows_out = 0;
         self.reduced_width = 0;
+        self.nb_huffman_groups = 0;
+        self.nb_huffman_group_codes = 0;
+        self.huffman_groups_mapped = false;
     }
 
     pub fn release(&mut self) {
@@ -272,6 +278,7 @@ impl Decoder {
         self.scratch = Vec::new();
         self.sorted = Vec::new();
         self.lengths = Vec::new();
+        self.huffman_group_map = Vec::new();
     }
 
     pub fn release_alpha_canvas(&mut self) {
@@ -391,7 +398,8 @@ impl Decoder {
     fn decode_entropy_image(&mut self, buf: &[u8]) -> Result<()> {
         self.parse_subimage(ROLE_ENTROPY, buf)?;
 
-        let img = &self.image[ROLE_ENTROPY];
+        const UNUSED: u32 = u32::MAX;
+        let img = &mut self.image[ROLE_ENTROPY];
         let mut max = 0;
 
         for y in 0..img.storage.height as usize {
@@ -402,7 +410,42 @@ impl Decoder {
                 max = max.max(entropy::group_index(*px));
             }
         }
-        self.nb_huffman_groups = max as usize + 1;
+        let nb_codes = max as usize + 1;
+
+        self.nb_huffman_group_codes = nb_codes;
+        self.nb_huffman_groups = nb_codes;
+        self.huffman_groups_mapped = false;
+
+        let pixels = (img.storage.width as usize) * (img.storage.height as usize);
+
+        /* Match libwebp's threshold: compact sparse ids and avoid reserving
+         * all decoding tables up front when an image asks for thousands. */
+        if nb_codes <= 1000 && nb_codes <= pixels {
+            return Ok(());
+        }
+
+        grow(&mut self.huffman_group_map, nb_codes, UNUSED)?;
+        self.huffman_group_map[..nb_codes].fill(UNUSED);
+
+        let mut nb_groups = 0u32;
+
+        for y in 0..img.storage.height as usize {
+            let row = &mut img.storage.data[y * img.storage.stride..]
+                [..img.storage.width as usize];
+
+            for px in row {
+                let old = entropy::group_index(*px) as usize;
+                let mapped = &mut self.huffman_group_map[old];
+
+                if *mapped == UNUSED {
+                    *mapped = nb_groups;
+                    nb_groups += 1;
+                }
+                entropy::set_group_index(px, *mapped);
+            }
+        }
+        self.nb_huffman_groups = nb_groups as usize;
+        self.huffman_groups_mapped = true;
         Ok(())
     }
 
@@ -483,10 +526,12 @@ impl Decoder {
         }
 
         let mut nb_groups = 1usize;
+        let mut nb_group_codes = 1usize;
 
         if role == ROLE_ARGB && self.gb.bit(buf) != 0 {
             self.decode_entropy_image(buf)?;
             nb_groups = self.nb_huffman_groups;
+            nb_group_codes = self.nb_huffman_group_codes;
         }
 
         let mut max_alphabet_size = ALPHABET_SIZES[HUFF_IDX_GREEN] as usize;
@@ -500,6 +545,8 @@ impl Decoder {
             image,
             sorted,
             lengths,
+            huffman_groups_mapped,
+            huffman_group_map,
             ..
         } = self;
 
@@ -517,9 +564,17 @@ impl Decoder {
         img.arena
             .try_reserve(ARENA_CHUNK)
             .map_err(|_| Error::NoMemory)?;
+        let mut unused_arena = Vec::new();
 
         #[allow(clippy::needless_range_loop)]
-        for i in 0..nb_groups {
+        for code in 0..nb_group_codes {
+            let group = if role == ROLE_ARGB && *huffman_groups_mapped {
+                (huffman_group_map[code] != u32::MAX)
+                    .then_some(huffman_group_map[code] as usize)
+            } else {
+                Some(code)
+            };
+
             for j in 0..HUFFMAN_CODES_PER_META_CODE {
                 let extra = if j == HUFF_IDX_GREEN && cache_bits > 0 {
                     1usize << cache_bits
@@ -541,11 +596,19 @@ impl Decoder {
                     crate::log::error("prefix code runs past the end of the data");
                     return Err(Error::InvalidData);
                 }
-                img.groups[i].trees[j] =
-                    huffman::build(&mut img.arena, &mut plan, lengths, sorted)?;
+                if let Some(group) = group {
+                    img.groups[group].trees[j] =
+                        huffman::build(&mut img.arena, &mut plan, lengths, sorted)?;
+                } else {
+                    unused_arena.clear();
+                    huffman::build(&mut unused_arena, &mut plan, lengths, sorted)?;
+                }
             }
 
-            let hg = &mut img.groups[i];
+            let Some(group) = group else {
+                continue;
+            };
+            let hg = &mut img.groups[group];
 
             hg.trivial_literal = hg.trees[HUFF_IDX_RED].mask == 0
                 && hg.trees[HUFF_IDX_BLUE].mask == 0
@@ -1305,6 +1368,77 @@ fn predict_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(miri))]
+    fn sparse_huffman_image(group: u32) -> Vec<u8> {
+        fn put(bits: &mut Vec<u8>, value: u32, count: u32) {
+            for i in 0..count {
+                bits.push(((value >> i) & 1) as u8);
+            }
+        }
+
+        fn simple_tree(bits: &mut Vec<u8>, symbol: u32) {
+            put(bits, 1, 1);
+            put(bits, 0, 1);
+            put(bits, u32::from(symbol > 1), 1);
+            put(bits, symbol, if symbol > 1 { 8 } else { 1 });
+        }
+
+        let mut bits = Vec::new();
+
+        put(&mut bits, 0x2f, 8);
+        put(&mut bits, 0, 14);
+        put(&mut bits, 0, 14);
+        put(&mut bits, 1, 1);
+        put(&mut bits, 0, 3);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 1, 1);
+        put(&mut bits, 0, 3);
+        put(&mut bits, 0, 1);
+        for symbol in [group & 255, group >> 8, 0, 255, 0] {
+            simple_tree(&mut bits, symbol);
+        }
+        for _ in 0..=group {
+            for _ in 0..HUFFMAN_CODES_PER_META_CODE {
+                simple_tree(&mut bits, 0);
+            }
+        }
+
+        let mut data = vec![0u8; bits.len().div_ceil(8)];
+
+        for (i, bit) in bits.into_iter().enumerate() {
+            data[i / 8] |= bit << (i % 8);
+        }
+        data
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn sparse_huffman_groups_are_stored_densely() {
+        let sparse_data = sparse_huffman_image(u16::MAX.into());
+        let mut parsed = Decoder::new();
+        let mut baseline = Decoder::new();
+        let mut sparse = Decoder::new();
+
+        parsed.read_frame_header(&sparse_data, false).unwrap();
+        baseline
+            .decode_frame(Target::Argb, &sparse_huffman_image(0), false, None)
+            .unwrap();
+        sparse
+            .decode_frame(Target::Argb, &sparse_data, false, None)
+            .unwrap();
+
+        assert_eq!(
+            sparse.picture(Target::Argb).data,
+            baseline.picture(Target::Argb).data
+        );
+        assert_eq!(parsed.nb_huffman_groups, 1);
+        assert_eq!(parsed.nb_huffman_group_codes, 1 << 16);
+        assert!(parsed.huffman_groups_mapped);
+        assert_eq!(parsed.image[ROLE_ARGB].groups.len(), 1);
+        assert_eq!(parsed.huffman_group_map[u16::MAX as usize], 0);
+    }
 
     #[test]
     fn transform_batches_preserve_predictor_rows_in_every_transform_order() {
