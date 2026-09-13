@@ -155,6 +155,40 @@ fn rl32(b: &[u8], at: usize) -> u32 {
     bits::rl32(&bits::quad(b, at))
 }
 
+/// The size the first bytes of a VP8 or VP8L bitstream declare, or None
+/// where they are not a header that could be decoded. `size` is the whole
+/// chunk's, which the VP8 first-partition length is checked against.
+pub(crate) fn bitstream_size(tag: u32, p: &[u8], size: usize) -> Option<(i32, i32)> {
+    if tag == TAG_VP8L {
+        if p.len() < 5 || p[0] != 0x2f {
+            return None;
+        }
+        let bits = rl32(p, 1);
+
+        if bits >> 29 != 0 {
+            return None;
+        }
+        Some((
+            (bits & 0x3fff) as i32 + 1,
+            ((bits >> 14) & 0x3fff) as i32 + 1,
+        ))
+    } else {
+        if p.len() < 10 || size < 10 || p[3..6] != [0x9d, 0x01, 0x2a] {
+            return None;
+        }
+        let bits = rl24(p, 0);
+
+        if bits & 1 != 0
+            || (bits >> 1) & 7 > 3
+            || bits & 0x10 == 0
+            || (bits >> 5) as usize > size - 10
+        {
+            return None;
+        }
+        Some(((rl16(p, 6) & 0x3fff) as i32, (rl16(p, 8) & 0x3fff) as i32))
+    }
+}
+
 fn window(b: &[u8], from: usize, len: usize) -> &[u8] {
     let from = from.min(b.len());
     let to = from.saturating_add(len).min(b.len());
@@ -191,36 +225,19 @@ impl Scan {
     fn still_header(&mut self, tag: u32, p: &[u8], size: usize) {
         if tag == TAG_VP8L {
             self.info.coding = Coding::Lossless;
-            if p.len() >= 5 && p[0] == 0x2f {
-                let bits = rl32(p, 1);
+            if let Some((width, height)) = bitstream_size(tag, p, size) {
+                let alpha = rl32(p, 1) >> 28 & 1 != 0;
 
-                if bits >> 29 != 0 {
-                    return;
-                }
-                self.info.width = (bits & 0x3fff) as i32 + 1;
-                self.info.height = ((bits >> 14) & 0x3fff) as i32 + 1;
-                self.info.image_has_alpha |= bits >> 28 & 1 != 0;
-                self.info.has_alpha |= bits >> 28 & 1 != 0;
+                self.info.width = width;
+                self.info.height = height;
+                self.info.image_has_alpha |= alpha;
+                self.info.has_alpha |= alpha;
             }
         } else {
             self.info.coding = Coding::Lossy;
-            if p.len() >= 10
-                && size >= 10
-                && p[3] == 0x9d
-                && p[4] == 0x01
-                && p[5] == 0x2a
-            {
-                let bits = rl24(p, 0);
-
-                if bits & 1 != 0
-                    || (bits >> 1) & 7 > 3
-                    || bits & 0x10 == 0
-                    || (bits >> 5) as usize > size - 10
-                {
-                    return;
-                }
-                self.info.width = (rl16(p, 6) & 0x3fff) as i32;
-                self.info.height = (rl16(p, 8) & 0x3fff) as i32;
+            if let Some((width, height)) = bitstream_size(tag, p, size) {
+                self.info.width = width;
+                self.info.height = height;
             }
         }
     }

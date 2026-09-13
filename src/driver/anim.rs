@@ -3,7 +3,7 @@ use std::mem;
 use crate::anim::{regions, AnimState, Placement, Region};
 use crate::bits::{rl24, rl32};
 use crate::blit::{self, Rect};
-use crate::container::TAG_ANMF;
+use crate::container::{bitstream_size, TAG_ANMF, TAG_VP8, TAG_VP8L};
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::dsp::yuv::YuvDsp;
 use crate::error::{Error, Result};
@@ -299,6 +299,66 @@ impl<'a> Decoder<'a> {
         found
     }
 
+    /// The size an ANMF declares for its frame, once both that and the image
+    /// it carries, read from the bitstream header of its VP8 or VP8L chunk,
+    /// are known to fit the canvas at the frame's offset. None where there is
+    /// no such image or where the walk would refuse the frame: the walk
+    /// checks the image's size before compositing it, and a batch must not
+    /// decode what the walk would refuse, since that is what bounds the
+    /// decode to the canvas.
+    fn anmf_declared_fit(&self, base: usize, size: usize) -> Option<(i32, i32)> {
+        let header = self.input.chunk(base, size.min(16));
+
+        if header.len() < 16 {
+            return None;
+        }
+        let pos_x = rl24(header) as i32 * 2;
+        let pos_y = rl24(&header[3..]) as i32 * 2;
+        let declared_width = rl24(&header[6..]) as i32 + 1;
+        let declared_height = rl24(&header[9..]) as i32 + 1;
+        let fits = |w: i32, h: i32| {
+            pos_x + w <= self.canvas_width && pos_y + h <= self.canvas_height
+        };
+
+        if !fits(declared_width, declared_height) {
+            return None;
+        }
+
+        let mut at = base + 16;
+        let end = base + size;
+
+        while end - at >= 8 {
+            let head = self.input.chunk(at, 8);
+
+            if head.len() < 8 {
+                return None;
+            }
+            let (chunk_type, payload_size) = (rl32(head), rl32(&head[4..]));
+
+            if payload_size == u32::MAX {
+                return None;
+            }
+            let payload_size = payload_size as usize;
+            let padded_size = payload_size + (payload_size & 1);
+
+            at += 8;
+            if end - at < padded_size {
+                return None;
+            }
+            match chunk_type {
+                TAG_VP8 | TAG_VP8L => {
+                    let p = self.input.chunk(at, payload_size.min(10));
+                    let (w, h) = bitstream_size(chunk_type, p, payload_size)?;
+
+                    return fits(w, h).then_some((declared_width, declared_height));
+                }
+                _ => {}
+            }
+            at += padded_size;
+        }
+        None
+    }
+
     /// Decodes the next run of frames into a slot each. Their images depend on
     /// nothing but their own bytes, so they are independent; everything that
     /// depends on the frames before it stays in decode_anmf().
@@ -309,21 +369,24 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        let entries = self.anmf_lookahead((base, size), want);
+        let mut entries = self.anmf_lookahead((base, size), want);
 
-        // Use declared sub-frame work; a large canvas may only blink a pixel.
-        let pixels: u64 = entries
-            .iter()
-            .map(|entry| {
-                let header = self.input.chunk(entry.base, entry.size.min(16));
-                if header.len() < 16 {
-                    return 0;
-                }
-                let width = u64::from(rl24(&header[6..])) + 1;
-                let height = u64::from(rl24(&header[9..])) + 1;
-                width * height
-            })
-            .sum();
+        /* A frame the walk would refuse ends the run; nothing past it is
+         * decoded ahead, so no image the canvas cannot hold is decoded at
+         * all. The work estimate uses the declared sub-frame size, since a
+         * large canvas may only blink a pixel. */
+        let mut pixels: u64 = 0;
+        let mut usable = 0;
+
+        for entry in &entries {
+            let Some((w, h)) = self.anmf_declared_fit(entry.base, entry.size) else {
+                break;
+            };
+
+            pixels += u64::from(w as u32) * u64::from(h as u32);
+            usable += 1;
+        }
+        entries.truncate(usable);
 
         if entries.len() < 2 || pixels < entries.len() as u64 * 96 * 96 {
             return;
@@ -540,5 +603,64 @@ mod tests {
             decoder.fill_ahead(base, size);
             assert_eq!(!decoder.ahead.spent(), batch);
         }
+    }
+
+    #[test]
+    fn a_frame_whose_image_overruns_the_canvas_is_not_decoded_ahead() {
+        let original = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuv.webp"
+        ))
+        .unwrap();
+        let mut shifted = original.clone();
+        let mut at = 12;
+        let mut frames = Vec::new();
+
+        while at + 8 <= shifted.len() {
+            let size = rl32(&shifted[at + 4..]) as usize;
+            if &shifted[at..at + 4] == b"ANMF" {
+                frames.push((at + 8, size));
+            }
+            at += 8 + size + (size & 1);
+        }
+        assert!(frames.len() >= 2);
+
+        let (base, size) = frames[0];
+        let (second, _) = frames[1];
+        let canvas_width = {
+            let mut decoder = Decoder::new();
+
+            decoder.open(&original).unwrap();
+            decoder.canvas_width
+        };
+
+        /* The second frame claims to be 1x1 at the canvas's right edge, which
+         * fits, while the image it carries is the full frame, which does not. */
+        let pos_x = (canvas_width - 2) as u32 / 2;
+
+        shifted[second..second + 3].copy_from_slice(&pos_x.to_le_bytes()[..3]);
+        shifted[second + 6..second + 12].fill(0);
+
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(crate::options::Options {
+                n_threads: 8,
+                ..Default::default()
+            })
+            .unwrap();
+        decoder.open(&shifted).unwrap();
+        decoder.anim.frame_index = 1;
+        decoder.pos = base + size + (size & 1);
+        decoder.fill_ahead(base, size);
+
+        /* Only the first frame was safe to run ahead, so no batch is worth
+         * starting; the walk then refuses the second frame itself. */
+        assert!(decoder.ahead.spent());
+        assert!(decoder.decode_anmf(base, size).is_ok());
+        assert_eq!(
+            decoder.decode_anmf(second, frames[1].1),
+            Err(Error::InvalidData)
+        );
     }
 }

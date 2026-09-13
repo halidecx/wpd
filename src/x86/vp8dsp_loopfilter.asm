@@ -513,42 +513,46 @@ cglobal vp8_h_loop_filter16y_mb_itranspose, 3, 8, 16, dst, stride, tmp, dst4, ds
     STORE_16x16B
     RET
 
-%macro LOAD_8UVx16B 0
-    movu          xm0, [dstUq]
-    movu          xm1, [dstUq+strideq]
-    movu          xm2, [dstUq+strideq*2]
-    movu          xm3, [dstU4q+mstrideq]
-    movu          xm4, [dstU4q]
-    movu          xm5, [dstU4q+strideq]
-    movu          xm6, [dstU4q+strideq*2]
-    movu          xm7, [dstU8q+mstrideq]
-    vinserti128    m0, m0, [dstVq], 1
-    vinserti128    m1, m1, [dstVq+strideq], 1
-    vinserti128    m2, m2, [dstVq+strideq*2], 1
-    vinserti128    m3, m3, [dstV4q+mstrideq], 1
-    vinserti128    m4, m4, [dstV4q], 1
-    vinserti128    m5, m5, [dstV4q+strideq], 1
-    vinserti128    m6, m6, [dstV4q+strideq*2], 1
-    vinserti128    m7, m7, [dstV8q+mstrideq], 1
+; The macroblock edge filter reads p3..q3 and the inner edge at column 4
+; reads on to q3 of its own, so twelve bytes a row are touched: exactly the
+; window the caller checks. Columns 12..15 of the transposed block are
+; never looked at, so they are left zero rather than loaded from past it.
+%macro LOAD_8UVx12B_ROW 3 ; dst reg, U address, V address
+    movq         xm%1, [%2]
+    pinsrd       xm%1, [%2+8], 2
+    movq          xm8, [%3]
+    pinsrd        xm8, [%3+8], 2
+    vinserti128   m%1, m%1, xm8, 1
 %endmacro
 
-%macro STORE_8UVx16B 0
-    movu          [dstUq], xm0
-    movu  [dstUq+strideq], xm1
-    movu [dstUq+strideq*2], xm2
-    movu [dstU4q+mstrideq], xm3
-    movu         [dstU4q], xm4
-    movu [dstU4q+strideq], xm5
-    movu [dstU4q+strideq*2], xm6
-    movu [dstU8q+mstrideq], xm7
-    vextracti128 [dstVq], m0, 1
-    vextracti128 [dstVq+strideq], m1, 1
-    vextracti128 [dstVq+strideq*2], m2, 1
-    vextracti128 [dstV4q+mstrideq], m3, 1
-    vextracti128 [dstV4q], m4, 1
-    vextracti128 [dstV4q+strideq], m5, 1
-    vextracti128 [dstV4q+strideq*2], m6, 1
-    vextracti128 [dstV8q+mstrideq], m7, 1
+%macro LOAD_8UVx12B 0
+    LOAD_8UVx12B_ROW 0, dstUq, dstVq
+    LOAD_8UVx12B_ROW 1, dstUq+strideq, dstVq+strideq
+    LOAD_8UVx12B_ROW 2, dstUq+strideq*2, dstVq+strideq*2
+    LOAD_8UVx12B_ROW 3, dstU4q+mstrideq, dstV4q+mstrideq
+    LOAD_8UVx12B_ROW 4, dstU4q, dstV4q
+    LOAD_8UVx12B_ROW 5, dstU4q+strideq, dstV4q+strideq
+    LOAD_8UVx12B_ROW 6, dstU4q+strideq*2, dstV4q+strideq*2
+    LOAD_8UVx12B_ROW 7, dstU8q+mstrideq, dstV8q+mstrideq
+%endmacro
+
+%macro STORE_8UVx12B_ROW 3 ; src reg, U address, V address
+    movq         [%2], xm%1
+    pextrd     [%2+8], xm%1, 2
+    vextracti128  xm8, m%1, 1
+    movq         [%3], xm8
+    pextrd     [%3+8], xm8, 2
+%endmacro
+
+%macro STORE_8UVx12B 0
+    STORE_8UVx12B_ROW 0, dstUq, dstVq
+    STORE_8UVx12B_ROW 1, dstUq+strideq, dstVq+strideq
+    STORE_8UVx12B_ROW 2, dstUq+strideq*2, dstVq+strideq*2
+    STORE_8UVx12B_ROW 3, dstU4q+mstrideq, dstV4q+mstrideq
+    STORE_8UVx12B_ROW 4, dstU4q, dstV4q
+    STORE_8UVx12B_ROW 5, dstU4q+strideq, dstV4q+strideq
+    STORE_8UVx12B_ROW 6, dstU4q+strideq*2, dstV4q+strideq*2
+    STORE_8UVx12B_ROW 7, dstU8q+mstrideq, dstV8q+mstrideq
 %endmacro
 
 INIT_YMM avx2
@@ -561,7 +565,7 @@ cglobal vp8_h_loop_filter8uv_mb_transpose, 4, 9, 16, dstU, dstV, stride, tmp, ds
     lea        dstV4q, [dstVq+strideq*4]
     lea        dstU8q, [dstU4q+strideq*4]
     lea        dstV8q, [dstV4q+strideq*4]
-    LOAD_8UVx16B
+    LOAD_8UVx12B
     TRANSPOSE_16x16B
     STORE_TRANSPOSED_16x16B
     RET
@@ -578,7 +582,7 @@ cglobal vp8_h_loop_filter8uv_mb_itranspose, 4, 9, 16, dstU, dstV, stride, tmp, d
     lea        dstV8q, [dstV4q+strideq*4]
     LOAD_TRANSPOSED_16x16B
     TRANSPOSE_16x16B
-    STORE_8UVx16B
+    STORE_8UVx12B
     RET
 
 

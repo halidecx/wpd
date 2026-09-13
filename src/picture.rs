@@ -5,6 +5,67 @@ fn chroma(p: usize) -> u32 {
     u32::from(p == 1 || p == 2)
 }
 
+pub(crate) use zeroed::try_zeroed;
+
+/// `n` zeroed elements from the allocator's zeroed path, which hands out
+/// pages the kernel already cleared rather than writing every byte of a
+/// large buffer twice: once here and again when it is decoded into. Fails
+/// rather than aborting when there is no memory.
+///
+/// The safe core forbids the unsafe code that path needs, so a build
+/// without assembly clears the buffer itself.
+#[cfg(feature = "asm")]
+#[allow(unsafe_code)]
+mod zeroed {
+    use std::alloc::{alloc_zeroed, Layout};
+
+    use crate::error::{Error, Result};
+
+    /// Element types every zero bit pattern is a value of.
+    ///
+    /// # Safety
+    /// An all-zero bit pattern must be a valid value of the type.
+    pub(crate) unsafe trait Zeroable: Copy {}
+
+    unsafe impl Zeroable for u8 {}
+    unsafe impl Zeroable for u32 {}
+
+    pub(crate) fn try_zeroed<T: Zeroable>(n: usize) -> Result<Vec<T>> {
+        let layout = Layout::array::<T>(n).map_err(|_| Error::NoMemory)?;
+
+        if layout.size() == 0 {
+            return Ok(Vec::new());
+        }
+        // SAFETY: the layout has a size, and it is the one Vec<T> frees a
+        // capacity of n with, so the vector owns the allocation outright.
+        let p = unsafe { alloc_zeroed(layout) }.cast::<T>();
+
+        if p.is_null() {
+            return Err(Error::NoMemory);
+        }
+        // SAFETY: p holds n zeroed Ts, which Zeroable says are valid values.
+        Ok(unsafe { Vec::from_raw_parts(p, n, n) })
+    }
+}
+
+#[cfg(not(feature = "asm"))]
+mod zeroed {
+    use crate::error::{Error, Result};
+
+    pub(crate) trait Zeroable: Copy + Default {}
+
+    impl Zeroable for u8 {}
+    impl Zeroable for u32 {}
+
+    pub(crate) fn try_zeroed<T: Zeroable>(n: usize) -> Result<Vec<T>> {
+        let mut v = Vec::new();
+
+        v.try_reserve_exact(n).map_err(|_| Error::NoMemory)?;
+        v.resize(n, T::default());
+        Ok(v)
+    }
+}
+
 #[derive(Default)]
 pub struct Plane {
     data: Vec<u8>,
@@ -12,15 +73,13 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// Makes the plane `size` bytes. A fresh allocation is zero; a reused
+    /// one keeps what it held, since every caller writes the whole plane
+    /// before reading it, and clearing a large one costs a pass over it.
     fn resize(&mut self, stride: usize, rows: i32, size: usize) -> Result<()> {
         if self.data.len() < size {
-            self.data.clear();
-            self.data
-                .try_reserve_exact(size)
-                .map_err(|_| Error::NoMemory)?;
-            self.data.resize(size, 0);
-        } else {
-            self.data[..size].fill(0);
+            self.data = Vec::new();
+            self.data = try_zeroed(size)?;
         }
         self.stride = stride;
         debug_assert!(rows >= 0);
@@ -552,12 +611,26 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_and_growing_again_still_starts_from_zero() {
+    fn a_fresh_plane_starts_from_zero_and_a_regrown_one_does_too() {
         let mut buf = Buffer::default();
 
-        buf.alloc_argb(8, 8).unwrap();
-        buf.frame_mut().row(0, 0)[0] = 0xff;
         buf.alloc_argb(2, 2).unwrap();
-        assert_eq!(buf.frame().row(0, 0)[0], 0);
+        assert!(buf.frame().row(0, 0).iter().all(|&b| b == 0));
+        buf.frame_mut().row(0, 0)[0] = 0xff;
+        buf.alloc_argb(8, 8).unwrap();
+        assert!(buf.frame().row(0, 0).iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_zeroed_vector_is_zero_and_frees_cleanly() {
+        let bytes: Vec<u8> = try_zeroed(1 << 20).unwrap();
+        let words: Vec<u32> = try_zeroed(1000).unwrap();
+
+        assert!(bytes.iter().all(|&b| b == 0));
+        assert!(words.iter().all(|&w| w == 0));
+        assert_eq!(bytes.len(), 1 << 20);
+        assert_eq!(words.capacity(), 1000);
+        assert!(try_zeroed::<u32>(0).unwrap().is_empty());
+        assert_eq!(try_zeroed::<u32>(usize::MAX), Err(Error::NoMemory));
     }
 }

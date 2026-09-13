@@ -137,14 +137,11 @@ impl Picture {
             .and_then(|n| n.checked_add(PADDING))
             .ok_or(Error::TooLarge)?;
 
+        /* A fresh picture comes zeroed from the allocator; a reused one
+         * keeps its pixels, every one of which is written before it is read. */
         if self.data.len() < size {
-            self.data.clear();
-            self.data
-                .try_reserve_exact(size)
-                .map_err(|_| Error::NoMemory)?;
-            self.data.resize(size, 0);
-        } else {
-            self.data[..size].fill(0);
+            self.data = Vec::new();
+            self.data = crate::picture::try_zeroed(size)?;
         }
         self.stride = w as usize;
         self.width = w;
