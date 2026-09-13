@@ -164,6 +164,12 @@ pub fn crop_origin(
     packed: bool,
 ) -> Result<(i32, i32)> {
     let align = if packed { 0 } else { 1 };
+
+    /* Guarded upstream where options are set; checked here as well so the
+     * arithmetic below cannot wrap for a caller that skipped that. */
+    if crop.left < 0 || crop.top < 0 || crop.width <= 0 || crop.height <= 0 {
+        return Err(Error::InvalidData);
+    }
     let left = crop.left & !align;
     let top = crop.top & !align;
 
@@ -373,6 +379,27 @@ mod tests {
 
         assert_eq!(crop_origin(&crop, 32, 32, false), Ok((4, 6)));
         assert_eq!(crop_origin(&crop, 32, 32, true), Ok((5, 7)));
+    }
+
+    #[test]
+    fn a_crop_with_a_negative_corner_or_an_empty_extent_is_rejected() {
+        for (left, top, width, height) in [
+            (-1, 0, 4, 4),
+            (0, -1, 4, 4),
+            (0, 0, 0, 4),
+            (0, 0, 4, -4),
+            (i32::MIN, 0, 4, 4),
+        ] {
+            let crop = Crop {
+                left,
+                top,
+                width,
+                height,
+            };
+
+            assert_eq!(crop_origin(&crop, 32, 32, true), Err(Error::InvalidData));
+            assert_eq!(crop_origin(&crop, 32, 32, false), Err(Error::InvalidData));
+        }
     }
 
     #[test]

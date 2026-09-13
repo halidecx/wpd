@@ -23,6 +23,9 @@ pub fn vertical_unfilter(prev: Option<&[u8]>, row: &mut [u8]) {
     let Some(prev) = prev else {
         return horizontal_unfilter(None, row);
     };
+    /* Every pixel has a pixel above it; a short row above is a caller bug,
+     * and the assembly says the same rather than reading past it. */
+    let prev = &prev[..row.len()];
 
     for (px, &above) in row.iter_mut().zip(prev) {
         *px = px.wrapping_add(above);
@@ -33,11 +36,12 @@ pub fn gradient_unfilter(prev: Option<&[u8]>, row: &mut [u8]) {
     let Some(prev) = prev else {
         return horizontal_unfilter(None, row);
     };
+    /* As above: the row above is at least as long, or the caller is wrong. */
+    let prev = &prev[..row.len()];
+
     if row.is_empty() {
         return;
     }
-    let prev = &prev[..row.len()];
-
     row[0] = row[0].wrapping_add(prev[0]);
 
     let mut left = i32::from(row[0]);

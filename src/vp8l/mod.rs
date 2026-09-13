@@ -564,8 +564,6 @@ impl Decoder {
         img.arena
             .try_reserve(ARENA_CHUNK)
             .map_err(|_| Error::NoMemory)?;
-        let mut unused_arena = Vec::new();
-
         #[allow(clippy::needless_range_loop)]
         for code in 0..nb_group_codes {
             let group = if role == ROLE_ARGB && *huffman_groups_mapped {
@@ -600,8 +598,9 @@ impl Decoder {
                     img.groups[group].trees[j] =
                         huffman::build(&mut img.arena, &mut plan, lengths, sorted)?;
                 } else {
-                    unused_arena.clear();
-                    huffman::build(&mut unused_arena, &mut plan, lengths, sorted)?;
+                    /* No pixel maps to this group, so its tables are never
+                     * read; the code still has to be a valid one. */
+                    huffman::validate(&mut plan, lengths, sorted)?;
                 }
             }
 

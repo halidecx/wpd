@@ -80,22 +80,30 @@ pub unsafe extern "C" fn wpd_get_info(
     size: usize,
     info: *mut WPDImageInfo,
 ) -> c_int {
-    let Some(info) = (unsafe { info.as_mut() }) else {
-        return WPD_ERR_INVALID_ARG;
-    };
-
-    if data.is_null() || info.struct_size < WPDImageInfo::v1() {
+    if info.is_null() || data.is_null() || size > isize::MAX as usize {
         return WPD_ERR_INVALID_ARG;
     }
-    info_clear(info);
+    /* Read only the caller's allocation; a v1 pointer cannot become a
+     * reference to the current, possibly longer, struct. */
+    let declared = unsafe { std::ptr::addr_of!((*info).struct_size).read() };
+
+    if declared < WPDImageInfo::v1() {
+        return WPD_ERR_INVALID_ARG;
+    }
 
     let buf = unsafe { slice::from_raw_parts(data, size) };
 
-    crate::guard(WPD_ERR_INTERNAL, || match wpd::container::get_info(buf) {
-        Ok(scanned) => {
-            fill_info(info, &scanned);
-            WPD_OK
+    crate::guard(WPD_ERR_INTERNAL, || {
+        let scanned = unsafe {
+            crate::decoder::with_prefix(info, WPDImageInfo::v1(), |info| {
+                info_clear(info);
+                wpd::container::get_info(buf).map(|scanned| fill_info(info, &scanned))
+            })
+        };
+
+        match scanned {
+            Ok(()) => WPD_OK,
+            Err(e) => status(e),
         }
-        Err(e) => status(e),
     })
 }

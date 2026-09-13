@@ -703,6 +703,9 @@ pub fn upsample_row<const L: usize>(
     dst: &mut UpsampleDst<'_>,
     len: usize,
 ) {
+    if len == 0 {
+        return;
+    }
     let bpp = bpp(L);
     let last_pair = (len - 1) >> 1;
     let blocks = if len >= UPSAMPLE_BLOCK + 2 {
