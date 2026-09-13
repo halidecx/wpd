@@ -135,6 +135,18 @@ pred_add!(pred_add_11, |l, t, tl| select(t, l, tl));
 pred_add!(pred_add_12, |l, t, tl| clamped_add_sub_full(l, t, tl));
 pred_add!(pred_add_13, |l, t, tl| clamped_add_sub_half(l, t, tl));
 
+/// Adds the green channel back into red and blue, undoing the subtract-green
+/// transform on one row of ARGB pixels.
+pub fn add_green(row: &mut [u32]) {
+    for px in row {
+        let mut b = px.to_ne_bytes();
+
+        b[1] = b[1].wrapping_add(b[2]);
+        b[3] = b[3].wrapping_add(b[2]);
+        *px = u32::from_ne_bytes(b);
+    }
+}
+
 pub fn extract_green(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.iter_mut().zip(src.chunks_exact(4)) {
         *d = s[2];
@@ -234,6 +246,7 @@ pub struct Vp8lDsp {
     pub map_color32: fn(&mut [u32], &[u32]),
     pub color_row: fn(&mut [u32], u32),
     pub extract_green: fn(&mut [u8], &[u8]),
+    pub add_green: fn(&mut [u32]),
     pub blend_row_argb: fn(&mut [u8], &[u8]),
     pub blend_row_argb_premult: fn(&mut [u8], &[u8]),
 }
@@ -301,6 +314,7 @@ impl Vp8lDsp {
             map_color32: map_color32_pixels,
             color_row,
             extract_green,
+            add_green,
             blend_row_argb,
             blend_row_argb_premult,
         }

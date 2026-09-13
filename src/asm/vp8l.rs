@@ -10,6 +10,7 @@ pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u
 pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
+pub type AddGreenRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int);
 
 pub(crate) use super::Raw;
 
@@ -44,6 +45,9 @@ macro_rules! raw_vp8l {
     };
     ($m:ident, $i:ident, blend_row, $sym:literal) => {
         raw!($m, $i, BlendRowRaw, $sym, (*mut u8, *const u8, c_int));
+    };
+    ($m:ident, $i:ident, add_green, $sym:literal) => {
+        raw!($m, $i, AddGreenRaw, $sym, (*mut u32, *const u32, c_int));
     };
 }
 
@@ -103,6 +107,14 @@ fn blend_row<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
+fn add_green<T: Raw<Sig = AddGreenRaw>>(row: &mut [u32]) {
+    unsafe {
+        let p = row.as_mut_ptr();
+
+        (T::F)(p, p.cast_const(), row.len() as c_int)
+    }
+}
+
 fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len() / 4);
 
@@ -113,6 +125,7 @@ fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
 pub struct RawTable {
     pub pred_add: [Option<PredAddRaw>; 14],
     pub extract_green: Option<BlendRowRaw>,
+    pub add_green: Option<AddGreenRaw>,
     pub map_color32: Option<MapColorRaw>,
     pub blend_row_argb: Option<BlendRowRaw>,
     pub blend_row_argb_premult: Option<BlendRowRaw>,
@@ -249,12 +262,21 @@ mod arch {
         use super::*;
 
         preds! {
+            Pred0, pred0, "ff_pred_add_0_sse2";
+            Pred1, pred1, "ff_pred_add_1_sse2";
+            Pred2, pred2, "ff_pred_add_2_sse2";
+            Pred3, pred3, "ff_pred_add_3_sse2";
+            Pred4, pred4, "ff_pred_add_4_sse2";
             Pred5, pred5, "ff_pred_add_5_sse2";
             Pred6, pred6, "ff_pred_add_6_sse2";
             Pred7, pred7, "ff_pred_add_7_sse2";
+            Pred8, pred8, "ff_pred_add_8_sse2";
+            Pred9, pred9, "ff_pred_add_9_sse2";
             Pred10, pred10, "ff_pred_add_10_sse2";
             Pred12, pred12, "ff_pred_add_12_sse2";
         }
+
+        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_sse2");
     }
 
     pub mod sse4 {
@@ -269,6 +291,7 @@ mod arch {
         use super::*;
 
         raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_ssse3");
+        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_ssse3");
         raw_vp8l!(
             BlendPremult,
             blend_premult,
@@ -306,11 +329,13 @@ mod arch {
             blend_row,
             "ff_blend_row_argb_premult_avx2"
         );
+        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_avx2");
     }
 
     ladder! {
         SSE2 {
-            @preds sse2 [5, 6, 7, 10, 12];
+            @preds sse2 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12];
+            add_green = add_green::<sse2::AddGreen>;
         }
         SSE41 {
             @preds sse4 [13];
@@ -318,12 +343,14 @@ mod arch {
         SSSE3 {
             color_row = color_row::<ssse3::ColorRow>;
             blend_row_argb_premult = blend_row::<ssse3::BlendPremult>;
+            add_green = add_green::<ssse3::AddGreen>;
         }
         AVX2 {
             @preds avx2 [0, 1, 2, 3, 4, 8, 9, 11];
             map_color32 = map_color32::<avx2::MapColor>;
             color_row = color_row::<avx2::ColorRow>;
             extract_green = extract_green::<avx2::ExtractGreen>;
+            add_green = add_green::<avx2::AddGreen>;
             blend_row_argb = blend_row::<avx2::Blend>;
             blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
         }
@@ -356,6 +383,7 @@ mod arch {
 
         raw_vp8l!(MapColor, map_color, map_color, "ff_map_color32_neon");
         raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_neon");
+        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_neon");
         raw_vp8l!(
             ExtractGreen,
             extract_green,
@@ -377,6 +405,7 @@ mod arch {
             map_color32 = map_color32::<neon::MapColor>;
             color_row = color_row::<neon::ColorRow>;
             extract_green = extract_green::<neon::ExtractGreen>;
+            add_green = add_green::<neon::AddGreen>;
             blend_row_argb = blend_row::<neon::Blend>;
             blend_row_argb_premult = blend_row::<neon::BlendPremult>;
         }

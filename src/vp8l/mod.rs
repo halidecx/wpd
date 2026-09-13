@@ -943,6 +943,7 @@ impl Decoder {
                     }
                     Transform::SubtractGreen => {
                         transform::subtract_green_rows(
+                            &self.dsp,
                             &mut pic.data,
                             base,
                             stride,
@@ -1012,10 +1013,24 @@ impl Decoder {
     }
 
     fn apply_subtract_green(&mut self, target: Target) {
-        let width = self.reduced_width as usize;
-        let pic = self.picture_mut(ROLE_ARGB, target);
+        let Decoder {
+            dsp,
+            argb,
+            alpha_argb,
+            reduced_width,
+            ..
+        } = self;
+        let width = *reduced_width as usize;
+        let pic = target_picture(target, argb, alpha_argb);
 
-        transform::subtract_green_rows(&mut pic.data, 0, pic.stride, width, pic.height);
+        transform::subtract_green_rows(
+            dsp,
+            &mut pic.data,
+            0,
+            pic.stride,
+            width,
+            pic.height,
+        );
     }
 
     fn apply_color_indexing(&mut self, target: Target) {
@@ -1267,6 +1282,7 @@ impl Decoder {
                 }
                 Transform::SubtractGreen => {
                     transform::subtract_green_rows(
+                        dsp,
                         &mut out.data,
                         base,
                         stride,

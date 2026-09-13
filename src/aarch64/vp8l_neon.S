@@ -456,6 +456,42 @@ function ff_extract_green_neon, export=1
 9:      ret
 endfunc
 
+// Adds the green channel back into red and blue; dst may be src.
+function ff_add_green_neon, export=1
+        cmp             w2,  #16
+        b.lt            2f
+1:      ld4             {v0.16b-v3.16b}, [x1], #64
+        sub             w2,  w2,  #16
+        add             v1.16b,  v1.16b,  v2.16b
+        add             v3.16b,  v3.16b,  v2.16b
+        cmp             w2,  #16
+        st4             {v0.16b-v3.16b}, [x0], #64
+        b.ge            1b
+2:      cmp             w2,  #8
+        b.lt            4f
+        ld4             {v0.8b-v3.8b}, [x1], #32
+        sub             w2,  w2,  #8
+        add             v1.8b,   v1.8b,   v2.8b
+        add             v3.8b,   v3.8b,   v2.8b
+        st4             {v0.8b-v3.8b}, [x0], #32
+4:      cbz             w2,  9f
+5:      ldrb            w4,  [x1, #1]
+        ldrb            w5,  [x1, #2]
+        ldrb            w6,  [x1, #3]
+        ldrb            w7,  [x1]
+        add             x1,  x1,  #4
+        add             w4,  w4,  w5
+        add             w6,  w6,  w5
+        strb            w7,  [x0]
+        strb            w4,  [x0, #1]
+        strb            w5,  [x0, #2]
+        strb            w6,  [x0, #3]
+        add             x0,  x0,  #4
+        subs            w2,  w2,  #1
+        b.gt            5b
+9:      ret
+endfunc
+
 function ff_color_row_neon, export=1
         lsr             w4,  w3,  #24           // green_to_red
         lsr             w5,  w3,  #16           // green_to_blue

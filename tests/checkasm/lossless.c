@@ -170,6 +170,37 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
     }
 }
 
+static void check_add_green(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, src, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst0, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst1, [BUF_PIXELS]);
+    declare_func(void, uint32_t *, const uint32_t *, int);
+
+    if (check_func(dsp->add_green, "add_green")) {
+        for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
+            const int n = lengths[i];
+
+            for (int x = 0; x < BUF_PIXELS; x++) {
+                src[x]  = (uint32_t)rnd();
+                dst0[x] = dst1[x] = (uint32_t)rnd();
+            }
+
+            call_ref(dst0, src, n);
+            call_new(dst1, src, n);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+
+            memcpy(dst0, src, sizeof(dst0));
+            memcpy(dst1, src, sizeof(dst1));
+            call_ref(dst0, dst0, n);
+            call_new(dst1, dst1, n);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+        }
+        bench_new(dst1, src, MAX_PIXELS);
+    }
+}
+
 static void check_color_row(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint32_t, src, [BUF_PIXELS]);
     LOCAL_ALIGNED_16(uint32_t, dst0, [BUF_PIXELS]);
@@ -210,6 +241,8 @@ void checkasm_check_lossless(void) {
     report("pred_add");
     check_extract_green(&dsp);
     report("extract_green");
+    check_add_green(&dsp);
+    report("add_green");
     check_map_color32(&dsp);
     report("map_color32");
     check_blend_row_argb(&dsp);

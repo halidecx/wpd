@@ -33,7 +33,8 @@ SECTION .text
 
 %macro SET_ONES 1
     pcmpeqb    %1, %1
-    pabsb      %1, %1
+    psrlw      %1, 15
+    packuswb   %1, %1
 %endmacro
 
 %macro ROW_INDEX 0
@@ -45,23 +46,23 @@ SECTION .text
 %endmacro
 
 
-INIT_YMM avx2
+%macro PRED_ADD_0 0
 cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
     pcmpeqd    m0, m0
     psrld      m0, 24
-    cmp        nd, 16
+    cmp        nd, mmsize / 2
     jl .tail4
 .loop16:
     movu       m1, [srcq]
-    movu       m2, [srcq+32]
+    movu       m2, [srcq+mmsize]
     paddb      m1, m1, m0
     paddb      m2, m2, m0
     movu       [dstq], m1
-    movu       [dstq+32], m2
-    add        srcq, 64
-    add        dstq, 64
-    sub        nd, 16
-    cmp        nd, 16
+    movu       [dstq+mmsize], m2
+    add        srcq, 2 * mmsize
+    add        dstq, 2 * mmsize
+    sub        nd, mmsize / 2
+    cmp        nd, mmsize / 2
     jge .loop16
 .tail4:
     cmp        nd, 4
@@ -88,11 +89,17 @@ cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
     jg .loop1
 .ret:
     RET
+%endmacro
 
 
-INIT_XMM avx2
+%macro PRED_ADD_1 0
 cglobal pred_add_1, 4, 4, 3, src, upper, n, dst
+%if cpuflag(avx2)
     vpbroadcastd m0, [dstq-4]
+%else
+    movd       m0, [dstq-4]
+    pshufd     m0, m0, 0
+%endif
     cmp        nd, 4
     jl .tail1
 .loop4:
@@ -122,27 +129,27 @@ cglobal pred_add_1, 4, 4, 3, src, upper, n, dst
     jg .loop1
 .ret:
     RET
+%endmacro
 
 
 %macro PRED_TOP 2
-INIT_YMM avx2
 cglobal pred_add_%1, 4, 4, 4, src, upper, n, dst
-    cmp        nd, 16
+    cmp        nd, mmsize / 2
     jl .tail4
 .loop16:
     movu       m0, [upperq+%2]
-    movu       m1, [upperq+%2+32]
+    movu       m1, [upperq+%2+mmsize]
     movu       m2, [srcq]
-    movu       m3, [srcq+32]
+    movu       m3, [srcq+mmsize]
     paddb      m0, m0, m2
     paddb      m1, m1, m3
     movu       [dstq], m0
-    movu       [dstq+32], m1
-    add        srcq, 64
-    add        upperq, 64
-    add        dstq, 64
-    sub        nd, 16
-    cmp        nd, 16
+    movu       [dstq+mmsize], m1
+    add        srcq, 2 * mmsize
+    add        upperq, 2 * mmsize
+    add        dstq, 2 * mmsize
+    sub        nd, mmsize / 2
+    cmp        nd, mmsize / 2
     jge .loop16
 .tail4:
     cmp        nd, 4
@@ -175,16 +182,10 @@ cglobal pred_add_%1, 4, 4, 4, src, upper, n, dst
     RET
 %endmacro
 
-PRED_TOP 2, 0
-PRED_TOP 3, 4
-PRED_TOP 4, -4
-
-
 %macro PRED_AVGTOP 3
-INIT_YMM avx2
 cglobal pred_add_%1, 4, 4, 6, src, upper, n, dst
     SET_ONES   m5
-    cmp        nd, 16
+    cmp        nd, mmsize / 2
     jl .tail4
 .loop16:
     movu       m0, [upperq+%2]
@@ -193,17 +194,17 @@ cglobal pred_add_%1, 4, 4, 6, src, upper, n, dst
     AVG2       m2, m0, m1, m4, m5
     paddb      m2, m2, m3
     movu       [dstq], m2
-    movu       m0, [upperq+%2+32]
-    movu       m1, [upperq+%3+32]
-    movu       m3, [srcq+32]
+    movu       m0, [upperq+%2+mmsize]
+    movu       m1, [upperq+%3+mmsize]
+    movu       m3, [srcq+mmsize]
     AVG2       m2, m0, m1, m4, m5
     paddb      m2, m2, m3
-    movu       [dstq+32], m2
-    add        srcq, 64
-    add        upperq, 64
-    add        dstq, 64
-    sub        nd, 16
-    cmp        nd, 16
+    movu       [dstq+mmsize], m2
+    add        srcq, 2 * mmsize
+    add        upperq, 2 * mmsize
+    add        dstq, 2 * mmsize
+    sub        nd, mmsize / 2
+    cmp        nd, mmsize / 2
     jge .loop16
 .tail4:
     cmp        nd, 4
@@ -239,10 +240,6 @@ cglobal pred_add_%1, 4, 4, 6, src, upper, n, dst
 .ret:
     RET
 %endmacro
-
-PRED_AVGTOP 8, -4, 0
-PRED_AVGTOP 9, 0, 4
-
 
 %macro PRED_AVGLEFT 2
 cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
@@ -320,7 +317,7 @@ cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
 %endmacro
 
 
-INIT_XMM avx2
+%macro PRED_SELECT 0
 cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     test       nd, nd
     jz .ret
@@ -374,6 +371,7 @@ cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     jl .loop2
 .ret:
     RET
+%endmacro
 
 
 %macro PRED_CLAMP_FULL 0
@@ -433,15 +431,91 @@ cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
 %endmacro
 
 
+; Adds the green channel back into red and blue; dst may be src.
+%macro ADD_GREEN 0
+cglobal add_green, 3, 3, 4, dst, src, n
+%if cpuflag(ssse3)
+    mova       m2, [ct_green]
+%else
+    pcmpeqd    m2, m2
+    psrld      m2, 24
+    pslld      m2, 16                 ; the green byte of every pixel
+%endif
+    cmp        nd, mmsize / 4
+    jl .tail1
+.loop:
+    movu       m0, [srcq]
+%if cpuflag(ssse3)
+    pshufb     m1, m0, m2
+%else
+    pand       m1, m0, m2
+    pslld      m3, m1, 8
+    psrld      m1, 8
+    por        m1, m1, m3
+%endif
+    paddb      m0, m0, m1
+    movu       [dstq], m0
+    add        srcq, mmsize
+    add        dstq, mmsize
+    sub        nd, mmsize / 4
+    cmp        nd, mmsize / 4
+    jge .loop
+.tail1:
+    test       nd, nd
+    jz .ret
+.loop1:
+    movd       xm0, [srcq]
+%if cpuflag(ssse3)
+    pshufb     xm1, xm0, xm2
+%else
+    pand       xm1, xm0, xm2
+    pslld      xm3, xm1, 8
+    psrld      xm1, 8
+    por        xm1, xm1, xm3
+%endif
+    paddb      xm0, xm0, xm1
+    movd       [dstq], xm0
+    add        srcq, 4
+    add        dstq, 4
+    dec        nd
+    jg .loop1
+.ret:
+    RET
+%endmacro
+
 INIT_XMM sse2
+PRED_ADD_0
+PRED_ADD_1
+PRED_TOP 2, 0
+PRED_TOP 3, 4
+PRED_TOP 4, -4
+PRED_AVGTOP 8, -4, 0
+PRED_AVGTOP 9, 0, 4
 PRED_AVGLEFT 6, -4
 PRED_AVGLEFT 7, 0
 PRED_AVG3
 PRED_AVG4
 PRED_CLAMP_FULL
+ADD_GREEN
+
+INIT_XMM ssse3
+ADD_GREEN
 
 INIT_XMM sse4
 PRED_CLAMP_HALF
+
+INIT_XMM avx2
+PRED_ADD_1
+PRED_SELECT
+
+INIT_YMM avx2
+PRED_ADD_0
+PRED_TOP 2, 0
+PRED_TOP 3, 4
+PRED_TOP 4, -4
+PRED_AVGTOP 8, -4, 0
+PRED_AVGTOP 9, 0, 4
+ADD_GREEN
 
 
 INIT_YMM avx2
