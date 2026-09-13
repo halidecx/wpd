@@ -58,6 +58,18 @@ function ff_vp8_luma_dc_wht_neon, export=1
         ret
 endfunc
 
+// Only dc[0] is set, so the WHT is a rounding shift scattered to 16 blocks.
+function ff_vp8_luma_dc_wht_dc_neon, export=1
+        ldrsh           w2,  [x1]
+        strh            wzr, [x1]
+        add             w2,  w2,  #3
+        asr             w2,  w2,  #3
+    .rept 16
+        strh            w2,  [x0], #32
+    .endr
+        ret
+endfunc
+
 function ff_vp8_idct_add_neon, export=1
         ld1             {v0.8b - v3.8b},  [x1]
         mov             w4,  #20091

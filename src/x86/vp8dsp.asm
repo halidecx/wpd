@@ -276,3 +276,22 @@ INIT_XMM sse2
 VP8_LUMA_DC_WHT
 INIT_XMM sse4
 VP8_LUMA_DC_WHT
+
+; Only dc[0] is set: every block gets the same DC and the WHT collapses to
+; a rounding shift, so this is a scatter of one value.
+%macro VP8_LUMA_DC_WHT_DC 0
+cglobal vp8_luma_dc_wht_dc, 2, 3, 0, block, dc1, val
+    movsx        vald, word [dc1q]
+    mov    word [dc1q], 0
+    add          vald, 3
+    sar          vald, 3
+%assign %%i 0
+%rep 16
+    mov [blockq+2*16*%%i], valw
+%assign %%i %%i+1
+%endrep
+    RET
+%endmacro
+
+INIT_XMM sse2
+VP8_LUMA_DC_WHT_DC

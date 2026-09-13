@@ -785,6 +785,12 @@ mod arch {
         raw_vp8!(DcAdd4uv, dc_add4uv, idct4, "ff_vp8_idct_dc_add4uv_sse2");
     }
 
+    pub mod sse2_wht_dc {
+        use super::*;
+
+        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_sse2");
+    }
+
     pub mod sse4 {
         use super::*;
 
@@ -894,6 +900,8 @@ mod arch {
         SSE2 {
             @lf sse2, sse2_mb;
             @idct sse2_idct;
+
+            luma_dc_wht_dc = wht::<sse2_wht_dc::WhtDc>;
         }
         SSSE3 {
             @lf ssse3, ssse3_mb;
@@ -937,6 +945,12 @@ mod arch {
         "ff_vp8_idct_dc_add4uv_neon"
     );
 
+    pub mod neon_wht_dc {
+        use super::*;
+
+        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_neon");
+    }
+
     pub mod neon_mb {
         use super::*;
 
@@ -961,6 +975,7 @@ mod arch {
             @lf neon, neon_mb;
             @idct neon_idct;
 
+            luma_dc_wht_dc = wht::<neon_wht_dc::WhtDc>;
             h_loop_filter_simple_mb = checked_lf_h_simple_mb::<fused::HSimpleMb>;
             h_loop_filter16y_mb = checked_lf_h_mb::<fused::H16Mb>;
             h_loop_filter8uv_mb = checked_lf_h_uv_mb::<fused::H8uvMb>;
