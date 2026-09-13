@@ -274,6 +274,17 @@ impl<'a> PlaneMut<'a> {
         }
     }
 
+    /// Borrows a buffer that holds rows `first` onward of a taller picture,
+    /// so a strip of it answers to the picture's own row numbers.
+    pub fn borrowed_at(data: &'a mut [u8], stride: usize, first: i32) -> Self {
+        PlaneMut {
+            data,
+            stride,
+            origin: 0,
+            first,
+        }
+    }
+
     pub fn stride(&self) -> usize {
         self.stride
     }

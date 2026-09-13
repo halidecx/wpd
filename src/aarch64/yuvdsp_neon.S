@@ -88,10 +88,7 @@ endconst
         str             q4,  [sp, #(\bottom_off + 16)]
 .endm
 
-.macro  convert8 y, dst, uoff, voff, layout
-        ldr             d0,  [\y], #8
-        ldr             d1,  [sp, #\uoff]
-        ldr             d2,  [sp, #\voff]
+.macro  convert8_math dst, layout
         uxtl            v0.8h,   v0.8b
         uxtl            v1.8h,   v1.8b
         uxtl            v2.8h,   v2.8b
@@ -149,6 +146,13 @@ endconst
 .endif
 .endm
 
+.macro  convert8 y, dst, uoff, voff, layout
+        ldr             d0,  [\y], #8
+        ldr             d1,  [sp, #\uoff]
+        ldr             d2,  [sp, #\voff]
+        convert8_math   \dst, \layout
+.endm
+
 .macro  upsample_block layout
 function ff_upsample_block_\layout\()_neon, export=1
         ldr             w8,  [sp]
@@ -189,6 +193,87 @@ upsample_block rgba
 upsample_block bgra
 upsample_block rgb
 upsample_block bgr
+
+// One packed row straight from a luma row and two chroma rows: 444 takes
+// chroma at full width, 420 stretches each chroma sample over its pixel pair.
+.macro  yuv_row8 y, u, v, dst, layout, chroma
+        ldr             d0,  [\y], #8
+.if \chroma == 444
+        ldr             d1,  [\u], #8
+        ldr             d2,  [\v], #8
+.else
+        ldr             s1,  [\u], #4
+        ldr             s2,  [\v], #4
+        zip1            v1.8b,   v1.8b,  v1.8b
+        zip1            v2.8b,   v2.8b,  v2.8b
+.endif
+        convert8_math   \dst, \layout
+.endm
+
+.macro  copy_bytes dst, src, count
+        mov             w6,  wzr
+5:      ldrb            w7,  [\src, x6]
+        strb            w7,  [\dst, x6]
+        add             w6,  w6,  #1
+        cmp             w6,  \count
+        b.lt            5b
+.endm
+
+// The tail short of eight pixels goes through the stack: its samples are
+// copied in, converted as a full group, and only the pixels asked for are
+// copied out.
+.macro  yuv_row chroma, layout, bpp
+function ff_yuv\chroma\()_row_\layout\()_neon, export=1
+        sub             sp,  sp,  #128
+        movrel          x9,  yuv_coeffs
+        ld1r            {v24.8h}, [x9], #2
+        ld1r            {v25.8h}, [x9], #2
+        ld1r            {v26.8h}, [x9], #2
+        ld1r            {v27.8h}, [x9], #2
+        ld1r            {v28.8h}, [x9], #2
+        ld1r            {v29.8h}, [x9], #2
+        ld1r            {v30.8h}, [x9], #2
+        ld1r            {v31.8h}, [x9]
+        subs            w4,  w4,  #8
+        b.lt            2f
+1:      yuv_row8        x1, x2, x3, x0, \layout, \chroma
+        subs            w4,  w4,  #8
+        b.ge            1b
+2:      adds            w4,  w4,  #8
+        b.eq            9f
+        mov             x10, sp
+        add             x11, sp,  #16
+        add             x12, sp,  #32
+        add             x13, sp,  #48
+        copy_bytes      x10, x1, w4
+.if \chroma == 444
+        mov             w5,  w4
+.else
+        add             w5,  w4,  #1
+        lsr             w5,  w5,  #1
+.endif
+        copy_bytes      x11, x2, w5
+        copy_bytes      x12, x3, w5
+        yuv_row8        x10, x11, x12, x13, \layout, \chroma
+        mov             w5,  #\bpp
+        mul             w5,  w4,  w5
+        add             x13, sp,  #48
+        copy_bytes      x0, x13, w5
+9:      add             sp,  sp,  #128
+        ret
+endfunc
+.endm
+
+yuv_row 444, argb, 4
+yuv_row 420, argb, 4
+yuv_row 444, rgba, 4
+yuv_row 420, rgba, 4
+yuv_row 444, bgra, 4
+yuv_row 420, bgra, 4
+yuv_row 444, rgb, 3
+yuv_row 420, rgb, 3
+yuv_row 444, bgr, 3
+yuv_row 420, bgr, 3
 
 .macro dispatch_alpha pos, off
 function ff_dispatch_alpha_\pos\()_neon, export=1

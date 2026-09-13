@@ -1,5 +1,5 @@
 use super::ANIM_SUBFRAME;
-use crate::convert::YuvPlanes;
+use crate::convert::{Sampling, YuvPlanes};
 use crate::dsp::rescale::RescaleDsp;
 use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use crate::error::{Error, Result};
@@ -321,12 +321,7 @@ pub fn convert_to_packed(
     let (w, h) = (width as usize, height as usize);
 
     if src.chroma_full {
-        crate::convert::yuv444_to_packed(layout, plane, &planes, w, h);
-        if let (Some(a), Some(dispatch)) = (&planes.a, dsp.alpha_dispatcher(layout)) {
-            for y in 0..height {
-                dispatch(plane.row_mut(y, 0, 4 * w), a.row(y, 0, w));
-            }
-        }
+        crate::convert::yuv444_to_packed(dsp, layout, plane, &planes, w, 0, h, threads);
         return Ok(());
     }
     if no_fancy_upsampling {
@@ -351,39 +346,51 @@ fn convert_to_packed_2byte(
     premultiply_packed: bool,
     threads: usize,
 ) -> Result<()> {
-    let mut temp = Buffer::default();
-
-    if src.format != Format::Argb {
-        convert_to_packed(
-            dsp,
-            &mut temp,
-            src,
-            Format::Argb as i32,
-            no_fancy_upsampling,
-            premultiply_packed,
-            threads,
-        )?;
-    }
-
-    let argb = if temp.is_empty() { *src } else { temp.frame() };
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
+    let Some(pack) = format_packer(dsp, format) else {
+        return Err(Error::Unsupported);
+    };
+    let premultiply = (format_is_premultiplied(format) && premultiply_packed)
+        .then(|| format_premultiplier_4444(dsp, format));
 
-    dst.alloc_packed(argb.width, argb.height, 2, target)?;
+    dst.alloc_packed(src.width, src.height, 2, target)?;
 
     let mut out = dst.frame_mut();
 
-    if let Some(pack) = format_packer(dsp, format) {
-        for y in 0..argb.height {
-            pack(out.row(0, y), argb.row(0, y));
-        }
-    }
-    if format_is_premultiplied(format) && premultiply_packed {
-        let premultiply = format_premultiplier_4444(dsp, format);
+    if src.format == Format::Argb {
+        for y in 0..src.height {
+            let row = out.row(0, y);
 
-        for y in 0..argb.height {
-            premultiply(out.row(0, y));
+            pack(row, src.row(0, y));
+            if let Some(premultiply) = premultiply {
+                premultiply(row);
+            }
         }
+        return Ok(());
     }
+
+    let sampling = if src.chroma_full {
+        Sampling::Full
+    } else if no_fancy_upsampling {
+        Sampling::Simple
+    } else {
+        Sampling::Fancy
+    };
+    let planes = yuv_planes(src);
+
+    crate::convert::yuv_to_packed_2byte(
+        dsp,
+        &mut out.planes_mut()[0],
+        &planes,
+        src.width as usize,
+        src.height as usize,
+        0,
+        src.height as usize,
+        sampling,
+        pack,
+        premultiply,
+        threads,
+    );
     Ok(())
 }
 

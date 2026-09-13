@@ -21,6 +21,8 @@ pub type UpsampleBlockRaw = unsafe extern "C" fn(
     c_int,
 );
 pub type RowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
+pub type YuvRowRaw =
+    unsafe extern "C" fn(*mut u8, *const u8, *const u8, *const u8, c_int);
 pub type PremultiplyRaw = unsafe extern "C" fn(*mut u8, c_int, c_int);
 pub type Premultiply4444Raw = unsafe extern "C" fn(*mut u8, c_int);
 pub type ArgbToYuv444Raw =
@@ -99,6 +101,47 @@ fn upsample_block<T: Raw<Sig = UpsampleBlockRaw>, const L: usize>(
                 .map_or(std::ptr::null_mut(), <[u8]>::as_mut_ptr),
             blocks as c_int,
         );
+    }
+}
+
+fn yuv444_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+) {
+    let n = (dst.len() / bpp(L)).min(y.len()).min(u.len()).min(v.len());
+
+    unsafe {
+        (T::F)(
+            dst.as_mut_ptr(),
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            n as c_int,
+        )
+    }
+}
+
+fn yuv420_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+) {
+    let n = (dst.len() / bpp(L))
+        .min(y.len())
+        .min(2 * u.len())
+        .min(2 * v.len());
+
+    unsafe {
+        (T::F)(
+            dst.as_mut_ptr(),
+            y.as_ptr(),
+            u.as_ptr(),
+            v.as_ptr(),
+            n as c_int,
+        )
     }
 }
 
@@ -202,6 +245,11 @@ pub struct RawTable {
     pub upsample_block: Option<[UpsampleBlockRaw; 5]>,
     pub upsample_rgb: Option<UpsampleBlockRaw>,
     pub upsample_bgr: Option<UpsampleBlockRaw>,
+    pub yuv444_row: Option<[YuvRowRaw; 5]>,
+    pub yuv420_row: Option<[YuvRowRaw; 5]>,
+    /// The three-byte layouts alone, from a set that only refines those.
+    pub yuv444_row_rgb: Option<[YuvRowRaw; 2]>,
+    pub yuv420_row_rgb: Option<[YuvRowRaw; 2]>,
     pub dispatch_alpha_first: Option<RowRaw>,
     pub dispatch_alpha_last: Option<RowRaw>,
     pub packers: Option<[RowRaw; 8]>,
@@ -239,6 +287,69 @@ macro_rules! raw_upsample_table {
             $set::UpsampleRgb::F,
             $set::UpsampleBgr::F,
         ]
+    };
+}
+
+macro_rules! raw_yuv_row {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        raw!(
+            $marker,
+            $inner,
+            YuvRowRaw,
+            $sym,
+            (*mut u8, *const u8, *const u8, *const u8, c_int)
+        );
+    };
+}
+
+macro_rules! yuv_row_syms {
+    ($argb444:literal, $rgba444:literal, $bgra444:literal, $rgb444:literal,
+     $bgr444:literal, $argb420:literal, $rgba420:literal, $bgra420:literal,
+     $rgb420:literal, $bgr420:literal) => {
+        raw_yuv_row!(Yuv444Argb, yuv444_argb, $argb444);
+        raw_yuv_row!(Yuv444Rgba, yuv444_rgba, $rgba444);
+        raw_yuv_row!(Yuv444Bgra, yuv444_bgra, $bgra444);
+        raw_yuv_row!(Yuv420Argb, yuv420_argb, $argb420);
+        raw_yuv_row!(Yuv420Rgba, yuv420_rgba, $rgba420);
+        raw_yuv_row!(Yuv420Bgra, yuv420_bgra, $bgra420);
+        yuv_row_rgb_syms!($rgb444, $bgr444, $rgb420, $bgr420);
+    };
+}
+
+macro_rules! yuv_row_rgb_syms {
+    ($rgb444:literal, $bgr444:literal, $rgb420:literal, $bgr420:literal) => {
+        raw_yuv_row!(Yuv444Rgb, yuv444_rgb, $rgb444);
+        raw_yuv_row!(Yuv444Bgr, yuv444_bgr, $bgr444);
+        raw_yuv_row!(Yuv420Rgb, yuv420_rgb, $rgb420);
+        raw_yuv_row!(Yuv420Bgr, yuv420_bgr, $bgr420);
+    };
+}
+
+macro_rules! yuv_rows {
+    ($dsp:ident, $set:ident) => {
+        $dsp.yuv444_row = [
+            yuv444_row::<$set::Yuv444Argb, LAYOUT_ARGB>,
+            yuv444_row::<$set::Yuv444Rgba, LAYOUT_RGBA>,
+            yuv444_row::<$set::Yuv444Bgra, LAYOUT_BGRA>,
+            yuv444_row::<$set::Yuv444Rgb, LAYOUT_RGB>,
+            yuv444_row::<$set::Yuv444Bgr, LAYOUT_BGR>,
+        ];
+        $dsp.yuv420_row = [
+            yuv420_row::<$set::Yuv420Argb, LAYOUT_ARGB>,
+            yuv420_row::<$set::Yuv420Rgba, LAYOUT_RGBA>,
+            yuv420_row::<$set::Yuv420Bgra, LAYOUT_BGRA>,
+            yuv420_row::<$set::Yuv420Rgb, LAYOUT_RGB>,
+            yuv420_row::<$set::Yuv420Bgr, LAYOUT_BGR>,
+        ];
+    };
+}
+
+macro_rules! yuv_rows_rgb {
+    ($dsp:ident, $set:ident) => {
+        $dsp.yuv444_row[LAYOUT_RGB] = yuv444_row::<$set::Yuv444Rgb, LAYOUT_RGB>;
+        $dsp.yuv444_row[LAYOUT_BGR] = yuv444_row::<$set::Yuv444Bgr, LAYOUT_BGR>;
+        $dsp.yuv420_row[LAYOUT_RGB] = yuv420_row::<$set::Yuv420Rgb, LAYOUT_RGB>;
+        $dsp.yuv420_row[LAYOUT_BGR] = yuv420_row::<$set::Yuv420Bgr, LAYOUT_BGR>;
     };
 }
 
@@ -349,6 +460,8 @@ macro_rules! ladder {
             $( @upsample_rgb $up_rgb:ident; )?
             $( @upsample_bgr $up_bgr:ident; )?
             $( @packers $packers:ident; )?
+            $( @rows $rows:ident; )?
+            $( @rows_rgb $rows_rgb:ident; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -362,6 +475,8 @@ macro_rules! ladder {
                     $( dsp.upsample_block[LAYOUT_BGR] =
                         upsample_block::<$up_bgr::UpsampleBgr, LAYOUT_BGR>; )?
                     $( packers!(dsp, $packers); )?
+                    $( yuv_rows!(dsp, $rows); )?
+                    $( yuv_rows_rgb!(dsp, $rows_rgb); )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
             )*
@@ -381,6 +496,30 @@ macro_rules! ladder {
                     $( t.upsample_rgb = Some($up_rgb::UpsampleRgb::F); )?
                     $( t.upsample_bgr = Some($up_bgr::UpsampleBgr::F); )?
                     $( t.packers = Some(raw_packers!($packers)); )?
+                    $(
+                        t.yuv444_row = Some([
+                            $rows::Yuv444Argb::F,
+                            $rows::Yuv444Rgba::F,
+                            $rows::Yuv444Bgra::F,
+                            $rows::Yuv444Rgb::F,
+                            $rows::Yuv444Bgr::F,
+                        ]);
+                        t.yuv420_row = Some([
+                            $rows::Yuv420Argb::F,
+                            $rows::Yuv420Rgba::F,
+                            $rows::Yuv420Bgra::F,
+                            $rows::Yuv420Rgb::F,
+                            $rows::Yuv420Bgr::F,
+                        ]);
+                        t.yuv444_row_rgb = None;
+                        t.yuv420_row_rgb = None;
+                    )?
+                    $(
+                        t.yuv444_row_rgb =
+                            Some([$rows_rgb::Yuv444Rgb::F, $rows_rgb::Yuv444Bgr::F]);
+                        t.yuv420_row_rgb =
+                            Some([$rows_rgb::Yuv420Rgb::F, $rows_rgb::Yuv420Bgr::F]);
+                    )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
             )*
@@ -419,6 +558,19 @@ mod arch {
             "ff_upsample_block_rgb_sse2",
             "ff_upsample_block_bgr_sse2"
         );
+        #[cfg(target_arch = "x86_64")]
+        yuv_row_syms!(
+            "ff_yuv444_row_argb_sse2",
+            "ff_yuv444_row_rgba_sse2",
+            "ff_yuv444_row_bgra_sse2",
+            "ff_yuv444_row_rgb_sse2",
+            "ff_yuv444_row_bgr_sse2",
+            "ff_yuv420_row_argb_sse2",
+            "ff_yuv420_row_rgba_sse2",
+            "ff_yuv420_row_bgra_sse2",
+            "ff_yuv420_row_rgb_sse2",
+            "ff_yuv420_row_bgr_sse2"
+        );
     }
 
     pub mod ssse3 {
@@ -441,6 +593,13 @@ mod arch {
         raw_upsample!(UpsampleRgb, upsample_rgb, "ff_upsample_block_rgb_ssse3");
         #[cfg(target_arch = "x86_64")]
         raw_upsample!(UpsampleBgr, upsample_bgr, "ff_upsample_block_bgr_ssse3");
+        #[cfg(target_arch = "x86_64")]
+        yuv_row_rgb_syms!(
+            "ff_yuv444_row_rgb_ssse3",
+            "ff_yuv444_row_bgr_ssse3",
+            "ff_yuv420_row_rgb_ssse3",
+            "ff_yuv420_row_bgr_ssse3"
+        );
         #[cfg(target_arch = "x86_64")]
         raw!(
             ArgbToYuv444,
@@ -487,6 +646,19 @@ mod arch {
             "ff_upsample_block_bgr_avx2"
         );
         #[cfg(target_arch = "x86_64")]
+        yuv_row_syms!(
+            "ff_yuv444_row_argb_avx2",
+            "ff_yuv444_row_rgba_avx2",
+            "ff_yuv444_row_bgra_avx2",
+            "ff_yuv444_row_rgb_avx2",
+            "ff_yuv444_row_bgr_avx2",
+            "ff_yuv420_row_argb_avx2",
+            "ff_yuv420_row_rgba_avx2",
+            "ff_yuv420_row_bgra_avx2",
+            "ff_yuv420_row_rgb_avx2",
+            "ff_yuv420_row_bgr_avx2"
+        );
+        #[cfg(target_arch = "x86_64")]
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
@@ -508,6 +680,7 @@ mod arch {
         #[cfg(target_arch = "x86_64")]
         SSE2 {
             @upsample sse2;
+            @rows sse2;
         }
         SSE2 {
             dispatch_alpha_first = dispatch_alpha::<sse2::DispatchFirst>;
@@ -522,6 +695,7 @@ mod arch {
         SSSE3 {
             @upsample_rgb ssse3;
             @upsample_bgr ssse3;
+            @rows_rgb ssse3;
 
             argb_to_yuv444 = argb_to_yuv444::<ssse3::ArgbToYuv444>;
         }
@@ -534,6 +708,7 @@ mod arch {
         #[cfg(target_arch = "x86_64")]
         AVX2 {
             @upsample avx2;
+            @rows avx2;
 
             argb_to_yuv444 = argb_to_yuv444::<avx2::ArgbToYuv444>;
             argb_to_uv = argb_to_uv::<avx2::ArgbToUv>;
@@ -570,6 +745,18 @@ mod arch {
             "ff_upsample_block_bgra_neon",
             "ff_upsample_block_rgb_neon",
             "ff_upsample_block_bgr_neon"
+        );
+        yuv_row_syms!(
+            "ff_yuv444_row_argb_neon",
+            "ff_yuv444_row_rgba_neon",
+            "ff_yuv444_row_bgra_neon",
+            "ff_yuv444_row_rgb_neon",
+            "ff_yuv444_row_bgr_neon",
+            "ff_yuv420_row_argb_neon",
+            "ff_yuv420_row_rgba_neon",
+            "ff_yuv420_row_bgra_neon",
+            "ff_yuv420_row_rgb_neon",
+            "ff_yuv420_row_bgr_neon"
         );
         pack_syms!(
             "ff_pack_rgba_neon",
@@ -642,6 +829,7 @@ mod arch {
         NEON {
             @upsample neon;
             @packers neon;
+            @rows neon;
 
             premultiply_row = premultiply_row::<neon::Premultiply>;
             premultiply_row_4444 = premultiply_row_4444::<neon::Premultiply4444>;

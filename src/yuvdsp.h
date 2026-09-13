@@ -26,6 +26,12 @@ typedef void (*upsample_argb_block_func)(
 typedef void (*dispatch_alpha_func)(uint8_t *dst, const uint8_t *src,
                                     int num_pixels);
 
+/* One packed row from a luma row and two chroma rows. The 4:4:4 form reads
+ * num_pixels chroma samples, the 4:2:0 form (num_pixels + 1) / 2, each
+ * stretched over its pixel pair. */
+typedef void (*yuv_row_func)(uint8_t *dst, const uint8_t *y, const uint8_t *u,
+                             const uint8_t *v, int num_pixels);
+
 /* Reorders an ARGB row; dst must not alias src. */
 typedef void (*pack_row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
 
@@ -74,6 +80,8 @@ typedef struct WPDYUVDSP {
     argb_to_uv_func           argb_to_uv;
     multiply_row_func         multiply_row;
     multiply_argb_row_func    premultiply_argb_row;
+    yuv_row_func              yuv444_row[WPD_LAYOUT_NB];
+    yuv_row_func              yuv420_row[WPD_LAYOUT_NB];
 } WPDYUVDSP;
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);
