@@ -204,7 +204,7 @@ SECTION .text
 %endif
 %endmacro
 
-%macro CONVERT_STORE 4 ; dst, offset, layout, bpp; y, u, v in m3-m5 as words << 8
+%macro CONVERT_STORE 4
     pmulhuw   m3, [pw_19077]            ; 19077 . y
     pmulhuw   m6, m5, [pw_26149]
     paddw     m6, m3
@@ -240,7 +240,7 @@ SECTION .text
 %endif
 %endmacro
 
-%macro CONVERT_GROUP 7 ; y, dst, u_scratch, v_scratch, offset, layout, bpp
+%macro CONVERT_GROUP 7
 %if cpuflag(avx2)
     pmovzxbw  m3, [%1 + %5]
     pmovzxbw  m4, [rsp + %3 + %5]
@@ -312,9 +312,7 @@ UPSAMPLE_ARGB_BLOCK bgra, 4
 UPSAMPLE_ARGB_BLOCK rgb, 3
 UPSAMPLE_ARGB_BLOCK bgr, 3
 
-; One packed row straight from a luma row and two chroma rows: 444 takes chroma
-; at full width, 420 stretches each chroma sample over its pixel pair.
-%macro YUV_ROW_GROUP 7 ; y, u, v, dst, layout, bpp, chroma
+%macro YUV_ROW_GROUP 7
 %if cpuflag(avx2)
     pmovzxbw  m3, [%1]
 %if %7 == 444
@@ -353,7 +351,7 @@ UPSAMPLE_ARGB_BLOCK bgr, 3
     CONVERT_STORE %4, 0, %5, %6
 %endmacro
 
-%macro COPY_BYTES 3 ; dst, src, count; uses idx and tmp
+%macro COPY_BYTES 3
     xor       idxd, idxd
 %%loop:
     movzx     tmpd, byte [%2 + idxq]
@@ -363,9 +361,7 @@ UPSAMPLE_ARGB_BLOCK bgr, 3
     jl        %%loop
 %endmacro
 
-; The tail short of a group goes through the stack: its samples are copied in,
-; converted as a full group, and only the pixels asked for are copied out.
-%macro YUV_ROW 3 ; chroma, layout, bpp
+%macro YUV_ROW 3
 cglobal yuv%1_row_%2, 5, 8, 8, 128, dst, y, u, v, n, idx, tmp, cnt
     sub       nd, mmsize / 2
     jl        .tail
@@ -401,7 +397,7 @@ cglobal yuv%1_row_%2, 5, 8, 8, 128, dst, y, u, v, n, idx, tmp, cnt
     RET
 %endmacro
 
-%macro YUV_ROWS 2 ; layout, bpp
+%macro YUV_ROWS 2
 YUV_ROW 444, %1, %2
 YUV_ROW 420, %1, %2
 %endmacro

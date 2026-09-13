@@ -456,7 +456,6 @@ function ff_extract_green_neon, export=1
 9:      ret
 endfunc
 
-// Adds the green channel back into red and blue; dst may be src.
 function ff_add_green_neon, export=1
         cmp             w2,  #16
         b.lt            2f

@@ -306,9 +306,6 @@ entry!(fn wpd_decoder_set_output_buffer(decoder, buffer: *const WPDOutputBuffer)
     reported(unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK))
 });
 
-/// The caller's bytes as a slice, or None where no slice could describe
-/// them: a slice is bounded by isize::MAX, and a size past that is a mistake
-/// upstream rather than a file this large.
 unsafe fn lent<'a>(data: *const u8, size: usize) -> Option<&'a [u8]> {
     if data.is_null() || size == 0 {
         return Some(&[]);
@@ -319,10 +316,6 @@ unsafe fn lent<'a>(data: *const u8, size: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(data, size) })
 }
 
-/// Runs `body` on a copy of the first `v1` bytes of the caller's struct and
-/// writes them back, so a caller compiled against an older, shorter struct
-/// is never read or written past what it allocated. The declared size must
-/// already have been checked against `v1`.
 pub(crate) unsafe fn with_prefix<T>(
     p: *mut T,
     v1: usize,
@@ -388,8 +381,6 @@ entry!(fn wpd_decoder_get_info(const decoder, info: *mut WPDImageInfo) {
     if info.is_null() {
         return status(decoder.fail("invalid decoder state", Error::InvalidArgument));
     }
-    /* Read only the caller's allocation; a v1 pointer cannot become a
-     * reference to the current, possibly longer, struct. */
     let size = unsafe { ptr::addr_of!((*info).struct_size).read() };
 
     if size < WPDImageInfo::v1() {
@@ -606,9 +597,6 @@ struct WPDFrameOwner {
     plane: [Vec<u8>; 4],
 }
 
-/// A decoder the one-shot entry points own for the length of a call. Freed
-/// on drop, so a panic unwinding out of the middle of a decode does not
-/// leak it.
 struct Owned(*mut WPDDecoderRaw);
 
 impl Drop for Owned {
@@ -718,8 +706,6 @@ pub unsafe extern "C" fn wpd_decode(
             blend: 0,
             has_alpha: 0,
         };
-        /* The decoder owns the planes `decoded` points at, so it lives until
-         * they have been copied out below, and no longer. */
         let (decoder, ret) = match unsafe {
             decode_once(data, size, format, options, ptr::null(), &mut decoded)
         } {
@@ -883,8 +869,6 @@ mod tests {
         assert_eq!(counts, [1, usize::from(!cfg!(feature = "threads")), 1]);
     }
 
-    /// A struct exactly as long as a v1 caller would allocate, with bytes
-    /// after it that must survive the call untouched.
     #[repr(C, align(8))]
     struct Short<const N: usize> {
         bytes: [u8; N],
@@ -912,7 +896,6 @@ mod tests {
         const IMAGE_V1: usize = mem::offset_of!(WPDImageInfo, metadata) + 4;
         const FRAME_V1: usize = mem::offset_of!(WPDFrameInfo, complete) + 4;
 
-        // Both structs carry a tail past v1: the test is vacuous otherwise.
         assert!(IMAGE_V1 < mem::size_of::<WPDImageInfo>());
         assert!(FRAME_V1 < mem::size_of::<WPDFrameInfo>());
 
@@ -962,7 +945,6 @@ mod tests {
         assert_eq!(image.canary, [0x5a; 32]);
         assert_eq!(frame.canary, [0x5a; 32]);
 
-        // One byte short of v1 is refused, and still not written.
         let mut tiny = Short::<IMAGE_V1>::new();
 
         tiny.bytes[..mem::size_of::<usize>()]

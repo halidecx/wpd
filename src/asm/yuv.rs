@@ -247,7 +247,6 @@ pub struct RawTable {
     pub upsample_bgr: Option<UpsampleBlockRaw>,
     pub yuv444_row: Option<[YuvRowRaw; 5]>,
     pub yuv420_row: Option<[YuvRowRaw; 5]>,
-    /// The three-byte layouts alone, from a set that only refines those.
     pub yuv444_row_rgb: Option<[YuvRowRaw; 2]>,
     pub yuv420_row_rgb: Option<[YuvRowRaw; 2]>,
     pub dispatch_alpha_first: Option<RowRaw>,

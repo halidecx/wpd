@@ -4,11 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* libwebp-compatible area rescaler, exported for the test harnesses rather
- * than as public API. work holds 2 * dst_width * num_channels u32s and must
- * be 4-byte aligned; dst, src and work must not overlap; every dimension
- * and channel count is positive and each stride covers its row. A call that
- * breaks any of these returns without touching memory. */
 void wpd_rescale_plane(uint8_t *dst, int dst_stride, int dst_width,
                        int dst_height, const uint8_t *src, int src_stride,
                        int src_width, int src_height, int num_channels,

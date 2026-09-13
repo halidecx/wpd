@@ -370,32 +370,19 @@ fn yuv444_span(
     }
 }
 
-/// How the luma and chroma planes combine into a pixel row.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sampling {
-    /// Full-resolution chroma.
     Full,
-    /// Subsampled chroma, each sample stretched over its pixel pair.
     Simple,
-    /// Subsampled chroma, interpolated between the neighbouring samples.
     Fancy,
 }
 
-/// The two-byte output of a strip of about this many bytes of ARGB, so the
-/// strip is written, packed, and forgotten while it is still in cache.
 const STRIP_BYTES: usize = 64 * 1024;
 
-/// The rows a two-byte conversion carries through its ARGB strip at once. Two
-/// is the least the fancy path can hand over, and a strip is even so that one
-/// beginning on an odd row is followed by another that does too.
 fn strip_rows(width: usize) -> usize {
     (STRIP_BYTES / (4 * width.max(1))).clamp(2, 64) & !1
 }
 
-/// Converts rows `[row_start, row_end)` to a two-byte packed format through a
-/// cache-sized ARGB strip a band at a time, so the picture is never held as
-/// ARGB in full. Returns the first row written, as `yuv420_to_packed_rows()`
-/// does.
 #[allow(clippy::too_many_arguments)]
 pub fn yuv_to_packed_2byte(
     dsp: &YuvDsp,
@@ -458,8 +445,6 @@ fn strip_2byte_span(
     };
 
     while from < row_end {
-        /* A strip after the first begins on an odd row, as a band does, so
-         * the fancy path never reaches back into the one before it. */
         let to = row_end.min((from + rows - 1) | 1);
         let mut argb = PlaneMut::borrowed_at(
             &mut strip[..(to - from) * stride],

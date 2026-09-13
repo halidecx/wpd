@@ -165,8 +165,6 @@ pub fn crop_origin(
 ) -> Result<(i32, i32)> {
     let align = if packed { 0 } else { 1 };
 
-    /* Guarded upstream where options are set; checked here as well so the
-     * arithmetic below cannot wrap for a caller that skipped that. */
     if crop.left < 0 || crop.top < 0 || crop.width <= 0 || crop.height <= 0 {
         return Err(Error::InvalidData);
     }

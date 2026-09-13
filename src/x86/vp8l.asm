@@ -45,7 +45,6 @@ SECTION .text
     neg        nq
 %endmacro
 
-
 %macro PRED_ADD_0 0
 cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
     pcmpeqd    m0, m0
@@ -91,7 +90,6 @@ cglobal pred_add_0, 4, 4, 3, src, upper, n, dst
     RET
 %endmacro
 
-
 %macro PRED_ADD_1 0
 cglobal pred_add_1, 4, 4, 3, src, upper, n, dst
 %if cpuflag(avx2)
@@ -130,7 +128,6 @@ cglobal pred_add_1, 4, 4, 3, src, upper, n, dst
 .ret:
     RET
 %endmacro
-
 
 %macro PRED_TOP 2
 cglobal pred_add_%1, 4, 4, 4, src, upper, n, dst
@@ -263,7 +260,6 @@ cglobal pred_add_%1, 4, 4, 5, src, upper, n, dst
     RET
 %endmacro
 
-
 %macro PRED_AVG3 0
 cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
     test       nd, nd
@@ -287,7 +283,6 @@ cglobal pred_add_5, 4, 4, 5, src, upper, n, dst
 .ret:
     RET
 %endmacro
-
 
 %macro PRED_AVG4 0
 cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
@@ -315,7 +310,6 @@ cglobal pred_add_10, 4, 4, 6, src, upper, n, dst
 .ret:
     RET
 %endmacro
-
 
 %macro PRED_SELECT 0
 cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
@@ -373,7 +367,6 @@ cglobal pred_add_11, 4, 4, 16, src, upper, n, dst
     RET
 %endmacro
 
-
 %macro PRED_CLAMP_FULL 0
 cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
     test       nd, nd
@@ -395,7 +388,6 @@ cglobal pred_add_12, 4, 4, 6, src, upper, n, dst
 .ret:
     RET
 %endmacro
-
 
 %macro PRED_CLAMP_HALF 0
 cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
@@ -430,8 +422,6 @@ cglobal pred_add_13, 4, 4, 7, src, upper, n, dst
     RET
 %endmacro
 
-
-; Adds the green channel back into red and blue; dst may be src.
 %macro ADD_GREEN 0
 cglobal add_green, 3, 3, 4, dst, src, n
 %if cpuflag(ssse3)
@@ -439,7 +429,7 @@ cglobal add_green, 3, 3, 4, dst, src, n
 %else
     pcmpeqd    m2, m2
     psrld      m2, 24
-    pslld      m2, 16                 ; the green byte of every pixel
+    pslld      m2, 16
 %endif
     cmp        nd, mmsize / 4
     jl .tail1
@@ -517,7 +507,6 @@ PRED_AVGTOP 8, -4, 0
 PRED_AVGTOP 9, 0, 4
 ADD_GREEN
 
-
 INIT_YMM avx2
 cglobal extract_green, 3, 4, 6, dst, src, n
     pcmpeqd    m4, m4
@@ -579,7 +568,6 @@ cglobal extract_green, 3, 4, 6, dst, src, n
 .ret:
     RET
 
-
 INIT_YMM avx2
 cglobal map_color32, 4, 5, 5, dst, src, pal, n
     pcmpeqd    m3, m3
@@ -611,7 +599,6 @@ cglobal map_color32, 4, 5, 5, dst, src, pal, n
     jg .loop1
 .ret:
     RET
-
 
 %macro BLEND_CH 2 ; acc, shift
     psrld      m9, m0, %2

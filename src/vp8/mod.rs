@@ -1271,8 +1271,6 @@ impl Decoder {
         if size < 10 {
             return Err(Error::InvalidData);
         }
-        /* The header parser indexes by `avail`, not by what the slice holds,
-         * so bytes said to be here but not here count as not yet arrived. */
         let avail = avail.min(chunk.len()).min(size);
 
         if avail < 10 {

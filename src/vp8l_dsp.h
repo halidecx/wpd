@@ -18,7 +18,6 @@ typedef struct WPDLosslessDSP {
                                    int num_pixels);
     void (*color_row)(uint32_t *dst, const uint32_t *src, int num_pixels,
                       uint32_t mult);
-    /* Adds green back into red and blue; dst may be src. */
     void (*add_green)(uint32_t *dst, const uint32_t *src, int num_pixels);
 } WPDLosslessDSP;
 

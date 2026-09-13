@@ -567,8 +567,6 @@ pub struct UpsampleDst<'a> {
 pub type UpsampleBlockFn = fn(&UpsampleSrc<'_>, &mut UpsampleDst<'_>, usize);
 
 pub type RowFn = fn(&mut [u8], &[u8]);
-/// One packed row from one luma row and its two chroma rows: full-width
-/// chroma for 4:4:4, half-width chroma shared by pixel pairs for 4:2:0.
 pub type YuvRowFn = fn(&mut [u8], &[u8], &[u8], &[u8]);
 pub type ArgbToYuv444Fn = fn(&mut [u8], &mut [u8], &mut [u8], &[u8]);
 pub type ArgbToUvFn = fn(&mut [u8], &mut [u8], &[u8], usize, usize, bool);

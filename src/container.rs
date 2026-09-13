@@ -155,9 +155,6 @@ fn rl32(b: &[u8], at: usize) -> u32 {
     bits::rl32(&bits::quad(b, at))
 }
 
-/// The size the first bytes of a VP8 or VP8L bitstream declare, or None
-/// where they are not a header that could be decoded. `size` is the whole
-/// chunk's, which the VP8 first-partition length is checked against.
 pub(crate) fn bitstream_size(tag: u32, p: &[u8], size: usize) -> Option<(i32, i32)> {
     if tag == TAG_VP8L {
         if p.len() < 5 || p[0] != 0x2f {

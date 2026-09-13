@@ -7,13 +7,6 @@ fn chroma(p: usize) -> u32 {
 
 pub(crate) use zeroed::try_zeroed;
 
-/// `n` zeroed elements from the allocator's zeroed path, which hands out
-/// pages the kernel already cleared rather than writing every byte of a
-/// large buffer twice: once here and again when it is decoded into. Fails
-/// rather than aborting when there is no memory.
-///
-/// The safe core forbids the unsafe code that path needs, so a build
-/// without assembly clears the buffer itself.
 #[cfg(feature = "asm")]
 #[allow(unsafe_code)]
 mod zeroed {
@@ -21,8 +14,6 @@ mod zeroed {
 
     use crate::error::{Error, Result};
 
-    /// Element types every zero bit pattern is a value of.
-    ///
     /// # Safety
     /// An all-zero bit pattern must be a valid value of the type.
     pub(crate) unsafe trait Zeroable: Copy {}
@@ -36,14 +27,11 @@ mod zeroed {
         if layout.size() == 0 {
             return Ok(Vec::new());
         }
-        // SAFETY: the layout has a size, and it is the one Vec<T> frees a
-        // capacity of n with, so the vector owns the allocation outright.
         let p = unsafe { alloc_zeroed(layout) }.cast::<T>();
 
         if p.is_null() {
             return Err(Error::NoMemory);
         }
-        // SAFETY: p holds n zeroed Ts, which Zeroable says are valid values.
         Ok(unsafe { Vec::from_raw_parts(p, n, n) })
     }
 }
@@ -73,9 +61,6 @@ pub struct Plane {
 }
 
 impl Plane {
-    /// Makes the plane `size` bytes. A fresh allocation is zero; a reused
-    /// one keeps what it held, since every caller writes the whole plane
-    /// before reading it, and clearing a large one costs a pass over it.
     fn resize(&mut self, stride: usize, rows: i32, size: usize) -> Result<()> {
         if self.data.len() < size {
             self.data = Vec::new();
@@ -274,8 +259,6 @@ impl<'a> PlaneMut<'a> {
         }
     }
 
-    /// Borrows a buffer that holds rows `first` onward of a taller picture,
-    /// so a strip of it answers to the picture's own row numbers.
     pub fn borrowed_at(data: &'a mut [u8], stride: usize, first: i32) -> Self {
         PlaneMut {
             data,

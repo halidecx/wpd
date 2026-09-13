@@ -299,13 +299,6 @@ impl<'a> Decoder<'a> {
         found
     }
 
-    /// The size an ANMF declares for its frame, once both that and the image
-    /// it carries, read from the bitstream header of its VP8 or VP8L chunk,
-    /// are known to fit the canvas at the frame's offset. None where there is
-    /// no such image or where the walk would refuse the frame: the walk
-    /// checks the image's size before compositing it, and a batch must not
-    /// decode what the walk would refuse, since that is what bounds the
-    /// decode to the canvas.
     fn anmf_declared_fit(&self, base: usize, size: usize) -> Option<(i32, i32)> {
         let header = self.input.chunk(base, size.min(16));
 
@@ -371,10 +364,6 @@ impl<'a> Decoder<'a> {
 
         let mut entries = self.anmf_lookahead((base, size), want);
 
-        /* A frame the walk would refuse ends the run; nothing past it is
-         * decoded ahead, so no image the canvas cannot hold is decoded at
-         * all. The work estimate uses the declared sub-frame size, since a
-         * large canvas may only blink a pixel. */
         let mut pixels: u64 = 0;
         let mut usable = 0;
 
@@ -634,8 +623,6 @@ mod tests {
             decoder.canvas_width
         };
 
-        /* The second frame claims to be 1x1 at the canvas's right edge, which
-         * fits, while the image it carries is the full frame, which does not. */
         let pos_x = (canvas_width - 2) as u32 / 2;
 
         shifted[second..second + 3].copy_from_slice(&pos_x.to_le_bytes()[..3]);
@@ -654,8 +641,6 @@ mod tests {
         decoder.pos = base + size + (size & 1);
         decoder.fill_ahead(base, size);
 
-        /* Only the first frame was safe to run ahead, so no batch is worth
-         * starting; the walk then refuses the second frame itself. */
         assert!(decoder.ahead.spent());
         assert!(decoder.decode_anmf(base, size).is_ok());
         assert_eq!(

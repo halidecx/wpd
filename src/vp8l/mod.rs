@@ -137,8 +137,6 @@ impl Picture {
             .and_then(|n| n.checked_add(PADDING))
             .ok_or(Error::TooLarge)?;
 
-        /* A fresh picture comes zeroed from the allocator; a reused one
-         * keeps its pixels, every one of which is written before it is read. */
         if self.data.len() < size {
             self.data = Vec::new();
             self.data = crate::picture::try_zeroed(size)?;
@@ -595,8 +593,6 @@ impl Decoder {
                     img.groups[group].trees[j] =
                         huffman::build(&mut img.arena, &mut plan, lengths, sorted)?;
                 } else {
-                    /* No pixel maps to this group, so its tables are never
-                     * read; the code still has to be a valid one. */
                     huffman::validate(&mut plan, lengths, sorted)?;
                 }
             }

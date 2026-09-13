@@ -83,8 +83,6 @@ pub unsafe extern "C" fn wpd_get_info(
     if info.is_null() || data.is_null() || size > isize::MAX as usize {
         return WPD_ERR_INVALID_ARG;
     }
-    /* Read only the caller's allocation; a v1 pointer cannot become a
-     * reference to the current, possibly longer, struct. */
     let declared = unsafe { std::ptr::addr_of!((*info).struct_size).read() };
 
     if declared < WPDImageInfo::v1() {

@@ -194,8 +194,6 @@ upsample_block bgra
 upsample_block rgb
 upsample_block bgr
 
-// One packed row straight from a luma row and two chroma rows: 444 takes
-// chroma at full width, 420 stretches each chroma sample over its pixel pair.
 .macro  yuv_row8 y, u, v, dst, layout, chroma
         ldr             d0,  [\y], #8
 .if \chroma == 444
@@ -219,9 +217,6 @@ upsample_block bgr
         b.lt            5b
 .endm
 
-// The tail short of eight pixels goes through the stack: its samples are
-// copied in, converted as a full group, and only the pixels asked for are
-// copied out.
 .macro  yuv_row chroma, layout, bpp
 function ff_yuv\chroma\()_row_\layout\()_neon, export=1
         sub             sp,  sp,  #128

@@ -135,8 +135,6 @@ pred_add!(pred_add_11, |l, t, tl| select(t, l, tl));
 pred_add!(pred_add_12, |l, t, tl| clamped_add_sub_full(l, t, tl));
 pred_add!(pred_add_13, |l, t, tl| clamped_add_sub_half(l, t, tl));
 
-/// Adds the green channel back into red and blue, undoing the subtract-green
-/// transform on one row of ARGB pixels.
 pub fn add_green(row: &mut [u32]) {
     for px in row {
         let mut b = px.to_ne_bytes();

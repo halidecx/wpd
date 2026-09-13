@@ -3,16 +3,12 @@ use std::slice;
 
 use wpd::picture::{PlaneMut, PlaneRef};
 
-/// True where two byte ranges share no byte.
 fn disjoint(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> bool {
     let (a, b) = (a as usize, b as usize);
 
     a.saturating_add(a_len) <= b || b.saturating_add(b_len) <= a
 }
 
-/// The test harnesses' way at the rescaler, declared in src/rescaler.h.
-/// Geometry that no plane could have, a misaligned work area, and ranges
-/// that overlap are all declined before anything is touched.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::missing_safety_doc)]
@@ -142,7 +138,6 @@ mod tests {
         let odd = unsafe { misaligned.as_mut_ptr().add(1) }.cast::<u32>();
 
         unsafe {
-            // Destination is the source.
             wpd_rescale_plane(
                 src.as_mut_ptr(),
                 8,
@@ -155,7 +150,6 @@ mod tests {
                 1,
                 work_ptr,
             );
-            // The work area lies inside the destination.
             wpd_rescale_plane(
                 dst.as_mut_ptr(),
                 8,
@@ -168,7 +162,6 @@ mod tests {
                 1,
                 dst.as_mut_ptr().cast(),
             );
-            // The work area is not 4-byte aligned.
             wpd_rescale_plane(dst.as_mut_ptr(), 8, 4, 4, src.as_ptr(), 8, 8, 8, 1, odd);
         }
         assert!(dst.iter().all(|&b| b == 0xaa));

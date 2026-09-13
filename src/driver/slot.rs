@@ -282,8 +282,6 @@ impl FrameSlot {
         let mut at = base + 16;
         let end = base + size;
 
-        /* The walk has checked the ANMF header is whole, but the frame
-         * table is the walk's; hold the line here too. */
         if size < 16 {
             crate::log::error("ANMF chunk too short for a frame header");
             return Err(Error::InvalidData);

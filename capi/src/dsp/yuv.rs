@@ -141,8 +141,6 @@ macro_rules! inplace_tramp {
     };
 }
 
-/* A packed row from three planes; $chroma is the pixels a chroma sample
- * covers. */
 macro_rules! yuv_row_tramp {
     ($name:ident, $kernel:ident, $layout:expr, $chroma:literal) => {
         unsafe extern "C" fn $name(

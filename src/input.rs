@@ -47,10 +47,6 @@ pub fn grow_to(capacity: usize, buffered: usize, size: usize) -> Result<Option<u
     Ok(Some(grown))
 }
 
-/// How many bytes a compaction keeping everything from `keep` on would move,
-/// or None where it is not worth doing. Every move is paid for by at least
-/// half as many bytes dropped, so a stream appended a little at a time costs
-/// a bounded number of moves per byte rather than one per append.
 pub fn compact(window: Window, keep: usize) -> Option<usize> {
     if keep < window.discarded || keep > window.size {
         return None;
@@ -109,9 +105,6 @@ impl<'a> Input<'a> {
         &bytes[..size.min(bytes.len())]
     }
 
-    /// Makes room for `size` more bytes after what is buffered. Only the
-    /// capacity grows; the bytes are written by the caller, so a file is
-    /// never cleared before being copied over.
     fn reserve(&mut self, size: usize) -> Result<()> {
         let buffered = self.window.buffered();
 
@@ -123,8 +116,6 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// Ends the owned bytes with the zeroed padding readers past the end
-    /// rely on.
     fn pad(&mut self, end: usize) {
         self.owned.truncate(end);
         self.owned.resize(end + FILE_PADDING, 0);
@@ -158,8 +149,6 @@ impl<'a> Input<'a> {
         self.owned = data;
     }
 
-    /// Hands the owned bytes back and forgets the stream they held, so
-    /// nothing goes on describing bytes that are no longer here.
     pub fn take_owned(&mut self) -> Vec<u8> {
         self.borrowed = None;
         self.window = Window::default();
@@ -257,8 +246,6 @@ mod tests {
             discarded: 0,
         };
 
-        // Dropping 64K to move nearly a megabyte would be paid again on the
-        // next append; once half the buffer is behind, the move is worth it.
         assert_eq!(compact(w, COMPACT_THRESHOLD), None);
         assert_eq!(compact(w, 1 << 19), Some((1 << 19) + FILE_PADDING));
     }

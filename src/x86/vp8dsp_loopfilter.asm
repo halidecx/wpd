@@ -23,7 +23,6 @@ pw_18:    times 8 dw 18
 
 SECTION .text
 
-
 %macro READ_16x4_INTERLEAVED 12
     lea           %12, [r0+8*r2]
 
@@ -244,7 +243,6 @@ INIT_XMM ssse3
 SIMPLE_LOOPFILTER v, 3
 SIMPLE_LOOPFILTER h, 5
 
-
 %macro SIMPLE_FILTER 10
     psubusb        %6, %2, %3
     psubusb        %7, %3, %2
@@ -331,7 +329,6 @@ cglobal vp8_v_loop_filter_simple_mb, 4, 4, 11, dst, stride, mbedge, bedge
 
     V_SIMPLE_FILTER_PAIR m5
     RET
-
 
 %macro TRANSPOSE_16x16B 0
     punpcklbw      m8, m0, m1
@@ -446,7 +443,6 @@ cglobal vp8_h_loop_filter_simple_mb, 4, 9, 16, dst, stride, mbedge, bedge
     STORE_16x16B
     RET
 
-
 %macro LOAD_TRANSPOSED_16x16B 0
     movu          xm0, [tmpq]
     movu          xm1, [tmpq+16]
@@ -513,11 +509,7 @@ cglobal vp8_h_loop_filter16y_mb_itranspose, 3, 8, 16, dst, stride, tmp, dst4, ds
     STORE_16x16B
     RET
 
-; The macroblock edge filter reads p3..q3 and the inner edge at column 4
-; reads on to q3 of its own, so twelve bytes a row are touched: exactly the
-; window the caller checks. Columns 12..15 of the transposed block are
-; never looked at, so they are left zero rather than loaded from past it.
-%macro LOAD_8UVx12B_ROW 3 ; dst reg, U address, V address
+%macro LOAD_8UVx12B_ROW 3
     movq         xm%1, [%2]
     pinsrd       xm%1, [%2+8], 2
     movq          xm8, [%3]
@@ -536,7 +528,7 @@ cglobal vp8_h_loop_filter16y_mb_itranspose, 3, 8, 16, dst, stride, tmp, dst4, ds
     LOAD_8UVx12B_ROW 7, dstU8q+mstrideq, dstV8q+mstrideq
 %endmacro
 
-%macro STORE_8UVx12B_ROW 3 ; src reg, U address, V address
+%macro STORE_8UVx12B_ROW 3
     movq         [%2], xm%1
     pextrd     [%2+8], xm%1, 2
     vextracti128  xm8, m%1, 1
@@ -584,7 +576,6 @@ cglobal vp8_h_loop_filter8uv_mb_itranspose, 4, 9, 16, dstU, dstV, stride, tmp, d
     TRANSPOSE_16x16B
     STORE_8UVx12B
     RET
-
 
 %macro INNER_LOOPFILTER 2
 %define stack_size 0
@@ -933,7 +924,6 @@ INNER_LOOPFILTER v, 16
 INNER_LOOPFILTER h, 16
 INNER_LOOPFILTER v,  8
 INNER_LOOPFILTER h,  8
-
 
 %macro MBEDGE_LOOPFILTER 2
 %define stack_size 0

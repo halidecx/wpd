@@ -307,9 +307,6 @@ fn fill(p: &Plan, table: &mut [u32], sorted: &[u16]) -> bool {
     total == p.total_size
 }
 
-/// Checks a code the way `build` would without building its table, for a
-/// group no pixel maps to: the bitstream still has to be well formed, but
-/// the table would never be read.
 pub fn validate(plan: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> Result<()> {
     if analyze(plan, lengths, sorted) {
         Ok(())
@@ -330,8 +327,6 @@ pub fn build(
 
     let start = arena.len();
 
-    /* A reader addresses the arena through u32s; a table that would not fit
-     * there is refused rather than pointed at the wrong bytes. */
     if start + plan.total_size > u32::MAX as usize {
         return Err(Error::NoMemory);
     }
