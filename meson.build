@@ -354,11 +354,45 @@ fuzz_test = executable(
   install: false,
 )
 
+checkasm_features = ['checkasm']
+foreach f : cargo_features
+  if f != 'trim_dsp'
+    checkasm_features += f
+  endif
+endforeach
+
+libwpd_checkasm = custom_target(
+  'libwpd_checkasm',
+  output: 'libwpd_checkasm.a',
+  command: [
+    files('tools/cargo_build.sh'),
+    source_root,
+    meson.current_build_dir(),
+    'wpd_checkasm',
+    cargo_profile,
+    checkasm_features,
+  ],
+  env: cargo_env,
+  build_always_stale: true,
+  build_by_default: false,
+  install: false,
+)
+
+wpd_checkasm_dep = declare_dependency(
+  link_with: libwpd_checkasm,
+  include_directories: inc_dirs,
+  dependencies: [
+    cc.find_library('m', required: false),
+    dependency('threads', required: false),
+    cc.find_library('dl', required: false),
+  ],
+)
+
 if cc.has_header('sys/mman.h')
   rowbounds_test = executable(
     'test_rowbounds',
     files('tests/rowbounds.c'),
-    dependencies: wpd_dep,
+    dependencies: wpd_checkasm_dep,
     c_args: lib_c_args,
     install: false,
   )
@@ -475,40 +509,6 @@ checkasm_dep = dependency(
 )
 
 if asm_enabled and checkasm_dep.found()
-  checkasm_features = []
-  foreach f : cargo_features
-    if f != 'trim_dsp'
-      checkasm_features += f
-    endif
-  endforeach
-
-  libwpd_checkasm = custom_target(
-    'libwpd_checkasm',
-    output: 'libwpd_checkasm.a',
-    command: [
-      files('tools/cargo_build.sh'),
-      source_root,
-      meson.current_build_dir(),
-      'wpd_checkasm',
-      cargo_profile,
-      checkasm_features,
-    ],
-    env: cargo_env,
-    build_always_stale: true,
-    build_by_default: false,
-    install: false,
-  )
-
-  wpd_checkasm_dep = declare_dependency(
-    link_with: libwpd_checkasm,
-    include_directories: inc_dirs,
-    dependencies: [
-      cc.find_library('m', required: false),
-      dependency('threads', required: false),
-      cc.find_library('dl', required: false),
-    ],
-  )
-
   checkasm = executable(
     'checkasm',
     files(

@@ -1,5 +1,6 @@
 use std::ffi::{c_char, c_int, c_void, CStr};
 use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 use std::{alloc, mem, ptr, slice};
 
 use wpd::container::Coding;
@@ -11,7 +12,7 @@ use wpd::handout::Handout;
 use crate::container::{info_clear, WPDImageInfo};
 use crate::frame::{
     frame_clear, frame_private_data, frame_set_plane, frame_set_private_data,
-    frame_valid, write_frame, External, WPDFrame, WPDOutputPlane,
+    frame_valid, write_frame, External, SinkInput, WPDFrame, WPDOutputPlane,
 };
 use crate::options::WPDDecoderOptions;
 
@@ -19,6 +20,7 @@ pub struct WPDDecoder<'a> {
     decoder: Decoder<'a>,
     poisoned: bool,
     planes: [WPDOutputPlane; 4],
+    sink_input: Rc<SinkInput>,
 }
 
 impl WPDDecoder<'_> {
@@ -38,6 +40,22 @@ impl WPDDecoder<'_> {
             decoder,
             poisoned: false,
             planes: [WPDOutputPlane::empty(); 4],
+            sink_input: Rc::default(),
+        }
+    }
+
+    fn protect_input(&self) {
+        let input = self.input_bytes();
+        let start = input.as_ptr() as usize;
+        self.sink_input.range.set((start, start + input.len()));
+        self.sink_input.overlap.set(false);
+    }
+
+    fn output_failure(&mut self, message: &'static str, error: Error) -> Error {
+        if self.sink_input.overlap.get() {
+            self.fail("output overlaps input", Error::InvalidArgument)
+        } else {
+            self.fail(message, error)
         }
     }
 
@@ -262,7 +280,7 @@ unsafe fn set_output_buffer(
         }
     }
     if !decoder.has_sink() || decoder.planes != buffer.plane {
-        let sink = try_box(External(buffer.plane))?;
+        let sink = try_box(External(buffer.plane, Rc::clone(&decoder.sink_input)))?;
 
         decoder.planes = buffer.plane;
         decoder.set_sink(Some(sink));
@@ -307,10 +325,10 @@ entry!(fn wpd_decoder_set_output_buffer(decoder, buffer: *const WPDOutputBuffer)
 });
 
 unsafe fn lent<'a>(data: *const u8, size: usize) -> Option<&'a [u8]> {
-    if data.is_null() || size == 0 {
+    if size == 0 {
         return Some(&[]);
     }
-    if size > isize::MAX as usize {
+    if data.is_null() || size > isize::MAX as usize {
         return None;
     }
     Some(unsafe { slice::from_raw_parts(data, size) })
@@ -515,17 +533,19 @@ unsafe fn next_frame(
         return Err(decoder.fail("invalid frame", Error::InvalidArgument));
     }
 
+    decoder.protect_input();
     let ext = decoder.planes;
     let mut out = Handout::default();
 
     match decoder.next_picture(&mut out) {
         Ok(got) => {
             if got {
+                unsafe { wpd_frame_free(frame) };
                 unsafe { write_frame(&out, &ext, frame) };
             }
             Ok(got)
         }
-        Err((message, e)) => Err(decoder.fail(message, e)),
+        Err((message, e)) => Err(decoder.output_failure(message, e)),
     }
 }
 
@@ -549,11 +569,12 @@ unsafe fn partial_frame(
         return Err(decoder.fail(message, e));
     }
 
+    decoder.protect_input();
     let ext = decoder.planes;
     let mut out = Handout::default();
     let mut rows = 0;
 
-    unsafe { frame_clear(frame) };
+    unsafe { wpd_frame_free(frame) };
 
     let ret = match decoder.partial_picture(&mut out, &mut rows) {
         Ok(had_picture) => {
@@ -562,7 +583,7 @@ unsafe fn partial_frame(
             }
             Ok(())
         }
-        Err((message, e)) => Err(decoder.fail(message, e)),
+        Err((message, e)) => Err(decoder.output_failure(message, e)),
     };
 
     if !rows_valid.is_null() {
@@ -800,6 +821,93 @@ pub unsafe extern "C" fn wpd_frame_free(frame: *mut WPDFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoder_frames_replace_one_shot_owned_frames() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../wpd-test-data/lossy.webp"
+        ))
+        .unwrap();
+        let decoder = wpd_decoder_create();
+        assert!(!decoder.is_null());
+        let mut frame: WPDFrame = unsafe { mem::zeroed() };
+        frame.struct_size = mem::size_of::<WPDFrame>();
+        for partial in [false, true] {
+            assert_eq!(
+                unsafe {
+                    wpd_decode(data.as_ptr(), data.len(), 3, ptr::null(), &mut frame)
+                },
+                WPD_OK
+            );
+            assert!(!frame.private_data.is_null());
+            assert_eq!(
+                unsafe {
+                    wpd_decoder_open_borrowed(decoder, data.as_ptr(), data.len())
+                },
+                WPD_OK
+            );
+            if partial {
+                assert_eq!(
+                    unsafe {
+                        wpd_decoder_partial_frame(decoder, &mut frame, ptr::null_mut())
+                    },
+                    WPD_OK
+                );
+            } else {
+                assert_eq!(unsafe { wpd_decoder_next_frame(decoder, &mut frame) }, 1);
+            }
+            assert!(frame.private_data.is_null());
+        }
+        unsafe {
+            wpd_frame_free(&mut frame);
+            wpd_decoder_free(decoder);
+        }
+    }
+
+    #[test]
+    fn borrowed_input_cannot_be_used_as_output() {
+        let mut data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../wpd-test-data/lossy.webp"
+        ))
+        .unwrap();
+        let size = data.len();
+        let mut frame: WPDFrame = unsafe { mem::zeroed() };
+        frame.struct_size = mem::size_of::<WPDFrame>();
+        assert_eq!(
+            unsafe { wpd_decode(data.as_ptr(), size, 3, ptr::null(), &mut frame) },
+            WPD_OK
+        );
+        let stride = frame.width as usize * 4;
+        let bytes = stride * frame.height as usize;
+        unsafe { wpd_frame_free(&mut frame) };
+        data.resize(size.max(bytes), 0);
+        let original = data.clone();
+        let mut buffer = WPDOutputBuffer {
+            struct_size: mem::size_of::<WPDOutputBuffer>(),
+            plane: [WPDOutputPlane::empty(); 4],
+        };
+        buffer.plane[0] = WPDOutputPlane {
+            data: data.as_mut_ptr(),
+            size: bytes,
+            stride: stride as isize,
+        };
+        assert_eq!(
+            unsafe {
+                wpd_decode_into(
+                    data.as_ptr(),
+                    size,
+                    3,
+                    ptr::null(),
+                    &buffer,
+                    &mut frame,
+                )
+            },
+            WPD_ERR_INVALID_ARG
+        );
+        assert_eq!(data, original);
+    }
 
     #[test]
     fn threading_requires_current_options_from_the_c_caller() {
