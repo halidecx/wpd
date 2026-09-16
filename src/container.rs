@@ -343,6 +343,10 @@ impl Scan {
         Ok(())
     }
 
+    pub(crate) fn still_alpha_allowed(&self) -> bool {
+        !self.vp8x || self.vp8x_flags & VP8X_FLAG_ALPHA != 0
+    }
+
     fn frame_bounds(&self, p: &[u8]) -> Result<()> {
         if p.len() < 16 {
             log::error("ANMF chunk is too short");
@@ -556,17 +560,14 @@ impl Scan {
                     }
                     self.info.width = rl24(buf, at + 12) as i32 + 1;
                     self.info.height = rl24(buf, at + 15) as i32 + 1;
-                    if u64::from(self.info.width as u32)
-                        * u64::from(self.info.height as u32)
-                        >= 1 << 32
-                    {
-                        return Err(Error::TooLarge);
-                    }
+                    crate::error::check_image_size(self.info.width, self.info.height)?;
                 }
                 TAG_ALPH => {
                     self.still_chunk_allowed()?;
-                    self.info.has_alpha = true;
-                    self.info.image_has_alpha = true;
+                    if self.still_alpha_allowed() {
+                        self.info.has_alpha = true;
+                        self.info.image_has_alpha = true;
+                    }
                 }
                 TAG_ANIM => {
                     if size < ANIM_CHUNK_SIZE {
@@ -736,6 +737,22 @@ mod tests {
     #[test]
     fn something_that_is_not_a_webp_says_so() {
         assert_eq!(get_info(b"not a webp file at all"), Err(Error::NotWebp));
+    }
+
+    #[test]
+    fn oversized_vp8x_dimensions_are_refused_before_allocating() {
+        let payload = chunk(b"VP8X", &[2, 0, 0, 0, 0, 64, 0, 0, 0, 0]);
+        assert_eq!(get_info(&riff(&payload)), Err(Error::TooLarge));
+    }
+
+    #[test]
+    fn still_alpha_requires_the_vp8x_alpha_flag() {
+        let mut payload = chunk(b"VP8X", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        payload.extend(chunk(b"ALPH", &[0, 0]));
+        payload.extend(chunk(b"VP8 ", &[0x10, 0, 0, 0x9d, 1, 0x2a, 1, 0, 1, 0]));
+        let info = get_info(&riff(&payload)).unwrap();
+        assert!(!info.has_alpha);
+        assert!(!info.image_has_alpha);
     }
 
     #[test]

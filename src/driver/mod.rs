@@ -45,6 +45,7 @@ pub fn described((message, e): Failure) -> String {
 }
 
 pub(crate) struct StillLatch<'a> {
+    still_done: &'a mut bool,
     still_lossless: &'a mut bool,
     converted_rows: &'a mut i32,
 }
@@ -70,6 +71,7 @@ pub struct Decoder<'a> {
     pub(crate) scan: Scan,
     pub(crate) animation: bool,
     pub(crate) still_done: bool,
+    still_ready: Option<Source>,
     pub(crate) vp8_active: bool,
     pub(crate) still_lossy: bool,
     pub(crate) alpha_pending: bool,
@@ -228,6 +230,10 @@ pub(crate) fn source_view<'a>(
 }
 
 impl<'a> Decoder<'a> {
+    pub fn input_bytes(&self) -> &[u8] {
+        self.input.bytes()
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -322,6 +328,7 @@ impl<'a> Decoder<'a> {
         which: Source,
     ) -> (ExportTargets<'_>, Frame<'_>, StillLatch<'_>) {
         let Self {
+            still_done,
             still_lossless,
             converted_rows,
             ydsp,
@@ -349,6 +356,7 @@ impl<'a> Decoder<'a> {
             },
             img,
             StillLatch {
+                still_done,
                 still_lossless,
                 converted_rows,
             },
@@ -366,13 +374,24 @@ impl<'a> Decoder<'a> {
 
         export_packed(&set, targets, img, out)?;
 
+        *latch.still_done = true;
         *latch.still_lossless = true;
         *latch.converted_rows = height;
         Ok(())
     }
 
     pub(crate) fn row_parts(&mut self, which: Source) -> (RowTargets<'_>, Frame<'_>) {
+        let (targets, img, _) = self.row_parts_latched(which);
+
+        (targets, img)
+    }
+
+    fn row_parts_latched(
+        &mut self,
+        which: Source,
+    ) -> (RowTargets<'_>, Frame<'_>, &mut bool) {
         let Self {
+            still_done,
             ydsp,
             options,
             output,
@@ -395,6 +414,7 @@ impl<'a> Decoder<'a> {
                 converted_format: &mut converted_format.0,
             },
             img,
+            still_done,
         )
     }
 
@@ -403,6 +423,7 @@ impl<'a> Decoder<'a> {
         self.ahead.clear();
         self.canvas.release();
         self.still_done = false;
+        self.still_ready = None;
         self.vp8_active = false;
         self.still_lossy = false;
         self.alpha_pending = false;
@@ -578,15 +599,24 @@ impl<'a> Decoder<'a> {
         }
 
         match self.rescan_headers() {
-            Err(Error::Truncated) | Ok(()) => Ok(()),
-            Err(e) => Err(self.fail("cannot read headers", e)),
+            Err(Error::Truncated) | Ok(()) => {
+                self.status = None;
+                self.error.clear();
+                Ok(())
+            }
+            Err(e) => {
+                self.headers_valid = false;
+                Err(self.fail("cannot read headers", e))
+            }
         }
     }
 
+    /// Replaces the stream window; all previously supplied bytes must remain unchanged.
     pub fn update(&mut self, data: &'a [u8]) -> Result<(), Error> {
         self.update_with(data.len(), |input| input.borrow(data))
     }
 
+    /// Replaces the stream window; its previously supplied prefix must be unchanged.
     pub fn update_owned(&mut self, data: Vec<u8>) -> Result<(), Error> {
         self.update_with(data.len(), move |input| input.replace_owned(data))
     }
@@ -611,7 +641,11 @@ impl<'a> Decoder<'a> {
         install(&mut self.input);
 
         match self.rescan_headers() {
-            Err(Error::Truncated) | Ok(()) => Ok(()),
+            Err(Error::Truncated) | Ok(()) => {
+                self.status = None;
+                self.error.clear();
+                Ok(())
+            }
             Err(e) => {
                 self.input.reset();
                 self.headers_valid = false;
@@ -624,6 +658,7 @@ impl<'a> Decoder<'a> {
         if !self.streaming || self.eos || self.input_mode != InputMode::Update {
             return Err(self.fail("not an updated stream", Error::InvalidArgument));
         }
+        self.end = 0;
         Ok(self.input.take_owned())
     }
 
@@ -851,21 +886,24 @@ impl<'a> Decoder<'a> {
         &'o mut self,
         out: &mut Handout<'o>,
     ) -> Result<bool, Failure> {
-        self.still_done = true;
-
+        self.still_ready = Some(Source::Lossless);
+        if !self.frame.vp8l.still_active() {
+            self.export_complete_still_lossless(out)
+                .map_err(|e| ("cannot output frame", e))?;
+            return Ok(true);
+        }
         let set = self.export_settings();
-        let ret = if self.options.transforms() {
-            let (t, img) = self.export_parts(Source::Lossless);
-
-            export_packed(&set, t, img, out)
+        if self.options.transforms() {
+            let (t, img, latch) = self.export_parts_latched(Source::Lossless);
+            export_packed(&set, t, img, out).map_err(|e| ("cannot output frame", e))?;
+            *latch.still_done = true;
         } else {
-            let (t, img) = self.row_parts(Source::Lossless);
+            let (t, img, done) = self.row_parts_latched(Source::Lossless);
             let height = img.height;
-
             export_still_lossless(&set, t, &img, out, height)
-        };
-
-        ret.map_err(|e| ("cannot output frame", e))?;
+                .map_err(|e| ("cannot output frame", e))?;
+            *done = true;
+        }
         Ok(true)
     }
 
@@ -873,23 +911,21 @@ impl<'a> Decoder<'a> {
         &'o mut self,
         out: &mut Handout<'o>,
     ) -> Result<bool, Failure> {
-        self.still_done = true;
-
+        self.still_ready = Some(Source::Lossy);
         let packed_only =
             !self.options.transforms() && format_is_packed(self.out_format.0);
         let set = self.export_settings();
-        let ret = if packed_only {
-            let (t, img) = self.row_parts(Source::Lossy);
+        if packed_only {
+            let (t, img, done) = self.row_parts_latched(Source::Lossy);
             let height = img.height;
-
             export_still_packed(&set, t, &img, out, height)
+                .map_err(|e| ("cannot output frame", e))?;
+            *done = true;
         } else {
-            let (t, img) = self.export_parts(Source::Lossy);
-
-            export_packed(&set, t, img, out)
-        };
-
-        ret.map_err(|e| ("cannot output frame", e))?;
+            let (t, img, latch) = self.export_parts_latched(Source::Lossy);
+            export_packed(&set, t, img, out).map_err(|e| ("cannot output frame", e))?;
+            *latch.still_done = true;
+        }
         Ok(true)
     }
 
@@ -911,7 +947,7 @@ impl<'a> Decoder<'a> {
         if hs.raw == Raw::Lossless {
             self.lossless_decode(hs.raw_image_offset, hs.raw_image_size)
                 .map_err(|e| ("VP8L decode failed", e))?;
-            self.still_done = true;
+            self.still_ready = Some(Source::Lossless);
             self.still_lossless = true;
             self.converted_rows = self.frame_of(Source::Lossless).height;
             self.export_complete_still_lossless(out)
@@ -933,13 +969,7 @@ impl<'a> Decoder<'a> {
         }
         self.vp8_lossy_decode_frame(hs.raw_image_offset, hs.raw_image_size)
             .map_err(|e| ("VP8 decode failed", e))?;
-        self.still_done = true;
-
-        let set = self.export_settings();
-        let (t, img) = self.export_parts(Source::Lossy);
-
-        export_packed(&set, t, img, out).map_err(|e| ("cannot output frame", e))?;
-        Ok(true)
+        self.emit_still_lossy(out)
     }
 }
 
@@ -951,11 +981,20 @@ impl Decoder<'_> {
         let decoder = self;
 
         decoder.require_open()?;
-        if !decoder.headers_valid {
+        decoder.status = None;
+        decoder.error.clear();
+        if !decoder.headers_valid || decoder.input.size() == 0 {
             if !decoder.eos {
                 return Ok(false); /* the headers have not arrived yet */
             }
             return Err(("no image data found", Error::Truncated));
+        }
+        if !decoder.still_done {
+            match decoder.still_ready {
+                Some(Source::Lossless) => return decoder.emit_still_lossless(out),
+                Some(Source::Lossy) => return decoder.emit_still_lossy(out),
+                _ => {}
+            }
         }
         if decoder.scanned().raw != Raw::No {
             return if decoder.still_done {
@@ -1019,9 +1058,14 @@ impl Decoder<'_> {
                             Error::InvalidData,
                         ));
                     }
-                    let header = decoder.file_at(payload_pos)[0] as i32;
-
+                    if decoder.alpha_pending {
+                        return Err(("duplicate ALPHA chunk", Error::InvalidData));
+                    }
                     decoder.alpha_pending = true;
+                    if !decoder.scan.still_alpha_allowed() {
+                        continue;
+                    }
+                    let header = decoder.file_at(payload_pos)[0] as i32;
                     decoder
                         .frame
                         .set_alpha_chunk(header, payload_pos + 1, size - 1)
@@ -1062,12 +1106,7 @@ impl Decoder<'_> {
                     decoder
                         .lossless_decode(payload_pos, size)
                         .map_err(|e| ("VP8L decode failed", e))?;
-                    decoder.still_done = true;
-
-                    decoder
-                        .export_complete_still_lossless(out)
-                        .map_err(|e| ("cannot output frame", e))?;
-                    return Ok(true);
+                    return decoder.emit_still_lossless(out);
                 }
                 TAG_ANMF => {
                     if !decoder.animation
@@ -1286,6 +1325,206 @@ mod tests {
         out.extend_from_slice(&(RAW_LOSSLESS.len() as u32).to_le_bytes());
         out.extend_from_slice(RAW_LOSSLESS);
         out
+    }
+
+    #[test]
+    fn detached_update_buffers_suspend_decoding_and_resume_at_the_same_position() {
+        let mut decoder = Decoder::new();
+        decoder.open_stream().unwrap();
+        decoder.update_owned(riff_lossless()).unwrap();
+        let pos = decoder.pos;
+        let data = decoder.take_update_buffer().unwrap();
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        decoder.update_owned(data).unwrap();
+        assert_eq!(decoder.pos, pos);
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
+    fn failed_still_exports_can_be_retried_without_rewind() {
+        for data in [RAW_LOSSLESS.to_vec(), riff_lossless()] {
+            let mut decoder = failed_export(&data);
+            assert!(!decoder.still_done);
+            decoder.set_sink(None);
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            assert!(decoder.still_done);
+            assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        }
+    }
+
+    #[test]
+    fn invalid_appended_headers_invalidate_the_decode_window() {
+        let mut data = riff_lossless();
+        data.extend(chunk(b"VP8X", &[0; 10]));
+        data.extend(chunk(b"VP8X", &[0; 10]));
+        let len = data.len();
+        data[4..8].copy_from_slice(&(len as u32 - 8).to_le_bytes());
+        let mut decoder = Decoder::new();
+        decoder.open_stream().unwrap();
+        decoder.append(&data[..len - 36]).unwrap();
+        assert!(decoder.headers_valid);
+        assert!(decoder.append(&data[len - 36..]).is_err());
+        assert!(!decoder.headers_valid);
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn failed_lossy_exports_can_be_retried_without_rewind() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/a_lossy.webp"
+        ))
+        .unwrap();
+        let mut decoder = failed_export(&data);
+        decoder.set_sink(None);
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
+    fn a_recovered_stream_clears_the_previous_error() {
+        let mut decoder = Decoder::new();
+        decoder.open_stream().unwrap();
+        assert!(decoder.image_info().is_err());
+        decoder.append(&riff_lossless()).unwrap();
+        assert_eq!(decoder.status(), None);
+        assert!(decoder.error_raw().is_empty());
+    }
+
+    fn chunk(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() & 1 != 0 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn animation(subchunks: &[u8], width: u8, height: u8) -> Vec<u8> {
+        let mut payload = chunk(b"VP8X", &[2, 0, 0, 0, 3, 0, 0, 3, 0, 0]);
+        payload.extend(chunk(b"ANIM", &[0; 6]));
+        let mut frame = [0; 16].to_vec();
+        frame[6] = width - 1;
+        frame[9] = height - 1;
+        frame.extend_from_slice(subchunks);
+        payload.extend(chunk(b"ANMF", &frame));
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&(payload.len() as u32 + 4).to_le_bytes());
+        out.extend_from_slice(b"WEBP");
+        out.extend(payload);
+        out
+    }
+
+    #[test]
+    fn animation_rejects_duplicate_images_and_alpha_with_lossless() {
+        let image = chunk(b"VP8L", RAW_LOSSLESS);
+        for prefix in [image.clone(), chunk(b"ALPH", &[0, 0, 0, 0, 0])] {
+            let mut sub = prefix;
+            sub.extend_from_slice(&image);
+            let data = animation(&sub, 2, 2);
+            let mut decoder = Decoder::new();
+            decoder.open(&data).unwrap();
+            assert_eq!(
+                decoder.next_picture(&mut Handout::default()).unwrap_err().1,
+                Error::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn animation_uses_declared_disposal_size_and_rejects_larger_images() {
+        let image = chunk(b"VP8L", RAW_LOSSLESS);
+        let data = animation(&image, 3, 3);
+        let mut decoder = Decoder::new();
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert_eq!((decoder.anim.prev_width, decoder.anim.prev_height), (3, 3));
+        let data = animation(&image, 1, 1);
+        decoder.open(&data).unwrap();
+        assert_eq!(
+            decoder.next_picture(&mut Handout::default()).unwrap_err().1,
+            Error::InvalidData
+        );
+    }
+
+    #[test]
+    fn disposal_clears_the_declared_rectangle_in_serial_and_parallel_decoding() {
+        let mut payload = chunk(b"VP8X", &[2, 0, 0, 0, 127, 0, 0, 127, 0, 0]);
+        payload.extend(chunk(b"ANIM", &[0; 6]));
+        for (actual, declared, flags) in
+            [(128u32, 128u32, 2), (96, 112, 3), (96, 96, 2)]
+        {
+            let mut image = RAW_LOSSLESS.to_vec();
+            image[1..5]
+                .copy_from_slice(&((actual - 1) | ((actual - 1) << 14)).to_le_bytes());
+            let mut frame = vec![0; 16];
+            frame[6..9].copy_from_slice(&(declared - 1).to_le_bytes()[..3]);
+            frame[9..12].copy_from_slice(&(declared - 1).to_le_bytes()[..3]);
+            frame[15] = flags;
+            frame.extend(chunk(b"VP8L", &image));
+            payload.extend(chunk(b"ANMF", &frame));
+        }
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&(payload.len() as u32 + 4).to_le_bytes());
+        data.extend_from_slice(b"WEBP");
+        data.extend(payload);
+        for n_threads in [1, 4] {
+            let mut decoder = Decoder::new();
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            if cfg!(feature = "threads") && n_threads > 1 {
+                assert_eq!(decoder.ahead.slots.len(), 3);
+            }
+            /* Give the uncovered pixels a visible value independent of the
+             * test bitstream's constant colour. */
+            decoder.canvas.frame_mut().row(0, 100)[100 * 4..104 * 4].fill(255);
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            assert_eq!(
+                &decoder.canvas.frame().row(0, 100)[100 * 4..104 * 4],
+                &[255; 16]
+            );
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            assert_eq!(
+                &decoder.canvas.frame().row(0, 100)[100 * 4..104 * 4],
+                &[0; 16]
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_top_level_alpha_is_rejected_even_when_ignored() {
+        let mut payload = chunk(b"VP8X", &[0, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
+        payload.extend(chunk(b"ALPH", &[0, 0, 0, 0, 0]));
+        payload.extend(chunk(b"ALPH", &[0, 0, 0, 0, 0]));
+        payload.extend(chunk(b"VP8L", RAW_LOSSLESS));
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&(payload.len() as u32 + 4).to_le_bytes());
+        data.extend_from_slice(b"WEBP");
+        data.extend(payload);
+        let mut decoder = Decoder::new();
+        decoder.open(&data).unwrap();
+        assert_eq!(
+            decoder.next_picture(&mut Handout::default()).unwrap_err().1,
+            Error::InvalidData
+        );
+    }
+
+    #[test]
+    fn unsupported_alpha_compression_is_an_error() {
+        for compression in [2, 3] {
+            assert_eq!(
+                slot::FrameSlot::default().set_alpha_chunk(compression, 0, 4),
+                Err(Error::Unsupported)
+            );
+        }
     }
 
     #[test]

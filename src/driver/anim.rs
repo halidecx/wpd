@@ -343,7 +343,8 @@ impl<'a> Decoder<'a> {
                     let p = self.input.chunk(at, payload_size.min(10));
                     let (w, h) = bitstream_size(chunk_type, p, payload_size)?;
 
-                    return fits(w, h).then_some((declared_width, declared_height));
+                    return (fits(w, h) && w <= declared_width && h <= declared_height)
+                        .then_some((declared_width, declared_height));
                 }
                 _ => {}
             }
@@ -480,7 +481,9 @@ impl<'a> Decoder<'a> {
                  {sub_width}x{sub_height}"
             ));
         }
-        if self.anim.pos_x + sub_width > self.canvas_width
+        if sub_width > declared_width
+            || sub_height > declared_height
+            || self.anim.pos_x + sub_width > self.canvas_width
             || self.anim.pos_y + sub_height > self.canvas_height
         {
             crate::log::error_args(format_args!(
@@ -493,7 +496,9 @@ impl<'a> Decoder<'a> {
 
         let mut pl = self.placement();
 
-        self.anim.key_frame = pl.geom.is_key_frame(sub_width, sub_height);
+        /* Geometry follows ANMF declarations. libwebp demux instead replaces
+         * them with bitstream dimensions; mismatched files intentionally differ. */
+        self.anim.key_frame = pl.geom.is_key_frame(declared_width, declared_height);
         pl.geom.frame.key_frame = self.anim.key_frame;
 
         let argb = Format::Argb;
@@ -523,8 +528,8 @@ impl<'a> Decoder<'a> {
 
         self.frame_timestamp += self.frame_duration as i64;
         self.anim.prev_anmf_flags = self.anim.anmf_flags;
-        self.anim.prev_width = sub_width;
-        self.anim.prev_height = sub_height;
+        self.anim.prev_width = declared_width;
+        self.anim.prev_height = declared_height;
         self.anim.prev_pos_x = self.anim.pos_x;
         self.anim.prev_pos_y = self.anim.pos_y;
         self.anim.prev_key_frame = self.anim.key_frame;
