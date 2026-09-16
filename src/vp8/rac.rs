@@ -181,11 +181,11 @@ mod imp {
         pub fn new(start: usize, size: usize) -> Self {
             Self {
                 high: 255,
-                bits: -16,
+                bits: -8 * (size.min(3) as i32 - 1),
                 pos: start,
                 end: start + size,
                 code_word: 0,
-                eof: size < 3,
+                eof: false,
             }
         }
 
@@ -239,10 +239,12 @@ mod imp {
                 } else if self.pos < self.end {
                     code_word |= u32::from(buf[self.pos]) << (bits + 8);
                     self.pos += 1;
-                    bits -= 16;
+                    bits -= 8;
+                } else if bits > 0 {
+                    // Priming and refills may look ahead, but only consumed
+                    // virtual bits make the partition invalid.
                     self.eof = true;
-                } else {
-                    self.eof = true;
+                    bits = 0;
                 }
             }
             self.bits = bits;
@@ -372,6 +374,24 @@ mod tests {
             c.get(&buf);
         }
         assert!(c.overran());
+    }
+
+    #[test]
+    fn short_partitions_report_only_consumed_virtual_bits() {
+        // Uniform zero bits consume the first byte after two decisions, then
+        // eight decisions per byte. Priming must not itself signal EOF.
+        for (size, decisions) in [(0, 0), (1, 2), (2, 10), (3, 18), (4, 26)] {
+            let buf = [0; 4];
+            let mut c = RangeCoder::start(&buf[..size], 0, size);
+
+            assert!(!c.overran());
+            for _ in 0..decisions {
+                assert_eq!(c.get(&buf[..size]), 0);
+                assert!(!c.overran());
+            }
+            c.get(&buf[..size]);
+            assert!(c.overran());
+        }
     }
 
     #[test]

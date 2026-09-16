@@ -1329,15 +1329,19 @@ impl Decoder {
     }
 
     /// Reconstructs the whole frame, which frame_init() must have opened.
+    /// The complete chunk must be available; partial input is rejected.
     /// Apart from decode_frame() this is for a caller that wants to put
     /// something else on another thread in between the two.
     pub fn decode_rows_whole(&mut self, chunk: &[u8]) -> Result<()> {
+        if self.chunk_avail != self.chunk_size || chunk.len() < self.chunk_size {
+            return Err(Error::InvalidData);
+        }
         self.decode_rows_tmpl(chunk, false)?;
         Ok(())
     }
 
     fn decode_rows_tmpl(&mut self, chunk: &[u8], resumable: bool) -> Result<Status> {
-        if !self.picture.allocated() {
+        if !self.picture.allocated() || chunk.len() < self.chunk_avail {
             return Err(Error::InvalidData);
         }
 
@@ -1421,13 +1425,17 @@ impl Decoder {
                     self.decode_mb_coeffs(chunk, part, &mut mb, mb_x);
                 }
 
-                if let Some(snap) = snap {
-                    if self.coeff_partition[part].overran() {
+                if self.c.overran() {
+                    return Err(Error::InvalidData);
+                }
+                if self.coeff_partition[part].overran() {
+                    if let Some(snap) = snap {
                         self.restore_mb_state(&snap, part, mb_x);
                         self.mb_x = mb_x;
                         self.mb_y = mb_y;
                         return Ok(Status::NeedMore);
                     }
+                    return Err(Error::InvalidData);
                 }
 
                 self.intra_predict(planes, &mb, off, mb_x, mb_y);
@@ -1699,6 +1707,63 @@ mod tests {
         0x01, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x99, 0x00, 0x0a, 0x00, 0x00, 0x0a, 0x0a,
     ];
+
+    // A cwebp-encoded 16x16 solid-color frame, with one coefficient partition.
+    const SOLID: &[u8] = &[
+        0x70, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x10, 0x00, 0x10, 0x00, 0x02, 0x00, 0x34,
+        0x25, 0xa0, 0x02, 0x74, 0x01, 0x40, 0x00, 0x00, 0xfe, 0xef, 0x51, 0x2c, 0x61,
+        0x34, 0x93, 0xa3, 0xff, 0xab, 0x43, 0xff, 0xf9, 0x68, 0x7f, 0xff, 0x2d, 0x0f,
+        0xdb, 0xb0, 0x00,
+    ];
+
+    #[test]
+    fn whole_rows_reject_an_unopened_coefficient_partition() {
+        let mut dec = Decoder::new();
+        let partial = &SOLID[..21];
+
+        assert_eq!(
+            dec.frame_init(partial, partial.len(), SOLID.len()),
+            Ok(Status::Done)
+        );
+        assert_eq!(dec.decode_rows_whole(partial), Err(Error::InvalidData));
+        dec.extend(SOLID, SOLID.len());
+        assert_eq!(dec.decode_rows_whole(SOLID), Ok(()));
+    }
+
+    #[test]
+    fn exhausted_partitions_are_invalid_on_both_decode_paths() {
+        let truncated = &SOLID[..24];
+        let mut dec = Decoder::new();
+
+        assert_eq!(dec.decode_frame(truncated), Err(Error::InvalidData));
+        let mut dec = Decoder::new();
+        assert_eq!(
+            dec.frame_init(truncated, truncated.len(), truncated.len()),
+            Ok(Status::Done)
+        );
+        assert_eq!(dec.decode_rows(truncated), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn incomplete_partitions_resume_without_changing_the_picture() {
+        let mut whole = Decoder::new();
+
+        whole.decode_frame(SOLID).unwrap();
+        for split in 21..SOLID.len() {
+            let mut dec = Decoder::new();
+            let partial = &SOLID[..split];
+
+            assert_eq!(
+                dec.frame_init(partial, split, SOLID.len()),
+                Ok(Status::Done)
+            );
+            if dec.decode_rows(partial).unwrap() == Status::NeedMore {
+                dec.extend(SOLID, SOLID.len());
+                assert_eq!(dec.decode_rows(SOLID), Ok(Status::Done));
+            }
+            assert_eq!(dec.picture.data, whole.picture.data);
+        }
+    }
 
     #[test]
     fn rows_cannot_be_decoded_before_the_planes_exist() {
