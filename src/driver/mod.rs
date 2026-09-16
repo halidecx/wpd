@@ -1341,6 +1341,27 @@ mod tests {
     }
 
     #[test]
+    fn detached_animation_update_resumes_after_the_last_frame() {
+        let mut data = animation(&chunk(b"VP8L", RAW_LOSSLESS), 2, 2);
+        let frame = data[44..].to_vec();
+        data.extend(frame);
+        let len = data.len();
+        data[4..8].copy_from_slice(&(len as u32 - 8).to_le_bytes());
+        let mut decoder = Decoder::new();
+        decoder.open_stream().unwrap();
+        decoder.update_owned(data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        let pos = decoder.pos;
+        let data = decoder.take_update_buffer().unwrap();
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        decoder.update_owned(data).unwrap();
+        assert_eq!(decoder.pos, pos);
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert_eq!(decoder.anim.frame_index, 2);
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
     fn failed_still_exports_can_be_retried_without_rewind() {
         for data in [RAW_LOSSLESS.to_vec(), riff_lossless()] {
             let mut decoder = failed_export(&data);
