@@ -274,31 +274,6 @@ fn checked_lf_h_uv<T: Raw<Sig = LfUvRaw>>(
     )
 }
 
-#[allow(dead_code)]
-fn lf_v_mb<T: Raw<Sig = LfMbRaw>>(
-    w: Window,
-    s: usize,
-    e: i32,
-    be: i32,
-    i: i32,
-    hev: i32,
-) {
-    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev) }
-}
-
-#[allow(dead_code)]
-fn checked_lf_v_mb<T: Raw<Sig = LfMbRaw>>(
-    p: &mut [u8],
-    o: usize,
-    s: usize,
-    e: i32,
-    be: i32,
-    i: i32,
-    hev: i32,
-) {
-    lf_v_mb::<T>(check_v(p, o, s, 4, 15, 16), s, e, be, i, hev)
-}
-
 fn lf_h_mb<T: Raw<Sig = LfMbRaw>>(
     w: Window,
     s: usize,
@@ -320,44 +295,6 @@ fn checked_lf_h_mb<T: Raw<Sig = LfMbRaw>>(
     hev: i32,
 ) {
     lf_h_mb::<T>(check_h(p, o, s, 4, 16, 16), s, e, be, i, hev)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-fn lf_v_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
-    u: Window,
-    v: Window,
-    s: usize,
-    e: i32,
-    be: i32,
-    i: i32,
-    hev: i32,
-) {
-    unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, be, i, hev) }
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-fn checked_lf_v_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
-    u: &mut [u8],
-    ou: usize,
-    v: &mut [u8],
-    ov: usize,
-    s: usize,
-    e: i32,
-    be: i32,
-    i: i32,
-    hev: i32,
-) {
-    lf_v_uv_mb::<T>(
-        check_v(u, ou, s, 4, 7, 8),
-        check_v(v, ov, s, 4, 7, 8),
-        s,
-        e,
-        be,
-        i,
-        hev,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -597,6 +534,39 @@ macro_rules! marker {
         impl Raw for $name {
             type Sig = $sig;
             const F: $sig = $f;
+        }
+    };
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+macro_rules! neon_sets {
+    () => {
+        lf_set!(
+            neon,
+            "ff_vp8_v_loop_filter16_simple_neon",
+            "ff_vp8_h_loop_filter16_simple_neon",
+            "ff_vp8_v_loop_filter16_neon",
+            "ff_vp8_h_loop_filter16_neon",
+            "ff_vp8_v_loop_filter8uv_neon",
+            "ff_vp8_h_loop_filter8uv_neon",
+            "ff_vp8_v_loop_filter16_inner_neon",
+            "ff_vp8_h_loop_filter16_inner_neon",
+            "ff_vp8_v_loop_filter8uv_inner_neon",
+            "ff_vp8_h_loop_filter8uv_inner_neon"
+        );
+        idct_set!(
+            neon_idct,
+            "ff_vp8_luma_dc_wht_neon",
+            "ff_vp8_idct_add_neon",
+            "ff_vp8_idct_dc_add_neon",
+            "ff_vp8_idct_dc_add4y_neon",
+            "ff_vp8_idct_dc_add4uv_neon"
+        );
+
+        pub mod neon_mb {
+            use super::*;
+
+            composed_mb!(neon);
         }
     };
 }
@@ -923,38 +893,12 @@ mod arch {
 mod arch {
     use super::*;
 
-    lf_set!(
-        neon,
-        "ff_vp8_v_loop_filter16_simple_neon",
-        "ff_vp8_h_loop_filter16_simple_neon",
-        "ff_vp8_v_loop_filter16_neon",
-        "ff_vp8_h_loop_filter16_neon",
-        "ff_vp8_v_loop_filter8uv_neon",
-        "ff_vp8_h_loop_filter8uv_neon",
-        "ff_vp8_v_loop_filter16_inner_neon",
-        "ff_vp8_h_loop_filter16_inner_neon",
-        "ff_vp8_v_loop_filter8uv_inner_neon",
-        "ff_vp8_h_loop_filter8uv_inner_neon"
-    );
-    idct_set!(
-        neon_idct,
-        "ff_vp8_luma_dc_wht_neon",
-        "ff_vp8_idct_add_neon",
-        "ff_vp8_idct_dc_add_neon",
-        "ff_vp8_idct_dc_add4y_neon",
-        "ff_vp8_idct_dc_add4uv_neon"
-    );
+    neon_sets!();
 
     pub mod neon_wht_dc {
         use super::*;
 
         raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_neon");
-    }
-
-    pub mod neon_mb {
-        use super::*;
-
-        composed_mb!(neon);
     }
 
     pub mod fused {
@@ -987,27 +931,7 @@ mod arch {
 mod arch {
     use super::*;
 
-    lf_set!(
-        neon,
-        "ff_vp8_v_loop_filter16_simple_neon",
-        "ff_vp8_h_loop_filter16_simple_neon",
-        "ff_vp8_v_loop_filter16_neon",
-        "ff_vp8_h_loop_filter16_neon",
-        "ff_vp8_v_loop_filter8uv_neon",
-        "ff_vp8_h_loop_filter8uv_neon",
-        "ff_vp8_v_loop_filter16_inner_neon",
-        "ff_vp8_h_loop_filter16_inner_neon",
-        "ff_vp8_v_loop_filter8uv_inner_neon",
-        "ff_vp8_h_loop_filter8uv_inner_neon"
-    );
-    idct_set!(
-        neon_idct,
-        "ff_vp8_luma_dc_wht_neon",
-        "ff_vp8_idct_add_neon",
-        "ff_vp8_idct_dc_add_neon",
-        "ff_vp8_idct_dc_add4y_neon",
-        "ff_vp8_idct_dc_add4uv_neon"
-    );
+    neon_sets!();
 
     #[cfg(wpd_asm_armv6)]
     lf_set!(
@@ -1038,12 +962,6 @@ mod arch {
         use super::*;
 
         raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_armv6");
-    }
-
-    pub mod neon_mb {
-        use super::*;
-
-        composed_mb!(neon);
     }
 
     #[cfg(wpd_asm_armv6)]
