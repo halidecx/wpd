@@ -523,10 +523,13 @@ impl Decoder {
         let mut nb_groups = 1usize;
         let mut nb_group_codes = 1usize;
 
-        if role == ROLE_ARGB && self.gb.bit(buf) != 0 {
-            self.decode_entropy_image(buf)?;
-            nb_groups = self.nb_huffman_groups;
-            nb_group_codes = self.nb_huffman_group_codes;
+        if role == ROLE_ARGB {
+            self.huffman_groups_mapped = false;
+            if self.gb.bit(buf) != 0 {
+                self.decode_entropy_image(buf)?;
+                nb_groups = self.nb_huffman_groups;
+                nb_group_codes = self.nb_huffman_group_codes;
+            }
         }
 
         let mut max_alphabet_size = ALPHABET_SIZES[HUFF_IDX_GREEN] as usize;
@@ -1378,7 +1381,7 @@ mod tests {
     use super::*;
 
     #[cfg(not(miri))]
-    fn sparse_huffman_image(group: u32) -> Vec<u8> {
+    fn sparse_huffman_image(group: Option<u32>) -> Vec<u8> {
         fn put(bits: &mut Vec<u8>, value: u32, count: u32) {
             for i in 0..count {
                 bits.push(((value >> i) & 1) as u8);
@@ -1401,13 +1404,15 @@ mod tests {
         put(&mut bits, 0, 3);
         put(&mut bits, 0, 1);
         put(&mut bits, 0, 1);
-        put(&mut bits, 1, 1);
-        put(&mut bits, 0, 3);
-        put(&mut bits, 0, 1);
-        for symbol in [group & 255, group >> 8, 0, 255, 0] {
-            simple_tree(&mut bits, symbol);
+        put(&mut bits, u32::from(group.is_some()), 1);
+        if let Some(group) = group {
+            put(&mut bits, 0, 3);
+            put(&mut bits, 0, 1);
+            for symbol in [group & 255, group >> 8, 0, 255, 0] {
+                simple_tree(&mut bits, symbol);
+            }
         }
-        for _ in 0..=group {
+        for _ in 0..=group.unwrap_or(0) {
             for _ in 0..HUFFMAN_CODES_PER_META_CODE {
                 simple_tree(&mut bits, 0);
             }
@@ -1424,14 +1429,14 @@ mod tests {
     #[test]
     #[cfg(not(miri))]
     fn sparse_huffman_groups_are_stored_densely() {
-        let sparse_data = sparse_huffman_image(u16::MAX.into());
+        let sparse_data = sparse_huffman_image(Some(u16::MAX.into()));
         let mut parsed = Decoder::new();
         let mut baseline = Decoder::new();
         let mut sparse = Decoder::new();
 
         parsed.read_frame_header(&sparse_data, false).unwrap();
         baseline
-            .decode_frame(Target::Argb, &sparse_huffman_image(0), false, None)
+            .decode_frame(Target::Argb, &sparse_huffman_image(Some(0)), false, None)
             .unwrap();
         sparse
             .decode_frame(Target::Argb, &sparse_data, false, None)
@@ -1446,6 +1451,69 @@ mod tests {
         assert!(parsed.huffman_groups_mapped);
         assert_eq!(parsed.image[ROLE_ARGB].groups.len(), 1);
         assert_eq!(parsed.huffman_group_map[u16::MAX as usize], 0);
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn reused_decoder_discards_the_previous_huffman_mapping() {
+        let mut decoder = Decoder::new();
+        let sparse = sparse_huffman_image(Some(u16::MAX.into()));
+        let plain = sparse_huffman_image(None);
+
+        for stale in [u32::MAX, 1] {
+            decoder
+                .decode_frame(Target::Argb, &sparse, false, None)
+                .unwrap();
+            assert!(decoder.huffman_groups_mapped);
+            decoder.huffman_group_map[0] = stale;
+            decoder
+                .decode_frame(Target::Argb, &plain, false, None)
+                .unwrap();
+            assert!(!decoder.huffman_groups_mapped);
+            assert_eq!(decoder.picture(Target::Argb).data[0], 0);
+        }
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn animation_reuses_slots_after_a_sparse_huffman_frame() {
+        fn chunk(dst: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+            dst.extend_from_slice(tag);
+            dst.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            dst.extend_from_slice(data);
+            if data.len() & 1 != 0 {
+                dst.push(0);
+            }
+        }
+
+        let mut body = b"WEBP".to_vec();
+        chunk(&mut body, b"VP8X", &[0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        chunk(&mut body, b"ANIM", &[0; 6]);
+        for group in [Some(u16::MAX.into()), None, None, None, None, None] {
+            let mut frame = vec![0; 16];
+            frame[12] = 1;
+            frame[15] = 2;
+            chunk(&mut frame, b"VP8L", &sparse_huffman_image(group));
+            chunk(&mut body, b"ANMF", &frame);
+        }
+        let mut data = b"RIFF".to_vec();
+        data.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        data.extend_from_slice(&body);
+        for n_threads in [1, 2, 4] {
+            let mut decoder = crate::api::Decoder::new();
+            decoder
+                .set_options(crate::options::Options {
+                    n_threads,
+                    ..Default::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            for _ in 0..6 {
+                let picture = decoder.next_frame().unwrap().unwrap();
+                assert_eq!(picture.row(0, 0), &[0; 4]);
+            }
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
     }
 
     #[test]
