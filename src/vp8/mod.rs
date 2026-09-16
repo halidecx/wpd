@@ -1349,7 +1349,15 @@ impl Decoder {
         let ret = self.decode_rows_planes(&mut data, chunk, resumable);
 
         self.picture.data = data;
-        ret
+        let status = ret?;
+
+        if status == Status::Done
+            && (self.c.overran()
+                || self.coeff_partition.iter().any(RangeCoder::overran))
+        {
+            return Err(Error::InvalidData);
+        }
+        Ok(status)
     }
 
     fn decode_rows_planes(
@@ -1425,17 +1433,13 @@ impl Decoder {
                     self.decode_mb_coeffs(chunk, part, &mut mb, mb_x);
                 }
 
-                if self.c.overran() {
-                    return Err(Error::InvalidData);
-                }
-                if self.coeff_partition[part].overran() {
-                    if let Some(snap) = snap {
+                if let Some(snap) = snap {
+                    if self.coeff_partition[part].overran() {
                         self.restore_mb_state(&snap, part, mb_x);
                         self.mb_x = mb_x;
                         self.mb_y = mb_y;
                         return Ok(Status::NeedMore);
                     }
-                    return Err(Error::InvalidData);
                 }
 
                 self.intra_predict(planes, &mb, off, mb_x, mb_y);
