@@ -58,6 +58,17 @@ function ff_vp8_luma_dc_wht_neon, export=1
         ret
 endfunc
 
+function ff_vp8_luma_dc_wht_dc_neon, export=1
+        ldrsh           w2,  [x1]
+        strh            wzr, [x1]
+        add             w2,  w2,  #3
+        asr             w2,  w2,  #3
+    .rept 16
+        strh            w2,  [x0], #32
+    .endr
+        ret
+endfunc
+
 function ff_vp8_idct_add_neon, export=1
         ld1             {v0.8b - v3.8b},  [x1]
         mov             w4,  #20091
@@ -299,7 +310,6 @@ endfunc
         orr             v17.16b, v20.16b, v22.16b
     .endif
 
-
         eor             v3.16b, v3.16b, v21.16b
         eor             v4.16b, v4.16b, v21.16b
 
@@ -326,7 +336,6 @@ endfunc
         eor             v6.16b,  v6.16b,  v21.16b
     .endif
         and             v18.16b, v18.16b, v16.16b
-
 
     .if \simple
         sqadd           v19.16b, v18.16b, v22.16b
@@ -469,7 +478,6 @@ function ff_vp8_v_loop_filter8uv\name\()_neon, export=1
         sub             x1,  x1,  x2,  lsl #2
         sub             x0,  x0,  x2,  lsl #1
         sub             x1,  x1,  x2,  lsl #1
-
 
         st1             {v1.d}[0],     [x0], x2
         st1             {v1.d}[1],     [x1], x2

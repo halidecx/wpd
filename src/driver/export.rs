@@ -7,6 +7,7 @@ use super::convert::{
     format_layout, format_packer, format_planes, format_premultiplier_4444,
     premultiply_after_pack, transform_image, yuv_planes,
 };
+use crate::convert::Sampling;
 use crate::dsp::rescale::RescaleDsp;
 use crate::dsp::yuv::{RowFn, YuvDsp};
 use crate::error::{Error, Result};
@@ -130,6 +131,11 @@ pub(crate) fn export_external_planar_rows(
     row_start: i32,
     row_end: i32,
 ) -> Result<()> {
+    // External planar formats describe 4:2:0 planes; full chroma must first
+    // be converted to that layout.
+    if img.chroma_full {
+        return Err(Error::Unsupported);
+    }
     let planes = format_planes(format);
 
     for p in 0..planes {
@@ -251,8 +257,9 @@ pub fn export_packed<'a>(
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
         let want_alpha = target == Some(Format::Yuva420p);
         let native = img.format;
-        let mut planar = if (native == Format::Yuv420p && !want_alpha)
-            || native == Format::Yuva420p
+        let mut planar = if !img.chroma_full
+            && ((native == Format::Yuv420p && !want_alpha)
+                || native == Format::Yuva420p)
         {
             img
         } else {
@@ -363,7 +370,7 @@ pub fn export_still_packed<'a>(
     let RowTargets {
         dsp,
         options,
-        output,
+        output: _,
         converted,
         ext,
         converted_rows,
@@ -374,7 +381,7 @@ pub fn export_still_packed<'a>(
     let first = if *converted_format == format { done } else { 0 };
     let upto = upto.max(done);
     let converted_from = if format_bpp(format) == 2 {
-        still_packed_2byte(set, dsp, options, output, converted, src, first, upto)?
+        still_packed_2byte(set, dsp, options, converted, src, first, upto)?
     } else {
         still_packed_direct(set, dsp, options, converted, src, first, upto)?
     };
@@ -428,7 +435,6 @@ fn still_packed_2byte(
     set: &ExportSettings,
     dsp: &YuvDsp,
     options: &Options,
-    argb: &mut Buffer,
     dst: &mut Buffer,
     src: &Frame<'_>,
     first: i32,
@@ -436,56 +442,43 @@ fn still_packed_2byte(
 ) -> Result<i32> {
     let format = set.out_format;
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
-    let mut converted_from = first;
 
     if first == 0 {
-        argb.alloc_argb(src.width, src.height)?;
         dst.alloc_packed(src.width, src.height, 2, target)?;
     }
-    if upto > first {
-        let Some(pack) = format_packer(dsp, format) else {
-            return Err(Error::Unsupported);
-        };
-        let premultiply = format_premultiplier_4444(dsp, format);
-
-        if options.no_fancy_upsampling {
-            upsample_simple(dsp, argb, src, LAYOUT_ARGB, first, upto, set.threads);
-        } else {
-            converted_from =
-                upsample_fancy(dsp, argb, src, LAYOUT_ARGB, first, upto, set.threads);
-        }
-        pack_2byte_rows(
-            set,
-            dst,
-            &argb.frame(),
-            pack,
-            premultiply,
-            converted_from,
-            upto,
-        );
+    if upto <= first {
+        return Ok(first);
     }
-    Ok(converted_from)
-}
 
-fn pack_2byte_rows(
-    set: &ExportSettings,
-    dst: &mut Buffer,
-    argb: &Frame<'_>,
-    pack: RowFn,
-    premultiply: fn(&mut [u8]),
-    from: i32,
-    upto: i32,
-) {
+    let Some(pack) = format_packer(dsp, format) else {
+        return Err(Error::Unsupported);
+    };
+    let premultiply = set
+        .premultiply
+        .then(|| format_premultiplier_4444(dsp, format));
+    let sampling = if src.chroma_full {
+        Sampling::Full
+    } else if options.no_fancy_upsampling {
+        Sampling::Simple
+    } else {
+        Sampling::Fancy
+    };
+    let planes = yuv_planes(src);
     let mut out = dst.frame_mut();
 
-    for y in from..upto {
-        let row = out.row(0, y);
-
-        pack(row, argb.row(0, y));
-        if set.premultiply {
-            premultiply(row);
-        }
-    }
+    Ok(crate::convert::yuv_to_packed_2byte(
+        dsp,
+        &mut out.planes_mut()[0],
+        &planes,
+        src.width as usize,
+        src.height as usize,
+        first as usize,
+        upto as usize,
+        sampling,
+        pack,
+        premultiply,
+        set.threads,
+    ) as i32)
 }
 
 #[allow(clippy::too_many_arguments)]

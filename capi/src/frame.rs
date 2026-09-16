@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::ffi::{c_int, c_void};
+use std::rc::Rc;
 use std::{mem, ptr, slice};
 
 use wpd::handout::{Handout, Pixels, RowSink};
@@ -28,15 +30,49 @@ impl WPDOutputPlane {
     }
 }
 
-pub struct External(pub [WPDOutputPlane; 4]);
+#[derive(Default)]
+pub struct SinkInput {
+    pub range: Cell<(usize, usize)>,
+    pub overlap: Cell<bool>,
+}
+
+pub struct External(pub [WPDOutputPlane; 4], pub Rc<SinkInput>);
 
 impl RowSink for External {
     fn fits(&self, p: usize, row_len: usize, rows: i32) -> bool {
         let plane = &self.0[p];
 
-        !plane.data.is_null()
-            && plane.stride != 0
-            && external_plane_fits(plane.size, plane.stride, row_len, rows)
+        if plane.data.is_null()
+            || plane.stride == 0
+            || !external_plane_fits(plane.size, plane.stride, row_len, rows)
+        {
+            return false;
+        }
+        let Some(offset) = (rows as usize)
+            .saturating_sub(1)
+            .checked_mul(plane.stride.unsigned_abs())
+        else {
+            return false;
+        };
+        let data = plane.data as usize;
+        let (start, end) = if plane.stride < 0 {
+            (data.checked_sub(offset), data.checked_add(row_len))
+        } else {
+            (
+                Some(data),
+                data.checked_add(offset)
+                    .and_then(|end| end.checked_add(row_len)),
+            )
+        };
+        let (Some(start), Some(end)) = (start, end) else {
+            return false;
+        };
+        let (input_start, input_end) = self.1.range.get();
+        if input_start < input_end && start < input_end && input_start < end {
+            self.1.overlap.set(true);
+            return false;
+        }
+        true
     }
 
     fn row(&mut self, p: usize, y: i32, len: usize) -> &mut [u8] {
@@ -209,6 +245,27 @@ fn handout_plane(img: &Frame<'_>, p: usize) -> (*const u8, isize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn negative_stride_checks_the_lowest_output_row_for_overlap() {
+        let mut storage = [0u8; 64];
+        let base = storage.as_mut_ptr() as usize;
+        let input = Rc::new(SinkInput::default());
+        input.range.set((base, base + 8));
+        let mut planes = [WPDOutputPlane::empty(); 4];
+        planes[0] = WPDOutputPlane {
+            data: storage.as_mut_ptr().wrapping_add(32),
+            size: 48,
+            stride: -16,
+        };
+        let sink = External(planes, Rc::clone(&input));
+        assert!(!sink.fits(0, 8, 3));
+        assert!(input.overlap.get());
+        input.range.set((base + 40, base + 48));
+        input.overlap.set(false);
+        assert!(sink.fits(0, 8, 3));
+        assert!(!input.overlap.get());
+    }
 
     #[repr(C)]
     struct LegacyFrame {

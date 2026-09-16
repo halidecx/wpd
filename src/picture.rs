@@ -5,6 +5,55 @@ fn chroma(p: usize) -> u32 {
     u32::from(p == 1 || p == 2)
 }
 
+pub(crate) use zeroed::try_zeroed;
+
+#[cfg(feature = "asm")]
+#[allow(unsafe_code)]
+mod zeroed {
+    use std::alloc::{alloc_zeroed, Layout};
+
+    use crate::error::{Error, Result};
+
+    /// # Safety
+    /// An all-zero bit pattern must be a valid value of the type.
+    pub(crate) unsafe trait Zeroable: Copy {}
+
+    unsafe impl Zeroable for u8 {}
+    unsafe impl Zeroable for u32 {}
+
+    pub(crate) fn try_zeroed<T: Zeroable>(n: usize) -> Result<Vec<T>> {
+        let layout = Layout::array::<T>(n).map_err(|_| Error::NoMemory)?;
+
+        if layout.size() == 0 {
+            return Ok(Vec::new());
+        }
+        let p = unsafe { alloc_zeroed(layout) }.cast::<T>();
+
+        if p.is_null() {
+            return Err(Error::NoMemory);
+        }
+        Ok(unsafe { Vec::from_raw_parts(p, n, n) })
+    }
+}
+
+#[cfg(not(feature = "asm"))]
+mod zeroed {
+    use crate::error::{Error, Result};
+
+    pub(crate) trait Zeroable: Copy + Default {}
+
+    impl Zeroable for u8 {}
+    impl Zeroable for u32 {}
+
+    pub(crate) fn try_zeroed<T: Zeroable>(n: usize) -> Result<Vec<T>> {
+        let mut v = Vec::new();
+
+        v.try_reserve_exact(n).map_err(|_| Error::NoMemory)?;
+        v.resize(n, T::default());
+        Ok(v)
+    }
+}
+
 #[derive(Default)]
 pub struct Plane {
     data: Vec<u8>,
@@ -14,13 +63,8 @@ pub struct Plane {
 impl Plane {
     fn resize(&mut self, stride: usize, rows: i32, size: usize) -> Result<()> {
         if self.data.len() < size {
-            self.data.clear();
-            self.data
-                .try_reserve_exact(size)
-                .map_err(|_| Error::NoMemory)?;
-            self.data.resize(size, 0);
-        } else {
-            self.data[..size].fill(0);
+            self.data = Vec::new();
+            self.data = try_zeroed(size)?;
         }
         self.stride = stride;
         debug_assert!(rows >= 0);
@@ -66,12 +110,21 @@ impl Buffer {
         bpp: usize,
         format: Format,
     ) -> Result<()> {
-        let size = plane_size(w, h, bpp)?;
+        let size = match plane_size(w, h, bpp) {
+            Ok(size) => size,
+            Err(e) => {
+                self.release();
+                return Err(e);
+            }
+        };
 
         for plane in &mut self.plane[1..] {
             plane.release();
         }
-        self.plane[0].resize(w as usize * bpp, h, size)?;
+        if let Err(e) = self.plane[0].resize(w as usize * bpp, h, size) {
+            self.release();
+            return Err(e);
+        }
         self.width = w;
         self.height = h;
         self.format = Some(format);
@@ -212,6 +265,15 @@ impl<'a> PlaneMut<'a> {
             stride,
             origin: 0,
             first: 0,
+        }
+    }
+
+    pub fn borrowed_at(data: &'a mut [u8], stride: usize, first: i32) -> Self {
+        PlaneMut {
+            data,
+            stride,
+            origin: 0,
+            first,
         }
     }
 
@@ -385,7 +447,18 @@ impl<'a> Frame<'a> {
         self
     }
 
-    pub fn window(&self, x: i32, y: i32, w: i32, h: i32) -> Self {
+    pub fn window(&self, x: i32, y: i32, w: i32, h: i32) -> Result<Self> {
+        if x < 0
+            || y < 0
+            || w <= 0
+            || h <= 0
+            || w > self.width
+            || h > self.height
+            || x > self.width - w
+            || y > self.height - h
+        {
+            return Err(Error::InvalidArgument);
+        }
         let mut out = *self;
 
         for p in 0..4 {
@@ -401,7 +474,7 @@ impl<'a> Frame<'a> {
         }
         out.width = w;
         out.height = h;
-        out
+        Ok(out)
     }
 }
 
@@ -534,10 +607,45 @@ mod tests {
         buf.alloc_packed(4, 4, 4, Format::Argb).unwrap();
         buf.frame_mut().row(0, 2)[8] = 0x5a;
 
-        let w = buf.frame().window(2, 2, 2, 2);
+        let w = buf.frame().window(2, 2, 2, 2).unwrap();
 
         assert_eq!(w.width, 2);
         assert_eq!(w.row(0, 0)[0], 0x5a);
+    }
+
+    #[test]
+    fn a_failed_packed_allocation_clears_the_old_layout() {
+        let mut buf = Buffer::default();
+
+        buf.alloc_planar(2, 2, false).unwrap();
+        buf.premultiplied = true;
+        assert_eq!(buf.alloc_argb(0, 2), Err(Error::TooLarge));
+        assert!(buf.is_empty());
+        assert_eq!((buf.width, buf.height), (0, 0));
+        assert_eq!(buf.format, None);
+        assert!(!buf.chroma_full);
+        assert!(!buf.premultiplied);
+    }
+
+    #[test]
+    fn invalid_windows_are_rejected() {
+        let mut buf = Buffer::default();
+
+        buf.alloc_argb(4, 4).unwrap();
+        for (x, y, w, h) in [
+            (-1, 0, 1, 1),
+            (0, -1, 1, 1),
+            (0, 0, 0, 1),
+            (0, 0, 1, 0),
+            (3, 0, 2, 1),
+            (0, 3, 1, 2),
+            (i32::MAX, 0, i32::MAX, 1),
+        ] {
+            assert!(matches!(
+                buf.frame().window(x, y, w, h),
+                Err(Error::InvalidArgument)
+            ));
+        }
     }
 
     #[test]
@@ -552,12 +660,26 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_and_growing_again_still_starts_from_zero() {
+    fn a_fresh_plane_starts_from_zero_and_a_regrown_one_does_too() {
         let mut buf = Buffer::default();
 
-        buf.alloc_argb(8, 8).unwrap();
-        buf.frame_mut().row(0, 0)[0] = 0xff;
         buf.alloc_argb(2, 2).unwrap();
-        assert_eq!(buf.frame().row(0, 0)[0], 0);
+        assert!(buf.frame().row(0, 0).iter().all(|&b| b == 0));
+        buf.frame_mut().row(0, 0)[0] = 0xff;
+        buf.alloc_argb(8, 8).unwrap();
+        assert!(buf.frame().row(0, 0).iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_zeroed_vector_is_zero_and_frees_cleanly() {
+        let bytes: Vec<u8> = try_zeroed(1 << 20).unwrap();
+        let words: Vec<u32> = try_zeroed(1000).unwrap();
+
+        assert!(bytes.iter().all(|&b| b == 0));
+        assert!(words.iter().all(|&w| w == 0));
+        assert_eq!(bytes.len(), 1 << 20);
+        assert_eq!(words.capacity(), 1000);
+        assert!(try_zeroed::<u32>(0).unwrap().is_empty());
+        assert_eq!(try_zeroed::<u32>(usize::MAX), Err(Error::NoMemory));
     }
 }

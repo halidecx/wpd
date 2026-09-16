@@ -9,6 +9,7 @@ pub mod compat;
 pub mod container;
 pub mod cpu;
 pub mod decoder;
+#[cfg(feature = "checkasm")]
 pub mod dsp;
 pub mod frame;
 pub mod options;

@@ -154,7 +154,7 @@ mod imp {
 
 #[cfg(not(all(target_pointer_width = "64", not(feature = "force_rac32"))))]
 mod imp {
-    static NORM_SHIFT: [u8; 256] = [
+    static NORM_SHIFT: [u8; 257] = [
         8, 7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
         3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -164,7 +164,7 @@ mod imp {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
     #[derive(Clone, Copy, Default)]
@@ -181,11 +181,11 @@ mod imp {
         pub fn new(start: usize, size: usize) -> Self {
             Self {
                 high: 255,
-                bits: -16,
+                bits: -8 * (size.min(3) as i32 - 1),
                 pos: start,
                 end: start + size,
                 code_word: 0,
-                eof: size < 3,
+                eof: false,
             }
         }
 
@@ -239,10 +239,12 @@ mod imp {
                 } else if self.pos < self.end {
                     code_word |= u32::from(buf[self.pos]) << (bits + 8);
                     self.pos += 1;
-                    bits -= 16;
+                    bits -= 8;
+                } else if bits > 0 {
+                    // Priming and refills may look ahead, but only consumed
+                    // virtual bits make the partition invalid.
                     self.eof = true;
-                } else {
-                    self.eof = true;
+                    bits = 0;
                 }
             }
             self.bits = bits;
@@ -284,7 +286,16 @@ mod imp {
 
         #[inline(always)]
         pub fn get_signed(&mut self, buf: &[u8], v: i32) -> i32 {
-            if self.get_prob(buf, 128) != 0 {
+            let code_word = self.renorm(buf);
+            let low = self.high.div_ceil(2);
+            let negative = code_word >= low << 16;
+
+            // The signed-bit shortcut normalizes by exactly one bit, even
+            // when this leaves range 256. Match VP8GetSigned's rounding.
+            self.high = if negative { self.high - low } else { low } << 1;
+            self.code_word = (code_word - if negative { low << 16 } else { 0 }) << 1;
+            self.bits += 1;
+            if negative {
                 -v
             } else {
                 v
@@ -372,6 +383,34 @@ mod tests {
             c.get(&buf);
         }
         assert!(c.overran());
+    }
+
+    #[test]
+    fn short_partitions_report_only_consumed_virtual_bits() {
+        // Uniform zero bits consume the first byte after two decisions, then
+        // eight decisions per byte. Priming must not itself signal EOF.
+        for (size, decisions) in [(0, 0), (1, 2), (2, 10), (3, 18), (4, 26)] {
+            let buf = [0; 4];
+            let mut c = RangeCoder::start(&buf[..size], 0, size);
+
+            assert!(!c.overran());
+            for _ in 0..decisions {
+                assert_eq!(c.get(&buf[..size]), 0);
+                assert!(!c.overran());
+            }
+            c.get(&buf[..size]);
+            assert!(c.overran());
+        }
+    }
+
+    #[test]
+    fn signed_bits_preserve_the_full_normalized_range() {
+        let buf = [0, 128, 0];
+        let mut c = RangeCoder::start(&buf, 0, buf.len());
+
+        assert_eq!(c.get_signed(&buf, 1), 1);
+        assert_eq!(c.get_prob(&buf, 1), 1);
+        assert!(!c.overran());
     }
 
     #[test]

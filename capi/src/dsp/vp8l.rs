@@ -9,6 +9,7 @@ pub type PredAddFn = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u3
 pub type RowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MapColorFn = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowFn = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
+pub type AddGreenFn = unsafe extern "C" fn(*mut u32, *const u32, c_int);
 
 pub const PRED_COUNT: usize = 14;
 
@@ -20,6 +21,7 @@ pub struct WPDLosslessDSP {
     pub blend_row_argb: RowFn,
     pub blend_row_argb_premult: RowFn,
     pub color_row: ColorRowFn,
+    pub add_green: AddGreenFn,
 }
 
 unsafe extern "C" fn pred_add_0_c(
@@ -89,6 +91,18 @@ pred_tramp!(pred_add_10_c, pred_add_10, true, true, true);
 pred_tramp!(pred_add_11_c, pred_add_11, true, true, false);
 pred_tramp!(pred_add_12_c, pred_add_12, true, true, false);
 pred_tramp!(pred_add_13_c, pred_add_13, true, true, false);
+
+unsafe extern "C" fn add_green_c(dst: *mut u32, src: *const u32, n: c_int) {
+    let Some(n) = count(n) else {
+        return;
+    };
+    unsafe {
+        if dst.cast_const() != src {
+            std::ptr::copy(src, dst, n);
+        }
+        k::add_green(slice::from_raw_parts_mut(dst, n));
+    }
+}
 
 unsafe extern "C" fn extract_green_c(dst: *mut u8, src: *const u8, n: c_int) {
     let Some(n) = count(n) else {
@@ -190,6 +204,9 @@ fn init_asm(dsp: &mut WPDLosslessDSP) {
     if let Some(v) = t.color_row {
         dsp.color_row = v;
     }
+    if let Some(v) = t.add_green {
+        dsp.add_green = v;
+    }
 }
 
 impl WPDLosslessDSP {
@@ -217,6 +234,7 @@ impl WPDLosslessDSP {
             blend_row_argb: blend_row_argb_c,
             blend_row_argb_premult: blend_row_argb_premult_c,
             color_row: color_row_c,
+            add_green: add_green_c,
         };
 
         #[cfg(all(

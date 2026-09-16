@@ -226,6 +226,7 @@ impl<'a> Decoder<'a> {
         self.driver().append(chunk)
     }
 
+    /// Replace the streaming buffer, preserving every byte of its previous prefix.
     pub fn update(&mut self, data: Vec<u8>) -> Result<UpdatedDecoder<'_, 'a>> {
         self.driver().update_owned(data)?;
         Ok(UpdatedDecoder { decoder: self })
@@ -271,13 +272,16 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    pub fn partial_frame(&mut self) -> Result<(Picture<'_>, i32)> {
+    /// Return the available picture and valid row count, or `None` if no picture
+    /// has been decoded yet.
+    pub fn partial_frame(&mut self) -> Result<Option<(Picture<'_>, i32)>> {
         let mut out = Handout::default();
         let mut rows = 0;
 
         self.failed = None;
         match self.inner.partial_picture(&mut out, &mut rows) {
-            Ok(_) => Ok((Picture { out }, rows)),
+            Ok(false) => Ok(None),
+            Ok(true) => Ok(Some((Picture { out }, rows))),
             Err(failure) => {
                 self.failed = Some(driver::described(failure));
                 Err(failure.1)
@@ -381,6 +385,20 @@ mod tests {
         d.append(&ONE_PIXEL[12..]).unwrap();
         d.end_of_stream().unwrap();
         assert!(d.next_frame().unwrap().is_some());
+    }
+
+    #[test]
+    fn a_partial_frame_without_pixels_is_none() {
+        let mut decoder = Decoder::new();
+
+        decoder.open_stream().unwrap();
+        decoder.append(&ONE_PIXEL[..12]).unwrap();
+        assert!(decoder.partial_frame().unwrap().is_none());
+        decoder.append(&ONE_PIXEL[12..]).unwrap();
+        assert!(decoder.next_frame().unwrap().is_some());
+        let (picture, rows) = decoder.partial_frame().unwrap().unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(picture.row(0, 0).len(), 4);
     }
 
     #[test]

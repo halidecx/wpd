@@ -18,6 +18,7 @@ typedef struct WPDLosslessDSP {
                                    int num_pixels);
     void (*color_row)(uint32_t *dst, const uint32_t *src, int num_pixels,
                       uint32_t mult);
+    void (*add_green)(uint32_t *dst, const uint32_t *src, int num_pixels);
 } WPDLosslessDSP;
 
 void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp);

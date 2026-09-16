@@ -9,7 +9,6 @@ pw_4:     times 8 dw 4
 
 SECTION .text
 
-
 %macro ADD_DC 4
     %4        m2, [dst1q+%3]
     %4        m3, [dst1q+strideq+%3]
@@ -73,7 +72,6 @@ VP8_IDCT_DC_ADD
 INIT_XMM sse4
 VP8_IDCT_DC_ADD
 
-
 INIT_XMM sse2
 cglobal vp8_idct_dc_add4y, 3, 3, 6, dst, block, stride
     movd      m0, [blockq+32*0]
@@ -101,7 +99,6 @@ cglobal vp8_idct_dc_add4y, 3, 3, 6, dst, block, stride
     lea    dst2q, [dst1q+strideq*2]
     ADD_DC    m0, m1, 0, mova
     RET
-
 
 %macro ADD_DC_2ROWS 3
     movq      m6, [%3]
@@ -148,7 +145,6 @@ cglobal vp8_idct_dc_add4uv, 3, 3, 7, dst, block, stride
     ADD_DC_2ROWS m3, m5, dst1q
     ADD_DC_2ROWS m3, m5, dst2q
     RET
-
 
 %macro VP8_MULTIPLY_SUMSUB 4
     mova      %3, %1
@@ -228,7 +224,6 @@ cglobal vp8_idct_add, 3, 3, 8, dst, block, stride
     STORE_DIFF_2ROWS m1, m4, m5, dst2q, strideq
     RET
 
-
 %macro SCATTER_WHT 2
 %assign %%i 0
 %rep 4
@@ -276,3 +271,20 @@ INIT_XMM sse2
 VP8_LUMA_DC_WHT
 INIT_XMM sse4
 VP8_LUMA_DC_WHT
+
+%macro VP8_LUMA_DC_WHT_DC 0
+cglobal vp8_luma_dc_wht_dc, 2, 3, 0, block, dc1, val
+    movsx        vald, word [dc1q]
+    mov    word [dc1q], 0
+    add          vald, 3
+    sar          vald, 3
+%assign %%i 0
+%rep 16
+    mov [blockq+2*16*%%i], valw
+%assign %%i %%i+1
+%endrep
+    RET
+%endmacro
+
+INIT_XMM sse2
+VP8_LUMA_DC_WHT_DC

@@ -204,7 +204,43 @@ SECTION .text
 %endif
 %endmacro
 
-%macro CONVERT_GROUP 7 ; y, dst, u_scratch, v_scratch, offset, layout, bpp
+%macro CONVERT_STORE 4
+    pmulhuw   m3, [pw_19077]            ; 19077 . y
+    pmulhuw   m6, m5, [pw_26149]
+    paddw     m6, m3
+    psubw     m6, [pw_14234]
+    psraw     m6, 6                     ; R
+    pmulhuw   m0, m4, [pw_6419]
+    pmulhuw   m1, m5, [pw_13320]
+    paddw     m0, m1
+    paddw     m1, m3, [pw_8708]
+    psubw     m1, m0
+    psraw     m1, 6                     ; G
+    pmulhuw   m4, [pw_33050]
+    paddusw   m4, m3
+    psubusw   m4, [pw_17685]
+    psrlw     m4, 6                     ; B
+    mova      m2, [pw_255]              ; A
+%ifidn %3, argb
+    packuswb  m2, m1
+    packuswb  m6, m4
+    STORE_PIXELS m2, m6, %1, %2, %4
+%elifidn %3, bgra
+    packuswb  m4, m6
+    packuswb  m5, m1, m2
+    STORE_PIXELS m4, m5, %1, %2, %4
+%elifidn %3, bgr
+    packuswb  m4, m6
+    packuswb  m5, m1, m2
+    STORE_PIXELS m4, m5, %1, %2, %4
+%else
+    packuswb  m6, m4
+    packuswb  m5, m1, m2
+    STORE_PIXELS m6, m5, %1, %2, %4
+%endif
+%endmacro
+
+%macro CONVERT_GROUP 7
 %if cpuflag(avx2)
     pmovzxbw  m3, [%1 + %5]
     pmovzxbw  m4, [rsp + %3 + %5]
@@ -224,39 +260,7 @@ SECTION .text
     mova      m5, m7
     punpcklbw m5, m2
 %endif
-    pmulhuw   m3, [pw_19077]            ; 19077 . y
-    pmulhuw   m6, m5, [pw_26149]
-    paddw     m6, m3
-    psubw     m6, [pw_14234]
-    psraw     m6, 6                     ; R
-    pmulhuw   m0, m4, [pw_6419]
-    pmulhuw   m1, m5, [pw_13320]
-    paddw     m0, m1
-    paddw     m1, m3, [pw_8708]
-    psubw     m1, m0
-    psraw     m1, 6                     ; G
-    pmulhuw   m4, [pw_33050]
-    paddusw   m4, m3
-    psubusw   m4, [pw_17685]
-    psrlw     m4, 6                     ; B
-    mova      m2, [pw_255]              ; A
-%ifidn %6, argb
-    packuswb  m2, m1
-    packuswb  m6, m4
-    STORE_PIXELS m2, m6, %2, %5, %7
-%elifidn %6, bgra
-    packuswb  m4, m6
-    packuswb  m5, m1, m2
-    STORE_PIXELS m4, m5, %2, %5, %7
-%elifidn %6, bgr
-    packuswb  m4, m6
-    packuswb  m5, m1, m2
-    STORE_PIXELS m4, m5, %2, %5, %7
-%else
-    packuswb  m6, m4
-    packuswb  m5, m1, m2
-    STORE_PIXELS m6, m5, %2, %5, %7
-%endif
+    CONVERT_STORE %2, %5, %6, %7
 %endmacro
 
 %macro CONVERT32 6 ; y, dst, u_scratch, v_scratch, layout, bpp
@@ -307,6 +311,112 @@ UPSAMPLE_ARGB_BLOCK rgba, 4
 UPSAMPLE_ARGB_BLOCK bgra, 4
 UPSAMPLE_ARGB_BLOCK rgb, 3
 UPSAMPLE_ARGB_BLOCK bgr, 3
+
+%macro YUV_ROW_GROUP 7
+%if cpuflag(avx2)
+    pmovzxbw  m3, [%1]
+%if %7 == 444
+    pmovzxbw  m4, [%2]
+    pmovzxbw  m5, [%3]
+%else
+    movq      xm4, [%2]
+    movq      xm5, [%3]
+    punpcklbw xm4, xm4
+    punpcklbw xm5, xm5
+    pmovzxbw  m4, xm4
+    pmovzxbw  m5, xm5
+%endif
+    psllw     m3, 8
+    psllw     m4, 8
+    psllw     m5, 8
+%else
+    movq      m0, [%1]
+%if %7 == 444
+    movq      m1, [%2]
+    movq      m2, [%3]
+%else
+    movd      m1, [%2]
+    movd      m2, [%3]
+    punpcklbw m1, m1
+    punpcklbw m2, m2
+%endif
+    pxor      m7, m7
+    mova      m3, m7
+    punpcklbw m3, m0
+    mova      m4, m7
+    punpcklbw m4, m1
+    mova      m5, m7
+    punpcklbw m5, m2
+%endif
+    CONVERT_STORE %4, 0, %5, %6
+%endmacro
+
+%macro COPY_BYTES 3
+    xor       idxd, idxd
+%%loop:
+    movzx     tmpd, byte [%2 + idxq]
+    mov       [%1 + idxq], tmpb
+    inc       idxd
+    cmp       idxd, %3
+    jl        %%loop
+%endmacro
+
+%macro YUV_ROW 3
+cglobal yuv%1_row_%2, 5, 8, 8, 128, dst, y, u, v, n, idx, tmp, cnt
+    sub       nd, mmsize / 2
+    jl        .tail
+.loop:
+    YUV_ROW_GROUP yq, uq, vq, dstq, %2, %3, %1
+    add       yq, mmsize / 2
+%if %1 == 444
+    add       uq, mmsize / 2
+    add       vq, mmsize / 2
+%else
+    add       uq, mmsize / 4
+    add       vq, mmsize / 4
+%endif
+    add       dstq, %3 * (mmsize / 2)
+    sub       nd, mmsize / 2
+    jge       .loop
+.tail:
+    add       nd, mmsize / 2
+    jz        .end
+    COPY_BYTES rsp, yq, nd
+%if %1 == 444
+    mov       cntd, nd
+%else
+    lea       cntd, [nd + 1]
+    shr       cntd, 1
+%endif
+    COPY_BYTES rsp + 16, uq, cntd
+    COPY_BYTES rsp + 32, vq, cntd
+    YUV_ROW_GROUP rsp, rsp + 16, rsp + 32, rsp + 48, %2, %3, %1
+    imul      cntd, nd, %3
+    COPY_BYTES dstq, rsp + 48, cntd
+.end:
+    RET
+%endmacro
+
+%macro YUV_ROWS 2
+YUV_ROW 444, %1, %2
+YUV_ROW 420, %1, %2
+%endmacro
+
+INIT_XMM sse2
+YUV_ROWS argb, 4
+YUV_ROWS rgba, 4
+YUV_ROWS bgra, 4
+YUV_ROWS rgb, 3
+YUV_ROWS bgr, 3
+INIT_XMM ssse3
+YUV_ROWS rgb, 3
+YUV_ROWS bgr, 3
+INIT_YMM avx2
+YUV_ROWS argb, 4
+YUV_ROWS rgba, 4
+YUV_ROWS bgra, 4
+YUV_ROWS rgb, 3
+YUV_ROWS bgr, 3
 
 %macro ARGB_TO_UV_COLUMNS 2 ; src, stride
     movu      m0, [%1]

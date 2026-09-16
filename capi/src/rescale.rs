@@ -3,6 +3,12 @@ use std::slice;
 
 use wpd::picture::{PlaneMut, PlaneRef};
 
+fn disjoint(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> bool {
+    let (a, b) = (a as usize, b as usize);
+
+    a.saturating_add(a_len) <= b || b.saturating_add(b_len) <= a
+}
+
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::missing_safety_doc)]
@@ -51,6 +57,18 @@ pub unsafe extern "C" fn wpd_rescale_plane(
         return;
     };
     if dst.is_null() || src.is_null() || work.is_null() {
+        return;
+    }
+    if work as usize % std::mem::align_of::<u32>() != 0 {
+        return;
+    }
+
+    let work_bytes = work_len * std::mem::size_of::<u32>();
+
+    if !disjoint(dst, dst_extent, src, src_extent)
+        || !disjoint(dst, dst_extent, work.cast(), work_bytes)
+        || !disjoint(src, src_extent, work.cast(), work_bytes)
+    {
         return;
     }
 
@@ -107,6 +125,65 @@ mod tests {
                     std::ptr::null_mut(),
                 );
             }
+        }
+    }
+
+    #[test]
+    fn overlapping_or_misaligned_rescale_buffers_are_left_alone() {
+        let mut dst = [0xaau8; 64];
+        let mut src = [7u8; 64];
+        let mut work = [0u32; 64];
+        let mut misaligned = [0u8; 256];
+        let work_ptr = work.as_mut_ptr();
+        let odd = unsafe { misaligned.as_mut_ptr().add(1) }.cast::<u32>();
+
+        unsafe {
+            wpd_rescale_plane(
+                src.as_mut_ptr(),
+                8,
+                4,
+                4,
+                src.as_ptr(),
+                8,
+                8,
+                8,
+                1,
+                work_ptr,
+            );
+            wpd_rescale_plane(
+                dst.as_mut_ptr(),
+                8,
+                4,
+                4,
+                src.as_ptr(),
+                8,
+                8,
+                8,
+                1,
+                dst.as_mut_ptr().cast(),
+            );
+            wpd_rescale_plane(dst.as_mut_ptr(), 8, 4, 4, src.as_ptr(), 8, 8, 8, 1, odd);
+        }
+        assert!(dst.iter().all(|&b| b == 0xaa));
+        assert!(src.iter().all(|&b| b == 7));
+        assert!(misaligned.iter().all(|&b| b == 0));
+
+        unsafe {
+            wpd_rescale_plane(
+                dst.as_mut_ptr(),
+                8,
+                4,
+                4,
+                src.as_ptr(),
+                8,
+                8,
+                8,
+                1,
+                work_ptr,
+            );
+        }
+        for row in dst[..32].chunks(8) {
+            assert!(row[..4].iter().all(|&b| b == 7));
         }
     }
 }

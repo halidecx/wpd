@@ -48,10 +48,16 @@ pub fn grow_to(capacity: usize, buffered: usize, size: usize) -> Result<Option<u
 }
 
 pub fn compact(window: Window, keep: usize) -> Option<usize> {
-    if keep < window.discarded || keep - window.discarded < COMPACT_THRESHOLD {
+    if keep < window.discarded || keep > window.size {
         return None;
     }
-    Some(window.size - keep + FILE_PADDING)
+    let dropped = keep - window.discarded;
+    let moved = window.size - keep;
+
+    if dropped < COMPACT_THRESHOLD || dropped < moved / 2 {
+        return None;
+    }
+    Some(moved + FILE_PADDING)
 }
 
 #[derive(Default)]
@@ -107,24 +113,22 @@ impl<'a> Input<'a> {
                 .try_reserve_exact(grown.saturating_sub(self.owned.len()))
                 .map_err(|_| Error::NoMemory)?;
         }
-        let needed = buffered + size + FILE_PADDING;
-
-        if self.owned.len() < needed {
-            self.owned.resize(needed, 0);
-        }
         Ok(())
+    }
+
+    fn pad(&mut self, end: usize) {
+        self.owned.truncate(end);
+        self.owned.resize(end + FILE_PADDING, 0);
     }
 
     pub fn own(&mut self, data: &[u8]) -> Result<()> {
         self.borrowed = None;
         self.window = Window::default();
+        self.owned.clear();
         self.reserve(data.len())?;
-
-        let end = data.len();
-
-        self.owned[..end].copy_from_slice(data);
-        self.owned[end..end + FILE_PADDING].fill(0);
-        self.window.size = end;
+        self.owned.extend_from_slice(data);
+        self.pad(data.len());
+        self.window.size = data.len();
         Ok(())
     }
 
@@ -146,6 +150,8 @@ impl<'a> Input<'a> {
     }
 
     pub fn take_owned(&mut self) -> Vec<u8> {
+        self.borrowed = None;
+        self.window = Window::default();
         core::mem::take(&mut self.owned)
     }
 
@@ -153,10 +159,10 @@ impl<'a> Input<'a> {
         self.reserve(data.len())?;
 
         let at = self.window.buffered();
-        let end = at + data.len();
 
-        self.owned[at..end].copy_from_slice(data);
-        self.owned[end..end + FILE_PADDING].fill(0);
+        self.owned.truncate(at);
+        self.owned.extend_from_slice(data);
+        self.pad(at + data.len());
         self.window.size += data.len();
         Ok(())
     }
@@ -222,15 +228,49 @@ mod tests {
     #[test]
     fn compaction_below_the_threshold_is_not_worth_the_move() {
         let w = Window {
-            size: 1 << 20,
+            size: 3 * COMPACT_THRESHOLD,
             discarded: 0,
         };
 
         assert_eq!(compact(w, COMPACT_THRESHOLD - 1), None);
         assert_eq!(
             compact(w, COMPACT_THRESHOLD),
-            Some((1 << 20) - COMPACT_THRESHOLD + FILE_PADDING)
+            Some(2 * COMPACT_THRESHOLD + FILE_PADDING)
         );
+    }
+
+    #[test]
+    fn compaction_that_moves_much_more_than_it_drops_waits() {
+        let w = Window {
+            size: 1 << 20,
+            discarded: 0,
+        };
+
+        assert_eq!(compact(w, COMPACT_THRESHOLD), None);
+        assert_eq!(compact(w, 1 << 19), Some((1 << 19) + FILE_PADDING));
+    }
+
+    #[test]
+    fn a_keep_past_the_end_of_the_stream_is_declined() {
+        let w = Window {
+            size: 1 << 20,
+            discarded: 0,
+        };
+
+        assert_eq!(compact(w, (1 << 20) + 1), None);
+    }
+
+    #[test]
+    fn taking_the_owned_bytes_leaves_no_stream_behind() {
+        let mut input = Input::new();
+
+        input.append(&[1, 2, 3]).unwrap();
+        assert_eq!(input.take_owned()[..3], [1, 2, 3]);
+        assert_eq!(input.size(), 0);
+        assert!(input.bytes().is_empty());
+        assert!(input.chunk(0, 8).is_empty());
+        input.append(&[4]).unwrap();
+        assert_eq!(input.bytes(), &[4]);
     }
 
     #[test]

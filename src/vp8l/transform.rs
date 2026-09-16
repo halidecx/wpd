@@ -108,6 +108,7 @@ pub fn color_rows(
 }
 
 pub fn subtract_green_rows(
+    dsp: &Vp8lDsp,
     plane: &mut [u32],
     base: usize,
     stride: usize,
@@ -117,13 +118,7 @@ pub fn subtract_green_rows(
     let mut row = base;
 
     for _ in 0..rows {
-        for px in &mut plane[row..row + width] {
-            let mut b = px.to_ne_bytes();
-
-            b[1] = b[1].wrapping_add(b[2]);
-            b[3] = b[3].wrapping_add(b[2]);
-            *px = u32::from_ne_bytes(b);
-        }
+        (dsp.add_green)(&mut plane[row..row + width]);
         row += stride;
     }
 }

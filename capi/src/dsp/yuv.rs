@@ -34,6 +34,8 @@ pub type ArgbToUvFn =
 /* Forward direction only; the inverse divides per pixel and stays scalar. */
 pub type MultiplyRowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MultiplyArgbFn = unsafe extern "C" fn(*mut u8, c_int);
+pub type YuvRowFn =
+    unsafe extern "C" fn(*mut u8, *const u8, *const u8, *const u8, c_int);
 
 #[repr(C)]
 #[allow(clippy::upper_case_acronyms)]
@@ -57,6 +59,8 @@ pub struct WPDYUVDSP {
     pub argb_to_uv: ArgbToUvFn,
     pub multiply_row: MultiplyRowFn,
     pub premultiply_argb_row: MultiplyArgbFn,
+    pub yuv444_row: [YuvRowFn; LAYOUT_NB],
+    pub yuv420_row: [YuvRowFn; LAYOUT_NB],
 }
 
 macro_rules! upsample_block_tramp {
@@ -136,6 +140,43 @@ macro_rules! inplace_tramp {
         }
     };
 }
+
+macro_rules! yuv_row_tramp {
+    ($name:ident, $kernel:ident, $layout:expr, $chroma:literal) => {
+        unsafe extern "C" fn $name(
+            dst: *mut u8,
+            y: *const u8,
+            u: *const u8,
+            v: *const u8,
+            n: c_int,
+        ) {
+            let Some(n) = count(n) else {
+                return;
+            };
+            let samples = n.div_ceil($chroma);
+
+            unsafe {
+                k::$kernel::<$layout>(
+                    slice::from_raw_parts_mut(dst, bpp($layout) * n),
+                    slice::from_raw_parts(y, n),
+                    slice::from_raw_parts(u, samples),
+                    slice::from_raw_parts(v, samples),
+                )
+            }
+        }
+    };
+}
+
+yuv_row_tramp!(yuv444_row_argb_c, yuv444_row, LAYOUT_ARGB, 1);
+yuv_row_tramp!(yuv444_row_rgba_c, yuv444_row, LAYOUT_RGBA, 1);
+yuv_row_tramp!(yuv444_row_bgra_c, yuv444_row, LAYOUT_BGRA, 1);
+yuv_row_tramp!(yuv444_row_rgb_c, yuv444_row, LAYOUT_RGB, 1);
+yuv_row_tramp!(yuv444_row_bgr_c, yuv444_row, LAYOUT_BGR, 1);
+yuv_row_tramp!(yuv420_row_argb_c, yuv420_row, LAYOUT_ARGB, 2);
+yuv_row_tramp!(yuv420_row_rgba_c, yuv420_row, LAYOUT_RGBA, 2);
+yuv_row_tramp!(yuv420_row_bgra_c, yuv420_row, LAYOUT_BGRA, 2);
+yuv_row_tramp!(yuv420_row_rgb_c, yuv420_row, LAYOUT_RGB, 2);
+yuv_row_tramp!(yuv420_row_bgr_c, yuv420_row, LAYOUT_BGR, 2);
 
 row_tramp!(dispatch_alpha_first_c, dispatch_alpha_first, 4, 1);
 row_tramp!(dispatch_alpha_last_c, dispatch_alpha_last, 4, 1);
@@ -291,6 +332,20 @@ fn init_asm(dsp: &mut WPDYUVDSP) {
     if let Some(v) = t.premultiply_argb_row {
         dsp.premultiply_argb_row = v;
     }
+    if let Some(v) = t.yuv444_row {
+        dsp.yuv444_row = v;
+    }
+    if let Some(v) = t.yuv420_row {
+        dsp.yuv420_row = v;
+    }
+    if let Some([rgb, bgr]) = t.yuv444_row_rgb {
+        dsp.yuv444_row[LAYOUT_RGB] = rgb;
+        dsp.yuv444_row[LAYOUT_BGR] = bgr;
+    }
+    if let Some([rgb, bgr]) = t.yuv420_row_rgb {
+        dsp.yuv420_row[LAYOUT_RGB] = rgb;
+        dsp.yuv420_row[LAYOUT_BGR] = bgr;
+    }
 }
 
 impl WPDYUVDSP {
@@ -322,6 +377,20 @@ impl WPDYUVDSP {
             argb_to_uv: argb_to_uv_c,
             multiply_row: multiply_row_c,
             premultiply_argb_row: premultiply_argb_row_c,
+            yuv444_row: [
+                yuv444_row_argb_c,
+                yuv444_row_rgba_c,
+                yuv444_row_bgra_c,
+                yuv444_row_rgb_c,
+                yuv444_row_bgr_c,
+            ],
+            yuv420_row: [
+                yuv420_row_argb_c,
+                yuv420_row_rgba_c,
+                yuv420_row_bgra_c,
+                yuv420_row_rgb_c,
+                yuv420_row_bgr_c,
+            ],
         };
 
         #[cfg(all(

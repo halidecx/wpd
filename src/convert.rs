@@ -1,6 +1,6 @@
 use crate::dsp::yuv::{
-    bpp, upsample_row, yuv420_row, yuv444_row, UpsampleDst, UpsampleSrc, YuvDsp,
-    LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_RGB, LAYOUT_RGBA,
+    bpp, upsample_row, UpsampleDst, UpsampleSrc, YuvDsp, LAYOUT_ARGB, LAYOUT_BGR,
+    LAYOUT_BGRA, LAYOUT_RGB, LAYOUT_RGBA,
 };
 use crate::dsp::yuv::{extract_alpha, RowFn};
 use crate::picture::{PlaneMut, PlaneRef};
@@ -309,20 +309,15 @@ fn packed_simple_span(
     row_end: usize,
 ) {
     let chroma = width.div_ceil(2);
+    let convert = dsp.yuv420_row[layout];
 
     for j in row_start..row_end {
-        let y = src.y.row(j as i32, 0, width);
-        let u = src.u.row((j >> 1) as i32, 0, chroma);
-        let v = src.v.row((j >> 1) as i32, 0, chroma);
-        let out = dst.row_mut(j as i32, 0, bpp(layout) * width);
-
-        macro_rules! run {
-            ($l:expr) => {
-                yuv420_row::<$l>(out, y, u, v)
-            };
-        }
-
-        by_layout!(layout, run);
+        convert(
+            dst.row_mut(j as i32, 0, bpp(layout) * width),
+            src.y.row(j as i32, 0, width),
+            src.u.row((j >> 1) as i32, 0, chroma),
+            src.v.row((j >> 1) as i32, 0, chroma),
+        );
     }
 
     if let (Some(alpha), Some(dispatch)) = (&src.a, dsp.alpha_dispatcher(layout)) {
@@ -330,26 +325,162 @@ fn packed_simple_span(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn yuv444_to_packed(
+    dsp: &YuvDsp,
     layout: usize,
     dst: &mut PlaneMut<'_>,
     src: &YuvPlanes<'_>,
     width: usize,
-    height: usize,
+    row_start: usize,
+    row_end: usize,
+    threads: usize,
 ) {
-    for j in 0..height {
-        let y = src.y.row(j as i32, 0, width);
-        let u = src.u.row(j as i32, 0, width);
-        let v = src.v.row(j as i32, 0, width);
-        let out = dst.row_mut(j as i32, 0, bpp(layout) * width);
+    if width == 0 || row_start >= row_end {
+        return;
+    }
 
-        macro_rules! run {
-            ($l:expr) => {
-                yuv444_row::<$l>(out, y, u, v)
-            };
+    in_bands(dst, width, row_start, row_end, threads, |dst, from, to| {
+        yuv444_span(dsp, layout, dst, src, width, from, to);
+    });
+}
+
+fn yuv444_span(
+    dsp: &YuvDsp,
+    layout: usize,
+    dst: &mut PlaneMut<'_>,
+    src: &YuvPlanes<'_>,
+    width: usize,
+    row_start: usize,
+    row_end: usize,
+) {
+    let convert = dsp.yuv444_row[layout];
+
+    for j in row_start..row_end {
+        convert(
+            dst.row_mut(j as i32, 0, bpp(layout) * width),
+            src.y.row(j as i32, 0, width),
+            src.u.row(j as i32, 0, width),
+            src.v.row(j as i32, 0, width),
+        );
+    }
+
+    if let (Some(alpha), Some(dispatch)) = (&src.a, dsp.alpha_dispatcher(layout)) {
+        dispatch_alpha_rows(dispatch, dst, alpha, width, row_start, row_end);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Sampling {
+    Full,
+    Simple,
+    Fancy,
+}
+
+const STRIP_BYTES: usize = 64 * 1024;
+
+fn strip_rows(width: usize) -> usize {
+    (STRIP_BYTES / (4 * width.max(1))).clamp(2, 64) & !1
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn yuv_to_packed_2byte(
+    dsp: &YuvDsp,
+    dst: &mut PlaneMut<'_>,
+    src: &YuvPlanes<'_>,
+    width: usize,
+    height: usize,
+    row_start: usize,
+    row_end: usize,
+    sampling: Sampling,
+    pack: RowFn,
+    premultiply: Option<fn(&mut [u8])>,
+    threads: usize,
+) -> usize {
+    if width == 0 || height == 0 || row_start >= row_end {
+        return row_start;
+    }
+
+    in_bands(dst, width, row_start, row_end, threads, |dst, from, to| {
+        strip_2byte_span(
+            dsp,
+            dst,
+            src,
+            width,
+            height,
+            from,
+            to,
+            sampling,
+            pack,
+            premultiply,
+        );
+    });
+    if sampling == Sampling::Fancy {
+        first_row(row_start)
+    } else {
+        row_start
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn strip_2byte_span(
+    dsp: &YuvDsp,
+    dst: &mut PlaneMut<'_>,
+    src: &YuvPlanes<'_>,
+    width: usize,
+    height: usize,
+    row_start: usize,
+    row_end: usize,
+    sampling: Sampling,
+    pack: RowFn,
+    premultiply: Option<fn(&mut [u8])>,
+) {
+    let stride = 4 * width;
+    let rows = strip_rows(width);
+    let mut strip = vec![0u8; stride * rows];
+    let mut from = if sampling == Sampling::Fancy {
+        first_row(row_start)
+    } else {
+        row_start
+    };
+
+    while from < row_end {
+        let to = row_end.min((from + rows - 1) | 1);
+        let mut argb = PlaneMut::borrowed_at(
+            &mut strip[..(to - from) * stride],
+            stride,
+            from as i32,
+        );
+
+        match sampling {
+            Sampling::Full => {
+                yuv444_span(dsp, LAYOUT_ARGB, &mut argb, src, width, from, to);
+            }
+            Sampling::Simple => {
+                packed_simple_span(dsp, LAYOUT_ARGB, &mut argb, src, width, from, to);
+            }
+            Sampling::Fancy => {
+                packed_rows_span(
+                    dsp,
+                    LAYOUT_ARGB,
+                    &mut argb,
+                    src,
+                    width,
+                    height,
+                    from,
+                    to,
+                );
+            }
         }
+        for row in from..to {
+            let out = dst.row_mut(row as i32, 0, 2 * width);
 
-        by_layout!(layout, run);
+            pack(out, argb.row(row as i32, 0, stride));
+            if let Some(premultiply) = premultiply {
+                premultiply(out);
+            }
+        }
+        from = to;
     }
 }
 
@@ -639,6 +770,136 @@ mod tests {
             assert_eq!(px[0], 255);
             for &c in &px[1..] {
                 assert!(c.abs_diff(128) <= 2, "{c}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_two_byte_conversion_through_strips_packs_what_the_whole_argb_would() {
+        let dsp = YuvDsp::new();
+        let (w, h) = (1024usize, 200usize);
+
+        assert!(
+            crate::task::pieces(h, min_band_rows(w), MAX_BANDS) > 1,
+            "this size no longer splits, so the test proves nothing"
+        );
+
+        for sampling in [Sampling::Full, Sampling::Simple, Sampling::Fancy] {
+            let mut src = Buffer::default();
+
+            src.alloc_planar(w as i32, h as i32, sampling != Sampling::Full)
+                .unwrap();
+            for p in 0..4 {
+                let rows = if p == 1 || p == 2 {
+                    if sampling == Sampling::Full {
+                        h
+                    } else {
+                        h.div_ceil(2)
+                    }
+                } else {
+                    h
+                };
+
+                for y in 0..rows as i32 {
+                    for (x, v) in src.frame_mut().row(p, y).iter_mut().enumerate() {
+                        *v = (x as u8)
+                            .wrapping_mul(7 + p as u8)
+                            .wrapping_add((y as u8).wrapping_mul(3));
+                    }
+                }
+            }
+
+            let f = src.frame();
+            let planes = YuvPlanes {
+                y: f.plane[0],
+                u: f.plane[1],
+                v: f.plane[2],
+                a: Some(f.plane[3]),
+            };
+            let pack = dsp.pack_rgba4444;
+            let premultiply = Some(dsp.premultiply_row_4444);
+
+            let mut argb = Buffer::default();
+            let mut want = Buffer::default();
+
+            argb.alloc_argb(w as i32, h as i32).unwrap();
+            want.alloc_packed(w as i32, h as i32, 2, Format::Rgba4444Pre)
+                .unwrap();
+            {
+                let mut view = argb.frame_mut();
+                let plane = &mut view.planes_mut()[0];
+
+                match sampling {
+                    Sampling::Full => {
+                        yuv444_to_packed(&dsp, LAYOUT_ARGB, plane, &planes, w, 0, h, 1);
+                    }
+                    Sampling::Simple => yuv420_to_packed_simple(
+                        &dsp,
+                        LAYOUT_ARGB,
+                        plane,
+                        &planes,
+                        w,
+                        0,
+                        h,
+                        1,
+                    ),
+                    Sampling::Fancy => {
+                        yuv420_to_packed_rows(
+                            &dsp,
+                            LAYOUT_ARGB,
+                            plane,
+                            &planes,
+                            w,
+                            h,
+                            0,
+                            h,
+                            1,
+                        );
+                    }
+                }
+            }
+            for y in 0..h as i32 {
+                let mut view = want.frame_mut();
+                let row = view.row(0, y);
+
+                pack(row, argb.frame().row(0, y));
+                (dsp.premultiply_row_4444)(row);
+            }
+
+            for (threads, step) in [(1usize, h), (3, h), (1, 3), (3, 7), (2, 1)] {
+                let mut got = Buffer::default();
+
+                got.alloc_packed(w as i32, h as i32, 2, Format::Rgba4444Pre)
+                    .unwrap();
+
+                let mut at = 0;
+
+                while at < h {
+                    let end = (at + step).min(h);
+                    let from = yuv_to_packed_2byte(
+                        &dsp,
+                        &mut got.frame_mut().planes_mut()[0],
+                        &planes,
+                        w,
+                        h,
+                        at,
+                        end,
+                        sampling,
+                        pack,
+                        premultiply,
+                        threads,
+                    );
+
+                    assert!(from <= at && at <= from + 1, "row {at} reported {from}");
+                    at = end;
+                }
+                for y in 0..h as i32 {
+                    assert_eq!(
+                        want.frame().row(0, y),
+                        got.frame().row(0, y),
+                        "row {y}, {threads} threads, step {step}"
+                    );
+                }
             }
         }
     }

@@ -137,17 +137,15 @@ pub fn scaled_size(
         h = (i64::from(src_height) * w + i64::from(src_width) - 1)
             / i64::from(src_width);
     }
-    let (w, h) = (w as i32, h as i32);
-
     if w <= 0
         || h <= 0
-        || w > MAX_SCALED
-        || h > MAX_SCALED
+        || w > i64::from(MAX_SCALED)
+        || h > i64::from(MAX_SCALED)
         || u64::from(w as u32) * u64::from(h as u32) >= 1u64 << 32
     {
         return Err(Error::TooLarge);
     }
-    Ok((w, h))
+    Ok((w as i32, h as i32))
 }
 
 pub struct Crop {
@@ -164,6 +162,10 @@ pub fn crop_origin(
     packed: bool,
 ) -> Result<(i32, i32)> {
     let align = if packed { 0 } else { 1 };
+
+    if crop.left < 0 || crop.top < 0 || crop.width <= 0 || crop.height <= 0 {
+        return Err(Error::InvalidData);
+    }
     let left = crop.left & !align;
     let top = crop.top & !align;
 
@@ -360,6 +362,8 @@ mod tests {
         assert_eq!(scaled_size(0, 0, 200, 100), Err(Error::TooLarge));
         assert_eq!(scaled_size(16385, 10, 200, 100), Err(Error::TooLarge));
         assert_eq!(scaled_size(0, 1, 1, 0), Err(Error::TooLarge));
+        assert_eq!(scaled_size(0, 3, 1_431_655_766, 1), Err(Error::TooLarge));
+        assert_eq!(scaled_size(3, 0, 1, 1_431_655_766), Err(Error::TooLarge));
     }
 
     #[test]
@@ -373,6 +377,27 @@ mod tests {
 
         assert_eq!(crop_origin(&crop, 32, 32, false), Ok((4, 6)));
         assert_eq!(crop_origin(&crop, 32, 32, true), Ok((5, 7)));
+    }
+
+    #[test]
+    fn a_crop_with_a_negative_corner_or_an_empty_extent_is_rejected() {
+        for (left, top, width, height) in [
+            (-1, 0, 4, 4),
+            (0, -1, 4, 4),
+            (0, 0, 0, 4),
+            (0, 0, 4, -4),
+            (i32::MIN, 0, 4, 4),
+        ] {
+            let crop = Crop {
+                left,
+                top,
+                width,
+                height,
+            };
+
+            assert_eq!(crop_origin(&crop, 32, 32, true), Err(Error::InvalidData));
+            assert_eq!(crop_origin(&crop, 32, 32, false), Err(Error::InvalidData));
+        }
     }
 
     #[test]

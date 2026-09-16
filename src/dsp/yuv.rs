@@ -567,6 +567,7 @@ pub struct UpsampleDst<'a> {
 pub type UpsampleBlockFn = fn(&UpsampleSrc<'_>, &mut UpsampleDst<'_>, usize);
 
 pub type RowFn = fn(&mut [u8], &[u8]);
+pub type YuvRowFn = fn(&mut [u8], &[u8], &[u8], &[u8]);
 pub type ArgbToYuv444Fn = fn(&mut [u8], &mut [u8], &mut [u8], &[u8]);
 pub type ArgbToUvFn = fn(&mut [u8], &mut [u8], &[u8], usize, usize, bool);
 
@@ -592,6 +593,8 @@ fn upsample_block<const L: usize>(
 
 pub struct YuvDsp {
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
+    pub yuv444_row: [YuvRowFn; LAYOUT_NB],
+    pub yuv420_row: [YuvRowFn; LAYOUT_NB],
     pub dispatch_alpha_first: RowFn,
     pub dispatch_alpha_last: RowFn,
     pub pack_rgba: RowFn,
@@ -629,6 +632,20 @@ impl YuvDsp {
                 upsample_block::<LAYOUT_BGRA>,
                 upsample_block::<LAYOUT_RGB>,
                 upsample_block::<LAYOUT_BGR>,
+            ],
+            yuv444_row: [
+                yuv444_row::<LAYOUT_ARGB>,
+                yuv444_row::<LAYOUT_RGBA>,
+                yuv444_row::<LAYOUT_BGRA>,
+                yuv444_row::<LAYOUT_RGB>,
+                yuv444_row::<LAYOUT_BGR>,
+            ],
+            yuv420_row: [
+                yuv420_row::<LAYOUT_ARGB>,
+                yuv420_row::<LAYOUT_RGBA>,
+                yuv420_row::<LAYOUT_BGRA>,
+                yuv420_row::<LAYOUT_RGB>,
+                yuv420_row::<LAYOUT_BGR>,
             ],
             dispatch_alpha_first,
             dispatch_alpha_last,
@@ -703,6 +720,9 @@ pub fn upsample_row<const L: usize>(
     dst: &mut UpsampleDst<'_>,
     len: usize,
 ) {
+    if len == 0 {
+        return;
+    }
     let bpp = bpp(L);
     let last_pair = (len - 1) >> 1;
     let blocks = if len >= UPSAMPLE_BLOCK + 2 {

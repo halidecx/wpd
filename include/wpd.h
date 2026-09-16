@@ -32,6 +32,12 @@ extern "C" {
 #define WPD_API
 #endif
 
+/**
+ * Decoder handles require external synchronization: only one call at a time
+ * may access a handle, including const queries, status, and error access.
+ * Different handles may be used concurrently. Callbacks must not reenter the
+ * decoder that invoked them.
+ */
 typedef struct WPDDecoder WPDDecoder;
 
 /**
@@ -284,6 +290,7 @@ typedef struct WPDOutputPlane {
 /**
  * Caller-owned output memory. Packed formats use plane[0]; planar formats use
  * Y, U, V, and optionally A. Negative strides are supported.
+ * Output storage must not overlap borrowed input, including update buffers.
  */
 typedef struct WPDOutputBuffer {
     size_t         struct_size; ///< Set to sizeof(WPDOutputBuffer).
@@ -345,8 +352,9 @@ WPD_API WPDStatus wpd_decoder_append(WPDDecoder *decoder, const uint8_t *data,
 /**
  * Update a streamed decode with a cumulative, caller-owned buffer.
  *
- * Each buffer must contain the complete input prefix and remain valid until the
- * next update or the decoder is freed.
+ * Each buffer must contain the complete input prefix, with all previously
+ * supplied bytes unchanged, and remain valid until the next update or the
+ * decoder is freed.
  */
 WPD_API WPDStatus wpd_decoder_update(WPDDecoder *decoder, const uint8_t *data,
                                      size_t size);
@@ -443,6 +451,8 @@ WPD_API WPDStatus wpd_decoder_status(const WPDDecoder *decoder);
 
 /**
  * Get a description of the last decoder failure.
+ * The returned string belongs to the decoder and is valid only until the next
+ * call using that decoder (including rewind or free). Copy it to retain it.
  */
 WPD_API const char *wpd_decoder_error(const WPDDecoder *decoder);
 
@@ -454,7 +464,8 @@ WPD_API void wpd_decoder_free(WPDDecoder *decoder);
 /**
  * Decode into caller-owned output memory.
  *
- * Any allocation owned by frame is released first.
+ * Any allocation owned by frame is released first. Input and output storage
+ * must not overlap.
  */
 WPD_API WPDStatus wpd_decode_into(const uint8_t *data, size_t size,
                                   WPDPixelFormat           format,

@@ -1,6 +1,5 @@
 use std::ffi::{c_char, c_int, c_uint, c_void};
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::{mem, ptr};
+use std::sync::Mutex;
 
 use wpd::log::Level;
 
@@ -8,8 +7,7 @@ pub type WPDLogCallback = unsafe extern "C" fn(*mut c_void, c_int, *const c_char
 
 const MESSAGE_MAX: usize = 511;
 
-static LOG_CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
-static LOG_OPAQUE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static LOG_CALLBACK: Mutex<(Option<WPDLogCallback>, usize)> = Mutex::new((None, 0));
 
 const fn parse_version(s: &str) -> [u32; 3] {
     let bytes = s.as_bytes();
@@ -46,20 +44,17 @@ pub unsafe extern "C" fn wpd_set_log_callback(
     callback: Option<WPDLogCallback>,
     opaque: *mut c_void,
 ) {
-    let callback = callback.map_or(ptr::null_mut(), |f| f as usize as *mut c_void);
-
-    LOG_OPAQUE.store(opaque, Ordering::Release);
-    LOG_CALLBACK.store(callback, Ordering::Release);
+    *LOG_CALLBACK.lock().unwrap_or_else(|e| e.into_inner()) =
+        (callback, opaque as usize);
 }
 
 pub(crate) fn forward_log(level: Level, message: &str) {
-    let installed = LOG_CALLBACK.load(Ordering::Acquire);
-
-    if installed.is_null() {
+    // Copy the pair together, but release the lock before calling foreign code.
+    let (callback, opaque) = *LOG_CALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(callback) = callback else {
         return;
-    }
-    let callback: WPDLogCallback = unsafe { mem::transmute(installed) };
-    let opaque = LOG_OPAQUE.load(Ordering::Relaxed);
+    };
+    let opaque = opaque as *mut c_void;
     let mut bytes = message.as_bytes();
 
     if bytes.len() > MESSAGE_MAX {

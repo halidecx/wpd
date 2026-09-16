@@ -155,6 +155,37 @@ fn rl32(b: &[u8], at: usize) -> u32 {
     bits::rl32(&bits::quad(b, at))
 }
 
+pub(crate) fn bitstream_size(tag: u32, p: &[u8], size: usize) -> Option<(i32, i32)> {
+    if tag == TAG_VP8L {
+        if p.len() < 5 || p[0] != 0x2f {
+            return None;
+        }
+        let bits = rl32(p, 1);
+
+        if bits >> 29 != 0 {
+            return None;
+        }
+        Some((
+            (bits & 0x3fff) as i32 + 1,
+            ((bits >> 14) & 0x3fff) as i32 + 1,
+        ))
+    } else {
+        if p.len() < 10 || size < 10 || p[3..6] != [0x9d, 0x01, 0x2a] {
+            return None;
+        }
+        let bits = rl24(p, 0);
+
+        if bits & 1 != 0
+            || (bits >> 1) & 7 > 3
+            || bits & 0x10 == 0
+            || (bits >> 5) as usize > size - 10
+        {
+            return None;
+        }
+        Some(((rl16(p, 6) & 0x3fff) as i32, (rl16(p, 8) & 0x3fff) as i32))
+    }
+}
+
 fn window(b: &[u8], from: usize, len: usize) -> &[u8] {
     let from = from.min(b.len());
     let to = from.saturating_add(len).min(b.len());
@@ -191,36 +222,19 @@ impl Scan {
     fn still_header(&mut self, tag: u32, p: &[u8], size: usize) {
         if tag == TAG_VP8L {
             self.info.coding = Coding::Lossless;
-            if p.len() >= 5 && p[0] == 0x2f {
-                let bits = rl32(p, 1);
+            if let Some((width, height)) = bitstream_size(tag, p, size) {
+                let alpha = rl32(p, 1) >> 28 & 1 != 0;
 
-                if bits >> 29 != 0 {
-                    return;
-                }
-                self.info.width = (bits & 0x3fff) as i32 + 1;
-                self.info.height = ((bits >> 14) & 0x3fff) as i32 + 1;
-                self.info.image_has_alpha |= bits >> 28 & 1 != 0;
-                self.info.has_alpha |= bits >> 28 & 1 != 0;
+                self.info.width = width;
+                self.info.height = height;
+                self.info.image_has_alpha |= alpha;
+                self.info.has_alpha |= alpha;
             }
         } else {
             self.info.coding = Coding::Lossy;
-            if p.len() >= 10
-                && size >= 10
-                && p[3] == 0x9d
-                && p[4] == 0x01
-                && p[5] == 0x2a
-            {
-                let bits = rl24(p, 0);
-
-                if bits & 1 != 0
-                    || (bits >> 1) & 7 > 3
-                    || bits & 0x10 == 0
-                    || (bits >> 5) as usize > size - 10
-                {
-                    return;
-                }
-                self.info.width = (rl16(p, 6) & 0x3fff) as i32;
-                self.info.height = (rl16(p, 8) & 0x3fff) as i32;
+            if let Some((width, height)) = bitstream_size(tag, p, size) {
+                self.info.width = width;
+                self.info.height = height;
             }
         }
     }
@@ -327,6 +341,10 @@ impl Scan {
         }
         self.still_chunk = true;
         Ok(())
+    }
+
+    pub(crate) fn still_alpha_allowed(&self) -> bool {
+        !self.vp8x || self.vp8x_flags & VP8X_FLAG_ALPHA != 0
     }
 
     fn frame_bounds(&self, p: &[u8]) -> Result<()> {
@@ -542,17 +560,14 @@ impl Scan {
                     }
                     self.info.width = rl24(buf, at + 12) as i32 + 1;
                     self.info.height = rl24(buf, at + 15) as i32 + 1;
-                    if u64::from(self.info.width as u32)
-                        * u64::from(self.info.height as u32)
-                        >= 1 << 32
-                    {
-                        return Err(Error::TooLarge);
-                    }
+                    crate::error::check_image_size(self.info.width, self.info.height)?;
                 }
                 TAG_ALPH => {
                     self.still_chunk_allowed()?;
-                    self.info.has_alpha = true;
-                    self.info.image_has_alpha = true;
+                    if self.still_alpha_allowed() {
+                        self.info.has_alpha = true;
+                        self.info.image_has_alpha = true;
+                    }
                 }
                 TAG_ANIM => {
                     if size < ANIM_CHUNK_SIZE {
@@ -722,6 +737,22 @@ mod tests {
     #[test]
     fn something_that_is_not_a_webp_says_so() {
         assert_eq!(get_info(b"not a webp file at all"), Err(Error::NotWebp));
+    }
+
+    #[test]
+    fn oversized_vp8x_dimensions_are_refused_before_allocating() {
+        let payload = chunk(b"VP8X", &[2, 0, 0, 0, 0, 64, 0, 0, 0, 0]);
+        assert_eq!(get_info(&riff(&payload)), Err(Error::TooLarge));
+    }
+
+    #[test]
+    fn still_alpha_requires_the_vp8x_alpha_flag() {
+        let mut payload = chunk(b"VP8X", &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        payload.extend(chunk(b"ALPH", &[0, 0]));
+        payload.extend(chunk(b"VP8 ", &[0x10, 0, 0, 0x9d, 1, 0x2a, 1, 0, 1, 0]));
+        let info = get_info(&riff(&payload)).unwrap();
+        assert!(!info.has_alpha);
+        assert!(!info.image_has_alpha);
     }
 
     #[test]

@@ -255,8 +255,8 @@ impl FrameSlot {
         let compression = header & 3;
 
         if compression > super::ALPHA_COMPRESSION_VP8L {
-            crate::log::warning("skipping unsupported ALPHA chunk");
-            return Ok(());
+            crate::log::error("unsupported ALPHA compression");
+            return Err(Error::Unsupported);
         }
         self.has_alpha = true;
         self.alpha_compression = compression;
@@ -281,6 +281,11 @@ impl FrameSlot {
         let mut sub: Option<Source> = None;
         let mut at = base + 16;
         let end = base + size;
+
+        if size < 16 {
+            crate::log::error("ANMF chunk too short for a frame header");
+            return Err(Error::InvalidData);
+        }
 
         while end - at >= 8 {
             let (chunk_type, payload_size) = {
@@ -309,7 +314,7 @@ impl FrameSlot {
                         crate::log::error("invalid ALPHA chunk size");
                         return Err(Error::InvalidData);
                     }
-                    if sub.is_some() {
+                    if sub.is_some() || self.has_alpha {
                         crate::log::error("ALPHA chunk after the image it belongs to");
                         return Err(Error::InvalidData);
                     }
@@ -321,9 +326,12 @@ impl FrameSlot {
                     self.lossy_decode_frame(env, at, payload_size)?;
                     sub = Some(Source::Lossy);
                 }
-                crate::container::TAG_VP8L if sub.is_none() => {
+                crate::container::TAG_VP8L if sub.is_none() && !self.has_alpha => {
                     self.lossless_decode(env, at, payload_size)?;
                     sub = Some(Source::Lossless);
+                }
+                crate::container::TAG_VP8 | crate::container::TAG_VP8L => {
+                    return Err(Error::InvalidData);
                 }
                 _ => {}
             }

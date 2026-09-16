@@ -548,7 +548,7 @@ fn decode_stream(
             return -1;
         }
         if ctx.info {
-            if let Ok((partial, rows)) = decoder.partial_frame() {
+            if let Ok(Some((partial, rows))) = decoder.partial_frame() {
                 if rows > 0 && rows != last_rows {
                     println!("partial: {} of {} rows", rows, partial.height());
                     last_rows = rows;

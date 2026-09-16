@@ -392,7 +392,7 @@ static void test_log_callback(void) {
     wpd_set_log_callback(collect_log, &opaque);
     log_count = 0;
     CHECK(wpd_decoder_open(decoder, file, size) == WPD_OK);
-    CHECK(wpd_decoder_next_frame(decoder, &frame) == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) == WPD_ERR_UNSUPPORTED);
     CHECK(log_count == 1);
     CHECK(log_last_opaque == &opaque);
     CHECK(strstr(log_last, "unsupported ALPHA") != NULL);
@@ -401,7 +401,7 @@ static void test_log_callback(void) {
     wpd_set_log_callback(NULL, NULL);
     log_count = 0;
     CHECK(wpd_decoder_open(decoder, file, size) == WPD_OK);
-    CHECK(wpd_decoder_next_frame(decoder, &frame) == 1);
+    CHECK(wpd_decoder_next_frame(decoder, &frame) == WPD_ERR_UNSUPPORTED);
     CHECK(log_count == 0);
 
     wpd_decoder_free(decoder);

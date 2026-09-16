@@ -129,6 +129,41 @@ static void check_pack_row(pack_row_func func, const char *name, int bpp) {
     }
 }
 
+static void check_yuv_row(yuv_row_func func, const char *name) {
+    LOCAL_ALIGNED_16(uint8_t, y, [MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, u, [MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, v, [MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * (MAX_PIXELS + GUARD_PIXELS)]);
+    declare_func(void,
+                 uint8_t *,
+                 const uint8_t *,
+                 const uint8_t *,
+                 const uint8_t *,
+                 int);
+
+    if (check_func(func, "%s", name)) {
+        for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
+             i++) {
+            const int n = row_lengths[i];
+
+            for (int x = 0; x < MAX_PIXELS; x++) {
+                y[x] = (uint8_t)rnd();
+                u[x] = (uint8_t)rnd();
+                v[x] = (uint8_t)rnd();
+            }
+            for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                dst0[x] = dst1[x] = (uint8_t)rnd();
+
+            call_ref(dst0, y, u, v, n);
+            call_new(dst1, y, u, v, n);
+            if (memcmp(dst0, dst1, 4 * (MAX_PIXELS + GUARD_PIXELS)))
+                fail();
+        }
+        bench_new(dst1, y, u, v, MAX_PIXELS);
+    }
+}
+
 static void check_premultiply_row_4444(premultiply_4444_row_func func,
                                        const char *name, int alpha_byte) {
     LOCAL_ALIGNED_16(uint8_t, rgba0, [2 * (MAX_PIXELS + GUARD_PIXELS)]);
@@ -571,6 +606,17 @@ void checkasm_check_yuvdsp(void) {
     check_pack_row(dsp.pack_bgr565, "pack_bgr565", 2);
     check_pack_row(dsp.pack_bgra4444, "pack_bgra4444", 2);
     report("pack_row");
+    check_yuv_row(dsp.yuv444_row[WPD_LAYOUT_ARGB], "yuv444_row_argb");
+    check_yuv_row(dsp.yuv444_row[WPD_LAYOUT_RGBA], "yuv444_row_rgba");
+    check_yuv_row(dsp.yuv444_row[WPD_LAYOUT_BGRA], "yuv444_row_bgra");
+    check_yuv_row(dsp.yuv444_row[WPD_LAYOUT_RGB], "yuv444_row_rgb");
+    check_yuv_row(dsp.yuv444_row[WPD_LAYOUT_BGR], "yuv444_row_bgr");
+    check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_ARGB], "yuv420_row_argb");
+    check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_RGBA], "yuv420_row_rgba");
+    check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_BGRA], "yuv420_row_bgra");
+    check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_RGB], "yuv420_row_rgb");
+    check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_BGR], "yuv420_row_bgr");
+    report("yuv_row");
     check_premultiply_row(&dsp);
     check_premultiply_row_4444(
         dsp.premultiply_row_4444, "premultiply_row_4444", 1);

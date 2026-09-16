@@ -15,6 +15,7 @@ crate-type = ["staticlib", "rlib"]
 wpd = { path = "..", default-features = false }
 
 [features]
+checkasm = []
 default = ["asm", "threads"]
 asm = ["wpd/asm"]
 threads = ["wpd/threads"]

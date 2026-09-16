@@ -1,5 +1,5 @@
 use super::ANIM_SUBFRAME;
-use crate::convert::YuvPlanes;
+use crate::convert::{Sampling, YuvPlanes};
 use crate::dsp::rescale::RescaleDsp;
 use crate::dsp::yuv::{RowFn, YuvDsp, LAYOUT_ARGB};
 use crate::error::{Error, Result};
@@ -80,7 +80,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     let (left, top) = image::crop_origin(&crop, src.width, src.height, packed)
         .map_err(|_| Error::InvalidArgument)?;
 
-    Ok(src.window(left, top, crop.width, crop.height))
+    src.window(left, top, crop.width, crop.height)
 }
 
 /// One plane's share of a rescale. The rescaler accumulates down the rows and
@@ -180,8 +180,8 @@ fn scale_image(
             (src.width, src.height)
         } else {
             (
-                ceil_rshift(src.width, u32::from(chroma)),
-                ceil_rshift(src.height, u32::from(chroma)),
+                ceil_rshift(src.width, u32::from(chroma && !src.chroma_full)),
+                ceil_rshift(src.height, u32::from(chroma && !src.chroma_full)),
             )
         };
         let weighted = premult || (weight_luma && p == 0);
@@ -321,12 +321,7 @@ pub fn convert_to_packed(
     let (w, h) = (width as usize, height as usize);
 
     if src.chroma_full {
-        crate::convert::yuv444_to_packed(layout, plane, &planes, w, h);
-        if let (Some(a), Some(dispatch)) = (&planes.a, dsp.alpha_dispatcher(layout)) {
-            for y in 0..height {
-                dispatch(plane.row_mut(y, 0, 4 * w), a.row(y, 0, w));
-            }
-        }
+        crate::convert::yuv444_to_packed(dsp, layout, plane, &planes, w, 0, h, threads);
         return Ok(());
     }
     if no_fancy_upsampling {
@@ -351,39 +346,51 @@ fn convert_to_packed_2byte(
     premultiply_packed: bool,
     threads: usize,
 ) -> Result<()> {
-    let mut temp = Buffer::default();
-
-    if src.format != Format::Argb {
-        convert_to_packed(
-            dsp,
-            &mut temp,
-            src,
-            Format::Argb as i32,
-            no_fancy_upsampling,
-            premultiply_packed,
-            threads,
-        )?;
-    }
-
-    let argb = if temp.is_empty() { *src } else { temp.frame() };
     let target = Format::from_raw(format).unwrap_or(Format::Argb);
+    let Some(pack) = format_packer(dsp, format) else {
+        return Err(Error::Unsupported);
+    };
+    let premultiply = (format_is_premultiplied(format) && premultiply_packed)
+        .then(|| format_premultiplier_4444(dsp, format));
 
-    dst.alloc_packed(argb.width, argb.height, 2, target)?;
+    dst.alloc_packed(src.width, src.height, 2, target)?;
 
     let mut out = dst.frame_mut();
 
-    if let Some(pack) = format_packer(dsp, format) {
-        for y in 0..argb.height {
-            pack(out.row(0, y), argb.row(0, y));
-        }
-    }
-    if format_is_premultiplied(format) && premultiply_packed {
-        let premultiply = format_premultiplier_4444(dsp, format);
+    if src.format == Format::Argb {
+        for y in 0..src.height {
+            let row = out.row(0, y);
 
-        for y in 0..argb.height {
-            premultiply(out.row(0, y));
+            pack(row, src.row(0, y));
+            if let Some(premultiply) = premultiply {
+                premultiply(row);
+            }
         }
+        return Ok(());
     }
+
+    let sampling = if src.chroma_full {
+        Sampling::Full
+    } else if no_fancy_upsampling {
+        Sampling::Simple
+    } else {
+        Sampling::Fancy
+    };
+    let planes = yuv_planes(src);
+
+    crate::convert::yuv_to_packed_2byte(
+        dsp,
+        &mut out.planes_mut()[0],
+        &planes,
+        src.width as usize,
+        src.height as usize,
+        0,
+        src.height as usize,
+        sampling,
+        pack,
+        premultiply,
+        threads,
+    );
     Ok(())
 }
 
@@ -444,13 +451,24 @@ pub fn ensure_yuva_rows(
 
     for p in 0..4 {
         let shift = image::plane_shift(p);
-        let w = ceil_rshift(width, shift) as usize;
-
         for y in (row_start >> shift)..ceil_rshift(row_end, shift) {
             if p == 3 && opaque {
                 out.row(3, y).fill(255);
+            } else if shift != 0 && src.chroma_full {
+                let top = src.row(p, 2 * y);
+                let bottom = src.row(p, (2 * y + 1).min(height - 1));
+                for (x, dst) in out.row(p, y).iter_mut().enumerate() {
+                    let left = 2 * x;
+                    let right = (left + 1).min(width as usize - 1);
+                    *dst = ((u16::from(top[left])
+                        + u16::from(top[right])
+                        + u16::from(bottom[left])
+                        + u16::from(bottom[right])
+                        + 2)
+                        / 4) as u8;
+                }
             } else {
-                out.row(p, y).copy_from_slice(src.plane[p].row(y, 0, w));
+                out.row(p, y).copy_from_slice(src.row(p, y));
             }
         }
     }
@@ -466,4 +484,52 @@ pub fn ensure_yuva(
     let height = src.height;
 
     ensure_yuva_rows(dsp, dst, src, want_alpha, 0, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_chroma_is_preserved_by_scaling_and_averaged_for_planar_output() {
+        let dsp = YuvDsp::default();
+        let mut src = Buffer::default();
+        let mut scaled = Buffer::default();
+        let mut planar = Buffer::default();
+        let mut scratch = Scratches::default();
+
+        src.alloc_planar(3, 3, false).unwrap();
+        for p in 0..4 {
+            for y in 0..3 {
+                src.frame_mut().row(p, y).copy_from_slice(&[
+                    (10 * y) as u8,
+                    (10 * y + 2) as u8,
+                    (10 * y + 4) as u8,
+                ]);
+            }
+        }
+        scale_image(
+            &dsp,
+            &RescaleDsp::default(),
+            &mut scratch,
+            &mut scaled,
+            &src.frame(),
+            3,
+            3,
+            true,
+            false,
+            1,
+        )
+        .unwrap();
+        for p in 0..4 {
+            for y in 0..3 {
+                assert_eq!(scaled.frame().row(p, y), src.frame().row(p, y));
+            }
+        }
+        ensure_yuva(&dsp, &mut planar, &src.frame(), true).unwrap();
+        for p in [1, 2] {
+            assert_eq!(planar.frame().row(p, 0), &[6, 9]);
+            assert_eq!(planar.frame().row(p, 1), &[21, 24]);
+        }
+    }
 }

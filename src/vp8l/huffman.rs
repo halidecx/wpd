@@ -307,6 +307,14 @@ fn fill(p: &Plan, table: &mut [u32], sorted: &[u16]) -> bool {
     total == p.total_size
 }
 
+pub fn validate(plan: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> Result<()> {
+    if analyze(plan, lengths, sorted) {
+        Ok(())
+    } else {
+        Err(Error::InvalidData)
+    }
+}
+
 pub fn build(
     arena: &mut Vec<u32>,
     plan: &mut Plan,
@@ -319,6 +327,9 @@ pub fn build(
 
     let start = arena.len();
 
+    if start + plan.total_size > u32::MAX as usize {
+        return Err(Error::NoMemory);
+    }
     arena
         .try_reserve(plan.total_size)
         .map_err(|_| Error::NoMemory)?;
@@ -495,6 +506,25 @@ mod tests {
     #[test]
     fn an_incomplete_code_is_rejected() {
         assert!(build_from(&[1, 2, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn validation_agrees_with_building_without_a_table() {
+        for lengths in [
+            &[0u8, 1, 0, 0][..],
+            &[1, 2, 3, 3],
+            &[1, 1, 1],
+            &[1, 2, 0, 0],
+        ] {
+            let mut plan = Plan::default();
+            let mut sorted = vec![0u16; lengths.len()];
+
+            count_lengths(&mut plan, lengths);
+
+            let validated = validate(&mut plan, lengths, &mut sorted).is_ok();
+
+            assert_eq!(validated, build_from(lengths).is_some(), "{lengths:?}");
+        }
     }
 
     #[test]
