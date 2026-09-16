@@ -154,7 +154,7 @@ mod imp {
 
 #[cfg(not(all(target_pointer_width = "64", not(feature = "force_rac32"))))]
 mod imp {
-    static NORM_SHIFT: [u8; 256] = [
+    static NORM_SHIFT: [u8; 257] = [
         8, 7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
         3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -164,7 +164,7 @@ mod imp {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
     #[derive(Clone, Copy, Default)]
@@ -286,7 +286,16 @@ mod imp {
 
         #[inline(always)]
         pub fn get_signed(&mut self, buf: &[u8], v: i32) -> i32 {
-            if self.get_prob(buf, 128) != 0 {
+            let code_word = self.renorm(buf);
+            let low = self.high.div_ceil(2);
+            let negative = code_word >= low << 16;
+
+            // The signed-bit shortcut normalizes by exactly one bit, even
+            // when this leaves range 256. Match VP8GetSigned's rounding.
+            self.high = if negative { self.high - low } else { low } << 1;
+            self.code_word = (code_word - if negative { low << 16 } else { 0 }) << 1;
+            self.bits += 1;
+            if negative {
                 -v
             } else {
                 v
@@ -392,6 +401,16 @@ mod tests {
             c.get(&buf[..size]);
             assert!(c.overran());
         }
+    }
+
+    #[test]
+    fn signed_bits_preserve_the_full_normalized_range() {
+        let buf = [0, 128, 0];
+        let mut c = RangeCoder::start(&buf, 0, buf.len());
+
+        assert_eq!(c.get_signed(&buf, 1), 1);
+        assert_eq!(c.get_prob(&buf, 1), 1);
+        assert!(!c.overran());
     }
 
     #[test]
