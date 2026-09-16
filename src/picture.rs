@@ -110,12 +110,21 @@ impl Buffer {
         bpp: usize,
         format: Format,
     ) -> Result<()> {
-        let size = plane_size(w, h, bpp)?;
+        let size = match plane_size(w, h, bpp) {
+            Ok(size) => size,
+            Err(e) => {
+                self.release();
+                return Err(e);
+            }
+        };
 
         for plane in &mut self.plane[1..] {
             plane.release();
         }
-        self.plane[0].resize(w as usize * bpp, h, size)?;
+        if let Err(e) = self.plane[0].resize(w as usize * bpp, h, size) {
+            self.release();
+            return Err(e);
+        }
         self.width = w;
         self.height = h;
         self.format = Some(format);
@@ -438,7 +447,18 @@ impl<'a> Frame<'a> {
         self
     }
 
-    pub fn window(&self, x: i32, y: i32, w: i32, h: i32) -> Self {
+    pub fn window(&self, x: i32, y: i32, w: i32, h: i32) -> Result<Self> {
+        if x < 0
+            || y < 0
+            || w <= 0
+            || h <= 0
+            || w > self.width
+            || h > self.height
+            || x > self.width - w
+            || y > self.height - h
+        {
+            return Err(Error::InvalidArgument);
+        }
         let mut out = *self;
 
         for p in 0..4 {
@@ -454,7 +474,7 @@ impl<'a> Frame<'a> {
         }
         out.width = w;
         out.height = h;
-        out
+        Ok(out)
     }
 }
 
@@ -587,10 +607,45 @@ mod tests {
         buf.alloc_packed(4, 4, 4, Format::Argb).unwrap();
         buf.frame_mut().row(0, 2)[8] = 0x5a;
 
-        let w = buf.frame().window(2, 2, 2, 2);
+        let w = buf.frame().window(2, 2, 2, 2).unwrap();
 
         assert_eq!(w.width, 2);
         assert_eq!(w.row(0, 0)[0], 0x5a);
+    }
+
+    #[test]
+    fn a_failed_packed_allocation_clears_the_old_layout() {
+        let mut buf = Buffer::default();
+
+        buf.alloc_planar(2, 2, false).unwrap();
+        buf.premultiplied = true;
+        assert_eq!(buf.alloc_argb(0, 2), Err(Error::TooLarge));
+        assert!(buf.is_empty());
+        assert_eq!((buf.width, buf.height), (0, 0));
+        assert_eq!(buf.format, None);
+        assert!(!buf.chroma_full);
+        assert!(!buf.premultiplied);
+    }
+
+    #[test]
+    fn invalid_windows_are_rejected() {
+        let mut buf = Buffer::default();
+
+        buf.alloc_argb(4, 4).unwrap();
+        for (x, y, w, h) in [
+            (-1, 0, 1, 1),
+            (0, -1, 1, 1),
+            (0, 0, 0, 1),
+            (0, 0, 1, 0),
+            (3, 0, 2, 1),
+            (0, 3, 1, 2),
+            (i32::MAX, 0, i32::MAX, 1),
+        ] {
+            assert!(matches!(
+                buf.frame().window(x, y, w, h),
+                Err(Error::InvalidArgument)
+            ));
+        }
     }
 
     #[test]

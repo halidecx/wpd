@@ -131,6 +131,11 @@ pub(crate) fn export_external_planar_rows(
     row_start: i32,
     row_end: i32,
 ) -> Result<()> {
+    // External planar formats describe 4:2:0 planes; full chroma must first
+    // be converted to that layout.
+    if img.chroma_full {
+        return Err(Error::Unsupported);
+    }
     let planes = format_planes(format);
 
     for p in 0..planes {
@@ -252,8 +257,9 @@ pub fn export_packed<'a>(
     if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
         let want_alpha = target == Some(Format::Yuva420p);
         let native = img.format;
-        let mut planar = if (native == Format::Yuv420p && !want_alpha)
-            || native == Format::Yuva420p
+        let mut planar = if !img.chroma_full
+            && ((native == Format::Yuv420p && !want_alpha)
+                || native == Format::Yuva420p)
         {
             img
         } else {
@@ -450,7 +456,9 @@ fn still_packed_2byte(
     let premultiply = set
         .premultiply
         .then(|| format_premultiplier_4444(dsp, format));
-    let sampling = if options.no_fancy_upsampling {
+    let sampling = if src.chroma_full {
+        Sampling::Full
+    } else if options.no_fancy_upsampling {
         Sampling::Simple
     } else {
         Sampling::Fancy

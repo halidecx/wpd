@@ -137,17 +137,15 @@ pub fn scaled_size(
         h = (i64::from(src_height) * w + i64::from(src_width) - 1)
             / i64::from(src_width);
     }
-    let (w, h) = (w as i32, h as i32);
-
     if w <= 0
         || h <= 0
-        || w > MAX_SCALED
-        || h > MAX_SCALED
+        || w > i64::from(MAX_SCALED)
+        || h > i64::from(MAX_SCALED)
         || u64::from(w as u32) * u64::from(h as u32) >= 1u64 << 32
     {
         return Err(Error::TooLarge);
     }
-    Ok((w, h))
+    Ok((w as i32, h as i32))
 }
 
 pub struct Crop {
@@ -364,6 +362,8 @@ mod tests {
         assert_eq!(scaled_size(0, 0, 200, 100), Err(Error::TooLarge));
         assert_eq!(scaled_size(16385, 10, 200, 100), Err(Error::TooLarge));
         assert_eq!(scaled_size(0, 1, 1, 0), Err(Error::TooLarge));
+        assert_eq!(scaled_size(0, 3, 1_431_655_766, 1), Err(Error::TooLarge));
+        assert_eq!(scaled_size(3, 0, 1, 1_431_655_766), Err(Error::TooLarge));
     }
 
     #[test]

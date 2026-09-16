@@ -80,7 +80,7 @@ pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {
     let (left, top) = image::crop_origin(&crop, src.width, src.height, packed)
         .map_err(|_| Error::InvalidArgument)?;
 
-    Ok(src.window(left, top, crop.width, crop.height))
+    src.window(left, top, crop.width, crop.height)
 }
 
 /// One plane's share of a rescale. The rescaler accumulates down the rows and
@@ -180,8 +180,8 @@ fn scale_image(
             (src.width, src.height)
         } else {
             (
-                ceil_rshift(src.width, u32::from(chroma)),
-                ceil_rshift(src.height, u32::from(chroma)),
+                ceil_rshift(src.width, u32::from(chroma && !src.chroma_full)),
+                ceil_rshift(src.height, u32::from(chroma && !src.chroma_full)),
             )
         };
         let weighted = premult || (weight_luma && p == 0);
@@ -451,13 +451,24 @@ pub fn ensure_yuva_rows(
 
     for p in 0..4 {
         let shift = image::plane_shift(p);
-        let w = ceil_rshift(width, shift) as usize;
-
         for y in (row_start >> shift)..ceil_rshift(row_end, shift) {
             if p == 3 && opaque {
                 out.row(3, y).fill(255);
+            } else if shift != 0 && src.chroma_full {
+                let top = src.row(p, 2 * y);
+                let bottom = src.row(p, (2 * y + 1).min(height - 1));
+                for (x, dst) in out.row(p, y).iter_mut().enumerate() {
+                    let left = 2 * x;
+                    let right = (left + 1).min(width as usize - 1);
+                    *dst = ((u16::from(top[left])
+                        + u16::from(top[right])
+                        + u16::from(bottom[left])
+                        + u16::from(bottom[right])
+                        + 2)
+                        / 4) as u8;
+                }
             } else {
-                out.row(p, y).copy_from_slice(src.plane[p].row(y, 0, w));
+                out.row(p, y).copy_from_slice(src.row(p, y));
             }
         }
     }
@@ -473,4 +484,52 @@ pub fn ensure_yuva(
     let height = src.height;
 
     ensure_yuva_rows(dsp, dst, src, want_alpha, 0, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_chroma_is_preserved_by_scaling_and_averaged_for_planar_output() {
+        let dsp = YuvDsp::default();
+        let mut src = Buffer::default();
+        let mut scaled = Buffer::default();
+        let mut planar = Buffer::default();
+        let mut scratch = Scratches::default();
+
+        src.alloc_planar(3, 3, false).unwrap();
+        for p in 0..4 {
+            for y in 0..3 {
+                src.frame_mut().row(p, y).copy_from_slice(&[
+                    (10 * y) as u8,
+                    (10 * y + 2) as u8,
+                    (10 * y + 4) as u8,
+                ]);
+            }
+        }
+        scale_image(
+            &dsp,
+            &RescaleDsp::default(),
+            &mut scratch,
+            &mut scaled,
+            &src.frame(),
+            3,
+            3,
+            true,
+            false,
+            1,
+        )
+        .unwrap();
+        for p in 0..4 {
+            for y in 0..3 {
+                assert_eq!(scaled.frame().row(p, y), src.frame().row(p, y));
+            }
+        }
+        ensure_yuva(&dsp, &mut planar, &src.frame(), true).unwrap();
+        for p in [1, 2] {
+            assert_eq!(planar.frame().row(p, 0), &[6, 9]);
+            assert_eq!(planar.frame().row(p, 1), &[21, 24]);
+        }
+    }
 }
