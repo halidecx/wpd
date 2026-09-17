@@ -391,6 +391,26 @@ static void check_scaled_formats(const char *file, const uint8_t *data,
         file, data, size, options, webp_options, 1, what, detail, coding);
 }
 
+static void set_crop_options(WPDDecoderOptions  *options,
+                             WebPDecoderOptions *webp_options,
+                             const int crop[4], int flip) {
+    *options              = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    options->use_cropping = 1;
+    options->crop_left    = crop[0];
+    options->crop_top     = crop[1];
+    options->crop_width   = crop[2];
+    options->crop_height  = crop[3];
+    options->flip         = flip;
+
+    memset(webp_options, 0, sizeof(*webp_options));
+    webp_options->use_cropping = 1;
+    webp_options->crop_left    = crop[0];
+    webp_options->crop_top     = crop[1];
+    webp_options->crop_width   = crop[2];
+    webp_options->crop_height  = crop[3];
+    webp_options->flip         = flip;
+}
+
 static void check_file(const char *dir, const char *name) {
     char               path[4096];
     size_t             size;
@@ -441,18 +461,7 @@ static void check_file(const char *dir, const char *name) {
         if (crops[i][0] + crops[i][2] > info.width ||
             crops[i][1] + crops[i][3] > info.height)
             continue;
-        options              = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
-        options.use_cropping = 1;
-        options.crop_left    = crops[i][0];
-        options.crop_top     = crops[i][1];
-        options.crop_width   = crops[i][2];
-        options.crop_height  = crops[i][3];
-        memset(&webp_options, 0, sizeof(webp_options));
-        webp_options.use_cropping = 1;
-        webp_options.crop_left    = crops[i][0];
-        webp_options.crop_top     = crops[i][1];
-        webp_options.crop_width   = crops[i][2];
-        webp_options.crop_height  = crops[i][3];
+        set_crop_options(&options, &webp_options, crops[i], 0);
         snprintf(detail,
                  sizeof(detail),
                  "%d,%d %dx%d",
@@ -503,21 +512,10 @@ static void check_file(const char *dir, const char *name) {
             crops[i][1] + crops[i][3] > info.height)
             continue;
         for (size_t k = 0; k < sizeof(combined) / sizeof(*combined); k++) {
-            options               = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
-            options.use_cropping  = 1;
-            options.crop_left     = crops[i][0];
-            options.crop_top      = crops[i][1];
-            options.crop_width    = crops[i][2];
-            options.crop_height   = crops[i][3];
-            options.use_scaling   = 1;
-            options.scaled_width  = combined[k][0];
-            options.scaled_height = combined[k][1];
-            memset(&webp_options, 0, sizeof(webp_options));
-            webp_options.use_cropping  = 1;
-            webp_options.crop_left     = crops[i][0];
-            webp_options.crop_top      = crops[i][1];
-            webp_options.crop_width    = crops[i][2];
-            webp_options.crop_height   = crops[i][3];
+            set_crop_options(&options, &webp_options, crops[i], 0);
+            options.use_scaling        = 1;
+            options.scaled_width       = combined[k][0];
+            options.scaled_height      = combined[k][1];
             webp_options.use_scaling   = 1;
             webp_options.scaled_width  = combined[k][0];
             webp_options.scaled_height = combined[k][1];
@@ -602,20 +600,7 @@ static void check_file(const char *dir, const char *name) {
         if (crops[i][0] + crops[i][2] > info.width ||
             crops[i][1] + crops[i][3] > info.height)
             continue;
-        options              = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
-        options.use_cropping = 1;
-        options.crop_left    = crops[i][0];
-        options.crop_top     = crops[i][1];
-        options.crop_width   = crops[i][2];
-        options.crop_height  = crops[i][3];
-        options.flip         = 1;
-        memset(&webp_options, 0, sizeof(webp_options));
-        webp_options.use_cropping = 1;
-        webp_options.crop_left    = crops[i][0];
-        webp_options.crop_top     = crops[i][1];
-        webp_options.crop_width   = crops[i][2];
-        webp_options.crop_height  = crops[i][3];
-        webp_options.flip         = 1;
+        set_crop_options(&options, &webp_options, crops[i], 1);
         snprintf(detail,
                  sizeof(detail),
                  "%d,%d %dx%d",

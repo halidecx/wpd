@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
@@ -70,9 +71,9 @@ fn build_aarch64(root: &Path) {
         );
         let mut code = String::from("__asm__ (");
         if directive {
-            code.push_str(&format!("\".arch_extension {name}\\n\""));
+            write!(code, "\".arch_extension {name}\\n\"").unwrap();
         }
-        code.push_str(&format!("\"{instr}\\n\");\n"));
+        writeln!(code, "\"{instr}\\n\");").unwrap();
         let have = compiles(&code, name);
 
         let upper = name.to_uppercase();
