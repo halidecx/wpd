@@ -3,7 +3,7 @@
 [package]
 name = "imagewebpdec"
 description = "Command-line front end for the image-webp decoder"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 rust-version = "1.82"
 license = "BSD-2-Clause"
