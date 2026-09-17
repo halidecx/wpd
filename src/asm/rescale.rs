@@ -211,42 +211,42 @@ mod arch {
             ExportDirect,
             export_direct,
             ExportDirectRaw,
-            "ff_rescale_export_direct_sse2",
+            "wpd_rescale_export_direct_sse2",
             (*mut u8, *const u32, c_int, u32)
         );
         raw!(
             ExportBlend,
             export_blend,
             ExportBlendRaw,
-            "ff_rescale_export_blend_sse2",
+            "wpd_rescale_export_blend_sse2",
             (*mut u8, *const u32, *const u32, c_int, u32, u32, u32)
         );
         raw!(
             ExportShrink,
             export_shrink,
             ExportShrinkRaw,
-            "ff_rescale_export_shrink_sse2",
+            "wpd_rescale_export_shrink_sse2",
             (*mut u8, *mut u32, *const u32, c_int, u32, u32)
         );
         raw!(
             ExportShrink0,
             export_shrink0,
             ExportShrink0Raw,
-            "ff_rescale_export_shrink0_sse2",
+            "wpd_rescale_export_shrink0_sse2",
             (*mut u8, *mut u32, c_int, u32)
         );
         raw!(
             ImportExpand,
             import_expand,
             ImportExpandRaw,
-            "ff_rescale_import_expand_sse2",
+            "wpd_rescale_import_expand_sse2",
             (*mut u32, *const u8, c_int, c_int, c_int, c_int, c_int)
         );
         raw!(
             ImportShrink,
             import_shrink,
             ImportShrinkRaw,
-            "ff_rescale_import_shrink_sse2",
+            "wpd_rescale_import_shrink_sse2",
             (*mut u32, *const u8, c_int, c_int, c_int, u32)
         );
     }
@@ -258,28 +258,28 @@ mod arch {
             ExportDirect,
             export_direct,
             ExportDirectRaw,
-            "ff_rescale_export_direct_avx2",
+            "wpd_rescale_export_direct_avx2",
             (*mut u8, *const u32, c_int, u32)
         );
         raw!(
             ExportBlend,
             export_blend,
             ExportBlendRaw,
-            "ff_rescale_export_blend_avx2",
+            "wpd_rescale_export_blend_avx2",
             (*mut u8, *const u32, *const u32, c_int, u32, u32, u32)
         );
         raw!(
             ExportShrink,
             export_shrink,
             ExportShrinkRaw,
-            "ff_rescale_export_shrink_avx2",
+            "wpd_rescale_export_shrink_avx2",
             (*mut u8, *mut u32, *const u32, c_int, u32, u32)
         );
         raw!(
             ExportShrink0,
             export_shrink0,
             ExportShrink0Raw,
-            "ff_rescale_export_shrink0_avx2",
+            "wpd_rescale_export_shrink0_avx2",
             (*mut u8, *mut u32, c_int, u32)
         );
     }
@@ -375,42 +375,42 @@ mod arch {
             ExportDirect,
             export_direct,
             ExportDirectRaw,
-            "ff_rescale_export_direct_neon",
+            "wpd_rescale_export_direct_neon",
             (*mut u8, *const u32, c_int, u32)
         );
         raw!(
             ExportBlend,
             export_blend,
             ExportBlendRaw,
-            "ff_rescale_export_blend_neon",
+            "wpd_rescale_export_blend_neon",
             (*mut u8, *const u32, *const u32, c_int, u32, u32, u32)
         );
         raw!(
             ExportShrink,
             export_shrink,
             ExportShrinkRaw,
-            "ff_rescale_export_shrink_neon",
+            "wpd_rescale_export_shrink_neon",
             (*mut u8, *mut u32, *const u32, c_int, u32, u32)
         );
         raw!(
             ExportShrink0,
             export_shrink0,
             ExportShrink0Raw,
-            "ff_rescale_export_shrink0_neon",
+            "wpd_rescale_export_shrink0_neon",
             (*mut u8, *mut u32, c_int, u32)
         );
         raw!(
             ImportExpand,
             import_expand,
             ImportExpandRaw,
-            "ff_rescale_import_expand_neon",
+            "wpd_rescale_import_expand_neon",
             (*mut u32, *const u8, c_int, c_int, c_int, c_int, c_int)
         );
         raw!(
             ImportShrink,
             import_shrink,
             ImportShrinkRaw,
-            "ff_rescale_import_shrink_neon",
+            "wpd_rescale_import_shrink_neon",
             (*mut u32, *const u8, c_int, c_int, c_int, u32)
         );
     }

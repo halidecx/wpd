@@ -243,23 +243,23 @@ typedef void (*dirty7)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
              uint32_t        c)
 
 #if WPD_ARCH_X86
-DECL_IMPORT_EXPAND(ff_rescale_import_expand_sse2);
-DECL_IMPORT_SHRINK(ff_rescale_import_shrink_sse2);
-DECL_EXPORT4(ff_rescale_export_direct_sse2);
-DECL_EXPORT4(ff_rescale_export_direct_avx2);
-DECL_EXPORT4(ff_rescale_export_shrink0_sse2);
-DECL_EXPORT4(ff_rescale_export_shrink0_avx2);
-DECL_EXPORT6(ff_rescale_export_shrink_sse2);
-DECL_EXPORT6(ff_rescale_export_shrink_avx2);
-DECL_EXPORT7(ff_rescale_export_blend_sse2);
-DECL_EXPORT7(ff_rescale_export_blend_avx2);
+DECL_IMPORT_EXPAND(wpd_rescale_import_expand_sse2);
+DECL_IMPORT_SHRINK(wpd_rescale_import_shrink_sse2);
+DECL_EXPORT4(wpd_rescale_export_direct_sse2);
+DECL_EXPORT4(wpd_rescale_export_direct_avx2);
+DECL_EXPORT4(wpd_rescale_export_shrink0_sse2);
+DECL_EXPORT4(wpd_rescale_export_shrink0_avx2);
+DECL_EXPORT6(wpd_rescale_export_shrink_sse2);
+DECL_EXPORT6(wpd_rescale_export_shrink_avx2);
+DECL_EXPORT7(wpd_rescale_export_blend_sse2);
+DECL_EXPORT7(wpd_rescale_export_blend_avx2);
 #else
-DECL_IMPORT_EXPAND(ff_rescale_import_expand_neon);
-DECL_IMPORT_SHRINK(ff_rescale_import_shrink_neon);
-DECL_EXPORT4(ff_rescale_export_direct_neon);
-DECL_EXPORT4(ff_rescale_export_shrink0_neon);
-DECL_EXPORT6(ff_rescale_export_shrink_neon);
-DECL_EXPORT7(ff_rescale_export_blend_neon);
+DECL_IMPORT_EXPAND(wpd_rescale_import_expand_neon);
+DECL_IMPORT_SHRINK(wpd_rescale_import_shrink_neon);
+DECL_EXPORT4(wpd_rescale_export_direct_neon);
+DECL_EXPORT4(wpd_rescale_export_shrink0_neon);
+DECL_EXPORT6(wpd_rescale_export_shrink_neon);
+DECL_EXPORT7(wpd_rescale_export_blend_neon);
 #endif
 
 static int faulted(const char *name, int n) {
@@ -466,16 +466,17 @@ static int check_raw_bindings(void) {
     int              failed = 0;
 
     wpd_rescale_raw_dsp_init(&raw);
-    PIN(import_expand, ff_rescale_import_expand_sse2);
-    PIN(import_shrink, ff_rescale_import_shrink_sse2);
+    PIN(import_expand, wpd_rescale_import_expand_sse2);
+    PIN(import_shrink, wpd_rescale_import_shrink_sse2);
     PIN(export_direct,
-        avx2 ? ff_rescale_export_direct_avx2 : ff_rescale_export_direct_sse2);
+        avx2 ? wpd_rescale_export_direct_avx2 : wpd_rescale_export_direct_sse2);
     PIN(export_blend,
-        avx2 ? ff_rescale_export_blend_avx2 : ff_rescale_export_blend_sse2);
+        avx2 ? wpd_rescale_export_blend_avx2 : wpd_rescale_export_blend_sse2);
     PIN(export_shrink,
-        avx2 ? ff_rescale_export_shrink_avx2 : ff_rescale_export_shrink_sse2);
+        avx2 ? wpd_rescale_export_shrink_avx2 : wpd_rescale_export_shrink_sse2);
     PIN(export_shrink0,
-        avx2 ? ff_rescale_export_shrink0_avx2 : ff_rescale_export_shrink0_sse2);
+        avx2 ? wpd_rescale_export_shrink0_avx2
+             : wpd_rescale_export_shrink0_sse2);
     return failed;
 }
 
@@ -486,22 +487,22 @@ static int probe_dirty_args(int guards) {
     const RawLevel sse2 = {
         "sse2",
         1,
-        ff_rescale_import_expand_sse2,
-        ff_rescale_import_shrink_sse2,
-        ff_rescale_export_direct_sse2,
-        ff_rescale_export_shrink0_sse2,
-        ff_rescale_export_shrink_sse2,
-        ff_rescale_export_blend_sse2,
+        wpd_rescale_import_expand_sse2,
+        wpd_rescale_import_shrink_sse2,
+        wpd_rescale_export_direct_sse2,
+        wpd_rescale_export_shrink0_sse2,
+        wpd_rescale_export_shrink_sse2,
+        wpd_rescale_export_blend_sse2,
     };
     const RawLevel avx2 = {
         "avx2",
         0,
         NULL,
         NULL,
-        ff_rescale_export_direct_avx2,
-        ff_rescale_export_shrink0_avx2,
-        ff_rescale_export_shrink_avx2,
-        ff_rescale_export_blend_avx2,
+        wpd_rescale_export_direct_avx2,
+        wpd_rescale_export_shrink0_avx2,
+        wpd_rescale_export_shrink_avx2,
+        wpd_rescale_export_blend_avx2,
     };
     int failed = 0;
 
@@ -521,12 +522,12 @@ static int check_raw_bindings(void) {
     int              failed = 0;
 
     wpd_rescale_raw_dsp_init(&raw);
-    PIN(import_expand, ff_rescale_import_expand_neon);
-    PIN(import_shrink, ff_rescale_import_shrink_neon);
-    PIN(export_direct, ff_rescale_export_direct_neon);
-    PIN(export_blend, ff_rescale_export_blend_neon);
-    PIN(export_shrink, ff_rescale_export_shrink_neon);
-    PIN(export_shrink0, ff_rescale_export_shrink0_neon);
+    PIN(import_expand, wpd_rescale_import_expand_neon);
+    PIN(import_shrink, wpd_rescale_import_shrink_neon);
+    PIN(export_direct, wpd_rescale_export_direct_neon);
+    PIN(export_blend, wpd_rescale_export_blend_neon);
+    PIN(export_shrink, wpd_rescale_export_shrink_neon);
+    PIN(export_shrink0, wpd_rescale_export_shrink0_neon);
     return failed;
 }
 
@@ -537,12 +538,12 @@ static int probe_dirty_args(int guards) {
     const RawLevel neon = {
         "neon",
         0,
-        ff_rescale_import_expand_neon,
-        ff_rescale_import_shrink_neon,
-        ff_rescale_export_direct_neon,
-        ff_rescale_export_shrink0_neon,
-        ff_rescale_export_shrink_neon,
-        ff_rescale_export_blend_neon,
+        wpd_rescale_import_expand_neon,
+        wpd_rescale_import_shrink_neon,
+        wpd_rescale_export_direct_neon,
+        wpd_rescale_export_shrink0_neon,
+        wpd_rescale_export_shrink_neon,
+        wpd_rescale_export_blend_neon,
     };
     int failed = 0;
 

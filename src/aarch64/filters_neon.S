@@ -16,7 +16,7 @@
 // vector to itself shifted by 1, 2, 4 then 8 bytes turns sixteen of those
 // dependencies into four vector adds; only the carry into the next block is
 // left on the serial chain.
-function ff_horizontal_unfilter_neon, export=1, jumpable=1
+function wpd_horizontal_unfilter_neon, export=1, jumpable=1
         cmp             w2,  #0
         b.le            9f
         ldrb            w3,  [x1]
@@ -54,7 +54,7 @@ function ff_horizontal_unfilter_neon, export=1, jumpable=1
 endfunc
 
 //------------------------------------------------------------------------------
-function ff_vertical_unfilter_neon, export=1
+function wpd_vertical_unfilter_neon, export=1
         cbz             x0,  8f
         cmp             w2,  #32
         b.lt            2f
@@ -82,7 +82,7 @@ function ff_vertical_unfilter_neon, export=1
         subs            w2,  w2,  #1
         b.gt            4b
 9:      ret
-8:      b               X(ff_horizontal_unfilter_neon)
+8:      b               X(wpd_horizontal_unfilter_neon)
 endfunc
 
 //------------------------------------------------------------------------------
@@ -119,7 +119,7 @@ endfunc
 #define GRADIENT_GIVE_UP    4
 #define GRADIENT_SERIAL_RUN 128
 
-function ff_gradient_unfilter_neon, export=1
+function wpd_gradient_unfilter_neon, export=1
         cbz             x0,  8f
         cmp             w2,  #0
         b.le            9f
@@ -207,5 +207,5 @@ function ff_gradient_unfilter_neon, export=1
         dup             v0.8h,   w3
         b               1b
 
-8:      b               X(ff_horizontal_unfilter_neon)
+8:      b               X(wpd_horizontal_unfilter_neon)
 endfunc

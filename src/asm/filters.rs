@@ -74,16 +74,16 @@ mod arch {
     pub mod sse2 {
         use super::*;
 
-        raw_unfilter!(Horizontal, horizontal, "ff_horizontal_unfilter_sse2");
-        raw_unfilter!(Vertical, vertical, "ff_vertical_unfilter_sse2");
-        raw_unfilter!(Gradient, gradient, "ff_gradient_unfilter_sse2");
+        raw_unfilter!(Horizontal, horizontal, "wpd_horizontal_unfilter_sse2");
+        raw_unfilter!(Vertical, vertical, "wpd_vertical_unfilter_sse2");
+        raw_unfilter!(Gradient, gradient, "wpd_gradient_unfilter_sse2");
     }
 
     pub mod avx2 {
         use super::*;
 
-        raw_unfilter!(Vertical, vertical, "ff_vertical_unfilter_avx2");
-        raw_unfilter!(Gradient, gradient, "ff_gradient_unfilter_avx2");
+        raw_unfilter!(Vertical, vertical, "wpd_vertical_unfilter_avx2");
+        raw_unfilter!(Gradient, gradient, "wpd_gradient_unfilter_avx2");
     }
 
     ladder! {
@@ -106,9 +106,9 @@ mod arch {
     pub mod neon {
         use super::*;
 
-        raw_unfilter!(Horizontal, horizontal, "ff_horizontal_unfilter_neon");
-        raw_unfilter!(Vertical, vertical, "ff_vertical_unfilter_neon");
-        raw_unfilter!(Gradient, gradient, "ff_gradient_unfilter_neon");
+        raw_unfilter!(Horizontal, horizontal, "wpd_horizontal_unfilter_neon");
+        raw_unfilter!(Vertical, vertical, "wpd_vertical_unfilter_neon");
+        raw_unfilter!(Gradient, gradient, "wpd_gradient_unfilter_neon");
     }
 
     ladder! {

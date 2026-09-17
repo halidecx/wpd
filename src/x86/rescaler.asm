@@ -81,7 +81,7 @@ SECTION .text
     mov       [%1], %3
 %endmacro
 
-; void ff_rescale_export_direct_sse2(uint8_t *dst, const uint32_t *frow,
+; void wpd_rescale_export_direct_sse2(uint8_t *dst, const uint32_t *frow,
 ;                                    int n, uint32_t fy_scale)
 %macro EXPORT_DIRECT 0
 cglobal rescale_export_direct, 4, 5, 8, dst, frow, n, fy
@@ -111,7 +111,7 @@ cglobal rescale_export_direct, 4, 5, 8, dst, frow, n, fy
     RET
 %endmacro
 
-; void ff_rescale_export_blend_sse2(uint8_t *dst, const uint32_t *irow,
+; void wpd_rescale_export_blend_sse2(uint8_t *dst, const uint32_t *irow,
 ;                                   const uint32_t *frow, int n,
 ;                                   uint32_t fy_scale, uint32_t wa,
 ;                                   uint32_t wb)
@@ -174,7 +174,7 @@ cglobal rescale_export_blend, 7, 8, 14, dst, irow, frow, n, fy, wa, wb
     RET
 %endmacro
 
-; void ff_rescale_export_shrink_sse2(uint8_t *dst, uint32_t *irow,
+; void wpd_rescale_export_shrink_sse2(uint8_t *dst, uint32_t *irow,
 ;                                    const uint32_t *frow, int n,
 ;                                    uint32_t yscale, uint32_t fxy_scale)
 %macro EXPORT_SHRINK 0
@@ -232,7 +232,7 @@ cglobal rescale_export_shrink, 6, 7, 12, dst, irow, frow, n, yscale, fxy
     RET
 %endmacro
 
-; void ff_rescale_export_shrink0_sse2(uint8_t *dst, uint32_t *irow, int n,
+; void wpd_rescale_export_shrink0_sse2(uint8_t *dst, uint32_t *irow, int n,
 ;                                     uint32_t fxy_scale)
 %macro EXPORT_SHRINK0 0
 cglobal rescale_export_shrink0, 4, 5, 8, dst, irow, n, fxy
@@ -287,7 +287,7 @@ EXPORT_SHRINK0
     punpcklwd %1, m5
 %endmacro
 
-; void ff_rescale_import_expand_sse2(uint32_t *frow, const uint8_t *src,
+; void wpd_rescale_import_expand_sse2(uint32_t *frow, const uint8_t *src,
 ;                                    int n, int src_width, int channels,
 ;                                    int x_add, int x_sub)
 ; The caller keeps src_width >= 8 and x_add < 1 << 15 so the weights fit
@@ -364,7 +364,7 @@ cglobal rescale_import_expand, 7, 9, 8, frow, src, n, srcw, ch, x_add, x_sub
 .end:
     RET
 
-; void ff_rescale_import_shrink_sse2(uint32_t *frow, const uint8_t *src,
+; void wpd_rescale_import_shrink_sse2(uint32_t *frow, const uint8_t *src,
 ;                                    int n, int x_add, int x_sub,
 ;                                    uint32_t fx_scale)
 ; Four channels only, and the caller keeps x_add <= x_sub << 7 so

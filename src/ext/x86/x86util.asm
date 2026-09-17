@@ -1,5 +1,5 @@
 
-%define private_prefix ff
+%define private_prefix wpd
 %define public_prefix  avpriv
 %define cpuflags_mmxext cpuflags_mmx2
 

@@ -2,18 +2,8 @@ use std::ffi::c_int;
 use std::{mem, slice};
 
 use wpd::container::{Coding, Info};
-use wpd::error::Error;
 
-const WPD_OK: c_int = 0;
-const WPD_ERR_INVALID_ARG: c_int = -1;
-const WPD_ERR_INTERNAL: c_int = -9;
-const WPD_ERR_NOT_WEBP: c_int = -2;
-const WPD_ERR_BITSTREAM: c_int = -3;
-const WPD_ERR_TRUNCATED: c_int = -4;
-const WPD_ERR_UNSUPPORTED: c_int = -5;
-const WPD_ERR_NO_MEMORY: c_int = -6;
-const WPD_ERR_TOO_LARGE: c_int = -7;
-const WPD_ERR_BUFFER_TOO_SMALL: c_int = -8;
+use crate::status::{status, WPD_ERR_INTERNAL, WPD_ERR_INVALID_ARG, WPD_OK};
 
 #[repr(C)]
 pub struct WPDImageInfo {
@@ -32,19 +22,6 @@ pub struct WPDImageInfo {
 impl WPDImageInfo {
     pub(crate) fn v1() -> usize {
         mem::offset_of!(WPDImageInfo, metadata) + mem::size_of::<c_int>()
-    }
-}
-
-pub(crate) fn status(e: Error) -> c_int {
-    match e {
-        Error::InvalidArgument => WPD_ERR_INVALID_ARG,
-        Error::InvalidData => WPD_ERR_BITSTREAM,
-        Error::NoMemory => WPD_ERR_NO_MEMORY,
-        Error::TooLarge => WPD_ERR_TOO_LARGE,
-        Error::Truncated => WPD_ERR_TRUNCATED,
-        Error::NotWebp => WPD_ERR_NOT_WEBP,
-        Error::Unsupported => WPD_ERR_UNSUPPORTED,
-        Error::BufferTooSmall => WPD_ERR_BUFFER_TOO_SMALL,
     }
 }
 

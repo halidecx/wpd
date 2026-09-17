@@ -114,6 +114,22 @@ pub(crate) fn frame_head() -> usize {
     mem::offset_of!(WPDFrame, data)
 }
 
+pub(crate) fn plane_extent(
+    stride: isize,
+    rows: usize,
+    row_len: usize,
+) -> Option<usize> {
+    let stride = usize::try_from(stride).ok()?;
+
+    if rows == 0 || row_len == 0 || stride < row_len {
+        return None;
+    }
+    (rows - 1)
+        .checked_mul(stride)?
+        .checked_add(row_len)
+        .filter(|&size| size <= isize::MAX as usize)
+}
+
 pub(crate) unsafe fn frame_valid(frame: *const WPDFrame) -> bool {
     !frame.is_null()
         && unsafe { ptr::addr_of!((*frame).struct_size).read() }
@@ -308,5 +324,15 @@ mod tests {
         assert_eq!(unsafe { ptr::addr_of!((*frame).width).read() }, 23);
         assert_eq!(unsafe { ptr::addr_of!((*frame).height).read() }, 29);
         assert!(unsafe { frame_private_data(frame) }.is_null());
+    }
+
+    #[test]
+    fn plane_extents_reject_invalid_or_unaddressable_geometry() {
+        assert_eq!(plane_extent(8, 3, 4), Some(20));
+        assert_eq!(plane_extent(3, 3, 4), None);
+        assert_eq!(plane_extent(-8, 3, 4), None);
+        assert_eq!(plane_extent(8, 0, 4), None);
+        assert_eq!(plane_extent(8, 3, 0), None);
+        assert_eq!(plane_extent(isize::MAX, 2, 1), None);
     }
 }

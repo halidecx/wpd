@@ -171,7 +171,7 @@ mod asm {
         wpd::asm::rescale::export_row_shrink_avx2
     );
 
-    pub fn init(dsp: &mut WPDRESCALEDSP) {
+    pub(super) fn init(dsp: &mut WPDRESCALEDSP) {
         let s = wpd::asm::rescale::selection(wpd::cpu::flags());
 
         dsp.import_row_expand = match s.import_row_expand {
@@ -217,7 +217,7 @@ mod asm {
         wpd::asm::rescale::export_row_shrink_neon
     );
 
-    pub fn init(dsp: &mut WPDRESCALEDSP) {
+    pub(super) fn init(dsp: &mut WPDRESCALEDSP) {
         let s = wpd::asm::rescale::selection(wpd::cpu::flags());
 
         dsp.import_row_expand = match s.import_row_expand {

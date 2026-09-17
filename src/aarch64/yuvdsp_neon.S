@@ -154,7 +154,7 @@ endconst
 .endm
 
 .macro  upsample_block layout
-function ff_upsample_block_\layout\()_neon, export=1
+function wpd_upsample_block_\layout\()_neon, export=1
         ldr             w8,  [sp]
         sub             sp,  sp,  #128
         movrel          x9,  yuv_coeffs
@@ -218,7 +218,7 @@ upsample_block bgr
 .endm
 
 .macro  yuv_row chroma, layout, bpp
-function ff_yuv\chroma\()_row_\layout\()_neon, export=1
+function wpd_yuv\chroma\()_row_\layout\()_neon, export=1
         sub             sp,  sp,  #128
         movrel          x9,  yuv_coeffs
         ld1r            {v24.8h}, [x9], #2
@@ -271,7 +271,7 @@ yuv_row 444, bgr, 3
 yuv_row 420, bgr, 3
 
 .macro dispatch_alpha pos, off
-function ff_dispatch_alpha_\pos\()_neon, export=1
+function wpd_dispatch_alpha_\pos\()_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ldr             q4,  [x1], #16
@@ -298,7 +298,7 @@ endfunc
 dispatch_alpha first, 0
 dispatch_alpha last,  3
 
-function ff_pack_rgba_neon, export=1
+function wpd_pack_rgba_neon, export=1
         cmp             w2,  #16
         b.lt            2f
         movrel          x3,  pack_rgba_tbl
@@ -329,7 +329,7 @@ function ff_pack_rgba_neon, export=1
 9:      ret
 endfunc
 
-function ff_pack_bgra_neon, export=1
+function wpd_pack_bgra_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ldp             q0,  q1,  [x1], #32
@@ -359,7 +359,7 @@ function ff_pack_bgra_neon, export=1
 endfunc
 
 .macro  pack24 name, p0, p1, p2
-function ff_pack_\name\()_neon, export=1
+function wpd_pack_\name\()_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
@@ -414,7 +414,7 @@ pack24 bgr, 3, 2, 1
 .endm
 
 .macro  pack16 name, kind, swap
-function ff_pack_\name\()_neon, export=1
+function wpd_pack_\name\()_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
@@ -479,7 +479,7 @@ pack16 bgra4444, rgba4444, 1
 .endm
 
 .macro  premultiply_row_4444 name, rg, ba, org, oba
-function ff_premultiply_row_4444\name\()_neon, export=1
+function wpd_premultiply_row_4444\name\()_neon, export=1
         movi            v16.16b, #15
         movi            v17.16b, #17
         cmp             w1,  #16
@@ -532,7 +532,7 @@ premultiply_row_4444 _swap, 1, 0, 5, 4
     .endif
 .endm
 
-function ff_argb_to_y_neon, export=1
+function wpd_argb_to_y_neon, export=1
         movi            v20.16b, #65
         movi            v21.16b, #129
         movi            v22.16b, #25
@@ -600,7 +600,7 @@ endconst
         argb_to_uv444_calc 7, 3, 4, 5
 .endm
 
-function ff_argb_to_yuv444_neon, export=1
+function wpd_argb_to_yuv444_neon, export=1
         str             d8,  [sp, #-16]!
         movi            v20.16b, #65
         movi            v21.16b, #129
@@ -672,7 +672,7 @@ endfunc
         b               3f
 .endm
 
-function ff_premultiply_row_neon, export=1
+function wpd_premultiply_row_neon, export=1
         cmp             w2,  #8
         b.lt            3f
         cbz             w1,  2f
@@ -720,7 +720,7 @@ endfunc
         lsr             \dst, \dst, #8
 .endm
 
-function ff_multiply_row_neon, export=1
+function wpd_multiply_row_neon, export=1
         movi            v6.8h,   #128
         cmp             w2,  #16
         b.lt            3f
@@ -748,7 +748,7 @@ endconst
 
 /* Each pixel's colour channels scale by its own leading alpha byte, which
  * survives the pass because the alpha lane's multiplier is forced to 255. */
-function ff_premultiply_argb_row_neon, export=1
+function wpd_premultiply_argb_row_neon, export=1
         movi            v6.8h,   #128
         movrel          x2,  argb_bcasta_tbl
         ld1             {v7.16b}, [x2]
@@ -921,7 +921,7 @@ endconst
         uv_matrix       v21, 3, v1
 .endm
 
-function ff_argb_to_uv_neon, export=1
+function wpd_argb_to_uv_neon, export=1
         str             d15, [sp, #-16]!
         sub             sp,  sp,  #UV_FRAME
         movrel          x12, X(wpd_gamma_to_linear_tab)

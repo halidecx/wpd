@@ -140,6 +140,20 @@ struct FilterStrength {
     inner_filter: bool,
 }
 
+impl FilterStrength {
+    #[inline(always)]
+    fn limits(self) -> Option<(i32, i32)> {
+        let level = i32::from(self.filter_level);
+
+        if level == 0 {
+            return None;
+        }
+        let inner = i32::from(self.inner_limit);
+
+        Some((inner, 2 * level + inner))
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Macroblock {
     skip: bool,
@@ -1015,7 +1029,7 @@ impl Decoder {
 
     #[inline(always)]
     fn filter_mb(
-        &mut self,
+        &self,
         planes: &mut Planes<'_>,
         off: [usize; 3],
         f: FilterStrength,
@@ -1028,16 +1042,11 @@ impl Decoder {
             2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         ];
 
-        let filter_level = i32::from(f.filter_level);
-
-        if filter_level == 0 {
+        let Some((inner_limit, bedge_lim)) = f.limits() else {
             return;
-        }
-
-        let inner_limit = i32::from(f.inner_limit);
-        let bedge_lim = 2 * filter_level + inner_limit;
+        };
         let mbedge_lim = bedge_lim + 4;
-        let hev = HEV_THRESH_LUT[filter_level as usize];
+        let hev = HEV_THRESH_LUT[f.filter_level as usize];
         let ls = self.linesize();
         let uvls = self.uvlinesize();
         let inner = f.inner_filter;
@@ -1162,21 +1171,16 @@ impl Decoder {
 
     #[inline(always)]
     fn filter_mb_simple(
-        &mut self,
+        &self,
         luma: &mut [u8],
         off: usize,
         f: FilterStrength,
         mb_x: usize,
         mb_y: usize,
     ) {
-        let filter_level = i32::from(f.filter_level);
-
-        if filter_level == 0 {
+        let Some((_, bedge_lim)) = f.limits() else {
             return;
-        }
-
-        let inner_limit = i32::from(f.inner_limit);
-        let bedge_lim = 2 * filter_level + inner_limit;
+        };
         let mbedge_lim = bedge_lim + 4;
         let ls = self.linesize();
         let inner = f.inner_filter;

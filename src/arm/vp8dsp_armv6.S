@@ -2,7 +2,7 @@
 #include "asm.S"
 
 
-function ff_vp8_luma_dc_wht_armv6, export=1
+function wpd_vp8_luma_dc_wht_armv6, export=1
         push            {r4-r10, lr}
 
         ldm             r1,  {r2-r9}
@@ -124,7 +124,7 @@ function ff_vp8_luma_dc_wht_armv6, export=1
         pop             {r4-r10, pc}
 endfunc
 
-function ff_vp8_luma_dc_wht_dc_armv6, export=1
+function wpd_vp8_luma_dc_wht_dc_armv6, export=1
         ldrsh           r2,  [r1]
         mov             r3,  #0
         add             r2,  r2,  #3
@@ -136,7 +136,7 @@ function ff_vp8_luma_dc_wht_dc_armv6, export=1
         bx              lr
 endfunc
 
-function ff_vp8_idct_add_armv6, export=1
+function wpd_vp8_idct_add_armv6, export=1
         push            {r4-r12, lr}
         sub             sp,  sp,  #32
 
@@ -257,7 +257,7 @@ function ff_vp8_idct_add_armv6, export=1
         pop             {r4-r12, pc}
 endfunc
 
-function ff_vp8_idct_dc_add_armv6, export=1
+function wpd_vp8_idct_dc_add_armv6, export=1
         push            {r4-r6, lr}
         add             r6,  r0,  r2,  lsl #1
         ldrsh           r3,  [r1]
@@ -297,31 +297,31 @@ function ff_vp8_idct_dc_add_armv6, export=1
         pop             {r4-r6, pc}
 endfunc
 
-function ff_vp8_idct_dc_add4uv_armv6, export=1
+function wpd_vp8_idct_dc_add4uv_armv6, export=1
         push            {r4, lr}
 
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  r2,  lsl #2
         sub             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
 
         pop             {r4, pc}
 endfunc
 
-function ff_vp8_idct_dc_add4y_armv6, export=1
+function wpd_vp8_idct_dc_add4y_armv6, export=1
         push            {r4, lr}
 
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
         add             r0,  r0,  #4
-        bl              X(ff_vp8_idct_dc_add_armv6)
+        bl              X(wpd_vp8_idct_dc_add_armv6)
 
         pop             {r4, pc}
 endfunc
@@ -394,7 +394,7 @@ endfunc
         eor             r5,  r5,  r2
 .endm
 
-function ff_vp8_v_loop_filter16_simple_armv6, export=1
+function wpd_vp8_v_loop_filter16_simple_armv6, export=1
         push            {r4-r11, lr}
 
         orr             r2,  r2,  r2,  lsl #16
@@ -711,7 +711,7 @@ T       str_post        r11, r0,  r1,  lsl #1
         pop             {r0, r4-r11, pc}
 endfunc
 
-function ff_vp8_v_loop_filter16_inner_armv6, export=1
+function wpd_vp8_v_loop_filter16_inner_armv6, export=1
         push            {r4-r11, lr}
         add             r12, r0,  #8
         push            {r12}
@@ -720,7 +720,7 @@ function ff_vp8_v_loop_filter16_inner_armv6, export=1
         b               vp8_v_loop_filter_inner_armv6
 endfunc
 
-function ff_vp8_v_loop_filter8uv_inner_armv6, export=1
+function wpd_vp8_v_loop_filter8uv_inner_armv6, export=1
         push            {r1, r4-r11, lr}
         mov             r1,  r2
         orr             r2,  r3,  r3,  lsl #16
@@ -786,7 +786,7 @@ T       str_post        r10, r0,  r1,  lsl #2
         pop             {r0, r4-r11, pc}
 endfunc
 
-function ff_vp8_v_loop_filter16_armv6, export=1
+function wpd_vp8_v_loop_filter16_armv6, export=1
         push            {r4-r11, lr}
         add             r12, r0,  #8
         push            {r12}
@@ -795,7 +795,7 @@ function ff_vp8_v_loop_filter16_armv6, export=1
         b               vp8_v_loop_filter_armv6
 endfunc
 
-function ff_vp8_v_loop_filter8uv_armv6, export=1
+function wpd_vp8_v_loop_filter8uv_armv6, export=1
         push            {r1, r4-r11, lr}
         mov             r1,  r2
         orr             r2,  r3,  r3,  lsl #16
@@ -804,7 +804,7 @@ function ff_vp8_v_loop_filter8uv_armv6, export=1
         b               vp8_v_loop_filter_armv6
 endfunc
 
-function ff_vp8_h_loop_filter16_simple_armv6, export=1
+function wpd_vp8_h_loop_filter16_simple_armv6, export=1
         push            {r4-r11, lr}
         orr             r12, r2,  r2,  lsl #16
         mov32           r2,  0x80808080
@@ -894,7 +894,7 @@ T       str_post        r6,  r0,  r1,  lsl #1
         pop             {r0, r4-r11, pc}
 endfunc
 
-function ff_vp8_h_loop_filter16_inner_armv6, export=1
+function wpd_vp8_h_loop_filter16_inner_armv6, export=1
         push            {r4-r11, lr}
         add             r12, r0,  r1,  lsl #3
         sub             r12, r12, #4
@@ -904,7 +904,7 @@ function ff_vp8_h_loop_filter16_inner_armv6, export=1
         b               vp8_h_loop_filter_inner_armv6
 endfunc
 
-function ff_vp8_h_loop_filter8uv_inner_armv6, export=1
+function wpd_vp8_h_loop_filter8uv_inner_armv6, export=1
         sub             r1,  r1,  #4
         push            {r1, r4-r11, lr}
         mov             r1,  r2
@@ -1028,7 +1028,7 @@ function vp8_h_loop_filter_armv6
         pop             {r0, r4-r11, pc}
 endfunc
 
-function ff_vp8_h_loop_filter16_armv6, export=1
+function wpd_vp8_h_loop_filter16_armv6, export=1
         push            {r4-r11, lr}
         add             r12, r0,  r1,  lsl #3
         push            {r12}
@@ -1037,7 +1037,7 @@ function ff_vp8_h_loop_filter16_armv6, export=1
         b               vp8_h_loop_filter_armv6
 endfunc
 
-function ff_vp8_h_loop_filter8uv_armv6, export=1
+function wpd_vp8_h_loop_filter8uv_armv6, export=1
         push            {r1, r4-r11, lr}
         mov             r1,  r2
         orr             r2,  r3,  r3,  lsl #16

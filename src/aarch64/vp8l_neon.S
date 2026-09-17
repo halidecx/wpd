@@ -14,7 +14,7 @@
     .endif
 .endm
 
-function ff_pred_add_0_neon, export=1
+function wpd_pred_add_0_neon, export=1
         movi            v0.4s,   #255
         cmp             w2,  #16
         b.lt            2f
@@ -54,7 +54,7 @@ endfunc
         add             v\dst\().8b, v\dst\().8b, v\src\().8b
 .endm
 
-function ff_blend_row_argb_premult_neon, export=1
+function wpd_blend_row_argb_premult_neon, export=1
         cmp             w2,  #8
         b.lt            2f
         movi            v17.8h,  #1, lsl #8
@@ -89,7 +89,7 @@ function ff_blend_row_argb_premult_neon, export=1
 9:      ret
 endfunc
 
-function ff_pred_add_1_neon, export=1
+function wpd_pred_add_1_neon, export=1
         ldur            s0,  [x3, #-4]
         dup             v0.4s,   v0.s[0]
         movi            v3.16b,  #0
@@ -150,16 +150,16 @@ function pred_add_top_neon
 9:      ret
 endfunc
 
-function ff_pred_add_2_neon, export=1
+function wpd_pred_add_2_neon, export=1
         b               pred_add_top_neon
 endfunc
 
-function ff_pred_add_3_neon, export=1
+function wpd_pred_add_3_neon, export=1
         add             x1,  x1,  #4
         b               pred_add_top_neon
 endfunc
 
-function ff_pred_add_4_neon, export=1
+function wpd_pred_add_4_neon, export=1
         sub             x1,  x1,  #4
         b               pred_add_top_neon
 endfunc
@@ -209,12 +209,12 @@ function pred_add_avgtop_neon
 9:      ret
 endfunc
 
-function ff_pred_add_8_neon, export=1
+function wpd_pred_add_8_neon, export=1
         sub             x5,  x1,  #4
         b               pred_add_avgtop_neon
 endfunc
 
-function ff_pred_add_9_neon, export=1
+function wpd_pred_add_9_neon, export=1
         add             x5,  x1,  #4
         b               pred_add_avgtop_neon
 endfunc
@@ -226,7 +226,7 @@ endfunc
         str             s0,  [x3], #4
 .endm
 
-function ff_pred_add_5_neon, export=1
+function wpd_pred_add_5_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
@@ -278,12 +278,12 @@ function pred_add_avgleft_neon
 9:      ret
 endfunc
 
-function ff_pred_add_6_neon, export=1
+function wpd_pred_add_6_neon, export=1
         sub             x1,  x1,  #4
         b               pred_add_avgleft_neon
 endfunc
 
-function ff_pred_add_7_neon, export=1
+function wpd_pred_add_7_neon, export=1
         b               pred_add_avgleft_neon
 endfunc
 
@@ -294,7 +294,7 @@ endfunc
         str             s0,  [x3], #4
 .endm
 
-function ff_pred_add_10_neon, export=1
+function wpd_pred_add_10_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
@@ -332,7 +332,7 @@ endfunc
         str             s0,  [x3], #4
 .endm
 
-function ff_pred_add_11_neon, export=1
+function wpd_pred_add_11_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
@@ -372,7 +372,7 @@ endfunc
         uxtl            v0.8h,   v16.8b
 .endm
 
-function ff_pred_add_12_neon, export=1
+function wpd_pred_add_12_neon, export=1
         ldur            s0,  [x3, #-4]
         uxtl            v0.8h,   v0.8b
         cmp             w2,  #4
@@ -415,7 +415,7 @@ endfunc
         str             s0,  [x3], #4
 .endm
 
-function ff_pred_add_13_neon, export=1
+function wpd_pred_add_13_neon, export=1
         ldur            s0,  [x3, #-4]
         cmp             w2,  #4
         b.lt            2f
@@ -439,7 +439,7 @@ function ff_pred_add_13_neon, export=1
 9:      ret
 endfunc
 
-function ff_extract_green_neon, export=1
+function wpd_extract_green_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
@@ -456,7 +456,7 @@ function ff_extract_green_neon, export=1
 9:      ret
 endfunc
 
-function ff_add_green_neon, export=1
+function wpd_add_green_neon, export=1
         cmp             w2,  #16
         b.lt            2f
 1:      ld4             {v0.16b-v3.16b}, [x1], #64
@@ -491,7 +491,7 @@ function ff_add_green_neon, export=1
 9:      ret
 endfunc
 
-function ff_color_row_neon, export=1
+function wpd_color_row_neon, export=1
         lsr             w4,  w3,  #24           // green_to_red
         lsr             w5,  w3,  #16           // green_to_blue
         lsr             w6,  w3,  #8            // red_to_blue
@@ -537,7 +537,7 @@ function ff_color_row_neon, export=1
 9:      ret
 endfunc
 
-function ff_map_color32_neon, export=1
+function wpd_map_color32_neon, export=1
         cmp             w3,  #8
         b.lt            2f
 1:      ldp             x4,  x5,  [x1]
@@ -623,7 +623,7 @@ endconst
         strb            w9,  [x0, #\off]
 .endm
 
-function ff_blend_row_argb_neon, export=1
+function wpd_blend_row_argb_neon, export=1
         movrel          x3,  blend_scale
         movi            v17.8b,  #255
         cmp             w2,  #8

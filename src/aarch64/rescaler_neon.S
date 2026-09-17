@@ -34,9 +34,9 @@
         csinv           w\reg, w\reg, wzr, ls
 .endm
 
-// void ff_rescale_export_direct_neon(uint8_t *dst, const uint32_t *frow,
+// void wpd_rescale_export_direct_neon(uint8_t *dst, const uint32_t *frow,
 //                                    int n, uint32_t fy_scale)
-function ff_rescale_export_direct_neon, export=1
+function wpd_rescale_export_direct_neon, export=1
         fmov            s6,  w3
         mov             x7,  #0x80000000
         cmp             w2,  #8
@@ -57,7 +57,7 @@ function ff_rescale_export_direct_neon, export=1
 9:      ret
 endfunc
 
-// void ff_rescale_export_blend_neon(uint8_t *dst, const uint32_t *irow,
+// void wpd_rescale_export_blend_neon(uint8_t *dst, const uint32_t *irow,
 //                                   const uint32_t *frow, int n,
 //                                   uint32_t fy_scale, uint32_t wa,
 //                                   uint32_t wb)
@@ -72,7 +72,7 @@ endfunc
         rshrn2          v\out\().4s, v\hi\().2d, #32
 .endm
 
-function ff_rescale_export_blend_neon, export=1
+function wpd_rescale_export_blend_neon, export=1
         fmov            s6,  w4
         fmov            s7,  w5
         fmov            s16, w6
@@ -103,7 +103,7 @@ function ff_rescale_export_blend_neon, export=1
 9:      ret
 endfunc
 
-// void ff_rescale_export_shrink_neon(uint8_t *dst, uint32_t *irow,
+// void wpd_rescale_export_shrink_neon(uint8_t *dst, uint32_t *irow,
 //                                    const uint32_t *frow, int n,
 //                                    uint32_t yscale, uint32_t fxy_scale)
 // The fraction this row carries out of the accumulator is floored, not
@@ -115,7 +115,7 @@ endfunc
         shrn2           v\out\().4s, v\hi\().2d, #32
 .endm
 
-function ff_rescale_export_shrink_neon, export=1
+function wpd_rescale_export_shrink_neon, export=1
         fmov            s6,  w5
         fmov            s17, w4
         mov             x7,  #0x80000000
@@ -148,9 +148,9 @@ function ff_rescale_export_shrink_neon, export=1
 9:      ret
 endfunc
 
-// void ff_rescale_export_shrink0_neon(uint8_t *dst, uint32_t *irow, int n,
+// void wpd_rescale_export_shrink0_neon(uint8_t *dst, uint32_t *irow, int n,
 //                                     uint32_t fxy_scale)
-function ff_rescale_export_shrink0_neon, export=1
+function wpd_rescale_export_shrink0_neon, export=1
         fmov            s6,  w3
         mov             x7,  #0x80000000
         movi            v4.4s,   #0
@@ -175,7 +175,7 @@ function ff_rescale_export_shrink0_neon, export=1
 9:      ret
 endfunc
 
-// void ff_rescale_import_expand_neon(uint32_t *frow, const uint8_t *src,
+// void wpd_rescale_import_expand_neon(uint32_t *frow, const uint8_t *src,
 //                                    int n, int src_width, int channels,
 //                                    int x_add, int x_sub)
 // Four channels only. They share one accumulator, so a whole pixel is one
@@ -185,7 +185,7 @@ endfunc
 //
 //   right * x_add + (left - right) * accum == left * accum
 //                                             + right * (x_add - accum)
-function ff_rescale_import_expand_neon, export=1
+function wpd_rescale_import_expand_neon, export=1
         cmp             w2,  #0
         b.le            9f
         ldr             s0,  [x1]
@@ -212,14 +212,14 @@ function ff_rescale_import_expand_neon, export=1
 9:      ret
 endfunc
 
-// void ff_rescale_import_shrink_neon(uint32_t *frow, const uint8_t *src,
+// void wpd_rescale_import_shrink_neon(uint32_t *frow, const uint8_t *src,
 //                                    int n, int x_add, int x_sub,
 //                                    uint32_t fx_scale)
 // Four channels only. They share one accumulator, so an output pixel is one
 // quad of 16-bit lanes and the window's control flow is paid once instead of
 // four times. The caller keeps x_add <= x_sub << 7, which caps the window at
 // 128 source pixels and so keeps sum, and sum * x_sub, in range.
-function ff_rescale_import_shrink_neon, export=1
+function wpd_rescale_import_shrink_neon, export=1
         cmp             w2,  #0
         b.le            9f
         movi            v0.4h,   #0               // sum

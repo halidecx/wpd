@@ -57,7 +57,7 @@ endconst
 .endm
 
 .macro  argb_to_y_dot name, dot, yround, mask
-function ff_argb_to_y_\name, export=1
+function wpd_argb_to_y_\name, export=1
         movrel          x3,  yuv444_dot_coeffs
         ldr             q22, [x3]
         mov             w3,  #260
@@ -101,7 +101,7 @@ endfunc
 .endm
 
 .macro  argb_to_yuv444_dot name, dot, yround, mask
-function ff_argb_to_yuv444_\name, export=1
+function wpd_argb_to_yuv444_\name, export=1
         movrel          x5,  yuv444_dot_coeffs
         ldr             q22, [x5]
         ldr             d23, [x5, #16]
