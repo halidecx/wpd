@@ -1,6 +1,6 @@
 # wpd
 
-A safe, fast Rust & assembly WebP decoder with a C ABI.
+A safe, fast Rust and assembly WebP decoder with a C ABI.
 
 | Image               | [image-webp](https://crates.io/crates/image-webp) (0.2.4) | libwebp (523e304) | wpd (latest)        |
 | ------------------- | --------------------------------------------------------- | ----------------- | ------------------- |
@@ -25,67 +25,25 @@ meson compile -C build
 build/wpd [options] input.webp output.raw
 ```
 
-`-f`/`--fmt` selects output: `auto` (default), `yuv420p`, `yuva420p`, packed
-`argb`, `rgba`, `bgra`, `rgb`, `bgr`, premultiplied `Argb`, `rgbA`, `bgrA`, or
-16-bit `rgb565`, `rgba4444`, `rgbA4444`. Animated frames are written in order.
-`/dev/null` decodes without writing. `--muxer md5 input.webp -` hashes output;
-`--verify MD5 input.webp` verifies it. `-r` repeats decoding for benchmarks.
-`--scale WxH` scales output, either dimension `0` to keep the ratio.
-`--threads N` fixes the thread count; `--threads 1` selects the serial path.
+The build enables assembly by default. Compile with `-Denable_asm=false` for
+memory safety guarantees at the cost of speed.
 
-Assembly is enabled by default; compile with `-Denable_asm=false` for memory
-safety guarantees at the expense of speed.
-
-For minimal binary & library sizes:
+For minimal binary and library sizes:
 
 ```sh
 meson setup build-minsize --buildtype=minsize
 meson compile -C build-minsize
 ```
 
-`-Dnightly_size=true` additionally needs nightly Rust plus `rust-src`.
-`libwpd.a` is still built, but alongside it `libwpd-sealed.a` is built as well.
-The sealed static lib aborts instead of unwinding when encountering an internal
-panic, and merges every object into one monolithic object for downstream
-consumers.
-
-## Threads
-
-A decode hands off whatever it does not have to do in order:
-
-- an animation's frames, decoded a batch at a time ahead of the walk that
-  composites them, along with their conversion to ARGB and the premultiply that
-  precedes compositing;
-- a lossy frame's alpha channel, which is a lossless image of its own sharing
-  nothing with the colour planes;
-- the rows of a colour conversion, split into bands;
-- the planes of a scaled image, one per thread.
-
-`options.n_threads` counts the calling thread: `0` lets the decoder choose,
-which is the number of processors it is allowed to run on, and `1` keeps
-everything on the calling thread. Threads are spawned per parallel region and
-joined before the call that started them returns, rather than pooled, which is
-what lets a job borrow decoder state and be checked for it. Regions are
-therefore coarse and each is gated on a size threshold, since a spawn costs
-about 17us here. Output is bit-exact whatever the count, and
-`./scripts/threadcheck.sh` asserts that over the test data. Configure the build
-with `-Dthreads=disabled` to leave the code out entirely.
-
-Some things are deliberately serial. A streamed animation cannot decode ahead,
-since a frame whose bytes have not arrived cannot be started, and a slot may not
-borrow an input buffer that is about to be replaced. Colour conversion is
-limited by memory rather than arithmetic and stops getting faster at three
-bands, so that is where it is capped. The lossy in-loop filter is not threaded:
-overlapping it with the row loop needs two threads writing interleaving row
-ranges of one picture while both advance independently, which no safe split
-expresses, and it is worth about 1.15x.
-
-The log callback may be called from a worker thread.
+`-Dnightly_size=true` also needs nightly Rust and `rust-src`. The build then
+produces `libwpd-sealed.a` alongside `libwpd.a`. The sealed static lib aborts
+instead of unwinding on an internal panic. The build merges every object into
+one monolithic object for downstream consumers.
 
 ## Library
 
 `meson install -C build` installs the static/shared libraries, `wpd.h`, and
-`wpd.pc`. Only `wpd_*` symbols declared in the header are exported.
+`wpd.pc`. The library exports only the `wpd_*` symbols declared in the header.
 
 ### C
 
@@ -130,8 +88,10 @@ meson test -C build --suite testdata
 Test data is maintained at
 [wpd-test-data](https://github.com/halidecx/wpd-test-data), which you can clone
 into the `wpd/` root. `./scripts/testdata.sh` runs end-to-end assembly and
-fallback checks. For libwebp parity testing and benchmarking against alternative
-WebP decoders, build the optional third-party test binaries:
+fallback checks.
+
+For libwebp parity testing and benchmarking against alternative WebP decoders,
+build the optional third-party test binaries:
 
 ```sh
 meson compile -C build libwebpdec
@@ -139,13 +99,10 @@ meson compile -C build imagewebpdec
 ./scripts/bench.sh
 ```
 
-The default libwebp is the pinned Meson subproject; `-Dlibwebp=system` or
+The default libwebp is the pinned Meson subproject. `-Dlibwebp=system` or
 `-Dlibwebpdecoder=/path/to/libwebpdecoder.a` overrides it. `imagewebpdec` is the
 same harness over the pure-Rust `image-webp` crate, which `bench.sh` includes
-whenever it has been built. Other checks include `fuzz.sh`, `sanitize.sh`,
-`rustsan.sh`, `tsan.sh`, `threadcheck.sh`, `miri.sh`, `rac32.sh`, and
-`cargo +nightly fuzz run container|vp8l|vp8|e2e`. Decode test outputs into
-`wpd-test-data`; never delete its reference WebP files.
+whenever it has been built.
 
 ## Credits
 
@@ -156,7 +113,3 @@ This project would not be possible without:
 - [dav1d](https://www.videolan.org/projects/dav1d.html), the fastest open-source
   AV1 decoder
 - [rav1d](https://github.com/memorysafety/rav1d), a Rust rewrite of dav1d
-
-> Disclaimer: LLMs were heavily utilized in the creation of this project. Usage
-> included Claude Fable 5, Claude Opus 5, GPT-5.6 Sol/Terra, and DeepSeek V4
-> Flash.
