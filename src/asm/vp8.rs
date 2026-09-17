@@ -543,24 +543,24 @@ macro_rules! neon_sets {
     () => {
         lf_set!(
             neon,
-            "ff_vp8_v_loop_filter16_simple_neon",
-            "ff_vp8_h_loop_filter16_simple_neon",
-            "ff_vp8_v_loop_filter16_neon",
-            "ff_vp8_h_loop_filter16_neon",
-            "ff_vp8_v_loop_filter8uv_neon",
-            "ff_vp8_h_loop_filter8uv_neon",
-            "ff_vp8_v_loop_filter16_inner_neon",
-            "ff_vp8_h_loop_filter16_inner_neon",
-            "ff_vp8_v_loop_filter8uv_inner_neon",
-            "ff_vp8_h_loop_filter8uv_inner_neon"
+            "wpd_vp8_v_loop_filter16_simple_neon",
+            "wpd_vp8_h_loop_filter16_simple_neon",
+            "wpd_vp8_v_loop_filter16_neon",
+            "wpd_vp8_h_loop_filter16_neon",
+            "wpd_vp8_v_loop_filter8uv_neon",
+            "wpd_vp8_h_loop_filter8uv_neon",
+            "wpd_vp8_v_loop_filter16_inner_neon",
+            "wpd_vp8_h_loop_filter16_inner_neon",
+            "wpd_vp8_v_loop_filter8uv_inner_neon",
+            "wpd_vp8_h_loop_filter8uv_inner_neon"
         );
         idct_set!(
             neon_idct,
-            "ff_vp8_luma_dc_wht_neon",
-            "ff_vp8_idct_add_neon",
-            "ff_vp8_idct_dc_add_neon",
-            "ff_vp8_idct_dc_add4y_neon",
-            "ff_vp8_idct_dc_add4uv_neon"
+            "wpd_vp8_luma_dc_wht_neon",
+            "wpd_vp8_idct_add_neon",
+            "wpd_vp8_idct_dc_add_neon",
+            "wpd_vp8_idct_dc_add4y_neon",
+            "wpd_vp8_idct_dc_add4uv_neon"
         );
 
         pub mod neon_mb {
@@ -708,29 +708,29 @@ mod arch {
 
     lf_set!(
         sse2,
-        "ff_vp8_v_loop_filter_simple_sse2",
-        "ff_vp8_h_loop_filter_simple_sse2",
-        "ff_vp8_v_loop_filter16y_mbedge_sse2",
-        "ff_vp8_h_loop_filter16y_mbedge_sse2",
-        "ff_vp8_v_loop_filter8uv_mbedge_sse2",
-        "ff_vp8_h_loop_filter8uv_mbedge_sse2",
-        "ff_vp8_v_loop_filter16y_inner_sse2",
-        "ff_vp8_h_loop_filter16y_inner_sse2",
-        "ff_vp8_v_loop_filter8uv_inner_sse2",
-        "ff_vp8_h_loop_filter8uv_inner_sse2"
+        "wpd_vp8_v_loop_filter_simple_sse2",
+        "wpd_vp8_h_loop_filter_simple_sse2",
+        "wpd_vp8_v_loop_filter16y_mbedge_sse2",
+        "wpd_vp8_h_loop_filter16y_mbedge_sse2",
+        "wpd_vp8_v_loop_filter8uv_mbedge_sse2",
+        "wpd_vp8_h_loop_filter8uv_mbedge_sse2",
+        "wpd_vp8_v_loop_filter16y_inner_sse2",
+        "wpd_vp8_h_loop_filter16y_inner_sse2",
+        "wpd_vp8_v_loop_filter8uv_inner_sse2",
+        "wpd_vp8_h_loop_filter8uv_inner_sse2"
     );
     lf_set!(
         ssse3,
-        "ff_vp8_v_loop_filter_simple_ssse3",
-        "ff_vp8_h_loop_filter_simple_ssse3",
-        "ff_vp8_v_loop_filter16y_mbedge_ssse3",
-        "ff_vp8_h_loop_filter16y_mbedge_ssse3",
-        "ff_vp8_v_loop_filter8uv_mbedge_ssse3",
-        "ff_vp8_h_loop_filter8uv_mbedge_ssse3",
-        "ff_vp8_v_loop_filter16y_inner_ssse3",
-        "ff_vp8_h_loop_filter16y_inner_ssse3",
-        "ff_vp8_v_loop_filter8uv_inner_ssse3",
-        "ff_vp8_h_loop_filter8uv_inner_ssse3"
+        "wpd_vp8_v_loop_filter_simple_ssse3",
+        "wpd_vp8_h_loop_filter_simple_ssse3",
+        "wpd_vp8_v_loop_filter16y_mbedge_ssse3",
+        "wpd_vp8_h_loop_filter16y_mbedge_ssse3",
+        "wpd_vp8_v_loop_filter8uv_mbedge_ssse3",
+        "wpd_vp8_h_loop_filter8uv_mbedge_ssse3",
+        "wpd_vp8_v_loop_filter16y_inner_ssse3",
+        "wpd_vp8_h_loop_filter16y_inner_ssse3",
+        "wpd_vp8_v_loop_filter8uv_inner_ssse3",
+        "wpd_vp8_h_loop_filter8uv_inner_ssse3"
     );
 
     pub mod sse2_mb {
@@ -748,24 +748,24 @@ mod arch {
     pub mod sse2_idct {
         use super::*;
 
-        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse2");
-        raw_vp8!(Add, add, idct, "ff_vp8_idct_add_sse2");
-        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse2");
-        raw_vp8!(DcAdd4y, dc_add4y, idct4, "ff_vp8_idct_dc_add4y_sse2");
-        raw_vp8!(DcAdd4uv, dc_add4uv, idct4, "ff_vp8_idct_dc_add4uv_sse2");
+        raw_vp8!(Wht, wht, wht, "wpd_vp8_luma_dc_wht_sse2");
+        raw_vp8!(Add, add, idct, "wpd_vp8_idct_add_sse2");
+        raw_vp8!(DcAdd, dc_add, idct, "wpd_vp8_idct_dc_add_sse2");
+        raw_vp8!(DcAdd4y, dc_add4y, idct4, "wpd_vp8_idct_dc_add4y_sse2");
+        raw_vp8!(DcAdd4uv, dc_add4uv, idct4, "wpd_vp8_idct_dc_add4uv_sse2");
     }
 
     pub mod sse2_wht_dc {
         use super::*;
 
-        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_sse2");
+        raw_vp8!(WhtDc, wht_dc, wht, "wpd_vp8_luma_dc_wht_dc_sse2");
     }
 
     pub mod sse4 {
         use super::*;
 
-        raw_vp8!(Wht, wht, wht, "ff_vp8_luma_dc_wht_sse4");
-        raw_vp8!(DcAdd, dc_add, idct, "ff_vp8_idct_dc_add_sse4");
+        raw_vp8!(Wht, wht, wht, "wpd_vp8_luma_dc_wht_sse4");
+        raw_vp8!(DcAdd, dc_add, idct, "wpd_vp8_idct_dc_add_sse4");
     }
 
     pub mod avx2 {
@@ -775,28 +775,28 @@ mod arch {
             VSimpleMb,
             v_simple_mb,
             lf_simple_mb,
-            "ff_vp8_v_loop_filter_simple_mb_avx2"
+            "wpd_vp8_v_loop_filter_simple_mb_avx2"
         );
         raw_vp8!(
             HSimpleMb,
             h_simple_mb,
             lf_simple_mb,
-            "ff_vp8_h_loop_filter_simple_mb_avx2"
+            "wpd_vp8_h_loop_filter_simple_mb_avx2"
         );
 
         unsafe extern "C" {
-            #[link_name = "ff_vp8_h_loop_filter16y_mb_transpose_avx2"]
+            #[link_name = "wpd_vp8_h_loop_filter16y_mb_transpose_avx2"]
             pub fn h16_transpose(dst: *mut u8, stride: isize, tmp: *mut u8);
-            #[link_name = "ff_vp8_h_loop_filter16y_mb_itranspose_avx2"]
+            #[link_name = "wpd_vp8_h_loop_filter16y_mb_itranspose_avx2"]
             pub fn h16_itranspose(dst: *mut u8, stride: isize, tmp: *const u8);
-            #[link_name = "ff_vp8_h_loop_filter8uv_mb_transpose_avx2"]
+            #[link_name = "wpd_vp8_h_loop_filter8uv_mb_transpose_avx2"]
             pub fn h8uv_transpose(
                 dst_u: *mut u8,
                 dst_v: *mut u8,
                 stride: isize,
                 tmp: *mut u8,
             );
-            #[link_name = "ff_vp8_h_loop_filter8uv_mb_itranspose_avx2"]
+            #[link_name = "wpd_vp8_h_loop_filter8uv_mb_itranspose_avx2"]
             pub fn h8uv_itranspose(
                 dst_u: *mut u8,
                 dst_v: *mut u8,
@@ -898,7 +898,7 @@ mod arch {
     pub mod neon_wht_dc {
         use super::*;
 
-        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_neon");
+        raw_vp8!(WhtDc, wht_dc, wht, "wpd_vp8_luma_dc_wht_dc_neon");
     }
 
     pub mod fused {
@@ -908,10 +908,15 @@ mod arch {
             HSimpleMb,
             h_simple_mb,
             lf_simple_mb,
-            "ff_vp8_h_loop_filter_simple_mb_neon"
+            "wpd_vp8_h_loop_filter_simple_mb_neon"
         );
-        raw_vp8!(H16Mb, h16_mb, lf_mb, "ff_vp8_h_loop_filter16y_mb_neon");
-        raw_vp8!(H8uvMb, h8uv_mb, lf_uv_mb, "ff_vp8_h_loop_filter8uv_mb_neon");
+        raw_vp8!(H16Mb, h16_mb, lf_mb, "wpd_vp8_h_loop_filter16y_mb_neon");
+        raw_vp8!(
+            H8uvMb,
+            h8uv_mb,
+            lf_uv_mb,
+            "wpd_vp8_h_loop_filter8uv_mb_neon"
+        );
     }
 
     ladder! {
@@ -936,32 +941,32 @@ mod arch {
     #[cfg(wpd_asm_armv6)]
     lf_set!(
         armv6,
-        "ff_vp8_v_loop_filter16_simple_armv6",
-        "ff_vp8_h_loop_filter16_simple_armv6",
-        "ff_vp8_v_loop_filter16_armv6",
-        "ff_vp8_h_loop_filter16_armv6",
-        "ff_vp8_v_loop_filter8uv_armv6",
-        "ff_vp8_h_loop_filter8uv_armv6",
-        "ff_vp8_v_loop_filter16_inner_armv6",
-        "ff_vp8_h_loop_filter16_inner_armv6",
-        "ff_vp8_v_loop_filter8uv_inner_armv6",
-        "ff_vp8_h_loop_filter8uv_inner_armv6"
+        "wpd_vp8_v_loop_filter16_simple_armv6",
+        "wpd_vp8_h_loop_filter16_simple_armv6",
+        "wpd_vp8_v_loop_filter16_armv6",
+        "wpd_vp8_h_loop_filter16_armv6",
+        "wpd_vp8_v_loop_filter8uv_armv6",
+        "wpd_vp8_h_loop_filter8uv_armv6",
+        "wpd_vp8_v_loop_filter16_inner_armv6",
+        "wpd_vp8_h_loop_filter16_inner_armv6",
+        "wpd_vp8_v_loop_filter8uv_inner_armv6",
+        "wpd_vp8_h_loop_filter8uv_inner_armv6"
     );
     #[cfg(wpd_asm_armv6)]
     idct_set!(
         armv6_idct,
-        "ff_vp8_luma_dc_wht_armv6",
-        "ff_vp8_idct_add_armv6",
-        "ff_vp8_idct_dc_add_armv6",
-        "ff_vp8_idct_dc_add4y_armv6",
-        "ff_vp8_idct_dc_add4uv_armv6"
+        "wpd_vp8_luma_dc_wht_armv6",
+        "wpd_vp8_idct_add_armv6",
+        "wpd_vp8_idct_dc_add_armv6",
+        "wpd_vp8_idct_dc_add4y_armv6",
+        "wpd_vp8_idct_dc_add4uv_armv6"
     );
 
     #[cfg(wpd_asm_armv6)]
     pub mod armv6_wht_dc {
         use super::*;
 
-        raw_vp8!(WhtDc, wht_dc, wht, "ff_vp8_luma_dc_wht_dc_armv6");
+        raw_vp8!(WhtDc, wht_dc, wht, "wpd_vp8_luma_dc_wht_dc_armv6");
     }
 
     #[cfg(wpd_asm_armv6)]

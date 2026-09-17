@@ -262,41 +262,41 @@ mod arch {
         use super::*;
 
         preds! {
-            Pred0, pred0, "ff_pred_add_0_sse2";
-            Pred1, pred1, "ff_pred_add_1_sse2";
-            Pred2, pred2, "ff_pred_add_2_sse2";
-            Pred3, pred3, "ff_pred_add_3_sse2";
-            Pred4, pred4, "ff_pred_add_4_sse2";
-            Pred5, pred5, "ff_pred_add_5_sse2";
-            Pred6, pred6, "ff_pred_add_6_sse2";
-            Pred7, pred7, "ff_pred_add_7_sse2";
-            Pred8, pred8, "ff_pred_add_8_sse2";
-            Pred9, pred9, "ff_pred_add_9_sse2";
-            Pred10, pred10, "ff_pred_add_10_sse2";
-            Pred12, pred12, "ff_pred_add_12_sse2";
+            Pred0, pred0, "wpd_pred_add_0_sse2";
+            Pred1, pred1, "wpd_pred_add_1_sse2";
+            Pred2, pred2, "wpd_pred_add_2_sse2";
+            Pred3, pred3, "wpd_pred_add_3_sse2";
+            Pred4, pred4, "wpd_pred_add_4_sse2";
+            Pred5, pred5, "wpd_pred_add_5_sse2";
+            Pred6, pred6, "wpd_pred_add_6_sse2";
+            Pred7, pred7, "wpd_pred_add_7_sse2";
+            Pred8, pred8, "wpd_pred_add_8_sse2";
+            Pred9, pred9, "wpd_pred_add_9_sse2";
+            Pred10, pred10, "wpd_pred_add_10_sse2";
+            Pred12, pred12, "wpd_pred_add_12_sse2";
         }
 
-        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_sse2");
+        raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_sse2");
     }
 
     pub mod sse4 {
         use super::*;
 
         preds! {
-            Pred13, pred13, "ff_pred_add_13_sse4";
+            Pred13, pred13, "wpd_pred_add_13_sse4";
         }
     }
 
     pub mod ssse3 {
         use super::*;
 
-        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_ssse3");
-        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_ssse3");
+        raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_ssse3");
+        raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_ssse3");
         raw_vp8l!(
             BlendPremult,
             blend_premult,
             blend_row,
-            "ff_blend_row_argb_premult_ssse3"
+            "wpd_blend_row_argb_premult_ssse3"
         );
     }
 
@@ -304,32 +304,32 @@ mod arch {
         use super::*;
 
         preds! {
-            Pred0, pred0, "ff_pred_add_0_avx2";
-            Pred1, pred1, "ff_pred_add_1_avx2";
-            Pred2, pred2, "ff_pred_add_2_avx2";
-            Pred3, pred3, "ff_pred_add_3_avx2";
-            Pred4, pred4, "ff_pred_add_4_avx2";
-            Pred8, pred8, "ff_pred_add_8_avx2";
-            Pred9, pred9, "ff_pred_add_9_avx2";
-            Pred11, pred11, "ff_pred_add_11_avx2";
+            Pred0, pred0, "wpd_pred_add_0_avx2";
+            Pred1, pred1, "wpd_pred_add_1_avx2";
+            Pred2, pred2, "wpd_pred_add_2_avx2";
+            Pred3, pred3, "wpd_pred_add_3_avx2";
+            Pred4, pred4, "wpd_pred_add_4_avx2";
+            Pred8, pred8, "wpd_pred_add_8_avx2";
+            Pred9, pred9, "wpd_pred_add_9_avx2";
+            Pred11, pred11, "wpd_pred_add_11_avx2";
         }
 
-        raw_vp8l!(MapColor, map_color, map_color, "ff_map_color32_avx2");
-        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_avx2");
+        raw_vp8l!(MapColor, map_color, map_color, "wpd_map_color32_avx2");
+        raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_avx2");
         raw_vp8l!(
             ExtractGreen,
             extract_green,
             blend_row,
-            "ff_extract_green_avx2"
+            "wpd_extract_green_avx2"
         );
-        raw_vp8l!(Blend, blend, blend_row, "ff_blend_row_argb_avx2");
+        raw_vp8l!(Blend, blend, blend_row, "wpd_blend_row_argb_avx2");
         raw_vp8l!(
             BlendPremult,
             blend_premult,
             blend_row,
-            "ff_blend_row_argb_premult_avx2"
+            "wpd_blend_row_argb_premult_avx2"
         );
-        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_avx2");
+        raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_avx2");
     }
 
     ladder! {
@@ -365,37 +365,37 @@ mod arch {
         use super::*;
 
         preds! {
-            Pred0, pred0, "ff_pred_add_0_neon";
-            Pred1, pred1, "ff_pred_add_1_neon";
-            Pred2, pred2, "ff_pred_add_2_neon";
-            Pred3, pred3, "ff_pred_add_3_neon";
-            Pred4, pred4, "ff_pred_add_4_neon";
-            Pred5, pred5, "ff_pred_add_5_neon";
-            Pred6, pred6, "ff_pred_add_6_neon";
-            Pred7, pred7, "ff_pred_add_7_neon";
-            Pred8, pred8, "ff_pred_add_8_neon";
-            Pred9, pred9, "ff_pred_add_9_neon";
-            Pred10, pred10, "ff_pred_add_10_neon";
-            Pred11, pred11, "ff_pred_add_11_neon";
-            Pred12, pred12, "ff_pred_add_12_neon";
-            Pred13, pred13, "ff_pred_add_13_neon";
+            Pred0, pred0, "wpd_pred_add_0_neon";
+            Pred1, pred1, "wpd_pred_add_1_neon";
+            Pred2, pred2, "wpd_pred_add_2_neon";
+            Pred3, pred3, "wpd_pred_add_3_neon";
+            Pred4, pred4, "wpd_pred_add_4_neon";
+            Pred5, pred5, "wpd_pred_add_5_neon";
+            Pred6, pred6, "wpd_pred_add_6_neon";
+            Pred7, pred7, "wpd_pred_add_7_neon";
+            Pred8, pred8, "wpd_pred_add_8_neon";
+            Pred9, pred9, "wpd_pred_add_9_neon";
+            Pred10, pred10, "wpd_pred_add_10_neon";
+            Pred11, pred11, "wpd_pred_add_11_neon";
+            Pred12, pred12, "wpd_pred_add_12_neon";
+            Pred13, pred13, "wpd_pred_add_13_neon";
         }
 
-        raw_vp8l!(MapColor, map_color, map_color, "ff_map_color32_neon");
-        raw_vp8l!(ColorRow, color_row, color_row, "ff_color_row_neon");
-        raw_vp8l!(AddGreen, add_green, add_green, "ff_add_green_neon");
+        raw_vp8l!(MapColor, map_color, map_color, "wpd_map_color32_neon");
+        raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_neon");
+        raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_neon");
         raw_vp8l!(
             ExtractGreen,
             extract_green,
             blend_row,
-            "ff_extract_green_neon"
+            "wpd_extract_green_neon"
         );
-        raw_vp8l!(Blend, blend, blend_row, "ff_blend_row_argb_neon");
+        raw_vp8l!(Blend, blend, blend_row, "wpd_blend_row_argb_neon");
         raw_vp8l!(
             BlendPremult,
             blend_premult,
             blend_row,
-            "ff_blend_row_argb_premult_neon"
+            "wpd_blend_row_argb_premult_neon"
         );
     }
 

@@ -2,7 +2,7 @@
 #include "asm.S"
 
 
-function ff_pred16x16_hor_neon, export=1
+function wpd_pred16x16_hor_neon, export=1
         sub             x2,  x0,  #1
     .rept 16
         ld1r            {v0.16b}, [x2], x1
@@ -11,7 +11,7 @@ function ff_pred16x16_hor_neon, export=1
         ret
 endfunc
 
-function ff_pred16x16_vert_neon, export=1
+function wpd_pred16x16_vert_neon, export=1
         sub             x2,  x0,  x1
         ld1             {v0.16b}, [x2]
     .rept 16
@@ -21,7 +21,7 @@ function ff_pred16x16_vert_neon, export=1
 endfunc
 
 
-function ff_pred4x4_tm_neon, export=1
+function wpd_pred4x4_tm_neon, export=1
         sub             x3,  x0,  x2
         sub             x4,  x3,  #1
         ld1r            {v0.8b},  [x4]
@@ -45,7 +45,7 @@ function ff_pred4x4_tm_neon, export=1
         ret
 endfunc
 
-function ff_pred8x8_tm_neon, export=1
+function wpd_pred8x8_tm_neon, export=1
         sub             x2,  x0,  x1
         sub             x3,  x2,  #1
         ld1r            {v0.8b},  [x3]
@@ -61,7 +61,7 @@ function ff_pred8x8_tm_neon, export=1
         ret
 endfunc
 
-function ff_pred16x16_tm_neon, export=1
+function wpd_pred16x16_tm_neon, export=1
         sub             x2,  x0,  x1
         sub             x3,  x2,  #1
         ld1r            {v0.16b}, [x3]
@@ -81,7 +81,7 @@ function ff_pred16x16_tm_neon, export=1
 endfunc
 
 
-function ff_pred8x8_dc_neon, export=1
+function wpd_pred8x8_dc_neon, export=1
         sub             x2,  x0,  x1
         sub             x3,  x0,  #1
         ld1             {v0.8b},  [x2]
@@ -102,7 +102,7 @@ function ff_pred8x8_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred8x8_left_dc_neon, export=1
+function wpd_pred8x8_left_dc_neon, export=1
         sub             x3,  x0,  #1
         mov             w4,  #4
     .rept 8
@@ -118,7 +118,7 @@ function ff_pred8x8_left_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred8x8_top_dc_neon, export=1
+function wpd_pred8x8_top_dc_neon, export=1
         sub             x2,  x0,  x1
         ld1             {v0.8b},  [x2]
         uaddlv          h0,  v0.8b
@@ -132,7 +132,7 @@ function ff_pred8x8_top_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred16x16_dc_neon, export=1
+function wpd_pred16x16_dc_neon, export=1
         sub             x2,  x0,  x1
         sub             x3,  x0,  #1
         ld1             {v0.16b}, [x2]
@@ -153,7 +153,7 @@ function ff_pred16x16_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred16x16_left_dc_neon, export=1
+function wpd_pred16x16_left_dc_neon, export=1
         sub             x3,  x0,  #1
         mov             w4,  #8
     .rept 16
@@ -169,7 +169,7 @@ function ff_pred16x16_left_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred16x16_top_dc_neon, export=1
+function wpd_pred16x16_top_dc_neon, export=1
         sub             x2,  x0,  x1
         ld1             {v0.16b}, [x2]
         uaddlv          h0,  v0.16b
@@ -211,7 +211,7 @@ endfunc
         fmov            d0,  x10
 .endm
 
-function ff_pred4x4_dc_neon, export=1
+function wpd_pred4x4_dc_neon, export=1
         sub             x3,  x0,  x2
         sub             x4,  x0,  #1
         ldrb            w5,  [x3]
@@ -242,7 +242,7 @@ function ff_pred4x4_dc_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_vert_neon, export=1
+function wpd_pred4x4_vert_neon, export=1
         sub             x3,  x0,  x2
         sub             x4,  x3,  #1
         ldr             w6,  [x4]
@@ -259,7 +259,7 @@ function ff_pred4x4_vert_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_hor_neon, export=1
+function wpd_pred4x4_hor_neon, export=1
         sub             x3,  x0,  x2
         sub             x4,  x3,  #1
         sub             x5,  x0,  #1
@@ -289,7 +289,7 @@ function ff_pred4x4_hor_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_down_left_neon, export=1
+function wpd_pred4x4_down_left_neon, export=1
         sub             x3,  x0,  x2
         ld1             {v0.s}[0], [x3]
         ld1             {v0.s}[1], [x1]
@@ -308,7 +308,7 @@ function ff_pred4x4_down_left_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_down_right_neon, export=1
+function wpd_pred4x4_down_right_neon, export=1
         load_left_rev_top
         add             x6,  x4,  #4
         ld1             {v0.b}[8], [x6]
@@ -326,7 +326,7 @@ function ff_pred4x4_down_right_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_vert_left_neon, export=1
+function wpd_pred4x4_vert_left_neon, export=1
         sub             x3,  x0,  x2
         ld1             {v0.s}[0], [x3]
         ld1             {v0.s}[1], [x1]
@@ -342,7 +342,7 @@ function ff_pred4x4_vert_left_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_hor_up_neon, export=1
+function wpd_pred4x4_hor_up_neon, export=1
         sub             x5,  x0,  #1
         ldrb            w6,  [x5]
         add             x5,  x5,  x2
@@ -369,7 +369,7 @@ function ff_pred4x4_hor_up_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_hor_down_neon, export=1
+function wpd_pred4x4_hor_down_neon, export=1
         load_left_rev_top
         edge_filters    v0, v1, v2, v3, v4
         zip1            v5.8b,  v1.8b,  v2.8b
@@ -384,7 +384,7 @@ function ff_pred4x4_hor_down_neon, export=1
         ret
 endfunc
 
-function ff_pred4x4_vert_right_neon, export=1
+function wpd_pred4x4_vert_right_neon, export=1
         sub             x3,  x0,  x2
         sub             x4,  x3,  #1
         sub             x5,  x0,  #1
@@ -416,7 +416,7 @@ function ff_pred4x4_vert_right_neon, export=1
 endfunc
 
 
-function ff_pred8x8_vert_neon, export=1
+function wpd_pred8x8_vert_neon, export=1
         sub             x2,  x0,  x1
         ld1             {v0.8b},  [x2]
     .rept 8
@@ -425,7 +425,7 @@ function ff_pred8x8_vert_neon, export=1
         ret
 endfunc
 
-function ff_pred8x8_hor_neon, export=1
+function wpd_pred8x8_hor_neon, export=1
         sub             x2,  x0,  #1
     .rept 8
         ld1r            {v0.8b},  [x2], x1

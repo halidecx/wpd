@@ -78,83 +78,83 @@ mod arch {
     pub mod sse {
         use super::*;
 
-        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vertical_8_sse");
+        raw_vp8pred!(Vert16, vert16, pred, "wpd_pred16x16_vertical_8_sse");
     }
 
     pub mod sse2 {
         use super::*;
 
-        raw_vp8pred!(Dc4, dc4, pred4x4, "ff_pred4x4_dc_8_sse2");
-        raw_vp8pred!(Hor4, hor4, pred4x4, "ff_pred4x4_horizontal_vp8_8_sse2");
-        raw_vp8pred!(Vert4, vert4, pred4x4, "ff_pred4x4_vertical_vp8_8_sse2");
+        raw_vp8pred!(Dc4, dc4, pred4x4, "wpd_pred4x4_dc_8_sse2");
+        raw_vp8pred!(Hor4, hor4, pred4x4, "wpd_pred4x4_horizontal_vp8_8_sse2");
+        raw_vp8pred!(Vert4, vert4, pred4x4, "wpd_pred4x4_vertical_vp8_8_sse2");
         raw_vp8pred!(
             DownLeft4,
             down_left4,
             pred4x4,
-            "ff_pred4x4_down_left_8_sse2"
+            "wpd_pred4x4_down_left_8_sse2"
         );
         raw_vp8pred!(
             DownRight4,
             down_right4,
             pred4x4,
-            "ff_pred4x4_down_right_8_sse2"
+            "wpd_pred4x4_down_right_8_sse2"
         );
         raw_vp8pred!(
             VertRight4,
             vert_right4,
             pred4x4,
-            "ff_pred4x4_vertical_right_8_sse2"
+            "wpd_pred4x4_vertical_right_8_sse2"
         );
         raw_vp8pred!(
             HorDown4,
             hor_down4,
             pred4x4,
-            "ff_pred4x4_horizontal_down_8_sse2"
+            "wpd_pred4x4_horizontal_down_8_sse2"
         );
-        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "ff_pred4x4_horizontal_up_8_sse2");
-        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_vp8_8_sse2");
+        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "wpd_pred4x4_horizontal_up_8_sse2");
+        raw_vp8pred!(Tm4, tm4, pred4x4, "wpd_pred4x4_tm_vp8_8_sse2");
 
-        raw_vp8pred!(Dc8, dc8, pred, "ff_pred8x8_dc_vp8_8_sse2");
-        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_8_sse2");
-        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_8_sse2");
-        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_horizontal_8_sse2");
-        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_vp8_8_sse2");
-        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vertical_8_sse2");
+        raw_vp8pred!(Dc8, dc8, pred, "wpd_pred8x8_dc_vp8_8_sse2");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "wpd_pred8x8_top_dc_8_sse2");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "wpd_pred8x8_left_dc_8_sse2");
+        raw_vp8pred!(Hor8, hor8, pred, "wpd_pred8x8_horizontal_8_sse2");
+        raw_vp8pred!(Tm8, tm8, pred, "wpd_pred8x8_tm_vp8_8_sse2");
+        raw_vp8pred!(Vert8, vert8, pred, "wpd_pred8x8_vertical_8_sse2");
 
-        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_horizontal_8_sse2");
-        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_8_sse2");
-        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_8_sse2");
-        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_8_sse2");
-        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_sse2");
+        raw_vp8pred!(Hor16, hor16, pred, "wpd_pred16x16_horizontal_8_sse2");
+        raw_vp8pred!(Dc16, dc16, pred, "wpd_pred16x16_dc_8_sse2");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "wpd_pred16x16_top_dc_8_sse2");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "wpd_pred16x16_left_dc_8_sse2");
+        raw_vp8pred!(Tm16, tm16, pred, "wpd_pred16x16_tm_vp8_8_sse2");
     }
 
     pub mod ssse3 {
         use super::*;
 
-        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_vp8_8_ssse3");
+        raw_vp8pred!(Tm4, tm4, pred4x4, "wpd_pred4x4_tm_vp8_8_ssse3");
         raw_vp8pred!(
             VertLeft4,
             vert_left4,
             pred4x4,
-            "ff_pred4x4_vertical_left_vp8_8_ssse3"
+            "wpd_pred4x4_vertical_left_vp8_8_ssse3"
         );
 
-        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_8_ssse3");
-        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_8_ssse3");
-        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_horizontal_8_ssse3");
-        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_vp8_8_ssse3");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "wpd_pred8x8_top_dc_8_ssse3");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "wpd_pred8x8_left_dc_8_ssse3");
+        raw_vp8pred!(Hor8, hor8, pred, "wpd_pred8x8_horizontal_8_ssse3");
+        raw_vp8pred!(Tm8, tm8, pred, "wpd_pred8x8_tm_vp8_8_ssse3");
 
-        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_horizontal_8_ssse3");
-        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_8_ssse3");
-        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_8_ssse3");
-        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_8_ssse3");
-        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_ssse3");
+        raw_vp8pred!(Hor16, hor16, pred, "wpd_pred16x16_horizontal_8_ssse3");
+        raw_vp8pred!(Dc16, dc16, pred, "wpd_pred16x16_dc_8_ssse3");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "wpd_pred16x16_top_dc_8_ssse3");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "wpd_pred16x16_left_dc_8_ssse3");
+        raw_vp8pred!(Tm16, tm16, pred, "wpd_pred16x16_tm_vp8_8_ssse3");
     }
 
     pub mod avx2 {
         use super::*;
 
-        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_vp8_8_avx2");
+        raw_vp8pred!(Tm16, tm16, pred, "wpd_pred16x16_tm_vp8_8_avx2");
     }
 
     ladder! {
@@ -213,40 +213,40 @@ mod arch {
     pub mod neon {
         use super::*;
 
-        raw_vp8pred!(Tm4, tm4, pred4x4, "ff_pred4x4_tm_neon");
-        raw_vp8pred!(Dc4, dc4, pred4x4, "ff_pred4x4_dc_neon");
-        raw_vp8pred!(Vert4, vert4, pred4x4, "ff_pred4x4_vert_neon");
-        raw_vp8pred!(Hor4, hor4, pred4x4, "ff_pred4x4_hor_neon");
-        raw_vp8pred!(DownLeft4, down_left4, pred4x4, "ff_pred4x4_down_left_neon");
+        raw_vp8pred!(Tm4, tm4, pred4x4, "wpd_pred4x4_tm_neon");
+        raw_vp8pred!(Dc4, dc4, pred4x4, "wpd_pred4x4_dc_neon");
+        raw_vp8pred!(Vert4, vert4, pred4x4, "wpd_pred4x4_vert_neon");
+        raw_vp8pred!(Hor4, hor4, pred4x4, "wpd_pred4x4_hor_neon");
+        raw_vp8pred!(DownLeft4, down_left4, pred4x4, "wpd_pred4x4_down_left_neon");
         raw_vp8pred!(
             DownRight4,
             down_right4,
             pred4x4,
-            "ff_pred4x4_down_right_neon"
+            "wpd_pred4x4_down_right_neon"
         );
-        raw_vp8pred!(VertLeft4, vert_left4, pred4x4, "ff_pred4x4_vert_left_neon");
+        raw_vp8pred!(VertLeft4, vert_left4, pred4x4, "wpd_pred4x4_vert_left_neon");
         raw_vp8pred!(
             VertRight4,
             vert_right4,
             pred4x4,
-            "ff_pred4x4_vert_right_neon"
+            "wpd_pred4x4_vert_right_neon"
         );
-        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "ff_pred4x4_hor_up_neon");
-        raw_vp8pred!(HorDown4, hor_down4, pred4x4, "ff_pred4x4_hor_down_neon");
+        raw_vp8pred!(HorUp4, hor_up4, pred4x4, "wpd_pred4x4_hor_up_neon");
+        raw_vp8pred!(HorDown4, hor_down4, pred4x4, "wpd_pred4x4_hor_down_neon");
 
-        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vert_neon");
-        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_hor_neon");
-        raw_vp8pred!(Dc8, dc8, pred, "ff_pred8x8_dc_neon");
-        raw_vp8pred!(Tm8, tm8, pred, "ff_pred8x8_tm_neon");
-        raw_vp8pred!(TopDc8, top_dc8, pred, "ff_pred8x8_top_dc_neon");
-        raw_vp8pred!(LeftDc8, left_dc8, pred, "ff_pred8x8_left_dc_neon");
+        raw_vp8pred!(Vert8, vert8, pred, "wpd_pred8x8_vert_neon");
+        raw_vp8pred!(Hor8, hor8, pred, "wpd_pred8x8_hor_neon");
+        raw_vp8pred!(Dc8, dc8, pred, "wpd_pred8x8_dc_neon");
+        raw_vp8pred!(Tm8, tm8, pred, "wpd_pred8x8_tm_neon");
+        raw_vp8pred!(TopDc8, top_dc8, pred, "wpd_pred8x8_top_dc_neon");
+        raw_vp8pred!(LeftDc8, left_dc8, pred, "wpd_pred8x8_left_dc_neon");
 
-        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vert_neon");
-        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_hor_neon");
-        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_neon");
-        raw_vp8pred!(Tm16, tm16, pred, "ff_pred16x16_tm_neon");
-        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_neon");
-        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_neon");
+        raw_vp8pred!(Vert16, vert16, pred, "wpd_pred16x16_vert_neon");
+        raw_vp8pred!(Hor16, hor16, pred, "wpd_pred16x16_hor_neon");
+        raw_vp8pred!(Dc16, dc16, pred, "wpd_pred16x16_dc_neon");
+        raw_vp8pred!(Tm16, tm16, pred, "wpd_pred16x16_tm_neon");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "wpd_pred16x16_top_dc_neon");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "wpd_pred16x16_left_dc_neon");
     }
 
     ladder! {
@@ -286,16 +286,16 @@ mod arch {
     pub mod neon {
         use super::*;
 
-        raw_vp8pred!(Vert8, vert8, pred, "ff_pred8x8_vert_neon");
-        raw_vp8pred!(Hor8, hor8, pred, "ff_pred8x8_hor_neon");
-        raw_vp8pred!(Dc128_8, dc128_8, pred, "ff_pred8x8_128_dc_neon");
+        raw_vp8pred!(Vert8, vert8, pred, "wpd_pred8x8_vert_neon");
+        raw_vp8pred!(Hor8, hor8, pred, "wpd_pred8x8_hor_neon");
+        raw_vp8pred!(Dc128_8, dc128_8, pred, "wpd_pred8x8_128_dc_neon");
 
-        raw_vp8pred!(Dc16, dc16, pred, "ff_pred16x16_dc_neon");
-        raw_vp8pred!(Vert16, vert16, pred, "ff_pred16x16_vert_neon");
-        raw_vp8pred!(Hor16, hor16, pred, "ff_pred16x16_hor_neon");
-        raw_vp8pred!(LeftDc16, left_dc16, pred, "ff_pred16x16_left_dc_neon");
-        raw_vp8pred!(TopDc16, top_dc16, pred, "ff_pred16x16_top_dc_neon");
-        raw_vp8pred!(Dc128_16, dc128_16, pred, "ff_pred16x16_128_dc_neon");
+        raw_vp8pred!(Dc16, dc16, pred, "wpd_pred16x16_dc_neon");
+        raw_vp8pred!(Vert16, vert16, pred, "wpd_pred16x16_vert_neon");
+        raw_vp8pred!(Hor16, hor16, pred, "wpd_pred16x16_hor_neon");
+        raw_vp8pred!(LeftDc16, left_dc16, pred, "wpd_pred16x16_left_dc_neon");
+        raw_vp8pred!(TopDc16, top_dc16, pred, "wpd_pred16x16_top_dc_neon");
+        raw_vp8pred!(Dc128_16, dc128_16, pred, "wpd_pred16x16_128_dc_neon");
     }
 
     ladder! {

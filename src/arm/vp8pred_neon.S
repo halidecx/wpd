@@ -23,12 +23,12 @@
         vpadd.u16       \dl, \dl, \dl
         .endm
 
-function ff_pred16x16_128_dc_neon, export=1
+function wpd_pred16x16_128_dc_neon, export=1
         vmov.i8         q0,  #128
         b               .L_pred16x16_dc_end
 endfunc
 
-function ff_pred16x16_top_dc_neon, export=1
+function wpd_pred16x16_top_dc_neon, export=1
         sub             r2,  r0,  r1
         vld1.8          {q0},     [r2,:128]
         add16x8         q0,  d0,  d1,  d0,  d1
@@ -37,7 +37,7 @@ function ff_pred16x16_top_dc_neon, export=1
         b               .L_pred16x16_dc_end
 endfunc
 
-function ff_pred16x16_left_dc_neon, export=1
+function wpd_pred16x16_left_dc_neon, export=1
         sub             r2,  r0,  #1
         ldcol.8         d0,  r2,  r1
         ldcol.8         d1,  r2,  r1
@@ -47,7 +47,7 @@ function ff_pred16x16_left_dc_neon, export=1
         b               .L_pred16x16_dc_end
 endfunc
 
-function ff_pred16x16_dc_neon, export=1
+function wpd_pred16x16_dc_neon, export=1
         sub             r2,  r0,  r1
         vld1.8          {q0},     [r2,:128]
         sub             r2,  r0,  #1
@@ -70,7 +70,7 @@ function ff_pred16x16_dc_neon, export=1
         bx              lr
 endfunc
 
-function ff_pred16x16_hor_neon, export=1
+function wpd_pred16x16_hor_neon, export=1
         sub             r2,  r0,  #1
         mov             r3,  #16
 1:      vld1.8          {d0[],d1[]},[r2],      r1
@@ -80,7 +80,7 @@ function ff_pred16x16_hor_neon, export=1
         bx              lr
 endfunc
 
-function ff_pred16x16_vert_neon, export=1
+function wpd_pred16x16_vert_neon, export=1
         sub             r0,  r0,  r1
         vld1.8          {q0},     [r0,:128], r1
         mov             r3,  #8
@@ -90,7 +90,7 @@ function ff_pred16x16_vert_neon, export=1
         bne             1b
         bx              lr
 endfunc
-function ff_pred8x8_hor_neon, export=1
+function wpd_pred8x8_hor_neon, export=1
         sub             r2,  r0,  #1
         mov             r3,  #8
 1:      vld1.8          {d0[]},   [r2],     r1
@@ -100,7 +100,7 @@ function ff_pred8x8_hor_neon, export=1
         bx              lr
 endfunc
 
-function ff_pred8x8_vert_neon, export=1
+function wpd_pred8x8_vert_neon, export=1
         sub             r0,  r0,  r1
         vld1.8          {d0},     [r0,:64], r1
         mov             r3,  #4
@@ -111,7 +111,7 @@ function ff_pred8x8_vert_neon, export=1
         bx              lr
 endfunc
 
-function ff_pred8x8_128_dc_neon, export=1
+function wpd_pred8x8_128_dc_neon, export=1
         vmov.i8         d0,  #128
         mov             r3,  #8
 1:      vst1.8          {d0}, [r0,:64], r1

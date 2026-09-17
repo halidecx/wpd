@@ -2,7 +2,7 @@
 #include "asm.S"
 #include "neon.S"
 
-function ff_vp8_luma_dc_wht_neon, export=1
+function wpd_vp8_luma_dc_wht_neon, export=1
         vld1.16         {q0-q1},  [r1,:128]
         vmov.i16        q15, #0
 
@@ -55,7 +55,7 @@ function ff_vp8_luma_dc_wht_neon, export=1
         bx              lr
 endfunc
 
-function ff_vp8_idct_add_neon, export=1
+function wpd_vp8_idct_add_neon, export=1
         vld1.16         {q0-q1},  [r1,:128]
         movw            r3,  #20091
         movt            r3,  #35468/2
@@ -128,7 +128,7 @@ function ff_vp8_idct_add_neon, export=1
         bx              lr
 endfunc
 
-function ff_vp8_idct_dc_add_neon, export=1
+function wpd_vp8_idct_dc_add_neon, export=1
         mov             r3,  #0
         ldrsh           r12, [r1]
         strh            r3,  [r1]
@@ -150,7 +150,7 @@ function ff_vp8_idct_dc_add_neon, export=1
         bx              lr
 endfunc
 
-function ff_vp8_idct_dc_add4uv_neon, export=1
+function wpd_vp8_idct_dc_add4uv_neon, export=1
         vmov.i16        d0,  #0
         mov             r3,  #32
         vld1.16         {d16[]},  [r1,:16]
@@ -200,7 +200,7 @@ function ff_vp8_idct_dc_add4uv_neon, export=1
         bx              lr
 endfunc
 
-function ff_vp8_idct_dc_add4y_neon, export=1
+function wpd_vp8_idct_dc_add4y_neon, export=1
         vmov.i16        d0,  #0
         mov             r3,  #32
         vld1.16         {d16[]},  [r1,:16]
@@ -382,7 +382,7 @@ endfunc
 .endm
 
 .macro  vp8_v_loop_filter16 name, inner=0, simple=0
-function ff_vp8_v_loop_filter16\name\()_neon, export=1
+function wpd_vp8_v_loop_filter16\name\()_neon, export=1
         vpush           {q4-q7}
         sub             r0,  r0,  r1,  lsl #1+!\simple
 
@@ -428,7 +428,7 @@ vp8_v_loop_filter16 _inner,  inner=1
 vp8_v_loop_filter16 _simple, simple=1
 
 .macro  vp8_v_loop_filter8uv name, inner=0
-function ff_vp8_v_loop_filter8uv\name\()_neon, export=1
+function wpd_vp8_v_loop_filter8uv\name\()_neon, export=1
         vpush           {q4-q7}
         sub             r0,  r0,  r2,  lsl #2
         sub             r1,  r1,  r2,  lsl #2
@@ -484,7 +484,7 @@ vp8_v_loop_filter8uv
 vp8_v_loop_filter8uv _inner, inner=1
 
 .macro  vp8_h_loop_filter16 name, inner=0, simple=0
-function ff_vp8_h_loop_filter16\name\()_neon, export=1
+function wpd_vp8_h_loop_filter16\name\()_neon, export=1
         vpush           {q4-q7}
         sub             r0,  r0,  #4
     .if !\simple
@@ -548,7 +548,7 @@ vp8_h_loop_filter16 _inner,  inner=1
 vp8_h_loop_filter16 _simple, simple=1
 
 .macro  vp8_h_loop_filter8uv name, inner=0
-function ff_vp8_h_loop_filter8uv\name\()_neon, export=1
+function wpd_vp8_h_loop_filter8uv\name\()_neon, export=1
         vpush           {q4-q7}
         sub             r0,  r0,  #4
         sub             r1,  r1,  #4

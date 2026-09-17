@@ -540,35 +540,35 @@ mod arch {
         raw_row!(
             DispatchFirst,
             dispatch_first,
-            "ff_dispatch_alpha_first_sse2"
+            "wpd_dispatch_alpha_first_sse2"
         );
-        raw_row!(DispatchLast, dispatch_last, "ff_dispatch_alpha_last_sse2");
+        raw_row!(DispatchLast, dispatch_last, "wpd_dispatch_alpha_last_sse2");
         premultiply_4444_syms!(
-            "ff_premultiply_row_4444_sse2",
-            "ff_premultiply_row_4444_swap_sse2"
+            "wpd_premultiply_row_4444_sse2",
+            "wpd_premultiply_row_4444_swap_sse2"
         );
-        multiply_syms!("ff_multiply_row_sse2", "ff_premultiply_argb_row_sse2");
+        multiply_syms!("wpd_multiply_row_sse2", "wpd_premultiply_argb_row_sse2");
 
         #[cfg(target_arch = "x86_64")]
         upsample_syms!(
-            "ff_upsample_block_argb_sse2",
-            "ff_upsample_block_rgba_sse2",
-            "ff_upsample_block_bgra_sse2",
-            "ff_upsample_block_rgb_sse2",
-            "ff_upsample_block_bgr_sse2"
+            "wpd_upsample_block_argb_sse2",
+            "wpd_upsample_block_rgba_sse2",
+            "wpd_upsample_block_bgra_sse2",
+            "wpd_upsample_block_rgb_sse2",
+            "wpd_upsample_block_bgr_sse2"
         );
         #[cfg(target_arch = "x86_64")]
         yuv_row_syms!(
-            "ff_yuv444_row_argb_sse2",
-            "ff_yuv444_row_rgba_sse2",
-            "ff_yuv444_row_bgra_sse2",
-            "ff_yuv444_row_rgb_sse2",
-            "ff_yuv444_row_bgr_sse2",
-            "ff_yuv420_row_argb_sse2",
-            "ff_yuv420_row_rgba_sse2",
-            "ff_yuv420_row_bgra_sse2",
-            "ff_yuv420_row_rgb_sse2",
-            "ff_yuv420_row_bgr_sse2"
+            "wpd_yuv444_row_argb_sse2",
+            "wpd_yuv444_row_rgba_sse2",
+            "wpd_yuv444_row_bgra_sse2",
+            "wpd_yuv444_row_rgb_sse2",
+            "wpd_yuv444_row_bgr_sse2",
+            "wpd_yuv420_row_argb_sse2",
+            "wpd_yuv420_row_rgba_sse2",
+            "wpd_yuv420_row_bgra_sse2",
+            "wpd_yuv420_row_rgb_sse2",
+            "wpd_yuv420_row_bgr_sse2"
         );
     }
 
@@ -576,35 +576,35 @@ mod arch {
         use super::*;
 
         pack_syms!(
-            "ff_pack_rgba_ssse3",
-            "ff_pack_bgra_ssse3",
-            "ff_pack_rgb_ssse3",
-            "ff_pack_bgr_ssse3",
-            "ff_pack_rgb565_ssse3",
-            "ff_pack_rgba4444_ssse3",
-            "ff_pack_bgr565_ssse3",
-            "ff_pack_bgra4444_ssse3"
+            "wpd_pack_rgba_ssse3",
+            "wpd_pack_bgra_ssse3",
+            "wpd_pack_rgb_ssse3",
+            "wpd_pack_bgr_ssse3",
+            "wpd_pack_rgb565_ssse3",
+            "wpd_pack_rgba4444_ssse3",
+            "wpd_pack_bgr565_ssse3",
+            "wpd_pack_bgra4444_ssse3"
         );
-        premultiply_syms!("ff_premultiply_row_ssse3");
-        raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_ssse3");
+        premultiply_syms!("wpd_premultiply_row_ssse3");
+        raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_ssse3");
 
         #[cfg(target_arch = "x86_64")]
-        raw_upsample!(UpsampleRgb, upsample_rgb, "ff_upsample_block_rgb_ssse3");
+        raw_upsample!(UpsampleRgb, upsample_rgb, "wpd_upsample_block_rgb_ssse3");
         #[cfg(target_arch = "x86_64")]
-        raw_upsample!(UpsampleBgr, upsample_bgr, "ff_upsample_block_bgr_ssse3");
+        raw_upsample!(UpsampleBgr, upsample_bgr, "wpd_upsample_block_bgr_ssse3");
         #[cfg(target_arch = "x86_64")]
         yuv_row_rgb_syms!(
-            "ff_yuv444_row_rgb_ssse3",
-            "ff_yuv444_row_bgr_ssse3",
-            "ff_yuv420_row_rgb_ssse3",
-            "ff_yuv420_row_bgr_ssse3"
+            "wpd_yuv444_row_rgb_ssse3",
+            "wpd_yuv444_row_bgr_ssse3",
+            "wpd_yuv420_row_rgb_ssse3",
+            "wpd_yuv420_row_bgr_ssse3"
         );
         #[cfg(target_arch = "x86_64")]
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
             ArgbToYuv444Raw,
-            "ff_argb_to_yuv444_ssse3",
+            "wpd_argb_to_yuv444_ssse3",
             (*mut u8, *mut u8, *mut u8, *const u8, c_int)
         );
     }
@@ -615,54 +615,54 @@ mod arch {
         raw_row!(
             DispatchFirst,
             dispatch_first,
-            "ff_dispatch_alpha_first_avx2"
+            "wpd_dispatch_alpha_first_avx2"
         );
-        raw_row!(DispatchLast, dispatch_last, "ff_dispatch_alpha_last_avx2");
+        raw_row!(DispatchLast, dispatch_last, "wpd_dispatch_alpha_last_avx2");
         pack_syms!(
-            "ff_pack_rgba_avx2",
-            "ff_pack_bgra_avx2",
-            "ff_pack_rgb_avx2",
-            "ff_pack_bgr_avx2",
-            "ff_pack_rgb565_avx2",
-            "ff_pack_rgba4444_avx2",
-            "ff_pack_bgr565_avx2",
-            "ff_pack_bgra4444_avx2"
+            "wpd_pack_rgba_avx2",
+            "wpd_pack_bgra_avx2",
+            "wpd_pack_rgb_avx2",
+            "wpd_pack_bgr_avx2",
+            "wpd_pack_rgb565_avx2",
+            "wpd_pack_rgba4444_avx2",
+            "wpd_pack_bgr565_avx2",
+            "wpd_pack_bgra4444_avx2"
         );
-        premultiply_syms!("ff_premultiply_row_avx2");
+        premultiply_syms!("wpd_premultiply_row_avx2");
         premultiply_4444_syms!(
-            "ff_premultiply_row_4444_avx2",
-            "ff_premultiply_row_4444_swap_avx2"
+            "wpd_premultiply_row_4444_avx2",
+            "wpd_premultiply_row_4444_swap_avx2"
         );
-        multiply_syms!("ff_multiply_row_avx2", "ff_premultiply_argb_row_avx2");
-        raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_avx2");
+        multiply_syms!("wpd_multiply_row_avx2", "wpd_premultiply_argb_row_avx2");
+        raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_avx2");
 
         #[cfg(target_arch = "x86_64")]
         upsample_syms!(
-            "ff_upsample_block_argb_avx2",
-            "ff_upsample_block_rgba_avx2",
-            "ff_upsample_block_bgra_avx2",
-            "ff_upsample_block_rgb_avx2",
-            "ff_upsample_block_bgr_avx2"
+            "wpd_upsample_block_argb_avx2",
+            "wpd_upsample_block_rgba_avx2",
+            "wpd_upsample_block_bgra_avx2",
+            "wpd_upsample_block_rgb_avx2",
+            "wpd_upsample_block_bgr_avx2"
         );
         #[cfg(target_arch = "x86_64")]
         yuv_row_syms!(
-            "ff_yuv444_row_argb_avx2",
-            "ff_yuv444_row_rgba_avx2",
-            "ff_yuv444_row_bgra_avx2",
-            "ff_yuv444_row_rgb_avx2",
-            "ff_yuv444_row_bgr_avx2",
-            "ff_yuv420_row_argb_avx2",
-            "ff_yuv420_row_rgba_avx2",
-            "ff_yuv420_row_bgra_avx2",
-            "ff_yuv420_row_rgb_avx2",
-            "ff_yuv420_row_bgr_avx2"
+            "wpd_yuv444_row_argb_avx2",
+            "wpd_yuv444_row_rgba_avx2",
+            "wpd_yuv444_row_bgra_avx2",
+            "wpd_yuv444_row_rgb_avx2",
+            "wpd_yuv444_row_bgr_avx2",
+            "wpd_yuv420_row_argb_avx2",
+            "wpd_yuv420_row_rgba_avx2",
+            "wpd_yuv420_row_bgra_avx2",
+            "wpd_yuv420_row_rgb_avx2",
+            "wpd_yuv420_row_bgr_avx2"
         );
         #[cfg(target_arch = "x86_64")]
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
             ArgbToYuv444Raw,
-            "ff_argb_to_yuv444_avx2",
+            "wpd_argb_to_yuv444_avx2",
             (*mut u8, *mut u8, *mut u8, *const u8, c_int)
         );
         #[cfg(target_arch = "x86_64")]
@@ -670,7 +670,7 @@ mod arch {
             ArgbToUv,
             argb_to_uv,
             ArgbToUvRaw,
-            "ff_argb_to_uv_avx2",
+            "wpd_argb_to_uv_avx2",
             (*mut u8, *mut u8, *const u8, isize, c_int, c_int)
         );
     }
@@ -739,59 +739,59 @@ mod arch {
         use super::*;
 
         upsample_syms!(
-            "ff_upsample_block_argb_neon",
-            "ff_upsample_block_rgba_neon",
-            "ff_upsample_block_bgra_neon",
-            "ff_upsample_block_rgb_neon",
-            "ff_upsample_block_bgr_neon"
+            "wpd_upsample_block_argb_neon",
+            "wpd_upsample_block_rgba_neon",
+            "wpd_upsample_block_bgra_neon",
+            "wpd_upsample_block_rgb_neon",
+            "wpd_upsample_block_bgr_neon"
         );
         yuv_row_syms!(
-            "ff_yuv444_row_argb_neon",
-            "ff_yuv444_row_rgba_neon",
-            "ff_yuv444_row_bgra_neon",
-            "ff_yuv444_row_rgb_neon",
-            "ff_yuv444_row_bgr_neon",
-            "ff_yuv420_row_argb_neon",
-            "ff_yuv420_row_rgba_neon",
-            "ff_yuv420_row_bgra_neon",
-            "ff_yuv420_row_rgb_neon",
-            "ff_yuv420_row_bgr_neon"
+            "wpd_yuv444_row_argb_neon",
+            "wpd_yuv444_row_rgba_neon",
+            "wpd_yuv444_row_bgra_neon",
+            "wpd_yuv444_row_rgb_neon",
+            "wpd_yuv444_row_bgr_neon",
+            "wpd_yuv420_row_argb_neon",
+            "wpd_yuv420_row_rgba_neon",
+            "wpd_yuv420_row_bgra_neon",
+            "wpd_yuv420_row_rgb_neon",
+            "wpd_yuv420_row_bgr_neon"
         );
         pack_syms!(
-            "ff_pack_rgba_neon",
-            "ff_pack_bgra_neon",
-            "ff_pack_rgb_neon",
-            "ff_pack_bgr_neon",
-            "ff_pack_rgb565_neon",
-            "ff_pack_rgba4444_neon",
-            "ff_pack_bgr565_neon",
-            "ff_pack_bgra4444_neon"
+            "wpd_pack_rgba_neon",
+            "wpd_pack_bgra_neon",
+            "wpd_pack_rgb_neon",
+            "wpd_pack_bgr_neon",
+            "wpd_pack_rgb565_neon",
+            "wpd_pack_rgba4444_neon",
+            "wpd_pack_bgr565_neon",
+            "wpd_pack_bgra4444_neon"
         );
-        premultiply_syms!("ff_premultiply_row_neon");
+        premultiply_syms!("wpd_premultiply_row_neon");
         premultiply_4444_syms!(
-            "ff_premultiply_row_4444_neon",
-            "ff_premultiply_row_4444_swap_neon"
+            "wpd_premultiply_row_4444_neon",
+            "wpd_premultiply_row_4444_swap_neon"
         );
-        multiply_syms!("ff_multiply_row_neon", "ff_premultiply_argb_row_neon");
+        multiply_syms!("wpd_multiply_row_neon", "wpd_premultiply_argb_row_neon");
         raw_row!(
             DispatchFirst,
             dispatch_first,
-            "ff_dispatch_alpha_first_neon"
+            "wpd_dispatch_alpha_first_neon"
         );
-        raw_row!(DispatchLast, dispatch_last, "ff_dispatch_alpha_last_neon");
-        raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_neon");
+        raw_row!(DispatchLast, dispatch_last, "wpd_dispatch_alpha_last_neon");
+        raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_neon");
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
             ArgbToYuv444Raw,
-            "ff_argb_to_yuv444_neon",
+            "wpd_argb_to_yuv444_neon",
             (*mut u8, *mut u8, *mut u8, *const u8, c_int)
         );
         raw!(
             ArgbToUv,
             argb_to_uv,
             ArgbToUvRaw,
-            "ff_argb_to_uv_neon",
+            "wpd_argb_to_uv_neon",
             (*mut u8, *mut u8, *const u8, isize, c_int, c_int)
         );
     }
@@ -800,12 +800,12 @@ mod arch {
     pub mod dotprod {
         use super::*;
 
-        raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_neon_dotprod");
+        raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_neon_dotprod");
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
             ArgbToYuv444Raw,
-            "ff_argb_to_yuv444_neon_dotprod",
+            "wpd_argb_to_yuv444_neon_dotprod",
             (*mut u8, *mut u8, *mut u8, *const u8, c_int)
         );
     }
@@ -814,12 +814,12 @@ mod arch {
     pub mod i8mm {
         use super::*;
 
-        raw_row!(ArgbToY, argb_to_y, "ff_argb_to_y_neon_i8mm");
+        raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_neon_i8mm");
         raw!(
             ArgbToYuv444,
             argb_to_yuv444,
             ArgbToYuv444Raw,
-            "ff_argb_to_yuv444_neon_i8mm",
+            "wpd_argb_to_yuv444_neon_i8mm",
             (*mut u8, *mut u8, *mut u8, *const u8, c_int)
         );
     }
