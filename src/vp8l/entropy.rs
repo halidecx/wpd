@@ -228,6 +228,29 @@ fn cache_fill(
     to
 }
 
+#[inline(always)]
+fn backward_reference(
+    coded: u32,
+    length: u32,
+    width: usize,
+    pos: usize,
+    total: usize,
+) -> Result<(usize, usize)> {
+    let distance = if coded <= NUM_SHORT_DISTANCES {
+        let [x, y] = LZ77_DISTANCE_OFFSETS[coded as usize - 1];
+
+        (i32::from(x) + i32::from(y) * width as i32).max(1) as usize
+    } else {
+        (coded - NUM_SHORT_DISTANCES) as usize
+    };
+    let length = length as usize;
+
+    if distance > pos || length > total - pos {
+        return Err(Error::InvalidData);
+    }
+    Ok((distance, length))
+}
+
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
@@ -412,18 +435,8 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                 suspend!();
             }
 
-            let distance = if coded <= NUM_SHORT_DISTANCES {
-                let [xi, yi] = LZ77_DISTANCE_OFFSETS[coded as usize - 1];
-
-                (i32::from(xi) + i32::from(yi) * width as i32).max(1) as usize
-            } else {
-                (coded - NUM_SHORT_DISTANCES) as usize
-            };
-            let length = length as usize;
-
-            if distance > pos || length > total - pos {
-                return Err(Error::InvalidData);
-            }
+            let (distance, length) =
+                backward_reference(coded, length, width, pos, total)?;
 
             copy_block(pixels, pos, distance, length);
             pos += length;
@@ -537,18 +550,8 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
             }
 
             let coded = extend(gb, buf, prefix);
-            let distance = if coded <= NUM_SHORT_DISTANCES {
-                let [xi, yi] = LZ77_DISTANCE_OFFSETS[coded as usize - 1];
-
-                (i32::from(xi) + i32::from(yi) * width as i32).max(1) as usize
-            } else {
-                (coded - NUM_SHORT_DISTANCES) as usize
-            };
-            let length = length as usize;
-
-            if distance > pos || length > total - pos {
-                return Err(Error::InvalidData);
-            }
+            let (distance, length) =
+                backward_reference(coded, length, width, pos, total)?;
 
             copy_block(pixels, pos, distance, length);
             pos += length;

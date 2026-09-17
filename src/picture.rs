@@ -54,6 +54,33 @@ mod zeroed {
     }
 }
 
+#[inline]
+fn component_shift(format: Format, chroma_full: bool, p: usize) -> u32 {
+    if format.nb_components() == 1 || chroma_full {
+        0
+    } else {
+        chroma(p)
+    }
+}
+
+#[inline]
+fn frame_row_len(width: i32, format: Format, chroma_full: bool, p: usize) -> usize {
+    if format.nb_components() == 1 {
+        width as usize * format.bpp()
+    } else {
+        ceil_rshift(width, component_shift(format, chroma_full, p)) as usize
+    }
+}
+
+#[inline]
+fn frame_rows(height: i32, format: Format, chroma_full: bool, p: usize) -> i32 {
+    if format.nb_components() == 1 {
+        height
+    } else {
+        ceil_rshift(height, component_shift(format, chroma_full, p))
+    }
+}
+
 #[derive(Default)]
 pub struct Plane {
     data: Vec<u8>,
@@ -410,28 +437,12 @@ impl<'a> Frame<'a> {
         }
     }
 
-    fn shift(&self, p: usize) -> u32 {
-        if self.format.nb_components() == 1 || self.chroma_full {
-            0
-        } else {
-            chroma(p)
-        }
-    }
-
     pub fn row_len(&self, p: usize) -> usize {
-        if self.format.nb_components() == 1 {
-            self.width as usize * self.format.bpp()
-        } else {
-            ceil_rshift(self.width, self.shift(p)) as usize
-        }
+        frame_row_len(self.width, self.format, self.chroma_full, p)
     }
 
     pub fn rows(&self, p: usize) -> i32 {
-        if self.format.nb_components() == 1 {
-            self.height
-        } else {
-            ceil_rshift(self.height, self.shift(p))
-        }
+        frame_rows(self.height, self.format, self.chroma_full, p)
     }
 
     pub fn row(&self, p: usize, y: i32) -> &'a [u8] {
@@ -462,7 +473,7 @@ impl<'a> Frame<'a> {
         let mut out = *self;
 
         for p in 0..4 {
-            let shift = self.shift(p);
+            let shift = component_shift(self.format, self.chroma_full, p);
             let bpp = if self.format.nb_components() == 1 {
                 self.format.bpp()
             } else {
@@ -503,32 +514,16 @@ impl<'a> FrameMut<'a> {
         }
     }
 
-    fn shift(&self, p: usize) -> u32 {
-        if self.format.nb_components() == 1 || self.chroma_full {
-            0
-        } else {
-            chroma(p)
-        }
-    }
-
     pub fn planes_mut(&mut self) -> &mut [PlaneMut<'a>; 4] {
         &mut self.plane
     }
 
     pub fn row_len(&self, p: usize) -> usize {
-        if self.format.nb_components() == 1 {
-            self.width as usize * self.format.bpp()
-        } else {
-            ceil_rshift(self.width, self.shift(p)) as usize
-        }
+        frame_row_len(self.width, self.format, self.chroma_full, p)
     }
 
     pub fn rows(&self, p: usize) -> i32 {
-        if self.format.nb_components() == 1 {
-            self.height
-        } else {
-            ceil_rshift(self.height, self.shift(p))
-        }
+        frame_rows(self.height, self.format, self.chroma_full, p)
     }
 
     pub fn row(&mut self, p: usize, y: i32) -> &mut [u8] {
