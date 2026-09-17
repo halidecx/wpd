@@ -11,6 +11,8 @@ use wpd::dsp::yuv::{
 };
 use wpd::picture::{PlaneMut, PlaneRef};
 
+use crate::frame::plane_extent;
+
 pub type UpsampleBlockFn = unsafe extern "C" fn(
     *const u8,
     *const u8,
@@ -449,35 +451,24 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
 
     let layout = layout as usize;
     let (w, h) = (width as usize, height as usize);
-    let rows = |stride: isize, n: usize, len: usize| {
-        let stride = stride as usize;
-
-        if stride < len {
-            return None;
-        }
-        (n - 1)
-            .checked_mul(stride)?
-            .checked_add(len)
-            .filter(|&size| size <= isize::MAX as usize)
-    };
     let Some(dst_row) = bpp(layout).checked_mul(w) else {
         return row_start;
     };
-    let Some(dst_len) = rows(dst_stride, h, dst_row) else {
+    let Some(dst_len) = plane_extent(dst_stride, h, dst_row) else {
         return row_start;
     };
-    let Some(y_len) = rows(y_stride, h, w) else {
+    let Some(y_len) = plane_extent(y_stride, h, w) else {
         return row_start;
     };
     let chroma_h = h.div_ceil(2);
     let chroma_w = w.div_ceil(2);
-    let Some(uv_len) = rows(uv_stride, chroma_h, chroma_w) else {
+    let Some(uv_len) = plane_extent(uv_stride, chroma_h, chroma_w) else {
         return row_start;
     };
     let alpha_len = if a.is_null() {
         None
     } else {
-        let Some(len) = rows(a_stride, h, w) else {
+        let Some(len) = plane_extent(a_stride, h, w) else {
             return row_start;
         };
         Some(len)
@@ -544,22 +535,30 @@ mod tests {
 
     #[test]
     fn invalid_conversion_bounds_return_before_touching_pointers() {
-        for (start, end) in [(-1, 1), (0, 0), (1, 1), (0, 3)] {
+        for (layout, width, height, start, end) in [
+            (-1, 1, 1, 0, 1),
+            (LAYOUT_NB as c_int, 1, 1, 0, 1),
+            (LAYOUT_ARGB as c_int, 0, 1, 0, 1),
+            (LAYOUT_ARGB as c_int, 1, 0, 0, 1),
+            (LAYOUT_ARGB as c_int, 1, 1, -1, 1),
+            (LAYOUT_ARGB as c_int, 1, 1, 1, 1),
+            (LAYOUT_ARGB as c_int, 1, 1, 0, 2),
+        ] {
             assert_eq!(
                 unsafe {
                     wpd_yuv420_to_packed_rows(
-                        LAYOUT_ARGB as c_int,
+                        layout,
                         std::ptr::null_mut(),
-                        8,
+                        4,
                         std::ptr::null(),
-                        2,
+                        1,
                         std::ptr::null(),
                         std::ptr::null(),
                         1,
                         std::ptr::null(),
                         0,
-                        2,
-                        2,
+                        width,
+                        height,
                         start,
                         end,
                     )

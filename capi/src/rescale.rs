@@ -3,6 +3,8 @@ use std::slice;
 
 use wpd::picture::{PlaneMut, PlaneRef};
 
+use crate::frame::plane_extent;
+
 fn disjoint(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> bool {
     let (a, b) = (a as usize, b as usize);
 
@@ -33,17 +35,7 @@ pub unsafe extern "C" fn wpd_rescale_plane(
                 .checked_mul(channels)
         };
         let extent = |stride: c_int, width: c_int, height: c_int| {
-            let stride = usize::try_from(stride).ok()?;
-            let height = usize::try_from(height).ok().filter(|&n| n != 0)?;
-            let row = row(width)?;
-
-            if stride < row {
-                return None;
-            }
-            (height - 1)
-                .checked_mul(stride)?
-                .checked_add(row)
-                .filter(|&n| n <= isize::MAX as usize)
+            plane_extent(stride as isize, usize::try_from(height).ok()?, row(width)?)
         };
         let dst_extent = extent(dst_stride, dst_width, dst_height)?;
         let src_extent = extent(src_stride, src_width, src_height)?;

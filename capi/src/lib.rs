@@ -14,6 +14,7 @@ pub mod dsp;
 pub mod frame;
 pub mod options;
 pub mod rescale;
+mod status;
 
 #[cfg(not(panic = "abort"))]
 pub(crate) fn guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
