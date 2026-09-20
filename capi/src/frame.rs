@@ -118,6 +118,7 @@ pub(crate) fn frame_head() -> usize {
     mem::offset_of!(WPDFrame, data)
 }
 
+#[cfg(any(test, feature = "checkasm"))]
 pub(crate) fn plane_extent(
     stride: isize,
     rows: usize,

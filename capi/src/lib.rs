@@ -7,12 +7,17 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub mod compat;
 pub mod container;
+/* The test harnesses reach past wpd.h for these three. They are built only
+ * into the archive those harnesses link, so the library proper exports what
+ * its header declares and nothing else. */
+#[cfg(feature = "checkasm")]
 pub mod cpu;
 pub mod decoder;
 #[cfg(feature = "checkasm")]
 pub mod dsp;
 pub mod frame;
 pub mod options;
+#[cfg(feature = "checkasm")]
 pub mod rescale;
 mod status;
 
