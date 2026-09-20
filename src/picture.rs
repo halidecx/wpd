@@ -259,7 +259,15 @@ impl<'a> PlaneRef<'a> {
         self.data.is_empty()
     }
 
+    /* Indexing already stops a row that leaves the buffer. What it cannot see
+     * is one that stays inside and is still wrong: a negative row wraps to a
+     * real offset above the origin. The callers' geometry checks rule that
+     * out; this makes it loud if one of them ever stops doing so. A span may
+     * be longer than the stride, which is how a reader takes two rows at
+     * once. */
     pub fn row(&self, y: i32, from: usize, len: usize) -> &'a [u8] {
+        debug_assert!(y >= 0, "row {y} is above the plane");
+
         let at = self.origin + y as usize * self.stride + from;
 
         &self.data[at..at + len]
@@ -310,16 +318,22 @@ impl<'a> PlaneMut<'a> {
 
     #[inline(always)]
     fn at(&self, y: i32, from: usize) -> usize {
+        debug_assert!(y >= self.first, "row {y} is above the band");
+
         self.origin + (y - self.first) as usize * self.stride + from
     }
 
     pub fn row(&self, y: i32, from: usize, len: usize) -> &[u8] {
+        debug_assert!(from + len <= self.stride, "row outruns its stride");
+
         let at = self.at(y, from);
 
         &self.data[at..at + len]
     }
 
     pub fn row_mut(&mut self, y: i32, from: usize, len: usize) -> &mut [u8] {
+        debug_assert!(from + len <= self.stride, "row outruns its stride");
+
         let at = self.at(y, from);
 
         &mut self.data[at..at + len]

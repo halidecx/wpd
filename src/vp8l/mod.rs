@@ -814,7 +814,9 @@ impl Decoder {
     fn decode_alpha_8b(&mut self, buf: &[u8], dst: AlphaDst<'_>) -> Result<()> {
         let width = self.reduced_width.max(0) as usize;
         let height = self.height;
-        let total = width * height.max(0) as usize;
+        let total = width
+            .checked_mul(height.max(0) as usize)
+            .ok_or(Error::TooLarge)?;
 
         grow(&mut self.indices, total, 0u8)?;
 
