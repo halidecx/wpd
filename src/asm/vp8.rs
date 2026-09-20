@@ -10,7 +10,9 @@ pub type LfUvMbRaw =
     unsafe extern "C" fn(*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int);
 pub type LfSimpleRaw = unsafe extern "C" fn(*mut u8, isize, c_int);
 pub type LfSimpleMbRaw = unsafe extern "C" fn(*mut u8, isize, c_int, c_int);
-pub type WhtRaw = unsafe extern "C" fn(*mut [[i16; 16]; 4], *mut i16);
+/* The transform scatters one DC into each of the macroblock's sixteen blocks,
+ * so the pointer spans all of them. */
+pub type WhtRaw = unsafe extern "C" fn(*mut [[i16; 16]; 16], *mut i16);
 pub type IdctRaw = unsafe extern "C" fn(*mut u8, *mut i16, isize);
 pub type Idct4Raw = unsafe extern "C" fn(*mut u8, *mut [i16; 16], isize);
 
@@ -76,6 +78,19 @@ fn check_h(
     Window(unsafe { p.as_mut_ptr().add(o) })
 }
 
+/* A block of `rows` lines, `width` wide, with its top-left corner at `o`.
+ * Checked like the windows above: release builds wrap on overflow, and a
+ * wrapped sum would pass the comparison it was meant to fail. */
+#[inline(always)]
+fn check_block(p: &mut [u8], o: usize, s: usize, rows: usize, width: usize) -> *mut u8 {
+    let end = (rows - 1)
+        .checked_mul(s)
+        .and_then(|down| o.checked_add(down))
+        .and_then(|end| end.checked_add(width));
+    assert!(end.is_some_and(|end| p.len() >= end), "plane too small");
+    unsafe { p.as_mut_ptr().add(o) }
+}
+
 pub(crate) use super::Raw;
 
 /* The kind picks the signature alias and the argument list that goes with it.
@@ -118,7 +133,7 @@ macro_rules! raw_vp8 {
         raw!($m, $i, LfSimpleMbRaw, $sym, (*mut u8, isize, c_int, c_int));
     };
     ($m:ident, $i:ident, wht, $sym:literal) => {
-        raw!($m, $i, WhtRaw, $sym, (*mut [[i16; 16]; 4], *mut i16));
+        raw!($m, $i, WhtRaw, $sym, (*mut [[i16; 16]; 16], *mut i16));
     };
     ($m:ident, $i:ident, idct, $sym:literal) => {
         raw!($m, $i, IdctRaw, $sym, (*mut u8, *mut i16, isize));
@@ -471,7 +486,7 @@ fn simple_mb_from<T: Raw<Sig = LfSimpleRaw>, const VERT: bool>(
 }
 
 fn wht<T: Raw<Sig = WhtRaw>>(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
-    unsafe { (T::F)(block.as_mut_ptr().cast(), dc.as_mut_ptr()) }
+    unsafe { (T::F)(block, dc.as_mut_ptr()) }
 }
 
 fn idct<T: Raw<Sig = IdctRaw>>(
@@ -480,8 +495,8 @@ fn idct<T: Raw<Sig = IdctRaw>>(
     s: usize,
     block: &mut [i16; 16],
 ) {
-    assert!(p.len() >= o + 3 * s + 4, "plane too small");
-    unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
+    let dst = check_block(p, o, s, 4, 4);
+    unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
 fn idct4y<T: Raw<Sig = Idct4Raw>>(
@@ -490,8 +505,8 @@ fn idct4y<T: Raw<Sig = Idct4Raw>>(
     s: usize,
     block: &mut [[i16; 16]; 4],
 ) {
-    assert!(p.len() >= o + 3 * s + 16, "plane too small");
-    unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
+    let dst = check_block(p, o, s, 4, 16);
+    unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
 fn idct4uv<T: Raw<Sig = Idct4Raw>>(
@@ -500,8 +515,8 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
     s: usize,
     block: &mut [[i16; 16]; 4],
 ) {
-    assert!(p.len() >= o + 7 * s + 8, "plane too small");
-    unsafe { (T::F)(p.as_mut_ptr().add(o), block.as_mut_ptr(), s as isize) }
+    let dst = check_block(p, o, s, 8, 8);
+    unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
 macro_rules! composed_mb {
@@ -1008,3 +1023,36 @@ mod arch {
 }
 
 pub use arch::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_accepts_an_exact_fit() {
+        let mut p = [0u8; 2 + 3 * 8 + 4];
+        check_block(&mut p, 2, 8, 4, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "plane too small")]
+    fn block_rejects_one_byte_short() {
+        let mut p = [0u8; 2 + 3 * 8 + 3];
+        check_block(&mut p, 2, 8, 4, 4);
+    }
+
+    /* Each of these sums wraps to something small in a release build. */
+    #[test]
+    #[should_panic(expected = "plane too small")]
+    fn block_rejects_a_wrapping_stride() {
+        let mut p = [0u8; 64];
+        check_block(&mut p, 0, usize::MAX / 3 + 1, 4, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "plane too small")]
+    fn block_rejects_a_wrapping_origin() {
+        let mut p = [0u8; 64];
+        check_block(&mut p, usize::MAX - 8, 2, 4, 4);
+    }
+}
