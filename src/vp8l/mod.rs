@@ -1157,6 +1157,28 @@ impl Decoder {
             self.staged = true;
         }
 
+        let ret = self.still_rows(payload, complete);
+
+        if ret.is_err() {
+            self.still_abandon();
+        }
+        ret
+    }
+
+    /* A packed image decodes with `argb.stride` narrowed to the packed width,
+     * and only a finished image widens it again. An error in between would
+     * leave a live still whose stride no longer matches its width, which is
+     * what every reader of the picture assumes. A failed image is over, so
+     * put the picture back in order and let go of it. */
+    fn still_abandon(&mut self) {
+        self.argb.stride = self.argb.width.max(0) as usize;
+        for img in &mut self.image {
+            img.clear();
+        }
+        self.active = false;
+    }
+
+    fn still_rows(&mut self, payload: &[u8], complete: bool) -> Result<Status> {
         let status = self.decode_pixels(ROLE_ARGB, Target::Argb, payload, true)?;
 
         if status == Status::NeedMore && complete {
@@ -1619,6 +1641,40 @@ mod tests {
         assert_eq!(dec.resume.rows_done, 0);
         assert_eq!(dec.rows_out, 0);
         assert_eq!(dec.reduced_width, 0);
+    }
+
+    #[test]
+    fn an_error_mid_image_leaves_the_stride_matching_the_width() {
+        if too_big_for_miri() {
+            return;
+        }
+
+        let file = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/palette2bpp_rgb.webp"
+        ))
+        .unwrap();
+        let payload = &file[20..];
+        let mut failed = 0;
+
+        /* Damage past the headers, so the image starts and then breaks. */
+        for at in (payload.len() / 2..payload.len()).step_by(97) {
+            let mut bad = payload.to_vec();
+
+            for b in &mut bad[at..] {
+                *b = !*b;
+            }
+
+            let mut dec = Decoder::new();
+
+            dec.set_canvas(300, 200);
+            if dec.still_step(&bad, bad.len(), true).is_err() {
+                failed += 1;
+                assert!(!dec.still_active());
+            }
+            assert_eq!(dec.argb.stride, dec.argb.width.max(0) as usize);
+        }
+        assert!(failed > 0, "no damaged copy failed mid-image");
     }
 
     #[test]
