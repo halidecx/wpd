@@ -922,6 +922,38 @@ function wpd_vp8_h_loop_filter16y_mb_neon, export=1
         ret
 endfunc
 
+/* The edges sit at columns 0 and 4, so the filters reach columns -4..7 and
+ * no further. A 16-byte row would drag in four bytes of the next macroblock
+ * and store them back, which is outside what the caller checked. Lane 3 stays
+ * zero and neither filter looks at it. */
+.macro  vp8_uv_mb_row op, r, lo, hi
+        \op             {v\r\().8b},    [\lo], x21
+        \op             {v\r\().s}[2],  [\hi], x21
+.endm
+
+.macro  vp8_uv_mb_rows op
+        sub             x0,  x19, #4
+        sub             x1,  x20, #4
+        add             x2,  x19, #4
+        add             x3,  x20, #4
+        vp8_uv_mb_row   \op, 0, x0, x2
+        vp8_uv_mb_row   \op, 1, x0, x2
+        vp8_uv_mb_row   \op, 2, x0, x2
+        vp8_uv_mb_row   \op, 3, x0, x2
+        vp8_uv_mb_row   \op, 4, x0, x2
+        vp8_uv_mb_row   \op, 5, x0, x2
+        vp8_uv_mb_row   \op, 6, x0, x2
+        vp8_uv_mb_row   \op, 7, x0, x2
+        vp8_uv_mb_row   \op, 8, x1, x3
+        vp8_uv_mb_row   \op, 9, x1, x3
+        vp8_uv_mb_row   \op, 10, x1, x3
+        vp8_uv_mb_row   \op, 11, x1, x3
+        vp8_uv_mb_row   \op, 12, x1, x3
+        vp8_uv_mb_row   \op, 13, x1, x3
+        vp8_uv_mb_row   \op, 14, x1, x3
+        vp8_uv_mb_row   \op, 15, x1, x3
+.endm
+
 function wpd_vp8_h_loop_filter8uv_mb_neon, export=1
         AARCH64_SIGN_LINK_REGISTER
         stp             x29, x30, [sp, #-144]!
@@ -943,25 +975,7 @@ function wpd_vp8_h_loop_filter8uv_mb_neon, export=1
         mov             w24, w5
         mov             w25, w6
 
-        sub             x0,  x19, #4
-        sub             x1,  x20, #4
-
-        ld1             {v0.16b},  [x0], x21
-        ld1             {v1.16b},  [x0], x21
-        ld1             {v2.16b},  [x0], x21
-        ld1             {v3.16b},  [x0], x21
-        ld1             {v4.16b},  [x0], x21
-        ld1             {v5.16b},  [x0], x21
-        ld1             {v6.16b},  [x0], x21
-        ld1             {v7.16b},  [x0]
-        ld1             {v8.16b},  [x1], x21
-        ld1             {v9.16b},  [x1], x21
-        ld1             {v10.16b}, [x1], x21
-        ld1             {v11.16b}, [x1], x21
-        ld1             {v12.16b}, [x1], x21
-        ld1             {v13.16b}, [x1], x21
-        ld1             {v14.16b}, [x1], x21
-        ld1             {v15.16b}, [x1]
+        vp8_uv_mb_rows  ld1
 
         transpose_16x16B
 
@@ -999,25 +1013,7 @@ function wpd_vp8_h_loop_filter8uv_mb_neon, export=1
 
         transpose_16x16B
 
-        sub             x0,  x19, #4
-        sub             x1,  x20, #4
-
-        st1             {v0.16b},  [x0], x21
-        st1             {v1.16b},  [x0], x21
-        st1             {v2.16b},  [x0], x21
-        st1             {v3.16b},  [x0], x21
-        st1             {v4.16b},  [x0], x21
-        st1             {v5.16b},  [x0], x21
-        st1             {v6.16b},  [x0], x21
-        st1             {v7.16b},  [x0]
-        st1             {v8.16b},  [x1], x21
-        st1             {v9.16b},  [x1], x21
-        st1             {v10.16b}, [x1], x21
-        st1             {v11.16b}, [x1], x21
-        st1             {v12.16b}, [x1], x21
-        st1             {v13.16b}, [x1], x21
-        st1             {v14.16b}, [x1], x21
-        st1             {v15.16b}, [x1]
+        vp8_uv_mb_rows  st1
 
         add             sp,  sp,  #256
         ldp             d8,  d9,  [sp, #80]

@@ -44,6 +44,7 @@ impl RowSink for External {
 
         if plane.data.is_null()
             || plane.stride == 0
+            || plane.size > isize::MAX as usize
             || !external_plane_fits(plane.size, plane.stride, row_len, rows)
         {
             return false;
@@ -77,10 +78,13 @@ impl RowSink for External {
 
     fn row(&mut self, p: usize, y: i32, len: usize) -> &mut [u8] {
         let plane = &self.0[p];
+        // `fits` bounded this product by a size that itself fits an isize;
+        // a row it never vetted stops here instead of wrapping into a pointer.
+        let offset = (y as isize)
+            .checked_mul(plane.stride)
+            .expect("row outside the checked plane");
 
-        unsafe {
-            slice::from_raw_parts_mut(plane.data.offset(y as isize * plane.stride), len)
-        }
+        unsafe { slice::from_raw_parts_mut(plane.data.offset(offset), len) }
     }
 }
 
@@ -114,6 +118,7 @@ pub(crate) fn frame_head() -> usize {
     mem::offset_of!(WPDFrame, data)
 }
 
+#[cfg(any(test, feature = "checkasm"))]
 pub(crate) fn plane_extent(
     stride: isize,
     rows: usize,

@@ -77,7 +77,9 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         compression,
         filter,
     } = a;
-    let extent = width * height.max(0) as usize;
+    let extent = width
+        .checked_mul(height.max(0) as usize)
+        .ok_or(Error::TooLarge)?;
 
     if compression == ALPHA_COMPRESSION_NONE {
         let raw = input.chunk(offset, size);

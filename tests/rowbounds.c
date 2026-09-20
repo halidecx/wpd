@@ -6,6 +6,7 @@
 
 #include "cpu.h"
 #include "rescaler.h"
+#include "vp8dsp.h"
 #include "yuvdsp.h"
 
 #include <errno.h>
@@ -614,6 +615,170 @@ done:
     return failed;
 }
 
+/* The loop filters run on windows that src/asm/vp8.rs checks before it hands
+ * the kernel a pointer, and the check is the only thing standing between a
+ * plane and the assembly. A kernel that loads a wider row than it filters
+ * reads and stores back bytes nobody checked, and since they come back
+ * unchanged no comparison can see it. So each kernel gets exactly the window
+ * its wrapper promises, once ending against a guard page and once starting
+ * against one.
+ *
+ * This runs in a child because a host that never delivers the fault (see
+ * above) leaves the overrunning instruction spinning. Any end other than a
+ * clean exit, the alarm included, is an overrun. */
+enum { LF_Y, LF_UV, LF_Y_MB, LF_UV_MB, LF_SIMPLE, LF_SIMPLE_MB };
+
+typedef struct {
+    const char *name;
+    size_t      slot;
+    int         sig;
+    int         horiz;
+    int         before; /* rows above, or columns to the left */
+    int         after; /* rows below, or columns from the edge rightwards */
+    int         n; /* length of the edge */
+} LfWindow;
+
+#define LF(field, sig, horiz, before, after, n) \
+    {#field, offsetof(VP8DSPContext, field), sig, horiz, before, after, n}
+
+static const LfWindow lf_windows[] = {
+    LF(vp8_v_loop_filter16y, LF_Y, 0, 4, 3, 16),
+    LF(vp8_h_loop_filter16y, LF_Y, 1, 4, 4, 16),
+    LF(vp8_v_loop_filter8uv, LF_UV, 0, 4, 3, 8),
+    LF(vp8_h_loop_filter8uv, LF_UV, 1, 4, 4, 8),
+    LF(vp8_v_loop_filter16y_inner, LF_Y, 0, 4, 3, 16),
+    LF(vp8_h_loop_filter16y_inner, LF_Y, 1, 4, 4, 16),
+    LF(vp8_v_loop_filter8uv_inner, LF_UV, 0, 4, 3, 8),
+    LF(vp8_h_loop_filter8uv_inner, LF_UV, 1, 4, 4, 8),
+    LF(vp8_v_loop_filter16y_mb, LF_Y_MB, 0, 4, 15, 16),
+    LF(vp8_h_loop_filter16y_mb, LF_Y_MB, 1, 4, 16, 16),
+    LF(vp8_v_loop_filter8uv_mb, LF_UV_MB, 0, 4, 7, 8),
+    LF(vp8_h_loop_filter8uv_mb, LF_UV_MB, 1, 4, 8, 8),
+    LF(vp8_v_loop_filter_simple, LF_SIMPLE, 0, 2, 1, 16),
+    LF(vp8_h_loop_filter_simple, LF_SIMPLE, 1, 2, 2, 16),
+    LF(vp8_v_loop_filter_simple_mb, LF_SIMPLE_MB, 0, 2, 13, 16),
+    LF(vp8_h_loop_filter_simple_mb, LF_SIMPLE_MB, 1, 2, 14, 16),
+};
+
+#define LF_STRIDE 32
+
+/* Returns the edge pointer of a window that has a guard page directly after
+ * its last byte, or directly before its first one. */
+static uint8_t *lf_window(const LfWindow *w, int at_front, uint8_t **map,
+                          size_t *map_size) {
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    const size_t lead = w->horiz ? (size_t)w->before
+                                 : (size_t)w->before * LF_STRIDE;
+    const size_t size = lead +
+        (w->horiz ? (size_t)(w->n - 1) * LF_STRIDE + (size_t)w->after
+                  : (size_t)w->after * LF_STRIDE + (size_t)w->n);
+    const size_t body = (size + page - 1) / page * page;
+    uint8_t     *start;
+
+    *map_size = body + 2 * page;
+    *map      = mmap(NULL,
+                     *map_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1,
+                     0);
+    if (*map == MAP_FAILED)
+        return NULL;
+    memset(*map + page, 0x5a, body);
+    if (mprotect(*map, page, PROT_NONE) < 0 ||
+        mprotect(*map + page + body, page, PROT_NONE) < 0) {
+        munmap(*map, *map_size);
+        return NULL;
+    }
+    start = at_front ? *map + page : *map + page + body - size;
+    return start + lead;
+}
+
+static void lf_call(const VP8DSPContext *d, const LfWindow *w, uint8_t *u,
+                    uint8_t *v) {
+    const void *slot = (const char *)d + w->slot;
+
+    switch (w->sig) {
+    case LF_Y:
+        (*(void (*const *)(uint8_t *, ptrdiff_t, int, int, int))slot)(
+            u, LF_STRIDE, 40, 20, 2);
+        break;
+    case LF_UV:
+        (*(void (*const *)(
+            uint8_t *, uint8_t *, ptrdiff_t, int, int, int))slot)(
+            u, v, LF_STRIDE, 40, 20, 2);
+        break;
+    case LF_Y_MB:
+        (*(void (*const *)(uint8_t *, ptrdiff_t, int, int, int, int))slot)(
+            u, LF_STRIDE, 40, 36, 20, 2);
+        break;
+    case LF_UV_MB:
+        (*(void (*const *)(
+            uint8_t *, uint8_t *, ptrdiff_t, int, int, int, int))slot)(
+            u, v, LF_STRIDE, 40, 36, 20, 2);
+        break;
+    case LF_SIMPLE:
+        (*(void (*const *)(uint8_t *, ptrdiff_t, int))slot)(u, LF_STRIDE, 40);
+        break;
+    default:
+        (*(void (*const *)(uint8_t *, ptrdiff_t, int, int))slot)(
+            u, LF_STRIDE, 40, 36);
+        break;
+    }
+}
+
+static int probe_loopfilter(const VP8DSPContext *d, const LfWindow *w,
+                            int at_front) {
+    uint8_t *maps[2]  = {NULL, NULL};
+    size_t   sizes[2] = {0, 0};
+    uint8_t *u        = lf_window(w, at_front, &maps[0], &sizes[0]);
+    uint8_t *v        = lf_window(w, at_front, &maps[1], &sizes[1]);
+    int      status = 0, failed = 0;
+    pid_t    pid;
+
+    if (!u || !v) {
+        fprintf(stderr, "mmap failed\n");
+        return 1;
+    }
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "fork failed\n");
+        return 1;
+    }
+    if (pid == 0) {
+        signal(SIGSEGV, SIG_DFL);
+        signal(SIGBUS, SIG_DFL);
+        alarm(5);
+        lf_call(d, w, u, v);
+        _exit(0);
+    }
+    while (waitpid(pid, &status, 0) < 0)
+        if (errno != EINTR) {
+            status = -1;
+            break;
+        }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("FAIL %s: stepped %s its checked window\n",
+               w->name,
+               at_front ? "in front of" : "past the end of");
+        failed = 1;
+    }
+    for (size_t i = 0; i < 2; i++) munmap(maps[i], sizes[i]);
+    return failed;
+}
+
+static int check_loopfilter(void) {
+    VP8DSPContext d;
+    int           failed = 0;
+
+    ff_vp8dsp_init(&d);
+    for (size_t i = 0; i < sizeof(lf_windows) / sizeof(*lf_windows); i++)
+        for (int at_front = 0; at_front < 2; at_front++)
+            failed |= probe_loopfilter(&d, &lf_windows[i], at_front);
+    return failed;
+}
+
 #define ROW(fn, dst, src) {#fn, KIND_ROW, dst, src, 0, dsp->fn}
 #define INPLACE(fn, dst) {#fn, KIND_INPLACE, dst, 0, 0, dsp->fn}
 #define PREMUL(pos, first)   \
@@ -681,13 +846,17 @@ int main(void) {
             "rowbounds: SKIP guard pages: this host does not deliver "
             "synchronous fault signals\n");
 
-    for (size_t i = 0; guards && i < sizeof(levels) / sizeof(*levels); i++) {
+    for (size_t i = 0; i < sizeof(levels) / sizeof(*levels); i++) {
         WPDYUVDSP     dsp;
         WPDRESCALEDSP rdsp;
 
         if (levels[i] & ~have)
             continue;
         wpd_set_cpu_flags_mask(levels[i] ? levels[i] | (levels[i] - 1) : 0);
+        /* These fork, so they work whether or not faults are delivered. */
+        failed |= check_loopfilter();
+        if (!guards)
+            continue;
         wpd_yuv_dsp_init(&dsp);
         failed |= check(&dsp);
         wpd_rescale_dsp_init(&rdsp);
@@ -698,6 +867,7 @@ int main(void) {
     printf("rowbounds: %s\n",
            failed       ? "FAILED"
                : guards ? "all rows stayed in bounds"
-                        : "table bindings checked, rows unprobed");
+                        : "loop filters and table bindings checked, rows "
+                          "unprobed");
     return failed;
 }

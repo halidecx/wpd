@@ -326,7 +326,9 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
         }
     }
 
-    let total = width * pic.height.max(0) as usize;
+    let total = width
+        .checked_mul(pic.height.max(0) as usize)
+        .ok_or(Error::TooLarge)?;
     let pixels = &mut pic.data[..total];
     let multi_group = groups.len() > 1;
     let map = GroupMap::new(entropy, groups);

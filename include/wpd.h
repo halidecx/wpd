@@ -119,6 +119,12 @@ typedef enum WPDBlend {
     WPD_BLEND_NONE  = 1,
 } WPDBlend;
 
+/**
+ * A decoded frame. Initialise one with WPD_FRAME_INIT before its first use and
+ * do not modify it afterwards: every call that fills a frame first releases
+ * what it held through private_data, which must therefore be NULL or a value
+ * this library put there. Anything else is undefined behaviour.
+ */
 typedef struct WPDFrame {
     size_t         struct_size; ///< Set to sizeof(WPDFrame).
     const uint8_t *data[4];
@@ -128,7 +134,7 @@ typedef struct WPDFrame {
     WPDPixelFormat format;
     int            duration; ///< Display duration in milliseconds.
     int64_t        timestamp; ///< Presentation timestamp in milliseconds.
-    void          *private_data;
+    void          *private_data; ///< Library-owned; NULL when nothing is held.
     int            pos_x, pos_y; ///< Sub-frame position in canvas coordinates.
     int            dispose; ///< WPDDispose.
     int            blend; ///< WPDBlend.
@@ -281,6 +287,11 @@ typedef enum WPDAnimationMode {
 WPD_API WPDStatus wpd_decoder_set_animation_mode(WPDDecoder      *decoder,
                                                  WPDAnimationMode mode);
 
+/**
+ * size is the number of bytes reachable from the first row, in the direction
+ * stride points. It must describe real storage: it may not exceed PTRDIFF_MAX,
+ * and the decoder trusts it as the bound on everything it writes.
+ */
 typedef struct WPDOutputPlane {
     uint8_t  *data;
     size_t    size;
@@ -440,6 +451,10 @@ WPD_API int wpd_decoder_next_frame(WPDDecoder *decoder, WPDFrame *frame);
  *
  * rows_valid is zero for animations and for output requiring crop, scale, or
  * flip. This does not consume the frame.
+ *
+ * Unlike wpd_decoder_next_frame(), which leaves frame alone unless it returns
+ * one, this releases and clears whatever frame held before it tries, so frame
+ * is empty after a failure or when no rows are ready.
  */
 WPD_API WPDStatus wpd_decoder_partial_frame(WPDDecoder *decoder,
                                             WPDFrame *frame, int *rows_valid);
@@ -494,6 +509,10 @@ typedef enum WPDLogLevel {
 
 /**
  * Diagnostic callback. message is valid for the duration of the call.
+ *
+ * A decoder running with n_threads other than 1 may call this from its worker
+ * threads, and concurrently, so the callback and whatever opaque points to
+ * must be thread-safe. It must not call back into the decoder that invoked it.
  */
 typedef void (*WPDLogCallback)(void *opaque, WPDLogLevel level,
                                const char *message);

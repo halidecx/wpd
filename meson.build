@@ -459,10 +459,11 @@ if have_libwebp
     'test_parity',
     files('tests/parity.c'),
     dependencies: [
-      wpd_dep,
+      wpd_checkasm_dep,
       libwebp_dec_dep,
       cc.find_library('m', required: false),
     ],
+    c_args: ['-DWPD_STATIC'],
     install: false,
   )
   message('parity: enabled, against libwebp from ' + libwebp_origin)

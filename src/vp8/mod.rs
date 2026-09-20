@@ -1769,7 +1769,14 @@ mod tests {
                 dec.extend(SOLID, SOLID.len());
                 assert_eq!(dec.decode_rows(SOLID), Ok(Status::Done));
             }
-            assert_eq!(dec.picture.data, whole.picture.data);
+            // Plane bases depend on each allocation's alignment padding.
+            for p in 0..3 {
+                assert_eq!(
+                    dec.picture.plane(p),
+                    whole.picture.plane(p),
+                    "split {split}, plane {p}"
+                );
+            }
         }
     }
 

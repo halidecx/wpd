@@ -257,7 +257,11 @@ unsafe fn set_output_buffer(
         return Err(decoder.fail("invalid output buffer", Error::InvalidArgument));
     }
     for plane in &buffer.plane {
-        if plane.data.is_null() != (plane.stride == 0) {
+        // Rows are reached by pointer offset, which is only defined inside
+        // an allocation, and no allocation outgrows isize.
+        if plane.data.is_null() != (plane.stride == 0)
+            || plane.size > isize::MAX as usize
+        {
             return Err(decoder.fail("invalid output buffer", Error::InvalidArgument));
         }
     }
