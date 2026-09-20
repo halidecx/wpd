@@ -483,13 +483,11 @@ endfunc
 vp8_v_loop_filter8uv
 vp8_v_loop_filter8uv _inner, inner=1
 
-.macro  vp8_h_loop_filter16 name, inner=0, simple=0
+.macro  vp8_h_loop_filter16 name, inner=0
 function wpd_vp8_h_loop_filter16\name\()_neon, export=1
         vpush           {q4-q7}
         sub             r0,  r0,  #4
-    .if !\simple
         ldr             r12, [sp, #64]
-    .endif
 
         vld1.8          {d0},     [r0], r1
         vld1.8          {d2},     [r0], r1
@@ -511,11 +509,9 @@ function wpd_vp8_h_loop_filter16\name\()_neon, export=1
         transpose_8x8   q0,  q1,  q2,  q3,  q4,  q5,  q6,  q7
 
         vdup.8          q14, r2
-    .if !\simple
         vdup.8          q15, r3
-    .endif
 
-        vp8_loop_filter inner=\inner, simple=\simple
+        vp8_loop_filter inner=\inner
 
         sub             r0,  r0,  r1, lsl #4
 
@@ -545,7 +541,64 @@ endfunc
 
 vp8_h_loop_filter16
 vp8_h_loop_filter16 _inner,  inner=1
-vp8_h_loop_filter16 _simple, simple=1
+
+/* The simple filter reads two pixels either side of the edge and the caller
+ * checks exactly that, so this cannot share the eight-wide rows above. Row r
+ * lands in lane r/4 of q(2 + r%4), and the transposes turn those into one
+ * column per register. */
+function wpd_vp8_h_loop_filter16_simple_neon, export=1
+        vpush           {q4-q5}
+        sub             r0,  r0,  #2
+        add             r12, r0,  #1
+
+        vld1.32         {d4[0]},  [r0], r1
+        vld1.32         {d6[0]},  [r0], r1
+        vld1.32         {d8[0]},  [r0], r1
+        vld1.32         {d10[0]}, [r0], r1
+        vld1.32         {d4[1]},  [r0], r1
+        vld1.32         {d6[1]},  [r0], r1
+        vld1.32         {d8[1]},  [r0], r1
+        vld1.32         {d10[1]}, [r0], r1
+        vld1.32         {d5[0]},  [r0], r1
+        vld1.32         {d7[0]},  [r0], r1
+        vld1.32         {d9[0]},  [r0], r1
+        vld1.32         {d11[0]}, [r0], r1
+        vld1.32         {d5[1]},  [r0], r1
+        vld1.32         {d7[1]},  [r0], r1
+        vld1.32         {d9[1]},  [r0], r1
+        vld1.32         {d11[1]}, [r0]
+
+        vtrn.8          q2,  q3
+        vtrn.8          q4,  q5
+        vtrn.16         q2,  q4
+        vtrn.16         q3,  q5
+
+        vdup.8          q14, r2
+
+        vp8_loop_filter simple=1
+
+        vzip.8          q3,  q4
+
+        vst1.16         {d6[0]},  [r12], r1
+        vst1.16         {d6[1]},  [r12], r1
+        vst1.16         {d6[2]},  [r12], r1
+        vst1.16         {d6[3]},  [r12], r1
+        vst1.16         {d7[0]},  [r12], r1
+        vst1.16         {d7[1]},  [r12], r1
+        vst1.16         {d7[2]},  [r12], r1
+        vst1.16         {d7[3]},  [r12], r1
+        vst1.16         {d8[0]},  [r12], r1
+        vst1.16         {d8[1]},  [r12], r1
+        vst1.16         {d8[2]},  [r12], r1
+        vst1.16         {d8[3]},  [r12], r1
+        vst1.16         {d9[0]},  [r12], r1
+        vst1.16         {d9[1]},  [r12], r1
+        vst1.16         {d9[2]},  [r12], r1
+        vst1.16         {d9[3]},  [r12]
+
+        vpop            {q4-q5}
+        bx              lr
+endfunc
 
 .macro  vp8_h_loop_filter8uv name, inner=0
 function wpd_vp8_h_loop_filter8uv\name\()_neon, export=1
