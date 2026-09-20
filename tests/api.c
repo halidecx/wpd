@@ -490,16 +490,16 @@ static void test_decoder_errors(void) {
     CHECK(wpd_decoder_set_output_buffer(
               decoder,
               &(WPDOutputBuffer){.struct_size = sizeof(WPDOutputBuffer),
-                                 .plane[0]    = {.data   = file,
-                                                 .size   = (size_t)PTRDIFF_MAX + 1,
-                                                 .stride = 4}}) ==
+                                 .plane[0] = {.data   = file,
+                                              .size   = (size_t)PTRDIFF_MAX + 1,
+                                              .stride = 4}}) ==
           WPD_ERR_INVALID_ARG);
     CHECK(wpd_decoder_set_output_buffer(
               decoder,
               &(WPDOutputBuffer){
                   .struct_size = sizeof(WPDOutputBuffer),
                   .plane[0]    = {.data = file, .size = 16, .stride = 4},
-                  .plane[1]    = {.data = file, .size = SIZE_MAX, .stride = 4}}) ==
+                  .plane[1] = {.data = file, .size = SIZE_MAX, .stride = 4}}) ==
           WPD_ERR_INVALID_ARG);
 
     wpd_decoder_free(decoder);

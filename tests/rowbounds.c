@@ -634,8 +634,8 @@ typedef struct {
     int         sig;
     int         horiz;
     int         before; /* rows above, or columns to the left */
-    int         after;  /* rows below, or columns from the edge rightwards */
-    int         n;      /* length of the edge */
+    int         after; /* rows below, or columns from the edge rightwards */
+    int         n; /* length of the edge */
 } LfWindow;
 
 #define LF(field, sig, horiz, before, after, n) \
@@ -704,8 +704,9 @@ static void lf_call(const VP8DSPContext *d, const LfWindow *w, uint8_t *u,
             u, LF_STRIDE, 40, 20, 2);
         break;
     case LF_UV:
-        (*(void (*const *)(uint8_t *, uint8_t *, ptrdiff_t, int, int, int))
-             slot)(u, v, LF_STRIDE, 40, 20, 2);
+        (*(void (*const *)(
+            uint8_t *, uint8_t *, ptrdiff_t, int, int, int))slot)(
+            u, v, LF_STRIDE, 40, 20, 2);
         break;
     case LF_Y_MB:
         (*(void (*const *)(uint8_t *, ptrdiff_t, int, int, int, int))slot)(

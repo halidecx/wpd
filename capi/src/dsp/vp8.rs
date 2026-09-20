@@ -139,21 +139,11 @@ wpd::composed_mb!(simple h_loop_filter_simple_mb_c, horiz, h_loop_filter_simple_
 wpd::composed_mb!(simple v_loop_filter_simple_mb_c, vert, v_loop_filter_simple_c);
 
 unsafe extern "C" fn luma_dc_wht_c(block: *mut [[i16; 16]; 16], dc: *mut i16) {
-    unsafe {
-        k::luma_dc_wht(
-            &mut *block,
-            &mut *dc.cast::<[i16; 16]>(),
-        )
-    }
+    unsafe { k::luma_dc_wht(&mut *block, &mut *dc.cast::<[i16; 16]>()) }
 }
 
 unsafe extern "C" fn luma_dc_wht_dc_c(block: *mut [[i16; 16]; 16], dc: *mut i16) {
-    unsafe {
-        k::luma_dc_wht_dc(
-            &mut *block,
-            &mut *dc.cast::<[i16; 16]>(),
-        )
-    }
+    unsafe { k::luma_dc_wht_dc(&mut *block, &mut *dc.cast::<[i16; 16]>()) }
 }
 
 unsafe extern "C" fn idct_add_c(dst: *mut u8, block: *mut i16, stride: isize) {
