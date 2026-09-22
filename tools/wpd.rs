@@ -117,19 +117,38 @@ const USAGE_TAIL: &str = concat!(
     "    processors this process may run on. default 0\n",
     " --max-input bytes\n",
     "    refuse input larger than this, read from a file or stdin;\n",
-    "    accepts a K, M or G suffix, 0 lifts the limit. default 256M\n",
+    "    accepts a K, M or G suffix, 0 lifts the limit. default 1280M,\n",
+    "    the largest lossless still plus room for metadata\n",
     " --max-output bytes\n",
     "    stop once the decoded output written to a file or stdout\n",
     "    reaches this; md5 and /dev/null are not counted. accepts a\n",
-    "    K, M or G suffix, 0 lifts the limit. default 8G\n",
+    "    K, M or G suffix, 0 lifts the limit. default 8G, eight frames\n",
+    "    of the largest canvas\n",
 );
 
-/* The input is buffered whole before decoding, and a decoded animation may be
- * orders of magnitude larger than the file that described it; both defaults
- * keep a hostile file from exhausting memory or disk while remaining far above
- * anything a real image needs. */
-pub const DEFAULT_MAX_INPUT: u64 = 256 << 20;
-pub const DEFAULT_MAX_OUTPUT: u64 = 8 << 30;
+/* Both defaults come from measured worst cases rather than round numbers.
+ *
+ * Input: incompressible RGBA noise encodes losslessly at exactly 4.000
+ * bytes per pixel (1024^2 to 4096^2, linear), and lossy with alpha at 2.12,
+ * so the largest still the decoder accepts, 16384^2, is a 1 GiB file. The
+ * decoder's own working set at that geometry measures 1.0 to 1.7 GiB, so
+ * buffering a file that size at most doubles a cost it already pays. The
+ * 256 MiB of headroom is for metadata chunks and encoders with worse prefix
+ * codes; anything larger is an animation. The RIFF size field caps what is
+ * ever decoded at 4 GiB, so no limit above that means anything.
+ *
+ * Output: a composited frame is canvas width * height * bytes per pixel
+ * whatever the sub-frame held, 1 GiB at 16384^2 ARGB, and an ANMF chunk
+ * a few dozen bytes long produces one; a 10 KiB solid 16383^2 still
+ * legitimately decodes to 1 GiB, so a ratio to the input cannot be the
+ * limit and the budget must be absolute. It must admit every still, so it
+ * is a multiple of the largest frame: eight of them, which is also 32 s of
+ * 1080p or 8 s of 2160p at 30 fps, and about 4 s of writing at the measured
+ * 0.35 to 0.58 s per maximum frame. */
+const MAX_STILL_INPUT: u64 = 16384 * 16384 * 4;
+const MAX_FRAME_OUTPUT: u64 = 16384 * 16384 * 4;
+pub const DEFAULT_MAX_INPUT: u64 = MAX_STILL_INPUT + (256 << 20);
+pub const DEFAULT_MAX_OUTPUT: u64 = 8 * MAX_FRAME_OUTPUT;
 
 fn usage(app: &str, reason: Option<&str>) {
     if let Some(reason) = reason {
