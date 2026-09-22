@@ -46,6 +46,11 @@ pub struct Output {
     kind: Kind,
     pub muxer: Muxer,
     file: Option<Box<dyn Write>>,
+    /* Bytes written to a file or stdout so far, and the most a decode may
+     * write in total; 0 lifts the limit. A hashed or discarded decode costs
+     * nothing downstream, so only Kind::File is budgeted. */
+    written: u64,
+    limit: u64,
     md5: Md5,
     frames: i32,
     width: i32,
@@ -90,7 +95,11 @@ fn extension(filename: &str) -> Option<&str> {
 }
 
 impl Output {
-    pub fn open(muxer: Option<&str>, filename: Option<&OsStr>) -> io::Result<Self> {
+    pub fn open(
+        muxer: Option<&str>,
+        filename: Option<&OsStr>,
+        limit: u64,
+    ) -> io::Result<Self> {
         let chosen = match muxer {
             Some(m) => m.to_owned(),
             None => filename
@@ -103,6 +112,7 @@ impl Output {
         };
         let mut out = Self::null();
 
+        out.limit = limit;
         if chosen == "md5" {
             out.kind = Kind::Md5;
             if filename.is_none() {
@@ -142,6 +152,8 @@ impl Output {
             kind: Kind::Null,
             muxer: Muxer::Raw,
             file: None,
+            written: 0,
+            limit: 0,
             md5: Md5::new(),
             frames: 0,
             width: 0,
@@ -162,7 +174,17 @@ impl Output {
                 self.md5.update(data);
                 Ok(())
             }
-            Kind::File => self.file.as_mut().unwrap().write_all(data),
+            Kind::File => {
+                if self.limit != 0 && data.len() as u64 > self.limit - self.written {
+                    eprintln!(
+                        "output would exceed the {} byte limit (--max-output)",
+                        self.limit
+                    );
+                    return Err(io::Error::other("output limit exceeded"));
+                }
+                self.written += data.len() as u64;
+                self.file.as_mut().unwrap().write_all(data)
+            }
             Kind::Null => Ok(()),
         }
     }
@@ -250,22 +272,27 @@ impl Output {
         Ok(())
     }
 
+    /* Y4M wants each plane whole, so the frame is converted once per plane
+     * into row-sized buffers rather than held as three frame-sized ones;
+     * the extra conversions are cheap next to the writes they feed. */
     fn write_argb_444(&mut self, frame: &Picture<'_>) -> io::Result<()> {
         let width = frame.width() as usize;
-        let pixels = width * frame.height() as usize;
-        let mut y = vec![0u8; pixels];
-        let mut u = vec![0u8; pixels];
-        let mut v = vec![0u8; pixels];
+        let mut y = vec![0u8; width];
+        let mut u = vec![0u8; width];
+        let mut v = vec![0u8; width];
+        let convert = self.yuvdsp.argb_to_yuv444;
 
-        for row in 0..frame.height() as usize {
-            let at = row * width;
-            let [y, u, v] = [&mut y, &mut u, &mut v].map(|p| &mut p[at..at + width]);
-
-            (self.yuvdsp.argb_to_yuv444)(y, u, v, frame.row(0, row as i32));
+        for plane in 0..3 {
+            for row in 0..frame.height() {
+                convert(&mut y, &mut u, &mut v, frame.row(0, row));
+                self.write(match plane {
+                    0 => &y,
+                    1 => &u,
+                    _ => &v,
+                })?;
+            }
         }
-        self.write(&y)?;
-        self.write(&u)?;
-        self.write(&v)
+        Ok(())
     }
 
     fn write_argb_alpha(&mut self, frame: &Picture<'_>) -> io::Result<()> {
@@ -419,5 +446,43 @@ mod tests {
         assert_eq!(extension("dir.ppm/out.y4m"), Some("y4m"));
         assert_eq!(extension("out"), None);
         assert_eq!(extension("a\\b.pam"), Some("pam"));
+    }
+
+    fn sink(limit: u64) -> Output {
+        let mut out = Output::null();
+
+        out.kind = Kind::File;
+        out.file = Some(Box::new(io::sink()));
+        out.limit = limit;
+        out
+    }
+
+    #[test]
+    fn a_file_sink_refuses_to_pass_its_byte_budget() {
+        let mut out = sink(10);
+
+        out.write(&[0; 4]).unwrap();
+        out.write(&[0; 6]).unwrap();
+        assert_eq!(out.written, 10);
+
+        let err = out.write(&[0; 1]).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(out.written, 10, "a refused write is not counted");
+    }
+
+    #[test]
+    fn a_zero_budget_is_unlimited_and_hashing_is_free() {
+        let mut out = sink(0);
+
+        out.write(&[0; 1 << 12]).unwrap();
+        assert_eq!(out.written, 1 << 12);
+
+        let mut out = Output::null();
+
+        out.kind = Kind::Md5;
+        out.limit = 1;
+        out.write(&[0; 64]).unwrap();
+        assert_eq!(out.written, 0);
     }
 }

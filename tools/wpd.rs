@@ -115,7 +115,21 @@ const USAGE_TAIL: &str = concat!(
     " --threads u32\n",
     "    threads a decode may use, counting this one; 0 asks for the\n",
     "    processors this process may run on. default 0\n",
+    " --max-input bytes\n",
+    "    refuse input larger than this, read from a file or stdin;\n",
+    "    accepts a K, M or G suffix, 0 lifts the limit. default 256M\n",
+    " --max-output bytes\n",
+    "    stop once the decoded output written to a file or stdout\n",
+    "    reaches this; md5 and /dev/null are not counted. accepts a\n",
+    "    K, M or G suffix, 0 lifts the limit. default 8G\n",
 );
+
+/* The input is buffered whole before decoding, and a decoded animation may be
+ * orders of magnitude larger than the file that described it; both defaults
+ * keep a hostile file from exhausting memory or disk while remaining far above
+ * anything a real image needs. */
+pub const DEFAULT_MAX_INPUT: u64 = 256 << 20;
+pub const DEFAULT_MAX_OUTPUT: u64 = 8 << 30;
 
 fn usage(app: &str, reason: Option<&str>) {
     if let Some(reason) = reason {
@@ -203,11 +217,28 @@ fn parse_md5(value: &str) -> Option<[u8; 16]> {
     Some(digest)
 }
 
+/* A byte count with an optional binary K, M or G suffix; 0 means no limit. */
+fn parse_size(value: &str) -> Option<u64> {
+    let (digits, unit) = match value.as_bytes().last()? {
+        b'k' | b'K' => (&value[..value.len() - 1], 1u64 << 10),
+        b'm' | b'M' => (&value[..value.len() - 1], 1 << 20),
+        b'g' | b'G' => (&value[..value.len() - 1], 1 << 30),
+        _ => (value, 1),
+    };
+
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok()?.checked_mul(unit)
+}
+
 #[derive(Default)]
 struct Options {
     repeat: i32,
     loops: i32,
     stream: usize,
+    max_input: u64,
+    max_output: u64,
     n_threads: i32,
     scale: Option<(i32, i32)>,
     info: bool,
@@ -240,6 +271,8 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("stream", None, true),
     ("threads", None, true),
     ("scale", None, true),
+    ("max-input", None, true),
+    ("max-output", None, true),
 ];
 
 fn by_prefix(prefix: &str) -> Option<(&'static str, bool)> {
@@ -269,6 +302,8 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
         "loops" => o.loops = parse_repeat(&value).ok_or(BAD_LOOPS)?,
         "stream" => o.stream = parse_repeat(&value).ok_or(BAD_STREAM)? as usize,
         "scale" => o.scale = Some(parse_scale(&value).ok_or(BAD_SCALE)?),
+        "max-input" => o.max_input = parse_size(&value).ok_or(BAD_SIZE)?,
+        "max-output" => o.max_output = parse_size(&value).ok_or(BAD_SIZE)?,
         "threads" => {
             o.n_threads = value
                 .parse::<i32>()
@@ -307,6 +342,8 @@ fn parse_args(argv: &[OsString]) -> Parsed {
     let mut o = Options {
         repeat: 1,
         loops: 1,
+        max_input: DEFAULT_MAX_INPUT,
+        max_output: DEFAULT_MAX_OUTPUT,
         ..Default::default()
     };
     let mut i = 1;
@@ -416,6 +453,7 @@ const BAD_THREADS: &str = "invalid thread count; expected 0..INT_MAX";
 const BAD_SCALE: &str = "invalid scale; expected WxH, either 0 to keep the ratio";
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
+const BAD_SIZE: &str = "invalid byte count; expected digits with an optional K, M or G";
 
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
@@ -488,6 +526,8 @@ fn print_metadata(decoder: &mut Decoder<'_>) {
     }
 }
 
+/* Returns 0 at the end of the frames, -1 when the decoder fails, and -2 when
+ * the sink does; the sink has already explained itself in that case. */
 fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
     loop {
         let Ok(next) = decoder.next_frame() else {
@@ -521,7 +561,7 @@ fn drain_frames(decoder: &mut Decoder<'_>, ctx: &mut DecodeContext) -> i32 {
                 if e.raw_os_error().is_some() {
                     eprintln!("write: {}", errmsg(&e));
                 }
-                return -1;
+                return -2;
             }
         }
         ctx.frames += 1;
@@ -544,8 +584,10 @@ fn decode_stream(
         if decoder.append(part).is_err() {
             return -1;
         }
-        if drain_frames(decoder, ctx) < 0 {
-            return -1;
+        let drained = drain_frames(decoder, ctx);
+
+        if drained < 0 {
+            return drained;
         }
         if ctx.info {
             if let Ok(Some((partial, rows))) = decoder.partial_frame() {
@@ -598,15 +640,33 @@ fn new_decoder(
     Some(decoder)
 }
 
-fn read_file(name: &OsStr) -> std::io::Result<Vec<u8>> {
+/* Reads to the end of the input, or fails once it has read one byte past
+ * the limit, so an endless pipe cannot grow the buffer forever. A limit of 0
+ * reads everything. */
+fn read_limited<R: Read>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
     let mut data = Vec::new();
 
-    if name == OsStr::new("-") {
-        std::io::stdin().read_to_end(&mut data)?;
-    } else {
-        std::fs::File::open(name)?.read_to_end(&mut data)?;
+    if limit == 0 {
+        reader.take(u64::MAX).read_to_end(&mut data)?;
+        return Ok(data);
+    }
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut data)?;
+    if data.len() as u64 > limit {
+        return Err(std::io::Error::other(format!(
+            "larger than the {limit} byte input limit (--max-input)"
+        )));
     }
     Ok(data)
+}
+
+fn read_file(name: &OsStr, limit: u64) -> std::io::Result<Vec<u8>> {
+    if name == OsStr::new("-") {
+        read_limited(std::io::stdin().lock(), limit)
+    } else {
+        read_limited(std::fs::File::open(name)?, limit)
+    }
 }
 
 #[cfg(unix)]
@@ -708,7 +768,7 @@ fn run(
     output_name: Option<&OsStr>,
     expected_md5: Option<[u8; 16]>,
 ) -> ExitCode {
-    let data = match read_file(input_name) {
+    let data = match read_file(input_name, opts.max_input) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{}: {}", input_name.to_string_lossy(), errmsg(&e));
@@ -724,7 +784,7 @@ fn run(
             opts.muxer.as_deref()
         };
 
-        match Output::open(muxer, output_name) {
+        match Output::open(muxer, output_name, opts.max_output) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!(
@@ -835,8 +895,10 @@ fn run(
             print_metadata(&mut decoder);
         }
         frames = ctx.frames;
-        if ret < 0 {
+        if ret == -1 {
             eprintln!("{}: {}", input_name.to_string_lossy(), decoder.error());
+        }
+        if ret < 0 {
             return ExitCode::FAILURE;
         }
     }
@@ -861,5 +923,70 @@ fn run(
             let _ = writeln!(std::io::stderr(), "write: {}", errmsg(&e));
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_size_takes_a_binary_suffix_and_rejects_overflow() {
+        assert_eq!(parse_size("0"), Some(0));
+        assert_eq!(parse_size("4096"), Some(4096));
+        assert_eq!(parse_size("2k"), Some(2048));
+        assert_eq!(parse_size("3M"), Some(3 << 20));
+        assert_eq!(parse_size("1g"), Some(1 << 30));
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("k"), None);
+        assert_eq!(parse_size("-1"), None);
+        assert_eq!(parse_size("1.5M"), None);
+        assert_eq!(parse_size("1T"), None);
+        assert_eq!(parse_size("99999999999999999999"), None);
+        assert_eq!(parse_size("17179869184G"), None);
+    }
+
+    #[test]
+    fn the_options_default_to_bounded_input_and_output() {
+        let Parsed::Ok(o) = parse_args(&[OsString::from("wpd")]) else {
+            panic!("plain argv must parse");
+        };
+
+        assert_eq!(o.max_input, DEFAULT_MAX_INPUT);
+        assert_eq!(o.max_output, DEFAULT_MAX_OUTPUT);
+
+        let argv: Vec<OsString> = ["wpd", "--max-input=1M", "--max-output", "0"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let Parsed::Ok(o) = parse_args(&argv) else {
+            panic!("size options must parse");
+        };
+
+        assert_eq!(o.max_input, 1 << 20);
+        assert_eq!(o.max_output, 0);
+        assert!(matches!(
+            parse_args(&[OsString::from("wpd"), OsString::from("--max-input=1T")]),
+            Parsed::Bad(BAD_SIZE)
+        ));
+    }
+
+    #[test]
+    fn input_stops_one_byte_past_the_limit() {
+        let data = [7u8; 100];
+
+        assert_eq!(read_limited(&data[..], 100).unwrap(), data);
+        assert_eq!(read_limited(&data[..], 0).unwrap(), data);
+
+        let err = read_limited(&data[..], 99).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(err.to_string().contains("--max-input"));
+
+        /* An endless source is cut off after limit + 1 bytes rather than
+         * buffered until memory runs out. */
+        let err = read_limited(std::io::repeat(1), 1 << 16).unwrap_err();
+
+        assert!(err.to_string().contains("input limit"));
     }
 }
