@@ -12,13 +12,13 @@ extern "C" {
  * Version of the headers being compiled against.
  */
 #define WPD_VERSION_MAJOR 0
-#define WPD_VERSION_MINOR 1
+#define WPD_VERSION_MINOR 2
 #define WPD_VERSION_PATCH 0
 #define WPD_VERSION_INT(major, minor, patch) \
     ((major) << 16 | (minor) << 8 | (patch))
 #define WPD_VERSION_NUM \
     WPD_VERSION_INT(WPD_VERSION_MAJOR, WPD_VERSION_MINOR, WPD_VERSION_PATCH)
-#define WPD_VERSION_STR "0.1.0"
+#define WPD_VERSION_STR "0.2.0"
 
 #if defined(_WIN32) && !defined(WPD_STATIC)
 #ifdef WPD_BUILDING

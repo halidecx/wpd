@@ -134,7 +134,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "wpd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cc",
  "nasm-rs",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "wpd-capi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "wpd",
 ]
