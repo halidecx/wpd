@@ -7,7 +7,7 @@ pub mod slot;
 use crate::anim::AnimState;
 use crate::bits::rl32;
 use crate::container::{
-    Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
+    self, Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
 };
 use crate::dsp::filters::FilterDsp;
 use crate::dsp::rescale::RescaleDsp;
@@ -593,6 +593,11 @@ impl<'a> Decoder<'a> {
         }
         self.input_mode = InputMode::Append;
 
+        let data = &data[..self.riff_room(data).min(data.len())];
+
+        if data.is_empty() {
+            return Ok(());
+        }
         self.file_compact();
         if let Err(e) = self.input.append(data) {
             return Err(self.fail("cannot buffer input", e));
@@ -609,6 +614,31 @@ impl<'a> Decoder<'a> {
                 Err(self.fail("cannot read headers", e))
             }
         }
+    }
+
+    /// How many more bytes a stream can use. Nothing past the end its RIFF
+    /// header declares is ever read, so those bytes are dropped rather than
+    /// buffered, and a caller appending forever holds at most the file the
+    /// header describes. A header split across appends is read from both.
+    fn riff_room(&self, data: &[u8]) -> usize {
+        let size = self.input.size();
+        let end = self.scan.riff_end().or_else(|| {
+            if size >= 12 {
+                return None;
+            }
+
+            let mut head = [0u8; 12];
+            let more = (12 - size).min(data.len());
+
+            head[..size].copy_from_slice(&self.input.bytes()[..size]);
+            head[size..size + more].copy_from_slice(&data[..more]);
+            container::riff_end(&head[..size + more])
+        });
+
+        end.map_or(usize::MAX, |end| {
+            usize::try_from(end.max(12).saturating_sub(size as u64))
+                .unwrap_or(usize::MAX)
+        })
     }
 
     /// Replaces the stream window; all previously supplied bytes must remain unchanged.
@@ -1371,6 +1401,28 @@ mod tests {
             assert!(decoder.still_done);
             assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
         }
+    }
+
+    #[test]
+    fn appends_past_the_riff_end_are_dropped() {
+        let data = riff_lossless();
+        let mut decoder = Decoder::new();
+
+        decoder.open_stream().unwrap();
+        for byte in &data[..11] {
+            decoder.append(std::slice::from_ref(byte)).unwrap();
+        }
+
+        let mut rest = data[11..].to_vec();
+
+        rest.extend([0xa5; 1000]);
+        decoder.append(&rest).unwrap();
+        for _ in 0..16 {
+            decoder.append(&[0xa5; 4096]).unwrap();
+        }
+        assert_eq!(decoder.input.size(), data.len());
+        decoder.end_of_stream().unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
     }
 
     #[test]
