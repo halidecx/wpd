@@ -1469,6 +1469,14 @@ impl Decoder {
                 off[2] += 8;
             }
 
+            /* Overrun is sticky and fails the frame once it is done, so a
+             * whole partition that has run dry fails it here instead, before
+             * a chunk of a few bytes pays for reconstructing a frame of up to
+             * 16383x16383; libwebp stops at the first such macroblock. */
+            if !check && (self.c.overran() || self.coeff_partition[part].overran()) {
+                return Err(Error::InvalidData);
+            }
+
             if self.deblock_filter {
                 if self.filter.simple {
                     self.filter_mb_row_simple(planes[0], mb_y);
@@ -1750,6 +1758,24 @@ mod tests {
             Ok(Status::Done)
         );
         assert_eq!(dec.decode_rows(truncated), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn a_dry_partition_stops_the_frame_at_the_row_it_ran_out_in() {
+        let mut tall = SOLID[..24].to_vec();
+
+        tall[8] = 0x40; /* 16x64: four macroblock rows from a partition that
+                         * cannot fill the first */
+        let mut dec = Decoder::new();
+
+        assert_eq!(dec.decode_frame(&tall), Err(Error::InvalidData));
+
+        let last_row = &dec.picture.plane(0)[dec.picture.planes[0].at(0, 63)..][..16];
+
+        assert!(
+            last_row.iter().all(|&b| b == 0),
+            "the last macroblock row was reconstructed"
+        );
     }
 
     #[test]
