@@ -12,13 +12,13 @@ extern "C" {
  * Version of the headers being compiled against.
  */
 #define WPD_VERSION_MAJOR 0
-#define WPD_VERSION_MINOR 1
+#define WPD_VERSION_MINOR 2
 #define WPD_VERSION_PATCH 0
 #define WPD_VERSION_INT(major, minor, patch) \
     ((major) << 16 | (minor) << 8 | (patch))
 #define WPD_VERSION_NUM \
     WPD_VERSION_INT(WPD_VERSION_MAJOR, WPD_VERSION_MINOR, WPD_VERSION_PATCH)
-#define WPD_VERSION_STR "0.1.0"
+#define WPD_VERSION_STR "0.2.0"
 
 #if defined(_WIN32) && !defined(WPD_STATIC)
 #ifdef WPD_BUILDING
@@ -240,10 +240,28 @@ typedef struct WPDDecoderOptions {
      * A decoder also uses one thread until options are set.
      */
     int n_threads;
+    /**
+     * Must be zero. Takes the tail padding of the struct that ended at
+     * n_threads, for the reason reserved takes the padding after flip.
+     */
+    int reserved2;
+    /**
+     * The most pixels a canvas or a scaled output may hold; 0 sets no limit
+     * beyond the format's own 16384x16384.
+     *
+     * A frame over the limit fails with WPD_ERR_TOO_LARGE before anything its
+     * size is allocated or decoded, so a caller decoding untrusted input can
+     * bound what a few bytes of header may cost in memory and time. Under a
+     * limit a stream is not decoded until its canvas size has arrived.
+     *
+     * A caller that sets struct_size to the size of an older struct, which had
+     * no such field, gets no limit.
+     */
+    unsigned frame_size_limit;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 /**
  * Set processing options. Cropping precedes scaling.

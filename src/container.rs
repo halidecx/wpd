@@ -193,9 +193,21 @@ fn window(b: &[u8], from: usize, len: usize) -> &[u8] {
     &b[from..to]
 }
 
+/// Where a WebP RIFF file ends, read from its first 12 bytes; None when they
+/// are too few or not a WebP RIFF header.
+pub fn riff_end(head: &[u8]) -> Option<u64> {
+    (head.len() >= 12 && rl32(head, 0) == TAG_RIFF && rl32(head, 8) == TAG_WEBP)
+        .then(|| u64::from(rl32(head, 4)) + 8)
+}
+
 impl Scan {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The end the RIFF header declares, once a scan has read it.
+    pub fn riff_end(&self) -> Option<u64> {
+        (self.riff_end != 0).then_some(self.riff_end)
     }
 
     pub fn reset(&mut self) {

@@ -7,7 +7,7 @@ pub mod slot;
 use crate::anim::AnimState;
 use crate::bits::rl32;
 use crate::container::{
-    Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
+    self, Coding, Info, Raw, Scan, METADATA_NB, TAG_ALPH, TAG_ANMF, TAG_VP8, TAG_VP8L,
 };
 use crate::dsp::filters::FilterDsp;
 use crate::dsp::rescale::RescaleDsp;
@@ -593,6 +593,11 @@ impl<'a> Decoder<'a> {
         }
         self.input_mode = InputMode::Append;
 
+        let data = &data[..self.riff_room(data).min(data.len())];
+
+        if data.is_empty() {
+            return Ok(());
+        }
         self.file_compact();
         if let Err(e) = self.input.append(data) {
             return Err(self.fail("cannot buffer input", e));
@@ -609,6 +614,31 @@ impl<'a> Decoder<'a> {
                 Err(self.fail("cannot read headers", e))
             }
         }
+    }
+
+    /// How many more bytes a stream can use. Nothing past the end its RIFF
+    /// header declares is ever read, so those bytes are dropped rather than
+    /// buffered, and a caller appending forever holds at most the file the
+    /// header describes. A header split across appends is read from both.
+    fn riff_room(&self, data: &[u8]) -> usize {
+        let size = self.input.size();
+        let end = self.scan.riff_end().or_else(|| {
+            if size >= 12 {
+                return None;
+            }
+
+            let mut head = [0u8; 12];
+            let more = (12 - size).min(data.len());
+
+            head[..size].copy_from_slice(&self.input.bytes()[..size]);
+            head[size..size + more].copy_from_slice(&data[..more]);
+            container::riff_end(&head[..size + more])
+        });
+
+        end.map_or(usize::MAX, |end| {
+            usize::try_from(end.max(12).saturating_sub(size as u64))
+                .unwrap_or(usize::MAX)
+        })
     }
 
     /// Replaces the stream window; all previously supplied bytes must remain unchanged.
@@ -988,6 +1018,23 @@ impl Decoder<'_> {
                 return Ok(false); /* the headers have not arrived yet */
             }
             return Err(("no image data found", Error::Truncated));
+        }
+        /* Every picture decoded fits the canvas, a still by matching it and an
+         * animation frame by lying inside it, so the canvas is what a size
+         * limit weighs. Under a limit nothing is decoded before the canvas is
+         * known, which costs a stream at most the few bytes of a frame header. */
+        if decoder.options.frame_size_limit != 0 && !decoder.still_done {
+            let (w, h) = (decoder.canvas_width, decoder.canvas_height);
+
+            if w <= 0 || h <= 0 {
+                if !decoder.eos {
+                    return Ok(false);
+                }
+                return Err(("cannot tell the frame size", Error::InvalidData));
+            }
+            if !decoder.options.fits(w, h) {
+                return Err(("frame exceeds the size limit", Error::TooLarge));
+            }
         }
         if !decoder.still_done {
             match decoder.still_ready {
@@ -1371,6 +1418,91 @@ mod tests {
             assert!(decoder.still_done);
             assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
         }
+    }
+
+    #[test]
+    fn appends_past_the_riff_end_are_dropped() {
+        let data = riff_lossless();
+        let mut decoder = Decoder::new();
+
+        decoder.open_stream().unwrap();
+        for byte in &data[..11] {
+            decoder.append(std::slice::from_ref(byte)).unwrap();
+        }
+
+        let mut rest = data[11..].to_vec();
+
+        rest.extend([0xa5; 1000]);
+        decoder.append(&rest).unwrap();
+        for _ in 0..16 {
+            decoder.append(&[0xa5; 4096]).unwrap();
+        }
+        assert_eq!(decoder.input.size(), data.len());
+        decoder.end_of_stream().unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    fn limited(frame_size_limit: u32) -> Decoder<'static> {
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(Options {
+                frame_size_limit,
+                ..Options::default()
+            })
+            .unwrap();
+        decoder
+    }
+
+    #[test]
+    fn a_size_limit_weighs_the_canvas_before_anything_is_decoded() {
+        let data = riff_lossless();
+
+        for (limit, fits) in [(0, true), (4, true), (3, false), (1, false)] {
+            let mut decoder = limited(limit);
+
+            decoder.open(&data).unwrap();
+            match decoder.next_picture(&mut Handout::default()) {
+                Ok(done) => assert!(fits && done, "limit {limit}"),
+                Err((_, e)) => assert!(!fits && e == Error::TooLarge, "limit {limit}"),
+            }
+        }
+
+        let mut animated = limited(3);
+
+        animated
+            .open(&animation(&chunk(b"VP8L", RAW_LOSSLESS), 2, 2))
+            .unwrap();
+        assert!(matches!(
+            animated.next_picture(&mut Handout::default()),
+            Err((_, Error::TooLarge))
+        ));
+
+        let mut scaled = limited(4);
+
+        scaled
+            .set_core_options(Options {
+                scale: Some((4, 4)),
+                frame_size_limit: 15,
+                ..Options::default()
+            })
+            .unwrap();
+        scaled.open(&data).unwrap();
+        assert!(scaled.next_picture(&mut Handout::default()).is_err());
+    }
+
+    #[test]
+    fn a_limited_stream_decodes_once_its_canvas_arrives() {
+        let data = riff_lossless();
+        let mut decoder = limited(4);
+
+        decoder.open_stream().unwrap();
+        decoder.append(&data[..21]).unwrap();
+        assert_eq!((decoder.canvas_width, decoder.canvas_height), (0, 0));
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        decoder.append(&data[21..]).unwrap();
+        decoder.end_of_stream().unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
     }
 
     #[test]

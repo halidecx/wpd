@@ -1759,6 +1759,34 @@ static void test_transforms(const uint8_t *data, size_t size,
           (int)(((int64_t)reference->width * 48 + reference->height - 1) /
                 reference->height));
     wpd_frame_free(&frame);
+
+    /* A size limit admits a canvas of exactly its size and refuses one pixel
+       more, and a caller built before it existed, whose struct ends where the
+       padding after n_threads did, gets no limit whatever that padding and
+       the bytes past it hold. */
+    const unsigned pixels = (unsigned)reference->width *
+        (unsigned)reference->height;
+
+    options                  = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    options.frame_size_limit = pixels;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    wpd_frame_free(&frame);
+    options.frame_size_limit = pixels - 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_TOO_LARGE);
+    wpd_frame_free(&frame);
+
+    options = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    memset(&options.reserved2,
+           0xFF,
+           sizeof(options) - offsetof(WPDDecoderOptions, reserved2));
+    options.frame_size_limit = 1;
+    options.struct_size      = (offsetof(WPDDecoderOptions, reserved2) +
+                                _Alignof(WPDDecoderOptions) - 1) &
+        ~(_Alignof(WPDDecoderOptions) - 1);
+    CHECK(options.struct_size < sizeof(options));
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    wpd_frame_free(&frame);
 }
 
 /* libwebp premultiplies rgbA4444 in the packed 4-bit domain, after the
