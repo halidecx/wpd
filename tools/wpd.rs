@@ -661,18 +661,21 @@ fn new_decoder(
 
 /* Reads to the end of the input, or fails once it has read one byte past
  * the limit, so an endless pipe cannot grow the buffer forever. A limit of 0
- * reads everything. */
-fn read_limited<R: Read>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
+ * reads everything. `hint` is the length the input claims, a regular file's
+ * size, reserved up front so the buffer is not grown and copied by doubling;
+ * it is clamped to the limit, since the file may be lying or growing. */
+fn read_limited<R: Read>(reader: R, limit: u64, hint: u64) -> std::io::Result<Vec<u8>> {
+    let cap = if limit == 0 {
+        u64::MAX
+    } else {
+        limit.saturating_add(1)
+    };
     let mut data = Vec::new();
 
-    if limit == 0 {
-        reader.take(u64::MAX).read_to_end(&mut data)?;
-        return Ok(data);
-    }
-    reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut data)?;
-    if data.len() as u64 > limit {
+    data.try_reserve_exact(usize::try_from(hint.min(cap)).unwrap_or(usize::MAX))
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::OutOfMemory))?;
+    reader.take(cap).read_to_end(&mut data)?;
+    if limit != 0 && data.len() as u64 > limit {
         return Err(std::io::Error::other(format!(
             "larger than the {limit} byte input limit (--max-input)"
         )));
@@ -682,10 +685,13 @@ fn read_limited<R: Read>(reader: R, limit: u64) -> std::io::Result<Vec<u8>> {
 
 fn read_file(name: &OsStr, limit: u64) -> std::io::Result<Vec<u8>> {
     if name == OsStr::new("-") {
-        read_limited(std::io::stdin().lock(), limit)
-    } else {
-        read_limited(std::fs::File::open(name)?, limit)
+        return read_limited(std::io::stdin().lock(), limit, 0);
     }
+
+    let file = std::fs::File::open(name)?;
+    let hint = file.metadata().map_or(0, |m| m.len());
+
+    read_limited(file, limit, hint)
 }
 
 #[cfg(unix)]
@@ -994,17 +1000,17 @@ mod tests {
     fn input_stops_one_byte_past_the_limit() {
         let data = [7u8; 100];
 
-        assert_eq!(read_limited(&data[..], 100).unwrap(), data);
-        assert_eq!(read_limited(&data[..], 0).unwrap(), data);
+        assert_eq!(read_limited(&data[..], 100, 0).unwrap(), data);
+        assert_eq!(read_limited(&data[..], 0, 0).unwrap(), data);
 
-        let err = read_limited(&data[..], 99).unwrap_err();
+        let err = read_limited(&data[..], 99, 100).unwrap_err();
 
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
         assert!(err.to_string().contains("--max-input"));
 
         /* An endless source is cut off after limit + 1 bytes rather than
          * buffered until memory runs out. */
-        let err = read_limited(std::io::repeat(1), 1 << 16).unwrap_err();
+        let err = read_limited(std::io::repeat(1), 1 << 16, u64::MAX).unwrap_err();
 
         assert!(err.to_string().contains("input limit"));
     }
