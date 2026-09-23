@@ -63,7 +63,13 @@ pub fn scaled_size(
 ) -> Result<(i32, i32)> {
     let (w, h) = options.scale.unwrap_or((0, 0));
 
-    image::scaled_size(w, h, src_width, src_height).map_err(|_| Error::TooLarge)
+    let (w, h) =
+        image::scaled_size(w, h, src_width, src_height).map_err(|_| Error::TooLarge)?;
+
+    if !options.fits(w, h) {
+        return Err(Error::TooLarge);
+    }
+    Ok((w, h))
 }
 
 pub fn crop_image<'a>(options: &Options, src: Frame<'a>) -> Result<Frame<'a>> {

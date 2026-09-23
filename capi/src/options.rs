@@ -1,4 +1,4 @@
-use std::ffi::c_int;
+use std::ffi::{c_int, c_uint};
 use std::mem;
 
 use wpd::options::Options;
@@ -21,6 +21,9 @@ pub struct WPDDecoderOptions {
     /// begins past the size a v1 caller can present. See `V1_SIZE`.
     pub reserved: c_int,
     pub n_threads: c_int,
+    /// Takes the v2 struct's tail padding, for the reason `reserved` took v1's.
+    pub reserved2: c_int,
+    pub frame_size_limit: c_uint,
 }
 
 /// What `sizeof` gave the v1 struct: it ended at `flip`, and padded out to the
@@ -33,6 +36,12 @@ const V1_SIZE: usize =
 /// version gate below has to sit past that.
 const _: () = assert!(V1_SIZE < WPDDecoderOptions::v2());
 
+/// What `sizeof` gave the v2 struct, which ended at `n_threads`.
+const V2_SIZE: usize =
+    WPDDecoderOptions::v2().next_multiple_of(mem::align_of::<WPDDecoderOptions>());
+
+const _: () = assert!(V2_SIZE < WPDDecoderOptions::v3());
+
 impl WPDDecoderOptions {
     pub(crate) const fn v1() -> usize {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
@@ -40,6 +49,10 @@ impl WPDDecoderOptions {
 
     pub(crate) const fn v2() -> usize {
         mem::offset_of!(WPDDecoderOptions, n_threads) + mem::size_of::<c_int>()
+    }
+
+    pub(crate) const fn v3() -> usize {
+        mem::offset_of!(WPDDecoderOptions, frame_size_limit) + mem::size_of::<c_uint>()
     }
 
     /// Legacy callers retain serial decoding and serial log callbacks.
@@ -61,6 +74,11 @@ impl WPDDecoderOptions {
             } else {
                 1
             },
+            frame_size_limit: if self.struct_size >= Self::v3() {
+                self.frame_size_limit
+            } else {
+                0
+            },
         }
     }
 }
@@ -78,5 +96,18 @@ mod tests {
         assert_eq!(options.to_core().n_threads, 1);
         options.struct_size = mem::size_of::<WPDDecoderOptions>();
         assert_eq!(options.to_core().n_threads, 8);
+    }
+
+    #[test]
+    fn older_options_leave_the_size_limit_off() {
+        let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
+
+        options.frame_size_limit = 64;
+        for size in [V1_SIZE, V2_SIZE] {
+            options.struct_size = size;
+            assert_eq!(options.to_core().frame_size_limit, 0);
+        }
+        options.struct_size = mem::size_of::<WPDDecoderOptions>();
+        assert_eq!(options.to_core().frame_size_limit, 64);
     }
 }

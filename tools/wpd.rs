@@ -112,6 +112,10 @@ const USAGE_TAIL: &str = concat!(
     " --scale WxH\n",
     "    scale the output; either dimension may be 0 to keep the\n",
     "    aspect ratio of the other\n",
+    " --frame-size-limit pixels\n",
+    "    refuse a canvas or scaled output of more pixels than this,\n",
+    "    given as a count or as WxH, before decoding it; 0 sets no\n",
+    "    limit beyond 16384x16384. default 0\n",
     " --threads u32\n",
     "    threads a decode may use, counting this one; 0 asks for the\n",
     "    processors this process may run on. default 0\n",
@@ -220,6 +224,20 @@ fn parse_scale(value: &str) -> Option<(i32, i32)> {
     (w >= 0 && h >= 0 && (w != 0 || h != 0)).then_some((w, h))
 }
 
+/* A pixel count, or WxH for their product; 0 means no limit. */
+fn parse_pixels(value: &str) -> Option<u32> {
+    let digits = |v: &str| {
+        (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u32>().ok())
+            .flatten()
+    };
+
+    match value.split_once(['x', 'X']) {
+        Some((w, h)) => digits(w)?.checked_mul(digits(h)?),
+        None => digits(value),
+    }
+}
+
 fn parse_md5(value: &str) -> Option<[u8; 16]> {
     if value.len() != 32 {
         return None;
@@ -260,6 +278,7 @@ struct Options {
     max_output: u64,
     n_threads: i32,
     scale: Option<(i32, i32)>,
+    frame_size_limit: u32,
     info: bool,
     subframe: bool,
     muxer: Option<String>,
@@ -290,6 +309,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("stream", None, true),
     ("threads", None, true),
     ("scale", None, true),
+    ("frame-size-limit", None, true),
     ("max-input", None, true),
     ("max-output", None, true),
 ];
@@ -321,6 +341,9 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
         "loops" => o.loops = parse_repeat(&value).ok_or(BAD_LOOPS)?,
         "stream" => o.stream = parse_repeat(&value).ok_or(BAD_STREAM)? as usize,
         "scale" => o.scale = Some(parse_scale(&value).ok_or(BAD_SCALE)?),
+        "frame-size-limit" => {
+            o.frame_size_limit = parse_pixels(&value).ok_or(BAD_PIXELS)?;
+        }
         "max-input" => o.max_input = parse_size(&value).ok_or(BAD_SIZE)?,
         "max-output" => o.max_output = parse_size(&value).ok_or(BAD_SIZE)?,
         "threads" => {
@@ -470,6 +493,7 @@ const BAD_LOOPS: &str = "invalid loop count; expected 1..INT_MAX";
 const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
 const BAD_THREADS: &str = "invalid thread count; expected 0..INT_MAX";
 const BAD_SCALE: &str = "invalid scale; expected WxH, either 0 to keep the ratio";
+const BAD_PIXELS: &str = "invalid frame size limit; expected a pixel count or WxH";
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 const BAD_SIZE: &str = "invalid byte count; expected digits with an optional K, M or G";
@@ -632,6 +656,7 @@ fn new_decoder(
     subframe: bool,
     n_threads: i32,
     scale: Option<(i32, i32)>,
+    frame_size_limit: u32,
 ) -> Option<Decoder<'static>> {
     let mut decoder = Decoder::new();
 
@@ -639,6 +664,7 @@ fn new_decoder(
         .set_options(api::Options {
             n_threads,
             scale,
+            frame_size_limit,
             ..api::Options::default()
         })
         .is_err()
@@ -863,6 +889,7 @@ fn run(
             opts.subframe,
             opts.n_threads,
             opts.scale,
+            opts.frame_size_limit,
         ) else {
             return ExitCode::FAILURE;
         };
@@ -877,6 +904,7 @@ fn run(
                         opts.subframe,
                         opts.n_threads,
                         opts.scale,
+                        opts.frame_size_limit,
                     ) else {
                         return ExitCode::FAILURE;
                     };
@@ -969,6 +997,20 @@ mod tests {
         assert_eq!(parse_size("1T"), None);
         assert_eq!(parse_size("99999999999999999999"), None);
         assert_eq!(parse_size("17179869184G"), None);
+    }
+
+    #[test]
+    fn a_pixel_limit_is_a_count_or_a_product() {
+        assert_eq!(parse_pixels("0"), Some(0));
+        assert_eq!(parse_pixels("65536"), Some(65536));
+        assert_eq!(parse_pixels("8192x8192"), Some(8192 * 8192));
+        assert_eq!(parse_pixels("16X16"), Some(256));
+        assert_eq!(parse_pixels(""), None);
+        assert_eq!(parse_pixels("x5"), None);
+        assert_eq!(parse_pixels("-1"), None);
+        assert_eq!(parse_pixels("+5"), None);
+        assert_eq!(parse_pixels("65536x65536"), None);
+        assert_eq!(parse_pixels("4294967296"), None);
     }
 
     #[test]

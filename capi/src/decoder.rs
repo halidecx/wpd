@@ -279,7 +279,7 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
     };
 
-    // Read only the caller's allocation; a v1 pointer cannot become a v2 reference.
+    // Read only the caller's allocation; an older pointer cannot become a newer reference.
     let size = unsafe { ptr::addr_of!((*options).struct_size).read() };
     if size < WPDDecoderOptions::v1() {
         return status(decoder.fail("invalid decoder options", Error::InvalidArgument));
@@ -294,6 +294,10 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
     }
     if size >= WPDDecoderOptions::v2() {
         local.n_threads = unsafe { ptr::addr_of!((*options).n_threads).read() };
+    }
+    if size >= WPDDecoderOptions::v3() {
+        local.frame_size_limit =
+            unsafe { ptr::addr_of!((*options).frame_size_limit).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
