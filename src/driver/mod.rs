@@ -1506,6 +1506,32 @@ mod tests {
     }
 
     #[test]
+    fn a_limited_stream_weighs_the_image_and_not_only_the_vp8x_canvas() {
+        let mut image = RAW_LOSSLESS.to_vec();
+
+        image.resize(64, 0);
+
+        let mut payload = b"WEBP".to_vec();
+
+        payload.extend(chunk(b"VP8X", &[0; 10]));
+        payload.extend(chunk(b"VP8L", &image));
+
+        let mut data = b"RIFF".to_vec();
+
+        data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend(payload);
+
+        let mut decoder = limited(1);
+
+        decoder.open_stream().unwrap();
+        assert_eq!(
+            decoder.append(&data[..data.len() - 16]),
+            Err(Error::InvalidData)
+        );
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
     fn invalid_appended_headers_invalidate_the_decode_window() {
         let mut data = riff_lossless();
         data.extend(chunk(b"VP8X", &[0; 10]));

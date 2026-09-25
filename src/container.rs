@@ -251,6 +251,34 @@ impl Scan {
         }
     }
 
+    /// Takes a still's size from its image header, which a VP8X canvas
+    /// overrides. The two are compared as soon as the header is readable,
+    /// in a chunk still arriving too: a stream decodes such a chunk before
+    /// it is whole, against the size the canvas claims.
+    fn still_size(&mut self, tag: u32, p: &[u8], size: usize) -> Result<()> {
+        let (width, height) = (self.info.width, self.info.height);
+
+        self.info.width = 0;
+        self.info.height = 0;
+        self.still_header(tag, p, size);
+
+        let (image_w, image_h) = (self.info.width, self.info.height);
+
+        if self.vp8x && width != 0 && height != 0 {
+            self.info.width = width;
+            self.info.height = height;
+            /* Match libwebp: conflicting still dimensions are invalid. */
+            if image_w != 0 && image_h != 0 && (image_w != width || image_h != height) {
+                log::error_args(format_args!(
+                    "VP8X canvas {width}x{height} does not match \
+                     the image's {image_w}x{image_h}"
+                ));
+                return Err(Error::InvalidData);
+            }
+        }
+        Ok(())
+    }
+
     fn anmf_alpha(&mut self, p: &[u8]) -> bool {
         let at = self.pos + 24;
 
@@ -534,15 +562,8 @@ impl Scan {
                     && (tag == TAG_VP8 || tag == TAG_VP8L)
                 {
                     self.still_chunk_allowed()?;
-
-                    let (width, height) = (self.info.width, self.info.height);
-
                     partial_still = true;
-                    self.still_header(tag, window(buf, at + 8, avail), size as usize);
-                    if self.vp8x && width != 0 && height != 0 {
-                        self.info.width = width;
-                        self.info.height = height;
-                    }
+                    self.still_size(tag, window(buf, at + 8, avail), size as usize)?;
                 }
                 break;
             }
@@ -623,32 +644,11 @@ impl Scan {
 
                     self.info.images = self.info.images.saturating_add(1);
                     if first {
-                        let (width, height) = (self.info.width, self.info.height);
-
-                        self.info.width = 0;
-                        self.info.height = 0;
-                        self.still_header(
+                        self.still_size(
                             tag,
                             window(buf, at + 8, size as usize),
                             size as usize,
-                        );
-                        let (image_w, image_h) = (self.info.width, self.info.height);
-
-                        if self.vp8x && width != 0 && height != 0 {
-                            self.info.width = width;
-                            self.info.height = height;
-                            /* Match libwebp: conflicting still dimensions are invalid. */
-                            if image_w != 0
-                                && image_h != 0
-                                && (image_w != width || image_h != height)
-                            {
-                                log::error_args(format_args!(
-                                    "VP8X canvas {width}x{height} does not match \
-                                     the image's {image_w}x{image_h}"
-                                ));
-                                return Err(Error::InvalidData);
-                            }
-                        }
+                        )?;
                     }
                 }
                 _ => {
@@ -790,6 +790,27 @@ mod tests {
 
         payload.extend_from_slice(&chunk(b"VP8L", &vp8l_header(17, 5, false)));
         assert_eq!(get_info(&riff(&payload)), Err(Error::InvalidData));
+    }
+
+    #[test]
+    fn a_disagreeing_still_is_refused_before_its_chunk_is_whole() {
+        let mut vp8l = vp8l_header(17, 5, false);
+
+        vp8l.resize(64, 0);
+
+        let mut payload = chunk(b"VP8X", &[0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        payload.extend_from_slice(&chunk(b"VP8L", &vp8l));
+
+        let file = riff(&payload);
+        let cut = file.len() - 32;
+
+        assert_eq!(get_info(&file[..cut]), Err(Error::InvalidData));
+
+        /* Before its header is readable, the canvas is all there is. */
+        let info = get_info(&file[..file.len() - 62]).unwrap();
+
+        assert_eq!((info.width, info.height), (1, 1));
     }
 
     #[test]
