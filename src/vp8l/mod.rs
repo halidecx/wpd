@@ -1833,6 +1833,10 @@ impl Pieces<'_> {
         let mut end = start;
 
         loop {
+            /* The last piece's rows are transformed with nothing left to
+             * decode beside them, so the pieces shrink toward the end. */
+            let step = step.min(((payload.len() - end) / 4).max(PIPELINE_MIN_STEP));
+
             end = (end + step).min(payload.len());
 
             let last = end == payload.len();
