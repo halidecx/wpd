@@ -781,13 +781,15 @@ impl Coeffs {
         let mut dc_nz = 0;
         let (luma_probs, luma_start) = if mb.mode != MODE_I4 {
             let m = NNZ_MASK[24];
+            let ctx = nnz_ctx(nz, m);
             let n = decode_block_coeffs(
                 &mut c,
                 buf,
                 &mut self.block_dc.0,
                 &token[1],
                 0,
-                nnz_ctx(nz, m),
+                ctx,
+                token[1][0][ctx][0],
                 q.luma_dc_qmul,
             );
 
@@ -798,16 +800,29 @@ impl Coeffs {
             (&token[3], 0)
         };
         let block_dc = u8::from(dc_nz != 0);
+        /* All blocks of a plane start on one of three probabilities, picked
+         * by context. Packed in a register, the right one is a shift away once
+         * the previous block settles the context; indexing the table put an
+         * address computation and a load between a mispredicted end of block
+         * and the next decision. */
+        let firsts = |probs: &[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16], i: usize| {
+            u32::from_le_bytes([probs[i][0][0], probs[i][1][0], probs[i][2][0], 0])
+        };
+        let luma_first = firsts(luma_probs, luma_start);
+        let chroma_first = firsts(&token[2], 0);
 
         for (b, &m) in NNZ_MASK[..24].iter().enumerate() {
             let luma = b < 16;
+            let ctx = nnz_ctx(nz, m);
+            let first = (if luma { luma_first } else { chroma_first }) >> (8 * ctx);
             let n = decode_block_coeffs(
                 &mut c,
                 buf,
                 &mut mb.block.0[b],
                 if luma { luma_probs } else { &token[2] },
                 if luma { luma_start } else { 0 },
-                nnz_ctx(nz, m),
+                ctx,
+                first as u8,
                 if luma { q.luma_qmul } else { q.chroma_qmul },
             );
 
@@ -1867,8 +1882,10 @@ fn nnz_ctx(nz: u32, m: u32) -> usize {
     usize::from(nz & m & 0xffff != 0) + usize::from(nz & m > 0xffff)
 }
 
-/* Returns one past the last coefficient decoded, 0 for an empty block. */
+/* Returns one past the last coefficient decoded, 0 for an empty block.
+ * first is probs[i][ctx][0], which the caller finds sooner. */
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn decode_block_coeffs(
     c: &mut RangeCoder,
     buf: &[u8],
@@ -1876,11 +1893,12 @@ fn decode_block_coeffs(
     probs: &[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16],
     mut i: usize,
     ctx: usize,
+    first: u8,
     qmul: [i16; 2],
 ) -> usize {
     let mut token_prob = &probs[i][ctx];
 
-    if !c.get_prob_branchy(buf, token_prob[0]) {
+    if !c.get_prob_branchy(buf, first) {
         return 0;
     }
     loop {
