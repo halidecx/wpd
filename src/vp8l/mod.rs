@@ -24,6 +24,11 @@ const PADDING: usize = 16;
 
 const ARENA_CHUNK: usize = 4096;
 
+/// Pixels a group has to cover, on average, before it gets the table
+/// `huffman::build_packed` makes. A table takes about as long to build as it
+/// saves over 200 literals.
+const PACKED_MIN_PIXELS: usize = 1024;
+
 const HUFF_IDX_GREEN: usize = 0;
 const HUFF_IDX_RED: usize = 1;
 const HUFF_IDX_BLUE: usize = 2;
@@ -167,6 +172,8 @@ pub struct HTreeGroup {
     pub trees: [Reader; HUFFMAN_CODES_PER_META_CODE],
     pub trivial_literal: bool,
     pub literal: [u8; 4],
+    /// Where `huffman::build_packed` put the group's table in the arena.
+    pub packed: Option<u32>,
 }
 
 #[derive(Default)]
@@ -485,12 +492,17 @@ impl Decoder {
         h: i32,
     ) -> Result<()> {
         self.picture_mut(role, target).alloc(w, h)?;
-        self.read_image_header(role, buf)?;
+        self.read_image_header(role, buf, w as usize * h as usize)?;
         self.decode_pixels(role, target, buf, false)?;
         Ok(())
     }
 
-    fn read_image_header(&mut self, role: usize, buf: &[u8]) -> Result<()> {
+    fn read_image_header(
+        &mut self,
+        role: usize,
+        buf: &[u8],
+        pixels: usize,
+    ) -> Result<()> {
         let cache_bits = if self.gb.bit(buf) != 0 {
             let bits = self.gb.bits(buf, 4);
 
@@ -614,6 +626,15 @@ impl Decoder {
                 {
                     hg.literal[slot] = hg.trees[tree].tree(&img.arena).only_symbol();
                 }
+            } else if pixels / PACKED_MIN_PIXELS >= nb_groups {
+                hg.packed = Some(huffman::build_packed(
+                    &mut img.arena,
+                    [
+                        hg.trees[HUFF_IDX_RED],
+                        hg.trees[HUFF_IDX_BLUE],
+                        hg.trees[HUFF_IDX_ALPHA],
+                    ],
+                )?);
             }
         }
         Ok(())
@@ -753,7 +774,11 @@ impl Decoder {
             }
         }
 
-        self.read_image_header(ROLE_ARGB, buf)?;
+        self.read_image_header(
+            ROLE_ARGB,
+            buf,
+            self.reduced_width as usize * self.height as usize,
+        )?;
         Ok((w, h))
     }
 

@@ -385,6 +385,48 @@ pub fn build(
     })
 }
 
+/// Bits that index the table built by `build_packed`.
+pub const PACKED_BITS: u32 = 8;
+
+/// Appends a table that decodes the red, blue and alpha codes of a literal in
+/// one lookup, for the next `PACKED_BITS` of the stream. An entry is the pixel
+/// in `[a, r, g, b]` order with the bits the three codes take in place of
+/// green, or zero where they take more than `PACKED_BITS`.
+pub fn build_packed(arena: &mut Vec<u32>, codes: [Reader; 3]) -> Result<u32> {
+    let start = arena.len();
+    let size = 1usize << PACKED_BITS;
+
+    if start + size > u32::MAX as usize {
+        return Err(Error::NoMemory);
+    }
+    arena.try_reserve(size).map_err(|_| Error::NoMemory)?;
+    arena.resize(start + size, 0);
+
+    let (tables, packed) = arena.split_at_mut(start);
+    let roots = codes.map(|c| &tables[c.start as usize..][..=c.mask as usize]);
+
+    for (i, slot) in packed.iter_mut().enumerate() {
+        let mut val = i;
+        let mut used = 0;
+        let mut symbols = [0u8; 3];
+
+        for (symbol, root) in symbols.iter_mut().zip(roots) {
+            let entry = root[val & (root.len() - 1)];
+            let bits = entry & 0xFF;
+
+            used += bits;
+            val >>= bits.min(PACKED_BITS);
+            *symbol = (entry >> 8) as u8;
+        }
+        if used <= PACKED_BITS {
+            let [r, b, a] = symbols;
+
+            *slot = u32::from_ne_bytes([a, r, used as u8, b]);
+        }
+    }
+    Ok(start as u32)
+}
+
 pub fn read_simple_code(
     br: &mut BitReader,
     buf: &[u8],
@@ -577,5 +619,45 @@ mod tests {
         assert_eq!(tree.read(&mut br), 0);
         assert_eq!(tree.read(&mut br), 1);
         assert_eq!(tree.read(&mut br), 3);
+    }
+
+    #[test]
+    fn a_packed_entry_is_the_three_codes_read_in_turn() {
+        let mut arena = Vec::new();
+        let codes: [&[u8]; 3] =
+            [&[1, 2, 3, 3], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 9], &[0, 0, 1]];
+        let readers = codes.map(|lengths| {
+            let mut plan = Plan::default();
+            let mut sorted = vec![0u16; lengths.len()];
+
+            count_lengths(&mut plan, lengths);
+            build(&mut arena, &mut plan, lengths, &mut sorted).unwrap()
+        });
+        let at = build_packed(&mut arena, readers).unwrap() as usize;
+        let trees = readers.map(|r| r.tree(&arena));
+        let mut packed = 0;
+
+        for i in 0..1usize << PACKED_BITS {
+            let buf = (i as u64 | 0xA5A5 << PACKED_BITS).to_le_bytes();
+            let mut br = BitReader::new(&buf);
+            let mut used = 0;
+            let [r, b, a] = [0, 1, 2].map(|k| {
+                let symbol = trees[k].read(&mut br) as usize;
+
+                if readers[k].mask != 0 {
+                    used += u32::from(codes[k][symbol]);
+                }
+                symbol as u8
+            });
+            let want = if used <= PACKED_BITS {
+                packed += 1;
+                u32::from_ne_bytes([a, r, used as u8, b])
+            } else {
+                0
+            };
+
+            assert_eq!(arena[at + i], want, "index {i:#x}");
+        }
+        assert!(packed > 0 && packed < 1 << PACKED_BITS);
     }
 }

@@ -1,11 +1,13 @@
 use super::bitreader::{BitReader, Fast, FAST_MARGIN, TAIL_MARGIN};
-use super::huffman::Tree;
+use super::huffman::{Tree, PACKED_BITS};
 use super::{
     HTreeGroup, Picture, Resume, HUFFMAN_CODES_PER_META_CODE, HUFF_IDX_ALPHA,
     HUFF_IDX_BLUE, HUFF_IDX_DIST, HUFF_IDX_GREEN, HUFF_IDX_RED, NUM_LENGTH_CODES,
     NUM_LITERAL_CODES, NUM_SHORT_DISTANCES,
 };
 use crate::error::{Error, Result, Status};
+
+const PACKED_MASK: usize = (1 << PACKED_BITS) - 1;
 
 pub struct Entropy<'a> {
     pub data: &'a [u32],
@@ -368,17 +370,29 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
 
                 if hg.trivial_literal {
                     px = hg.literal;
-                    px[2] = v as u8;
                 } else {
-                    let r =
-                        hg.trees[HUFF_IDX_RED].read_fast::<false>(arena, &mut f, buf);
-                    let b =
-                        hg.trees[HUFF_IDX_BLUE].read_fast::<true>(arena, &mut f, buf);
-                    let a =
-                        hg.trees[HUFF_IDX_ALPHA].read_fast::<false>(arena, &mut f, buf);
+                    px = match hg.packed {
+                        Some(at) => {
+                            let index = f.peek() as usize & PACKED_MASK;
 
-                    px = [a as u8, r as u8, v as u8, b as u8];
+                            arena[at as usize + index].to_ne_bytes()
+                        }
+                        None => [0; 4],
+                    };
+                    if px[2] != 0 {
+                        f.consume(u32::from(px[2]));
+                    } else {
+                        let r = hg.trees[HUFF_IDX_RED]
+                            .read_fast::<false>(arena, &mut f, buf);
+                        let b = hg.trees[HUFF_IDX_BLUE]
+                            .read_fast::<true>(arena, &mut f, buf);
+                        let a = hg.trees[HUFF_IDX_ALPHA]
+                            .read_fast::<false>(arena, &mut f, buf);
+
+                        px = [a as u8, r as u8, 0, b as u8];
+                    }
                 }
+                px[2] = v as u8;
                 pixels[pos] = u32::from_ne_bytes(px);
                 pos += 1;
                 x += 1;
