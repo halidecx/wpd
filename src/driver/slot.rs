@@ -585,6 +585,7 @@ impl Ahead {
         };
         let finished = pool.collect(j);
 
+        finished.logs.replay();
         self.slots[k] = finished.slot;
         self.inputs[k] = finished.input;
         self.entries[k].pending = false;
@@ -701,6 +702,11 @@ struct Finished {
     slot: FrameSlot,
     input: Input<'static>,
     out: std::thread::Result<Result<Source>>,
+    /// What the decode logged, passed on when the walk collects the frame:
+    /// by then the call that started the decode may have returned, and the
+    /// caller may have changed its log callback or freed what it points to.
+    /// A frame dropped uncollected takes its messages with it.
+    logs: crate::log::Held,
 }
 
 impl Shared {
@@ -742,15 +748,18 @@ impl Shared {
         };
         /* The copy starts where the ANMF payload did. A panic is carried
          * back to be raised on the thread that collects the frame. */
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            slot.decode_anmf_image(&env, 0, size)
-        }));
+        let (out, logs) = crate::log::hold(|| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                slot.decode_anmf_image(&env, 0, size)
+            }))
+        });
 
         Finished {
             index,
             slot,
             input,
             out,
+            logs,
         }
     }
 
@@ -938,6 +947,7 @@ impl Pool {
                 slot: job.slot,
                 input: job.input,
                 out: Ok(Err(Error::InvalidData)),
+                logs: crate::log::Held::default(),
             })
             .collect();
 

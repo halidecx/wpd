@@ -1863,6 +1863,81 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "threads", not(miri)))]
+    fn frames_decoded_ahead_log_from_the_call_that_reaches_them() {
+        const LATE: &str = "ALPHA chunk after the image it belongs to";
+        static LOGGED: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+            std::sync::Mutex::new(Vec::new());
+
+        fn record(_: crate::log::Level, message: &str) {
+            if message == LATE {
+                LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(std::thread::current().id());
+            }
+        }
+
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        /* Every frame after the first gets an ALPH chunk after its image,
+         * which fails it with LATE. */
+        let mut damaged = data[..12].to_vec();
+        let mut at = 12;
+        let mut frames = 0;
+
+        while at + 8 <= data.len() {
+            let size = crate::bits::rl32(&data[at + 4..]) as usize;
+            let chunk = &data[at..at + 8 + size + (size & 1)];
+
+            at += chunk.len();
+            if &chunk[..4] == b"ANMF" && {
+                frames += 1;
+                frames > 1
+            } {
+                damaged.extend_from_slice(b"ANMF");
+                damaged.extend_from_slice(&(chunk.len() as u32 + 2).to_le_bytes());
+                damaged.extend_from_slice(&chunk[8..]);
+                damaged.extend_from_slice(b"ALPH\x02\0\0\0\0\0");
+            } else {
+                damaged.extend_from_slice(chunk);
+            }
+        }
+        let riff = damaged.len() as u32 - 8;
+
+        damaged[4..8].copy_from_slice(&riff.to_le_bytes());
+        crate::log::set_sink(record);
+
+        /* The frames after the second are decoded ahead and fail too, but the
+         * walk never reaches them, so a serial decode says nothing of them. */
+        for n_threads in [1, 4] {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&damaged).unwrap();
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            assert!(decoder.next_picture(&mut Handout::default()).is_err());
+            drop(decoder);
+
+            let logged = std::mem::take(
+                &mut *LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+
+            assert_eq!(logged, [std::thread::current().id()], "{n_threads}");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
     fn a_run_longer_than_its_slots_composites_as_a_serial_decode_does() {
         let data = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),
