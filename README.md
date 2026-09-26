@@ -4,13 +4,13 @@ A safe, fast Rust and assembly WebP decoder with a C ABI.
 
 | Image               | [image-webp](https://crates.io/crates/image-webp) (0.2.4) | libwebp (523e304) | wpd (latest)        |
 | ------------------- | --------------------------------------------------------- | ----------------- | ------------------- |
-| lossy.webp          | 401.7ms (1.00x)                                           | 156.1ms (2.57x)   | **137.8ms (2.92x)** |
-| simplelf-lossy.webp | 310.6ms (1.00x)                                           | 152.2ms (2.04x)   | **130.6ms (2.38x)** |
-| anim_yuv.webp       | 260.5ms (1.00x)                                           | 131.8ms (1.98x)   | **119.8ms (2.17x)** |
-| lossless.webp       | 226.1ms (1.00x)                                           | 177.3ms (1.28x)   | **140.5ms (1.61x)** |
-| anim_rgb.webp       | 97.0ms (1.00x)                                            | 78.6ms (1.23x)    | **42.4ms (2.29x)**  |
-| a_lossy.webp        | 116.4ms (1.00x)                                           | 36.6ms (3.18x)    | **25.5ms (4.56x)**  |
-| anim_yuva.webp      | 575.7ms (1.00x)                                           | 308.0ms (1.87x)   | **263.8ms (2.18x)** |
+| lossy.webp          | 403.0ms (1.00x)                                           | 159.7ms (2.52x)   | **71.2ms (5.66x)**  |
+| simplelf-lossy.webp | 313.8ms (1.00x)                                           | 155.1ms (2.02x)   | **87.6ms (3.58x)**  |
+| anim_yuv.webp       | 262.6ms (1.00x)                                           | 134.1ms (1.96x)   | **41.9ms (6.27x)**  |
+| lossless.webp       | 229.4ms (1.00x)                                           | 180.1ms (1.27x)   | **60.4ms (3.80x)**  |
+| anim_rgb.webp       | 98.0ms (1.00x)                                            | 82.2ms (1.19x)    | **14.8ms (6.64x)**  |
+| a_lossy.webp        | 117.8ms (1.00x)                                           | 37.7ms (3.12x)    | **13.1ms (9.02x)**  |
+| anim_yuva.webp      | 585.2ms (1.00x)                                           | 311.2ms (1.88x)   | **34.0ms (17.19x)** |
 
 ## Build
 
