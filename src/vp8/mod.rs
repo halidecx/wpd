@@ -263,6 +263,11 @@ const COEFF_HEAVY_TENTHS_PER_MB: u64 = 65;
 /// about 20us to start, which a lossy 192x192 still does not make back (0.96x
 /// the time on one thread) and a 224x224 one barely does (1.05x), while
 /// 256x256 is 1.09-1.18x faster (Apple M-series, 3 threads, min of 21-31).
+///
+/// A frame one macroblock wide stays on one thread whatever its size, as each
+/// row it hands on is a single macroblock: 16x4096 was 0.93x and 16x8192
+/// 0.99x on three threads, and 16x4096 0.96x on two, while two macroblocks
+/// already pay, 32x2048 1.06x and 32x4096 1.14x (min of 21-31).
 const RELAY_PIXELS: usize = 256 * 256;
 
 /// What reconstruction and the loop filter read and write, apart from the
@@ -1569,8 +1574,13 @@ impl Decoder {
         self.recon.planes = g;
 
         let pixels = self.width as usize * self.height as usize;
+        let relay = !resumable
+            && threads > 1
+            && self.mb_width > 1
+            && self.mb_height > 1
+            && pixels >= RELAY_PIXELS;
 
-        if !resumable && threads > 1 && self.mb_height > 1 && pixels >= RELAY_PIXELS {
+        if relay {
             return self.decode_rows_relayed(planes, chunk, threads);
         }
 
