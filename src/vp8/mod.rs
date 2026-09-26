@@ -1050,7 +1050,7 @@ impl Recon {
     }
 
     #[inline(always)]
-    fn filter_mb(
+    fn filter_mb<const LUMA: bool, const CHROMA: bool>(
         &self,
         planes: &mut Planes<'_>,
         off: [usize; 3],
@@ -1076,55 +1076,59 @@ impl Recon {
 
         let edges = u32::from(mb_x != 0) | u32::from(mb_y != 0) << 1;
 
-        match self.dsp.loop_filter16y {
-            Some(all) if inner => all(
-                y,
-                off[0],
-                ls,
-                mbedge_lim,
-                bedge_lim,
-                inner_limit,
-                hev,
-                edges,
-            ),
-            _ => self.filter_mb_luma(
-                y,
-                off[0],
-                mbedge_lim,
-                bedge_lim,
-                inner_limit,
-                hev,
-                inner,
-                mb_x,
-                mb_y,
-            ),
+        if LUMA {
+            match self.dsp.loop_filter16y {
+                Some(all) if inner => all(
+                    y,
+                    off[0],
+                    ls,
+                    mbedge_lim,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                    edges,
+                ),
+                _ => self.filter_mb_luma(
+                    y,
+                    off[0],
+                    mbedge_lim,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                    inner,
+                    mb_x,
+                    mb_y,
+                ),
+            }
         }
 
-        match self.dsp.loop_filter8uv {
-            Some(all) if inner => all(
-                u,
-                off[1],
-                v,
-                off[2],
-                uvls,
-                mbedge_lim,
-                bedge_lim,
-                inner_limit,
-                hev,
-                edges,
-            ),
-            _ => self.filter_mb_chroma(
-                u,
-                v,
-                off,
-                mbedge_lim,
-                bedge_lim,
-                inner_limit,
-                hev,
-                inner,
-                mb_x,
-                mb_y,
-            ),
+        if CHROMA {
+            match self.dsp.loop_filter8uv {
+                Some(all) if inner => all(
+                    u,
+                    off[1],
+                    v,
+                    off[2],
+                    uvls,
+                    mbedge_lim,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                    edges,
+                ),
+                _ => self.filter_mb_chroma(
+                    u,
+                    v,
+                    off,
+                    mbedge_lim,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                    inner,
+                    mb_x,
+                    mb_y,
+                ),
+            }
         }
     }
 
@@ -1337,7 +1341,12 @@ impl Recon {
         }
     }
 
-    fn filter_mb_at(&self, planes: &mut Planes<'_>, mb_x: usize, mb_y: usize) {
+    fn filter_mb_at<const LUMA: bool, const CHROMA: bool>(
+        &self,
+        planes: &mut Planes<'_>,
+        mb_x: usize,
+        mb_y: usize,
+    ) {
         let g = self.planes;
         let strength = self.filter_strength[(mb_y & 1) * self.mb_width + mb_x];
         let off = [
@@ -1347,9 +1356,11 @@ impl Recon {
         ];
 
         if self.filter.simple {
-            self.filter_mb_simple(planes[0], off[0], strength, mb_x, mb_y);
+            if LUMA {
+                self.filter_mb_simple(planes[0], off[0], strength, mb_x, mb_y);
+            }
         } else {
-            self.filter_mb(planes, off, strength, mb_x, mb_y);
+            self.filter_mb::<LUMA, CHROMA>(planes, off, strength, mb_x, mb_y);
         }
     }
 
@@ -1396,6 +1407,15 @@ impl Recon {
         mb_x: usize,
         mb_y: usize,
     ) {
+        /* Chroma prediction reads no top-right pixels, so the chroma of the
+         * macroblock above and two to the left is final once the one before
+         * this has been predicted. Its filter comes here, apart from the luma
+         * one: back to back the two kernels fill most of the reorder buffer
+         * and leave the parse behind them little room. */
+        if self.deblock_filter && mb_y > 0 && mb_x > 1 {
+            self.filter_mb_at::<false, true>(planes, mb_x - 2, mb_y - 1);
+        }
+
         self.intra_predict(planes, mb, off, mb_x, mb_y);
 
         if !mb.skip {
@@ -1411,26 +1431,33 @@ impl Recon {
              * bottom edge stays unfiltered until every macroblock that
              * predicts from it is done. */
             if mb_y > 0 && mb_x > 0 {
-                self.filter_mb_at(planes, mb_x - 1, mb_y - 1);
+                self.filter_mb_at::<true, false>(planes, mb_x - 1, mb_y - 1);
             }
         }
     }
 
     /// Filters what reconstructing row `mb_y` has made final: the end of the
-    /// row above, which reconstruct_mb() filters a macroblock behind itself,
-    /// and the last row whole. `filter` is false for a row a partition ran
-    /// dry in: the frame ends there, with that row unfiltered below filtered
-    /// ones, as when each row was filtered as it was decoded.
+    /// row above, which reconstruct_mb() filters luma one and chroma two
+    /// macroblocks behind itself, and the last row whole. `filter` is false
+    /// for a row a partition ran dry in: the frame ends there, with that row
+    /// unfiltered below filtered ones, as when each row was filtered as it
+    /// was decoded.
     fn finish_row(&mut self, planes: &mut Planes<'_>, mb_y: usize, filter: bool) {
         if !self.deblock_filter {
             return;
         }
         if mb_y > 0 {
-            self.filter_mb_at(planes, self.mb_width - 1, mb_y - 1);
+            let w = self.mb_width;
+
+            self.filter_mb_at::<true, false>(planes, w - 1, mb_y - 1);
+            if w > 1 {
+                self.filter_mb_at::<false, true>(planes, w - 2, mb_y - 1);
+            }
+            self.filter_mb_at::<false, true>(planes, w - 1, mb_y - 1);
         }
         if filter && mb_y + 1 == self.mb_height {
             for mb_x in 0..self.mb_width {
-                self.filter_mb_at(planes, mb_x, mb_y);
+                self.filter_mb_at::<true, true>(planes, mb_x, mb_y);
             }
         }
     }
