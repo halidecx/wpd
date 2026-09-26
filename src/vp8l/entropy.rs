@@ -358,6 +358,12 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
     if let Some(mut f) = gb.fast(buf) {
         let limit = buf.len() - FAST_MARGIN;
 
+        // The cache takes each pixel as it is made, rather than in a batch
+        // before the next lookup: the pixel is still in a register, and a
+        // lookup does not wait on the stores of a batch just before it.
+        if cache_bits != 0 {
+            cached = cache_fill(cache, cache_bits, pixels, cached, pos);
+        }
         while pos < total && f.pos() <= limit {
             if x & huff_mask == 0 {
                 hgi = map.at(x, y);
@@ -399,14 +405,16 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                 }
                 px[2] = v as u8;
                 pixels[pos] = u32::from_ne_bytes(px);
+                if cache_bits != 0 {
+                    let argb = u32::from_be_bytes(px);
+
+                    cache[cache_slot(argb, cache_bits)] = argb;
+                }
                 pos += 1;
                 x += 1;
                 if x == width as i32 {
                     x = 0;
                     y += 1;
-                    if cache_bits != 0 {
-                        cached = cache_fill(cache, cache_bits, pixels, cached, pos);
-                    }
                 }
             } else if v < NUM_LITERAL_CODES + NUM_LENGTH_CODES {
                 let length = extend_fast(&mut f, v - NUM_LITERAL_CODES);
@@ -425,6 +433,9 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                     backward_reference(coded, length, width, pos, total)?;
 
                 copy_block(pixels, pos, distance, length);
+                if cache_bits != 0 {
+                    cache_fill(cache, cache_bits, pixels, pos, pos + length);
+                }
                 pos += length;
                 x += length as i32;
                 while x >= width as i32 {
@@ -434,9 +445,6 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                 if multi_group && x & huff_mask != 0 {
                     hgi = map.at(x, y);
                     hg = &groups[hgi];
-                }
-                if cache_bits != 0 {
-                    cached = cache_fill(cache, cache_bits, pixels, cached, pos);
                 }
             } else {
                 let slot = (v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES)) as usize;
@@ -449,8 +457,10 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                     crate::log::error("color cache index out-of-bounds");
                     return Err(Error::InvalidData);
                 }
-                cached = cache_fill(cache, cache_bits, pixels, cached, pos);
-                pixels[pos] = u32::from_ne_bytes(cache[slot].to_be_bytes());
+                let argb = cache[slot];
+
+                pixels[pos] = u32::from_ne_bytes(argb.to_be_bytes());
+                cache[cache_slot(argb, cache_bits)] = argb;
                 pos += 1;
                 x += 1;
                 if x == width as i32 {
@@ -458,6 +468,9 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                     y += 1;
                 }
             }
+        }
+        if cache_bits != 0 {
+            cached = pos;
         }
         gb.resume(&f, buf);
         trees = resolve(hg, arena);
