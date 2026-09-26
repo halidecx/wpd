@@ -17,6 +17,17 @@ static const int lengths[] = {
             (buf0)[i] = (buf1)[i] = (uint32_t)rnd(); \
     } while (0)
 
+/* Values narrowed to a few steps make the select predictor's distances
+ * tie, and a flat regime lets a pixel's pick carry from one block to the
+ * next. */
+static uint32_t pred_sample(int regime) {
+    switch (regime) {
+    case 1: return (uint32_t)rnd() & 0x03030303u;
+    case 2: return (rnd() & 15) ? 0 : (uint32_t)rnd();
+    default: return (uint32_t)rnd();
+    }
+}
+
 static void check_pred_add(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint32_t, upper0, [BUF_PIXELS]);
     LOCAL_ALIGNED_16(uint32_t, upper1, [BUF_PIXELS]);
@@ -26,16 +37,21 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
 
     for (int mode = 0; mode < WPD_PRED_COUNT; mode++) {
         if (check_func(dsp->pred_add[mode], "pred_add_%d", mode)) {
-            for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-                const int n = lengths[i];
+            for (int regime = 0; regime < 3; regime++) {
+                for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths);
+                     i++) {
+                    const int n = lengths[i];
 
-                randomize_pixels(upper0, upper1);
-                randomize_pixels(row0, row1);
-                call_ref(row0 + 1, upper0 + 1, n, row0 + 1);
-                call_new(row1 + 1, upper1 + 1, n, row1 + 1);
-                if (memcmp(row0, row1, sizeof(row0)) ||
-                    memcmp(upper0, upper1, sizeof(upper0)))
-                    fail();
+                    for (int x = 0; x < BUF_PIXELS; x++) {
+                        upper0[x] = upper1[x] = pred_sample(regime);
+                        row0[x] = row1[x] = pred_sample(regime);
+                    }
+                    call_ref(row0 + 1, upper0 + 1, n, row0 + 1);
+                    call_new(row1 + 1, upper1 + 1, n, row1 + 1);
+                    if (memcmp(row0, row1, sizeof(row0)) ||
+                        memcmp(upper0, upper1, sizeof(upper0)))
+                        fail();
+                }
             }
             randomize_pixels(upper0, upper1);
             randomize_pixels(row0, row1);
@@ -44,17 +60,7 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
     }
 }
 
-/* Two rows, the second over the first. Values narrowed to a few steps make
- * the select predictor's distances tie, and a flat regime lets a pixel's
- * pick carry from one block to the next. */
-static uint32_t pair_sample(int regime) {
-    switch (regime) {
-    case 1: return (uint32_t)rnd() & 0x03030303u;
-    case 2: return (rnd() & 15) ? 0 : (uint32_t)rnd();
-    default: return (uint32_t)rnd();
-    }
-}
-
+/* Two rows, the second over the first, in the same regimes. */
 static void check_pred_pair(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint32_t, upper, [BUF_PIXELS]);
     LOCAL_ALIGNED_16(uint32_t, a0, [BUF_PIXELS]);
@@ -77,9 +83,9 @@ static void check_pred_pair(WPDLosslessDSP *dsp) {
                     const int n = lengths[i];
 
                     for (int x = 0; x < BUF_PIXELS; x++) {
-                        upper[x] = pair_sample(regime);
-                        a0[x] = a1[x] = pair_sample(regime);
-                        b0[x] = b1[x] = pair_sample(regime);
+                        upper[x] = pred_sample(regime);
+                        a0[x] = a1[x] = pred_sample(regime);
+                        b0[x] = b1[x] = pred_sample(regime);
                     }
                     call_ref(a0 + 1, upper + 1, n, a0 + 1, b0 + 1, b0 + 1);
                     call_new(a1 + 1, upper + 1, n, a1 + 1, b1 + 1, b1 + 1);
