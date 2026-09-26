@@ -57,15 +57,17 @@ pub fn pieces(total: usize, min: usize, threads: usize) -> usize {
 
 /// Runs `side` on another thread and `main` here, then joins. Both always run,
 /// whatever either returns, so the caller decides which failure it reports.
+/// `main` is told whether `side` runs beside it: with one thread, or when the
+/// spawn fails, `side` runs after it instead, so it must not wait on `side`.
 pub fn join<A: Send, B>(
     threads: usize,
     side: impl FnOnce() -> A + Send,
-    main: impl FnOnce() -> B,
+    main: impl FnOnce(bool) -> B,
 ) -> (A, B) {
     if !cfg!(feature = "threads") || threads < 2 {
         /* The order the serial path runs them in is the order the code had
          * before it was split, so a log reads the same at one thread. */
-        let b = main();
+        let b = main(false);
 
         return (side(), b);
     }
@@ -76,7 +78,7 @@ pub fn join<A: Send, B>(
         let job = &side;
         let handle = std::thread::Builder::new()
             .spawn_scoped(s, move || job.lock().unwrap().take().unwrap()());
-        let b = main();
+        let b = main(handle.is_ok());
 
         let a = match handle {
             Ok(handle) => unwrap_joined(handle.join()),
@@ -369,7 +371,14 @@ mod tests {
     #[test]
     fn both_sides_of_a_join_run_and_their_answers_come_back_in_order() {
         for threads in [1, 2, 8] {
-            let (a, b) = join(threads, || 1u32, || 2u32);
+            let (a, b) = join(
+                threads,
+                || 1u32,
+                |beside| {
+                    assert!(!beside || threads > 1);
+                    2u32
+                },
+            );
 
             assert_eq!((a, b), (1, 2));
         }

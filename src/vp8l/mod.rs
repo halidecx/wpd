@@ -1444,7 +1444,7 @@ impl Decoder {
                 }
                 ret
             },
-            || {
+            |_| {
                 let tx = tx;
                 let mut rest = &mut out.data[first as usize * stride..];
                 let pieces = Pieces {
@@ -1522,6 +1522,7 @@ impl Decoder {
             by_green,
             rest: 0,
         };
+        let most = alpha_bands(*height);
         let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, Vec<u32>)>();
         let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u32>>();
         let (xf_ret, dec_ret) = crate::task::join(
@@ -1539,8 +1540,9 @@ impl Decoder {
                 }
                 ret
             },
-            || {
+            |beside| {
                 let tx = tx;
+                let mut made = 0;
                 let pieces = Pieces {
                     gb,
                     payload,
@@ -1556,7 +1558,17 @@ impl Decoder {
                     while y < y1 {
                         let end = (y + ALPHA_BAND_ROWS).min(y1);
                         let len = (end - y) as usize * w;
-                        let mut band = back_rx.try_recv().unwrap_or_default();
+                        /* Transforms that run after this, not beside it,
+                         * cannot hand a band back until every row is out. */
+                        let mut band = match back_rx.try_recv() {
+                            Ok(band) => band,
+                            Err(_) if made < most || !beside => {
+                                made += 1;
+                                Vec::new()
+                            }
+                            /* Only a transform thread that panicked hangs up. */
+                            Err(_) => back_rx.recv().map_err(|_| Error::InvalidData)?,
+                        };
 
                         band.clear();
                         band.try_reserve(len).map_err(|_| Error::NoMemory)?;
@@ -1799,6 +1811,19 @@ impl AlphaRows<'_> {
             (u.rest)(Some(&above[..w]), &mut here[..w]);
         }
     }
+}
+
+/// The most bands an alpha plane `height` rows tall has out at once while its
+/// transforms run beside the entropy decoder: those of two pieces of average
+/// size, one piece's being transformed while the next one's are handed over,
+/// which holds the bands to a sixteenth of the plane. A piece's rows arrive
+/// together, and with fewer bands than it needs the entropy decoder waits on
+/// the transforms: a 2048x16000 plane, 16 bands a piece, took 94ms with 8 of
+/// them, and 87ms with 16, with 32 and with as many as it asked for, 15.
+fn alpha_bands(height: i32) -> usize {
+    let bands = (height.max(0) as usize).div_ceil(ALPHA_BAND_ROWS as usize);
+
+    (2 * bands.div_ceil(PIPELINE_PIECES)).max(3)
 }
 
 /// The entropy decoder run over growing prefixes of a complete payload, so it
