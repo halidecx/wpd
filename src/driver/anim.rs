@@ -231,12 +231,17 @@ impl<'a> Decoder<'a> {
 
     /// How many frames may be decoded ahead of the one being composited.
     ///
-    /// Bounded by threads, by a ceiling of eight, and by memory: every slot
+    /// Bounded by threads, by a ceiling of sixteen, and by memory: every slot
     /// holds a decoded frame, so the count comes down as the canvas grows. A
     /// streamed animation or replaceable input gets one. The work threshold
     /// is checked against sub-frame dimensions after lookahead.
     fn ahead_count(&self) -> usize {
-        const MAX_SLOTS: usize = 8;
+        /* A batch costs about as long as its slowest frame, so the fewer
+         * batches an animation takes the better, up to the point where the
+         * frames no longer each find a core: on 18 threads, 16 decoded a
+         * 42-frame animation 1.14x faster than 12, and 18 did it 0.85x as
+         * fast as 16 while other work was running. */
+        const MAX_SLOTS: usize = 16;
         /* Y, U, V, alpha and the ARGB a sub-frame may be converted into. */
         const BYTES_PER_PIXEL: i64 = 6;
         const BUDGET: i64 = 96 << 20;
