@@ -253,11 +253,46 @@ fn backward_reference(
     Ok((distance, length))
 }
 
+/// Copies between slices of the same length in 32-byte pieces, the last of
+/// which ends at the end and may copy some of the one before it again. A
+/// copy shorter than a piece takes two overlapping halves, or quarters, and
+/// so on. Most copies are a few dozen pixels or fewer, which a call to
+/// `memcpy` takes longer to set up than to do.
+#[inline(always)]
+fn copy_disjoint<T: Copy>(dst: &mut [T], src: &[T]) {
+    let n = dst.len();
+    let piece = (32 / std::mem::size_of::<T>()).max(1);
+
+    if n >= piece {
+        for (d, s) in dst.chunks_exact_mut(piece).zip(src.chunks_exact(piece)) {
+            d.copy_from_slice(s);
+        }
+        dst[n - piece..].copy_from_slice(&src[n - piece..]);
+        return;
+    }
+
+    let mut part = piece / 2;
+
+    while part >= 4 {
+        if n >= part {
+            dst[..part].copy_from_slice(&src[..part]);
+            dst[n - part..].copy_from_slice(&src[n - part..]);
+            return;
+        }
+        part /= 2;
+    }
+    if n != 0 {
+        dst[0] = src[0];
+        dst[n / 2] = src[n / 2];
+        dst[n - 1] = src[n - 1];
+    }
+}
+
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
 
-        rest[..length].copy_from_slice(&done[pos - dist..][..length]);
+        copy_disjoint(&mut rest[..length], &done[pos - dist..][..length]);
         return;
     }
     if dist == 1 {
