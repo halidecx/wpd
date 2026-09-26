@@ -256,10 +256,15 @@ impl<'a> Decoder<'a> {
             .min(MAX_SLOTS)
     }
 
-    /// The ANMF payloads from `first` onwards, at most `want` of them. The
-    /// walk that calls this has already stepped past `first`, so self.pos is
-    /// where the frame after it begins.
-    fn anmf_lookahead(&self, first: (usize, usize), want: usize) -> Vec<AheadEntry> {
+    /// The ANMF payloads from `first` onwards, at most `want` of them, and
+    /// where the chunk after the last of them starts. The walk that calls
+    /// this has already stepped past `first`, so self.pos is where the frame
+    /// after it begins.
+    fn anmf_lookahead(
+        &self,
+        first: (usize, usize),
+        want: usize,
+    ) -> (Vec<AheadEntry>, usize) {
         let mut found = Vec::with_capacity(want);
         let mut at = self.pos;
 
@@ -270,34 +275,50 @@ impl<'a> Decoder<'a> {
             pending: false,
         });
 
-        while found.len() < want && at + 8 <= self.end {
-            let (chunk_type, size) = {
-                let head = self.file_at(at);
-
-                (rl32(head), rl32(&head[4..]))
+        while found.len() < want {
+            let Some((entry, next)) = self.anmf_at(at) else {
+                break;
             };
 
-            /* Anything that is not another frame ends the run: the metadata
-             * that follows the last one is not worth walking past. */
-            if chunk_type != TAG_ANMF || size == u32::MAX {
-                break;
-            }
-
-            let size = size as usize;
-            let padded = size + (size & 1);
-
-            if self.end - (at + 8) < padded {
-                break;
-            }
-            found.push(AheadEntry {
-                base: at + 8,
-                size,
-                out: Err(Error::InvalidData),
-                pending: false,
-            });
-            at += 8 + padded;
+            found.push(entry);
+            at = next;
         }
-        found
+        (found, at)
+    }
+
+    /// The ANMF chunk at `at`, and where the chunk after it starts. Anything
+    /// that is not another frame ends a run: the metadata that follows the
+    /// last one is not worth walking past.
+    fn anmf_at(&self, at: usize) -> Option<(AheadEntry, usize)> {
+        if at + 8 > self.end {
+            return None;
+        }
+
+        let (chunk_type, size) = {
+            let head = self.file_at(at);
+
+            (rl32(head), rl32(&head[4..]))
+        };
+
+        if chunk_type != TAG_ANMF || size == u32::MAX {
+            return None;
+        }
+
+        let size = size as usize;
+        let padded = size + (size & 1);
+
+        if self.end - (at + 8) < padded {
+            return None;
+        }
+
+        let entry = AheadEntry {
+            base: at + 8,
+            size,
+            out: Err(Error::InvalidData),
+            pending: false,
+        };
+
+        Some((entry, at + 8 + padded))
     }
 
     fn anmf_declared_fit(&self, base: usize, size: usize) -> Option<(i32, i32)> {
@@ -354,9 +375,11 @@ impl<'a> Decoder<'a> {
         None
     }
 
-    /// Decodes the next run of frames into a slot each. Their images depend on
-    /// nothing but their own bytes, so they are independent; everything that
-    /// depends on the frames before it stays in decode_anmf().
+    /// Starts a run of frames decoded ahead, one to a slot: the first here,
+    /// the rest on the pool, and after them each frame that follows as the
+    /// walk frees a slot. Their images depend on nothing but their own bytes,
+    /// so they are independent; everything that depends on the frames before
+    /// it stays in decode_anmf().
     fn fill_ahead(&mut self, base: usize, size: usize) {
         let want = self.ahead_count();
 
@@ -364,7 +387,7 @@ impl<'a> Decoder<'a> {
             return;
         }
 
-        let mut entries = self.anmf_lookahead((base, size), want);
+        let (mut entries, next) = self.anmf_lookahead((base, size), want);
 
         let mut pixels: u64 = 0;
         let mut usable = 0;
@@ -377,6 +400,9 @@ impl<'a> Decoder<'a> {
             pixels += u64::from(w as u32) * u64::from(h as u32);
             usable += 1;
         }
+        /* The run cannot go past a frame that does not fit. */
+        let next = (usable == entries.len()).then_some(next);
+
         entries.truncate(usable);
 
         if entries.len() < 2 || pixels < entries.len() as u64 * 96 * 96 {
@@ -393,16 +419,18 @@ impl<'a> Decoder<'a> {
                 .slots
                 .resize_with(entries.len(), FrameSlot::default);
         }
-        self.ahead.entries = entries;
-        self.ahead.pos = 0;
 
-        /* The same count whatever the canvas, so one pool serves every file
-         * the decoder opens; the calling thread is the last of them. */
-        let workers = self.threads.0.min(MAX_SLOTS) - 1;
+        /* A thread for every frame a run can have in flight, the same count
+         * whatever the canvas so that one pool serves every file the decoder
+         * opens. Once a run is going the calling thread only composites, and
+         * otherwise waits on the pool as a dav1d caller waits on its
+         * workers: with a thread fewer, a frame waited whenever the rest
+         * were busy while this thread sat beside it, and at four threads 42
+         * frames took 6.6ms instead of 5.2ms. */
+        let workers = self.threads.0.min(MAX_SLOTS);
         let (_, ahead, env) = self.frame_parts();
 
-        ahead.settings = env.settings;
-        ahead.submit(&env, workers);
+        ahead.start(&env, entries, next, workers);
 
         let first = &mut ahead.entries[0];
 
@@ -411,10 +439,15 @@ impl<'a> Decoder<'a> {
 
     /// Takes the frame decoded ahead for the chunk at `base`, if there is one.
     /// The slot it was decoded into is swapped in whole, which recycles the
-    /// buffers the outgoing frame was using.
+    /// buffers the outgoing frame was using, and is then given the next frame
+    /// of the run.
     fn take_ahead(&mut self, base: usize) -> Option<Result<Source>> {
-        let i = self.ahead.pos;
-        let entry = *self.ahead.entries.get(i)?;
+        if self.ahead.spent() {
+            return None;
+        }
+
+        let j = self.ahead.pos;
+        let entry = self.ahead.entries[j % self.ahead.entries.len()];
 
         if entry.base != base || self.ahead.settings != self.frame_settings() {
             /* The walk did not arrive where the batch expected, so the batch
@@ -423,9 +456,35 @@ impl<'a> Decoder<'a> {
             return None;
         }
         self.ahead.pos += 1;
-        self.ahead.collect(i);
-        std::mem::swap(&mut self.frame, &mut self.ahead.slots[i]);
-        Some(self.ahead.entries[i].out)
+
+        let k = self.ahead.collect(j);
+
+        std::mem::swap(&mut self.frame, &mut self.ahead.slots[k]);
+
+        let out = self.ahead.entries[k].out;
+
+        self.follow_ahead();
+        Some(out)
+    }
+
+    /// Hands the frame after the run's last to the slot just emptied, unless
+    /// the run ends there: at anything but a frame, or at a frame that does
+    /// not fit the canvas or is too small to be worth a thread.
+    fn follow_ahead(&mut self) {
+        let Some(at) = self.ahead.next else {
+            return;
+        };
+        let fit = self.anmf_at(at).and_then(|(entry, next)| {
+            let (w, h) = self.anmf_declared_fit(entry.base, entry.size)?;
+
+            (i64::from(w) * i64::from(h) >= 96 * 96).then_some((entry, next))
+        });
+        let Some((entry, next)) = fit else {
+            self.ahead.stop();
+            return;
+        };
+
+        self.ahead.follow(&self.input, entry, next);
     }
 
     pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {

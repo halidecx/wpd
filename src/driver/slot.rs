@@ -401,11 +401,20 @@ pub(crate) struct AheadEntry {
 /// Frames decoded ahead of the one being handed out, and the slots holding
 /// them. Empty whenever a decode cannot run ahead: a streamed animation, a
 /// canvas too large to hold several frames, or one thread.
+///
+/// A run of frames goes through the slots in turn: frame `j` of the run is
+/// entry and slot `j % entries.len()`, and each slot is given the next frame
+/// as soon as the walk takes the one it held.
 #[derive(Default)]
 pub(crate) struct Ahead {
     pub(crate) slots: Vec<FrameSlot>,
     pub(crate) entries: Vec<AheadEntry>,
+    /// The next frame of the run to hand out.
     pub(crate) pos: usize,
+    /// One past the last frame of the run handed to a slot.
+    pub(crate) end: usize,
+    /// Where the chunk after that frame starts, while the run may go on.
+    pub(crate) next: Option<usize>,
     pub(crate) settings: FrameSettings,
     /// Each slot's copy of the payload it is decoding, kept to be reused.
     inputs: Vec<Input<'static>>,
@@ -416,14 +425,18 @@ impl Ahead {
     pub(crate) fn clear(&mut self) {
         if self.entries.iter().any(|e| e.pending) {
             if let Some(pool) = &self.pool {
+                let n = self.entries.len();
+
                 for finished in pool.drain() {
-                    self.slots[finished.index] = finished.slot;
-                    self.inputs[finished.index] = finished.input;
+                    self.slots[finished.index % n] = finished.slot;
+                    self.inputs[finished.index % n] = finished.input;
                 }
             }
         }
         self.entries.clear();
         self.pos = 0;
+        self.end = 0;
+        self.next = None;
     }
 
     pub(crate) fn release(&mut self) {
@@ -435,71 +448,134 @@ impl Ahead {
 
     /// True once every frame decoded ahead has been handed over.
     pub(crate) fn spent(&self) -> bool {
-        self.pos >= self.entries.len()
+        self.pos >= self.end
     }
 
-    /// Hands every entry after the first to a pool of up to `workers`
-    /// threads, each with its own copy of the entry's payload. An entry
-    /// whose payload cannot be copied ends the batch.
-    pub(crate) fn submit(&mut self, env: &FrameEnv<'_, '_>, workers: usize) {
-        let input = env.input;
-
+    /// Starts a run with `entries`, handing every one after the first to a
+    /// pool of up to `workers` threads. `next` is where the chunk after the
+    /// last entry starts, if the run may go on past it. An entry whose
+    /// payload cannot be copied ends the run.
+    pub(crate) fn start(
+        &mut self,
+        env: &FrameEnv<'_, '_>,
+        entries: Vec<AheadEntry>,
+        next: Option<usize>,
+        workers: usize,
+    ) {
         if self.pool.as_ref().is_none_or(|pool| pool.size != workers) {
-            /* The old threads have nothing left to do: a batch is only
+            /* The old threads have nothing left to do: a run is only
              * started once the one before it has been collected. */
             self.pool = Some(Pool::new(workers, env));
         }
-        if self.inputs.len() < self.entries.len() {
-            self.inputs.resize_with(self.entries.len(), Input::default);
+        if self.inputs.len() < entries.len() {
+            self.inputs.resize_with(entries.len(), Input::default);
         }
+        self.entries = entries;
+        self.pos = 0;
+        self.end = self.entries.len();
+        self.next = next;
+        self.settings = env.settings;
 
         let mut jobs = Vec::new();
 
-        for (index, entry) in self.entries.iter_mut().enumerate().skip(1) {
-            let mut copy = std::mem::take(&mut self.inputs[index]);
-
-            if jobs.try_reserve(1).is_err()
-                || copy.own(input.chunk(entry.base, entry.size)).is_err()
-            {
-                self.entries.truncate(index);
+        for j in 1..self.end {
+            if jobs.try_reserve(1).is_err() {
+                self.cut(j);
                 break;
             }
-            jobs.push(Job {
-                index,
-                slot: std::mem::take(&mut self.slots[index]),
-                input: copy,
-                size: entry.size,
-                settings: self.settings,
-            });
-            entry.pending = true;
+            match self.job(env.input, j) {
+                Some(job) => jobs.push(job),
+                None => {
+                    self.cut(j);
+                    break;
+                }
+            }
         }
         if let Some(pool) = &mut self.pool {
             pool.submit(jobs);
         }
     }
 
-    /// Brings entry `i` back from the pool, waiting for it to be decoded or
-    /// decoding it here if no thread has started on it.
-    pub(crate) fn collect(&mut self, i: usize) {
-        let (Some(pool), true) = (&self.pool, self.entries[i].pending) else {
-            return;
-        };
-        let finished = pool.collect(i);
+    /// Hands `entry`, the frame after the last one handed out, to the slot
+    /// the walk has just emptied, if the run is still going. `next` is where
+    /// the chunk after it starts.
+    pub(crate) fn follow(&mut self, input: &Input<'_>, entry: AheadEntry, next: usize) {
+        let n = self.entries.len();
 
-        self.slots[i] = finished.slot;
-        self.inputs[i] = finished.input;
-        self.entries[i].pending = false;
-        match finished.out {
-            Ok(out) => self.entries[i].out = out,
-            Err(panic) => std::panic::resume_unwind(panic),
+        if self.next.is_none() || self.end - self.pos >= n {
+            return;
+        }
+
+        let j = self.end;
+
+        self.entries[j % n] = entry;
+        match self.job(input, j) {
+            Some(job) => {
+                self.end += 1;
+                self.next = Some(next);
+                if let Some(pool) = &mut self.pool {
+                    pool.submit(vec![job]);
+                }
+            }
+            None => self.next = None,
         }
     }
 
-    /// Waits for every frame of the batch to be decoded.
+    /// Ends the run at the frames already handed out.
+    pub(crate) fn stop(&mut self) {
+        self.next = None;
+    }
+
+    /// Ends the first batch of a run before frame `j`, which is not queued.
+    fn cut(&mut self, j: usize) {
+        self.entries.truncate(j);
+        self.end = j;
+        self.next = None;
+    }
+
+    /// Packs frame `j` of the run up for the pool, with its slot and a copy
+    /// of its payload.
+    fn job(&mut self, input: &Input<'_>, j: usize) -> Option<Job> {
+        let k = j % self.entries.len();
+        let entry = &mut self.entries[k];
+        let mut copy = std::mem::take(&mut self.inputs[k]);
+
+        copy.own(input.chunk(entry.base, entry.size)).ok()?;
+        entry.pending = true;
+        Some(Job {
+            index: j,
+            slot: std::mem::take(&mut self.slots[k]),
+            input: copy,
+            size: entry.size,
+            settings: self.settings,
+        })
+    }
+
+    /// Brings frame `j` of the run back from the pool, waiting for it to be
+    /// decoded or decoding it here if no thread has started on it, and
+    /// returns the slot it is in.
+    pub(crate) fn collect(&mut self, j: usize) -> usize {
+        let k = j % self.entries.len();
+        let (Some(pool), true) = (&self.pool, self.entries[k].pending) else {
+            return k;
+        };
+        let finished = pool.collect(j);
+
+        self.slots[k] = finished.slot;
+        self.inputs[k] = finished.input;
+        self.entries[k].pending = false;
+        match finished.out {
+            Ok(out) => self.entries[k].out = out,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+        k
+    }
+
+    /// Waits for every frame handed to a slot to be decoded.
     #[cfg(all(test, feature = "threads"))]
     pub(crate) fn settle(&mut self) {
-        for i in 0..self.entries.len() {
-            self.collect(i);
+        for j in self.pos..self.end {
+            self.collect(j);
         }
     }
 }
@@ -650,10 +726,21 @@ impl Pool {
     /// costs the spawning thread several microseconds that this one would
     /// rather spend decoding the first frame.
     fn submit(&mut self, jobs: Vec<Job>) {
-        let more = jobs.len().min(self.size).saturating_sub(self.threads);
+        let single = jobs.len() == 1;
+        let more = {
+            let mut queue = self.shared.lock();
 
-        self.shared.lock().waiting.extend(jobs);
-        self.shared.work.notify_all();
+            queue.waiting.extend(jobs);
+            (queue.waiting.len() + queue.running)
+                .min(self.size)
+                .saturating_sub(self.threads)
+        };
+
+        if single {
+            self.shared.work.notify_one();
+        } else {
+            self.shared.work.notify_all();
+        }
         if more == 0 {
             return;
         }

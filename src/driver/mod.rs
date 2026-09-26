@@ -1782,6 +1782,53 @@ mod tests {
         assert!(!decoder.ahead.spent());
     }
 
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn a_run_longer_than_its_slots_composites_as_a_serial_decode_does() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        let canvas = |decoder: &Decoder| {
+            let frame = decoder.canvas.frame();
+            let mut bytes = Vec::new();
+
+            for p in 0..4 {
+                for y in 0..frame.rows(p) {
+                    bytes.extend_from_slice(frame.row(p, y));
+                }
+            }
+            bytes
+        };
+        let mut decoders = [1, 3].map(|n_threads| {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            decoder
+        });
+        let mut frames = 0;
+
+        while decoders[0].next_picture(&mut Handout::default()).unwrap() {
+            assert!(decoders[1].next_picture(&mut Handout::default()).unwrap());
+            let serial = canvas(&decoders[0]);
+
+            assert!(!serial.is_empty() && serial == canvas(&decoders[1]));
+            frames += 1;
+        }
+        assert!(!decoders[1].next_picture(&mut Handout::default()).unwrap());
+
+        /* Three slots carried every frame after the first. */
+        assert_eq!(decoders[1].ahead.slots.len(), 3);
+        assert_eq!(decoders[1].ahead.end, frames);
+    }
+
     struct NeverFits;
 
     impl RowSink for NeverFits {
