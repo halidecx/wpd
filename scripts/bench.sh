@@ -15,9 +15,10 @@ testfiles=(
     anim_yuva.webp
 )
 
-# force rgba since image-webp only outputs rgb[a]
+# force rgba since image-webp only outputs rgb[a]; wpd gets one thread, as
+# neither of the others decodes on more
 for f in "${testfiles[@]}"; do
-    args=(-n "wpd" "$WPD --repeat $REPEAT wpd-test-data/$f /dev/null")
+    args=(-n "wpd" "$WPD --threads 1 --repeat $REPEAT wpd-test-data/$f /dev/null")
     [ -x "$LWP" ] && args+=(-n "lwp" "$LWP -f rgba --repeat $REPEAT wpd-test-data/$f /dev/null")
     [ -x "$IWP" ] && args+=(-n "iwp" "$IWP -f rgba --repeat $REPEAT wpd-test-data/$f /dev/null")
 
