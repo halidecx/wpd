@@ -416,6 +416,9 @@ pub(crate) struct Ahead {
     /// Where the chunk after that frame starts, while the run may go on.
     pub(crate) next: Option<usize>,
     pub(crate) settings: FrameSettings,
+    /// The threads the decode could use when the run started, which sized
+    /// the pool.
+    pub(crate) threads: usize,
     /// Each slot's copy of the payload it is decoding, kept to be reused.
     inputs: Vec<Input<'static>>,
     pool: Option<Pool>,

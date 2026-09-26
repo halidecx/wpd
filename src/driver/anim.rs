@@ -424,11 +424,13 @@ impl<'a> Decoder<'a> {
          * whatever the canvas so that one pool serves every file the decoder
          * opens. This thread counts against the budget, so while it is not
          * waiting on the pool one of them is held back. */
-        let workers = self.threads.0.min(MAX_SLOTS);
-        let beside = (self.threads.0 - 1).min(workers);
+        let threads = self.threads.0;
+        let workers = threads.min(MAX_SLOTS);
+        let beside = (threads - 1).min(workers);
         let (_, ahead, env) = self.frame_parts();
 
         ahead.start(&env, entries, next, workers, beside);
+        ahead.threads = threads;
 
         let first = &mut ahead.entries[0];
 
@@ -447,9 +449,14 @@ impl<'a> Decoder<'a> {
         let j = self.ahead.pos;
         let entry = self.ahead.entries[j % self.ahead.entries.len()];
 
-        if entry.base != base || self.ahead.settings != self.frame_settings() {
-            /* The walk did not arrive where the batch expected, so the batch
-             * is about something else; drop it and decode here. */
+        if entry.base != base
+            || self.ahead.settings != self.frame_settings()
+            || self.ahead.threads != self.threads.0
+        {
+            /* The walk did not arrive where the batch expected, or the
+             * options changed since it started, so the batch is about
+             * something else; drop it and decode here. The thread count is
+             * one of them: the run would otherwise go on at the old one. */
             self.ahead.clear();
             return None;
         }
