@@ -710,35 +710,52 @@ impl Decoder {
 
     #[inline(always)]
     fn decode_intra4x4_modes(&mut self, buf: &[u8], mb: &mut Macroblock, mb_x: usize) {
-        for y in 0..4 {
-            for x in 0..4 {
-                let top = self.intra4x4_pred_mode_top[4 * mb_x + x] as usize;
-                let left = self.intra4x4_pred_mode_left[y] as usize;
-                let ctx = &PRED4X4_PROB_INTRA[top][left];
-                let mode = self.c.get_tree(buf, &PRED4X4_TREE, ctx) as u8;
+        let top: &mut [u8; 4] = (&mut self.intra4x4_pred_mode_top[4 * mb_x..][..4])
+            .try_into()
+            .unwrap();
+        let mut t = *top;
 
-                mb.intra4x4_pred_mode_mb[4 * y + x] = mode;
-                self.intra4x4_pred_mode_left[y] = mode;
-                self.intra4x4_pred_mode_top[4 * mb_x + x] = mode;
+        for y in 0..4 {
+            let mut mode = self.intra4x4_pred_mode_left[y];
+
+            for x in 0..4 {
+                let ctx = &PRED4X4_PROB_INTRA[usize::from(t[x])][usize::from(mode)];
+
+                mode = read_pred4x4_mode(&mut self.c, buf, ctx);
+                t[x] = mode;
             }
+            mb.intra4x4_pred_mode_mb[4 * y..4 * y + 4].copy_from_slice(&t);
+            self.intra4x4_pred_mode_left[y] = mode;
         }
+        *top = t;
     }
 
     #[inline(always)]
     fn decode_mb_mode(&mut self, buf: &[u8], mb: &mut Macroblock, mb_x: usize) {
-        if self.segmentation.update_map {
-            let bit = self.c.get_prob(buf, self.prob.segmentid[0]) as usize;
+        let c = &mut self.c;
 
-            mb.segment =
-                self.c.get_prob(buf, self.prob.segmentid[1 + bit]) as usize + 2 * bit;
+        mb.segment = if !self.segmentation.update_map {
+            0
+        } else if !c.get_prob_branchy(buf, self.prob.segmentid[0]) {
+            c.get_prob(buf, self.prob.segmentid[1]) as usize
         } else {
-            mb.segment = 0;
-        }
+            2 + c.get_prob(buf, self.prob.segmentid[2]) as usize
+        };
 
-        mb.skip = self.mbskip_enabled && self.c.get_prob(buf, self.prob.mbskip) != 0;
-        mb.mode = self
-            .c
-            .get_tree(buf, &PRED16X16_TREE_INTRA, &PRED16X16_PROB_INTRA);
+        mb.skip = self.mbskip_enabled && c.get_prob(buf, self.prob.mbskip) != 0;
+        mb.mode = if !c.get_prob_branchy(buf, PRED16X16_PROB_INTRA[0]) {
+            MODE_I4
+        } else if !c.get_prob_branchy(buf, PRED16X16_PROB_INTRA[1]) {
+            if !c.get_prob_branchy(buf, PRED16X16_PROB_INTRA[2]) {
+                pred::DC_PRED8X8
+            } else {
+                pred::VERT_PRED8X8
+            }
+        } else if !c.get_prob_branchy(buf, PRED16X16_PROB_INTRA[3]) {
+            pred::HOR_PRED8X8
+        } else {
+            pred::PLANE_PRED8X8
+        };
 
         if mb.mode == MODE_I4 {
             self.decode_intra4x4_modes(buf, mb, mb_x);
@@ -749,8 +766,17 @@ impl Decoder {
             self.intra4x4_pred_mode_left.fill(mode);
         }
 
-        mb.chroma_pred_mode =
-            self.c.get_tree(buf, &PRED8X8C_TREE, &PRED8X8C_PROB_INTRA);
+        let c = &mut self.c;
+
+        mb.chroma_pred_mode = if !c.get_prob_branchy(buf, PRED8X8C_PROB_INTRA[0]) {
+            pred::DC_PRED8X8
+        } else if !c.get_prob_branchy(buf, PRED8X8C_PROB_INTRA[1]) {
+            pred::VERT_PRED8X8
+        } else if !c.get_prob_branchy(buf, PRED8X8C_PROB_INTRA[2]) {
+            pred::HOR_PRED8X8
+        } else {
+            pred::PLANE_PRED8X8
+        };
     }
 
     /// Reads one macroblock's modes and coefficients into `mb`.
@@ -1833,6 +1859,38 @@ impl Decoder {
 
         rows.clamp(0, self.height)
     }
+}
+
+/* The subblock mode tree, walked with a branch per decision as libwebp's
+ * ParseIntraMode does: each branch is predicted, so the next probability is
+ * already loaded where a table walk would wait on the tree entry for it. */
+#[inline(always)]
+fn read_pred4x4_mode(c: &mut RangeCoder, buf: &[u8], p: &[u8; 9]) -> u8 {
+    let mode = if !c.get_prob_branchy(buf, p[0]) {
+        pred::DC_PRED
+    } else if !c.get_prob_branchy(buf, p[1]) {
+        pred::TM_VP8_PRED
+    } else if !c.get_prob_branchy(buf, p[2]) {
+        pred::VERT_PRED
+    } else if !c.get_prob_branchy(buf, p[3]) {
+        if !c.get_prob_branchy(buf, p[4]) {
+            pred::HOR_PRED
+        } else if !c.get_prob_branchy(buf, p[5]) {
+            pred::DIAG_DOWN_RIGHT_PRED
+        } else {
+            pred::VERT_RIGHT_PRED
+        }
+    } else if !c.get_prob_branchy(buf, p[6]) {
+        pred::DIAG_DOWN_LEFT_PRED
+    } else if !c.get_prob_branchy(buf, p[7]) {
+        pred::VERT_LEFT_PRED
+    } else if !c.get_prob_branchy(buf, p[8]) {
+        pred::HOR_DOWN_PRED
+    } else {
+        pred::HOR_UP_PRED
+    };
+
+    mode as u8
 }
 
 fn check_intra_pred8x8_mode(mode: usize, mb_x: usize, mb_y: usize) -> usize {
