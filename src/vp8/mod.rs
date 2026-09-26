@@ -240,11 +240,24 @@ struct MbRow {
     /// False for a row a partition ran dry in, which is reconstructed as the
     /// serial decode would but neither filtered nor followed.
     filter: bool,
+    /// Whether the row came back to the parser with its reconstruction still
+    /// to do, rather than never used or already done.
+    pending: bool,
     mbs: Vec<Macroblock>,
 }
 
 /// Rows a parser may run ahead of reconstruction by. Eight did no better.
 const RELAY_ROWS: usize = 4;
+
+/// On two threads the coefficients get one to themselves, the modes and
+/// reconstruction sharing the other, when they carry at least this many
+/// tenths of a compressed byte a macroblock; below it reconstruction gets the
+/// thread instead. Parsing them costs about 23ns a byte and 60ns a macroblock
+/// and reconstruction 150-250ns a macroblock. Measured, coefficients alone
+/// against reconstruction alone: 0.90x at 5.0 bytes (3072x3072), 0.99x at 6.0,
+/// 1.03x at 6.9, 1.10x at 8.1 and 1.2-1.27x at 14-24 (Apple M-series, min of
+/// 21).
+const COEFF_HEAVY_TENTHS_PER_MB: u64 = 65;
 
 /// Below this a frame is decoded on one thread: the relay's threads cost
 /// about 20us to start, which a lossy 192x192 still does not make back (0.96x
@@ -1634,8 +1647,8 @@ impl Decoder {
     /// Parses rows here while other threads reconstruct and filter the ones
     /// parsed before them. Entropy decoding is most of the work and runs
     /// through each partition in order, so a still gets its threads from
-    /// splitting the work on a row into steps: the modes, then with three
-    /// threads the coefficients apart from them, then reconstruction.
+    /// splitting the work on a row into steps: the modes, the coefficients
+    /// and reconstruction, each on a thread of its own when there are three.
     fn decode_rows_relayed(
         &mut self,
         planes: &mut Planes<'_>,
@@ -1650,36 +1663,56 @@ impl Decoder {
                 .try_reserve(self.mb_width.saturating_sub(row.mbs.len()))
                 .map_err(|_| Error::NoMemory)?;
             row.mbs.resize_with(self.mb_width, Macroblock::default);
+            row.pending = false;
         }
 
         let mut recon = std::mem::take(&mut self.recon);
-        let mut reconstruct = |row: &mut MbRow| {
-            recon.reconstruct_row(planes, row);
-            true
-        };
+        let mut coeffs = std::mem::take(&mut self.coeffs);
+        let parts = self.num_coeff_partitions;
+        let mut parse =
+            |row: &mut MbRow| coeffs.parse_row(chunk, row.mb_y & (parts - 1), row);
         let (ret, rows) = if threads >= 3 {
-            let mut coeffs = std::mem::take(&mut self.coeffs);
-            let parts = self.num_coeff_partitions;
-            let mut parse =
-                |row: &mut MbRow| coeffs.parse_row(chunk, row.mb_y & (parts - 1), row);
-            let relayed = crate::task::relay(
+            let mut reconstruct = |row: &mut MbRow| {
+                recon.reconstruct_row(planes, row);
+                true
+            };
+
+            crate::task::relay(
                 threads,
                 rows,
-                |relay| self.parse_modes(chunk, relay),
+                |relay| self.parse_modes(chunk, relay, |_| {}),
                 &mut [&mut parse, &mut reconstruct],
-            );
+            )
+        } else if self.coeffs_outweigh_reconstruction() {
+            crate::task::relay(
+                threads,
+                rows,
+                |relay| {
+                    self.parse_modes(chunk, relay, |row| {
+                        recon.reconstruct_row(planes, row)
+                    })
+                },
+                &mut [&mut parse],
+            )
+        } else {
+            let mut reconstruct = |row: &mut MbRow| {
+                recon.reconstruct_row(planes, row);
+                true
+            };
 
             self.coeffs = coeffs;
-            relayed
-        } else {
-            crate::task::relay(
+            let relayed = crate::task::relay(
                 threads,
                 rows,
                 |relay| self.parse_rows(chunk, relay),
                 &mut [&mut reconstruct],
-            )
+            );
+
+            coeffs = std::mem::take(&mut self.coeffs);
+            relayed
         };
 
+        self.coeffs = coeffs;
         self.recon = recon;
         self.rows = rows;
         ret?;
@@ -1694,6 +1727,16 @@ impl Decoder {
         self.mb_y = self.mb_height;
         self.mb_rows_done = self.mb_height;
         Ok(Status::Done)
+    }
+
+    /// Whether parsing the coefficients looks to take longer than
+    /// reconstructing the frame, which decides what shares a thread with the
+    /// modes when there are only two.
+    fn coeffs_outweigh_reconstruction(&self) -> bool {
+        let bytes = self.chunk_size.saturating_sub(self.partition_start[0]) as u64;
+        let mbs = (self.mb_width * self.mb_height) as u64;
+
+        10 * bytes >= COEFF_HEAVY_TENTHS_PER_MB * mbs
     }
 
     fn parse_rows(
@@ -1723,16 +1766,29 @@ impl Decoder {
         Ok(())
     }
 
+    /// Parses the modes of every row and passes it on. `finish` gets each row
+    /// that comes back, in order, before its buffer is used again.
     fn parse_modes(
         &mut self,
         chunk: &[u8],
         relay: &mut crate::task::Relay<'_, '_, MbRow>,
+        mut finish: impl FnMut(&mut MbRow),
     ) -> Result<()> {
+        let mut ret = Ok(());
+        let mut done = |row: &mut MbRow| {
+            if row.pending {
+                finish(row);
+                row.pending = false;
+            }
+        };
+
         for mb_y in 0..self.mb_height {
             let Some(mut row) = relay.take() else {
-                return Err(Error::InvalidData);
+                ret = Err(Error::InvalidData);
+                break;
             };
 
+            done(&mut row);
             self.intra4x4_pred_mode_left = [pred::DC_PRED as u8; 4];
             for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
                 self.decode_mb_mode(chunk, mb, mb_x);
@@ -1742,11 +1798,18 @@ impl Decoder {
 
             row.mb_y = mb_y;
             row.modes_dry = dry;
+            row.pending = true;
             if !relay.pass(row) || dry {
-                return Err(Error::InvalidData);
+                ret = Err(Error::InvalidData);
+                break;
             }
         }
-        Ok(())
+
+        relay.finish();
+        while let Some(mut row) = relay.take() {
+            done(&mut row);
+        }
+        ret
     }
 
     fn start_row(&mut self) {
@@ -2064,12 +2127,16 @@ mod tests {
     #[test]
     fn a_relayed_frame_stops_where_one_thread_stops() {
         /* At 256x256 the modes run dry in row 2 with 40 bytes and in the
-         * last row with 125, the coefficients in row 5 with 600 and in the
-         * last row with 1900, and 4000 of each is a whole frame. */
+         * last row with 125, the coefficients in row 5 with 600, row 14 with
+         * 1750 and the last row with 1900, and 4000 of each is a whole frame.
+         * Two threads split the work one way below 1664 coefficient bytes
+         * and the other way above. */
         let cases = [
             (256, 256, 40, 4000),
+            (256, 256, 40, 1000),
             (256, 256, 125, 4000),
             (256, 256, 4000, 600),
+            (256, 256, 4000, 1750),
             (256, 256, 4000, 1900),
             (256, 256, 4000, 4000),
             (1024, 64, 40, 4000),

@@ -12,6 +12,9 @@
 //! `n_threads == 1`, for a build without the `threads` feature, or for work too
 //! small to split.
 
+use std::collections::VecDeque;
+use std::sync::mpsc::{channel, Receiver, Sender};
+
 /// More than this many threads buys nothing and costs a spawn each.
 const MAX_THREADS: usize = 64;
 
@@ -148,35 +151,49 @@ pub struct Relay<'c, 's, T> {
 enum Route<'c, 's, T> {
     /// One thread: a buffer goes through every step as soon as it is passed
     /// on. The flag is whether they all still want more.
-    Here(Vec<T>, &'c mut [Step<'s, T>], bool),
-    Across(std::sync::mpsc::Receiver<T>, std::sync::mpsc::Sender<T>),
+    Here(VecDeque<T>, &'c mut [Step<'s, T>], bool),
+    Across(Receiver<T>, Option<Sender<T>>),
 }
 
 impl<T> Relay<'_, '_, T> {
     /// A buffer to fill, waiting for the steps to finish with one if they
-    /// are all in their hands. None once the steps have gone, which they only
-    /// do after one said no or panicked.
+    /// are all in their hands. Buffers come back in the order they were
+    /// passed, after any never passed. None once the steps have gone, which
+    /// they do after `finish`, after one said no, or after a panic.
     pub fn take(&mut self) -> Option<T> {
         match &mut self.route {
-            Route::Here(idle, ..) => idle.pop(),
+            Route::Here(idle, ..) => idle.pop_front(),
             Route::Across(idle, _) => wait(idle),
         }
     }
 
     /// Hands a filled buffer on. False once a step has said it wants no more,
-    /// which may be a buffer or two after it said so.
+    /// which may be a buffer or two after it said so; the steps never see
+    /// the buffer then, and it is not given back.
     pub fn pass(&mut self, mut item: T) -> bool {
         match &mut self.route {
             Route::Here(idle, steps, more) => {
-                if *more {
-                    for step in steps.iter_mut() {
-                        *more &= step(&mut item);
-                    }
+                if !*more {
+                    return false;
                 }
-                idle.push(item);
+                for step in steps.iter_mut() {
+                    *more &= step(&mut item);
+                }
+                idle.push_back(item);
                 *more
             }
-            Route::Across(_, full) => full.send(item).is_ok(),
+            Route::Across(_, full) => {
+                full.as_ref().is_some_and(|full| full.send(item).is_ok())
+            }
+        }
+    }
+
+    /// Passes nothing more, so that `take` can drain the buffers still with
+    /// the steps and then return None.
+    pub fn finish(&mut self) {
+        match &mut self.route {
+            Route::Here(_, _, more) => *more = false,
+            Route::Across(_, full) => *full = None,
         }
     }
 }
@@ -196,20 +213,18 @@ pub fn relay<'s, T: Send, R>(
     produce: impl FnOnce(&mut Relay<'_, 's, T>) -> R,
     steps: &mut [Step<'s, T>],
 ) -> (R, Vec<T>) {
-    use std::sync::mpsc::channel;
-
     fn here<'s, T, R>(
         items: Vec<T>,
         produce: impl FnOnce(&mut Relay<'_, 's, T>) -> R,
         steps: &mut [Step<'s, T>],
     ) -> (R, Vec<T>) {
         let mut relay = Relay {
-            route: Route::Here(items, steps, true),
+            route: Route::Here(items.into(), steps, true),
         };
         let r = produce(&mut relay);
 
         match relay.route {
-            Route::Here(items, ..) => (r, items),
+            Route::Here(items, ..) => (r, items.into()),
             Route::Across(..) => unreachable!(),
         }
     }
@@ -263,7 +278,7 @@ pub fn relay<'s, T: Send, R>(
 
         let complete = handles.len() == n;
         let mut relay = Relay {
-            route: Route::Across(idle_rx, first_tx),
+            route: Route::Across(idle_rx, Some(first_tx)),
         };
         /* A failed spawn dropped the ends of the channels it was given, so
          * the steps already running stop once the producer's end goes too,
@@ -295,7 +310,7 @@ pub fn relay<'s, T: Send, R>(
 const SPIN: std::time::Duration = std::time::Duration::from_micros(100);
 
 /// Receives, spinning for a while before sleeping.
-fn wait<T>(rx: &std::sync::mpsc::Receiver<T>) -> Option<T> {
+fn wait<T>(rx: &Receiver<T>) -> Option<T> {
     use std::sync::mpsc::TryRecvError;
 
     let start = std::time::Instant::now();
@@ -395,6 +410,42 @@ mod tests {
             assert_eq!(items.len(), 3);
             assert!(doubled.iter().copied().eq(0..50));
             assert!(seen.iter().copied().eq((0..50).map(|i| 2 * i)));
+        }
+    }
+
+    #[test]
+    fn a_finished_relay_gives_back_what_it_was_passed_in_order() {
+        for threads in [1, 2] {
+            let mut add = |item: &mut (u32, bool)| {
+                item.0 += 100;
+                true
+            };
+            let mut back = Vec::new();
+            let (_, items) = relay(
+                threads,
+                vec![(0, false); 4],
+                |relay| {
+                    for i in 0..10u32 {
+                        let item = relay.take().unwrap();
+
+                        if item.1 {
+                            back.push(item.0);
+                        }
+                        assert!(relay.pass((i, true)));
+                    }
+                    relay.finish();
+                    assert!(!relay.pass((99, true)));
+                    while let Some(item) = relay.take() {
+                        if item.1 {
+                            back.push(item.0);
+                        }
+                    }
+                },
+                &mut [&mut add],
+            );
+
+            assert!(back.iter().copied().eq(100..110));
+            assert!(items.is_empty());
         }
     }
 
