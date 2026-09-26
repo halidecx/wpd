@@ -49,6 +49,15 @@ impl Reader {
         buf: &[u8],
     ) -> u32 {
         let table = &arena[self.start as usize..];
+
+        // A single symbol takes no bits, and branching on it takes its lookup
+        // off the chain of codes.
+        if self.mask == 0 {
+            if REFILL {
+                f.refill(buf);
+            }
+            return table[0] >> 8;
+        }
         let val = f.peek() as usize;
         let mut index = val & self.mask as usize;
         let mut entry = table[index];
