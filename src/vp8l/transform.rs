@@ -20,8 +20,7 @@ pub fn predictor_rows(
         return Ok(());
     }
 
-    let tile_size = 1usize << tile_bits;
-    let tile_mask = tile_size - 1;
+    let tiles = ((width - 1) >> tile_bits) + 1;
     let mut row = base;
     let mut upper = upper0;
     let mut y = y0;
@@ -42,6 +41,7 @@ pub fn predictor_rows(
 
     while y < y1 {
         let modes_row = (y >> tile_bits) as usize * modes_stride;
+        let row_modes = &modes[modes_row..modes_row + tiles];
 
         (dsp.pred_add[2])(plane, row, up, 1);
         if up + width != row {
@@ -49,18 +49,24 @@ pub fn predictor_rows(
         }
 
         let mut x = 1usize;
+        let mut tile = 0;
 
+        /* Neighbouring tiles often share a mode, and one call over the run
+         * does what a call per tile would. */
         while x < width {
-            let mode = modes[modes_row + (x >> tile_bits)].to_ne_bytes()[2];
-            let mut x_end = (x & !tile_mask) + tile_size;
+            let mode = row_modes[tile].to_ne_bytes()[2];
 
             if mode > 13 {
                 crate::log::error_args(format_args!("invalid predictor mode: {mode}"));
                 return Err(Error::InvalidData);
             }
-            if x_end > width {
-                x_end = width;
+            tile += 1;
+            while tile < tiles && row_modes[tile].to_ne_bytes()[2] == mode {
+                tile += 1;
             }
+
+            let x_end = (tile << tile_bits).min(width);
+
             (dsp.pred_add[usize::from(mode)])(plane, row + x, up + x, x_end - x);
             x = x_end;
         }
