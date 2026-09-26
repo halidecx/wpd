@@ -759,45 +759,110 @@ function wpd_color_row_neon, export=1
 9:      ret
 endfunc
 
-function wpd_map_color32_neon, export=1
-        cmp             w3,  #8
-        b.lt            2f
-1:      ldp             x4,  x5,  [x1]
-        ldp             x6,  x7,  [x1, #16]
-        ubfx            x8,  x4,  #16, #8
-        ubfx            x9,  x4,  #48, #8
-        ubfx            x10, x5,  #16, #8
-        ubfx            x11, x5,  #48, #8
-        ubfx            x12, x6,  #16, #8
-        ubfx            x13, x6,  #48, #8
-        ubfx            x14, x7,  #16, #8
-        ubfx            x15, x7,  #48, #8
-        ldr             w8,  [x2,  x8, lsl #2]
-        ldr             w9,  [x2,  x9, lsl #2]
-        ldr             w10, [x2, x10, lsl #2]
-        ldr             w11, [x2, x11, lsl #2]
+// Looks up the eight pixels held two to a register in \a..\d, and stores
+// them.
+.macro  map8            a, b, c, d
+        ubfx            x12, \a,  #16, #8
+        ubfx            x13, \a,  #48, #8
+        ubfx            x14, \b,  #16, #8
+        ubfx            x15, \b,  #48, #8
         ldr             w12, [x2, x12, lsl #2]
         ldr             w13, [x2, x13, lsl #2]
         ldr             w14, [x2, x14, lsl #2]
         ldr             w15, [x2, x15, lsl #2]
-        orr             x8,  x8,  x9,  lsl #32
-        orr             x10, x10, x11, lsl #32
         orr             x12, x12, x13, lsl #32
         orr             x14, x14, x15, lsl #32
-        add             x1,  x1,  #32
-        sub             w3,  w3,  #8
-        stp             x8,  x10, [x0]
+        stp             x12, x14, [x0]
+        ubfx            x12, \c,  #16, #8
+        ubfx            x13, \c,  #48, #8
+        ubfx            x14, \d,  #16, #8
+        ubfx            x15, \d,  #48, #8
+        ldr             w12, [x2, x12, lsl #2]
+        ldr             w13, [x2, x13, lsl #2]
+        ldr             w14, [x2, x14, lsl #2]
+        ldr             w15, [x2, x15, lsl #2]
+        orr             x12, x12, x13, lsl #32
+        orr             x14, x14, x15, lsl #32
         stp             x12, x14, [x0, #16]
         add             x0,  x0,  #32
-        cmp             w3,  #8
+.endm
+
+.macro  map_load16
+        ldp             x4,  x5,  [x1]
+        ldp             x6,  x7,  [x1, #16]
+        ldp             x8,  x9,  [x1, #32]
+        ldp             x10, x11, [x1, #48]
+        add             x1,  x1,  #64
+        sub             w3,  w3,  #16
+.endm
+
+// Sets eq if the sixteen pixels in x4..x11 are all the same.
+.macro  map_same16
+        ror             x13, x4,  #32
+        cmp             x4,  x13
+        ccmp            x4,  x5,  #0, eq
+        ccmp            x4,  x6,  #0, eq
+        ccmp            x4,  x7,  #0, eq
+        ccmp            x4,  x8,  #0, eq
+        ccmp            x4,  x9,  #0, eq
+        ccmp            x4,  x10, #0, eq
+        ccmp            x4,  x11, #0, eq
+.endm
+
+/* Sixteen pixels of one index are one lookup, splatted. The branch that
+ * finds them cannot be predicted, though, and each switch between runs
+ * and mixed pixels costs about as much as looking up ten blocks, which
+ * photos cut to a palette, full of short runs, would lose on. So a run
+ * is only followed from a block whose pixels MAP_AHEAD and one past it
+ * match it too, a sign the run goes on for a while. */
+#define MAP_AHEAD 158
+
+function wpd_map_color32_neon, export=1
+        cmp             w3,  #MAP_AHEAD + 2
+        b.lt            3f
+1:      map_load16
+        ldr             x12, [x1, #(MAP_AHEAD - 16) * 4]
+        map_same16
+        ccmp            x4,  x12, #0, eq
+        b.eq            4f
+2:      map8            x4,  x5,  x6,  x7
+        map8            x8,  x9,  x10, x11
+        cmp             w3,  #MAP_AHEAD + 2
         b.ge            1b
-2:      cbz             w3,  9f
-3:      ldrb            w4,  [x1, #2]
+        b               3f
+4:      ubfx            x12, x4,  #16, #8
+        add             x12, x2,  x12, lsl #2
+        ld1r            {v0.4s}, [x12]
+        cmp             w3,  #16
+        stp             q0,  q0,  [x0]
+        stp             q0,  q0,  [x0, #32]
+        add             x0,  x0,  #64
+        b.lt            6f
+        map_load16
+        map_same16
+        b.eq            4b
+        b               2b
+3:      cmp             w3,  #16
+        b.lt            6f
+5:      map_load16
+        map8            x4,  x5,  x6,  x7
+        map8            x8,  x9,  x10, x11
+        cmp             w3,  #16
+        b.ge            5b
+6:      cmp             w3,  #8
+        b.lt            7f
+        ldp             x4,  x5,  [x1]
+        ldp             x6,  x7,  [x1, #16]
+        add             x1,  x1,  #32
+        sub             w3,  w3,  #8
+        map8            x4,  x5,  x6,  x7
+7:      cbz             w3,  9f
+8:      ldrb            w4,  [x1, #2]
         add             x1,  x1,  #4
         subs            w3,  w3,  #1
         ldr             w4,  [x2, x4, lsl #2]
         str             w4,  [x0], #4
-        b.gt            3b
+        b.gt            8b
 9:      ret
 endfunc
 

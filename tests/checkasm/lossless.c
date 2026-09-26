@@ -136,37 +136,66 @@ static void check_extract_green(WPDLosslessDSP *dsp) {
     }
 }
 
+#define MAP_PIXELS 1024
+#define MAP_BUF (MAP_PIXELS + GUARD_PIXELS)
+
+static const int map_lengths[] = {
+    1, 7, 8, 9, 16, 17, 33, 159, 160, 161, 175, 177, 400, 1023, MAP_PIXELS};
+
+/* An index image's pixel x in one of a few regimes. Runs, some long enough
+ * for a kernel to follow and some not; one long run with a rare odd pixel,
+ * which lands in each lane of a block in turn; a dither's two pixels in
+ * turn, whose pairs are all alike though the pixels are not; and noise. */
+static uint32_t map_sample(int regime, int x, uint32_t *run, int *left) {
+    switch (regime) {
+    case 1:
+        if (--*left <= 0) {
+            *run  = (uint32_t)rnd();
+            *left = 1 + (int)(rnd() % 400);
+        }
+        return *run;
+    case 2: return (rnd() & 127) ? *run : (uint32_t)rnd();
+    case 3: return (x & 1) ? ~*run : *run;
+    default: return (uint32_t)rnd();
+    }
+}
+
 static void check_map_color32(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint32_t, palette, [256]);
-    LOCAL_ALIGNED_16(uint8_t, src, [4 * BUF_PIXELS]);
-    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * BUF_PIXELS]);
-    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, src, [4 * MAP_BUF]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * MAP_BUF]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * MAP_BUF]);
     declare_func(void, uint8_t *, const uint8_t *, const uint32_t *, int);
 
     if (check_func(dsp->map_color32, "map_color32")) {
-        for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-            const int n = lengths[i];
+        for (int regime = 0; regime < 4; regime++) {
+            for (size_t i = 0; i < sizeof(map_lengths) / sizeof(*map_lengths);
+                 i++) {
+                const int n    = map_lengths[i];
+                uint32_t  run  = (uint32_t)rnd();
+                int       left = 0;
 
-            for (int x = 0; x < 256; x++) palette[x] = (uint32_t)rnd();
-            for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
-                WPD_WN32A(src + x, rnd());
-                WPD_WN32A(dst0 + x, rnd());
-                memcpy(dst1 + x, dst0 + x, 4);
+                for (int x = 0; x < 256; x++) palette[x] = (uint32_t)rnd();
+                for (int x = 0; x < 4 * MAP_BUF; x += 4) {
+                    WPD_WN32A(src + x, map_sample(regime, x / 4, &run, &left));
+                    WPD_WN32A(dst0 + x, rnd());
+                    memcpy(dst1 + x, dst0 + x, 4);
+                }
+
+                call_ref(dst0, src, palette, n);
+                call_new(dst1, src, palette, n);
+                if (memcmp(dst0, dst1, sizeof(dst0)))
+                    fail();
+
+                memcpy(dst0, src, sizeof(dst0));
+                memcpy(dst1, src, sizeof(dst1));
+                call_ref(dst0, dst0, palette, n);
+                call_new(dst1, dst1, palette, n);
+                if (memcmp(dst0, dst1, sizeof(dst0)))
+                    fail();
             }
-
-            call_ref(dst0, src, palette, n);
-            call_new(dst1, src, palette, n);
-            if (memcmp(dst0, dst1, sizeof(dst0)))
-                fail();
-
-            memcpy(dst0, src, sizeof(dst0));
-            memcpy(dst1, src, sizeof(dst1));
-            call_ref(dst0, dst0, palette, n);
-            call_new(dst1, dst1, palette, n);
-            if (memcmp(dst0, dst1, sizeof(dst0)))
-                fail();
         }
-        bench_new(dst1, src, palette, MAX_PIXELS);
+        bench_new(dst1, src, palette, MAP_PIXELS);
     }
 }
 
