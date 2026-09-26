@@ -606,6 +606,57 @@ static void check_loopfilter_8uv_mb_v(VP8DSPContext *d) {
     }
 }
 
+static void check_loopfilter16y_all(VP8DSPContext *d) {
+    LOOPFILTER_BUFFER(buf0, 20 * MB_STRIDE);
+    LOOPFILTER_BUFFER(buf1, 20 * MB_STRIDE);
+    static const int lims[][4] = {{24, 20, 10, 2},
+                                  {193, 189, 63, 2},
+                                  {4, 0, 1, 0},
+                                  {40, 36, 7, 1},
+                                  {64, 60, 30, 0}};
+    uint8_t         *dst0      = LOOPFILTER_DATA(buf0) + 4 * MB_STRIDE + 16;
+    uint8_t         *dst1      = LOOPFILTER_DATA(buf1) + 4 * MB_STRIDE + 16;
+    int              edges, i, fill;
+    declare_func(void, uint8_t *, ptrdiff_t, int, int, int, int, int);
+
+    if (check_func(d->vp8_loop_filter16y, "vp8_loop_filter16y_all")) {
+        for (edges = 0; edges < 4; edges++) {
+            for (i = 0; i < 5; i++) {
+                for (fill = 0; fill < 3; fill++) {
+                    init_loopfilter_buffer(buf0);
+                    if (fill == 2)
+                        fill_loopfilter_buffers(
+                            LOOPFILTER_DATA(buf0), MB_STRIDE, MB_STRIDE, 20);
+                    else
+                        fill_smooth_buffer_h(
+                            LOOPFILTER_DATA(buf0), 20, fill ? 3 : 8);
+                    memcpy(buf1, buf0, sizeof(buf0));
+                    call_ref(dst0,
+                             MB_STRIDE,
+                             lims[i][0],
+                             lims[i][1],
+                             lims[i][2],
+                             lims[i][3],
+                             edges);
+                    call_new(dst1,
+                             MB_STRIDE,
+                             lims[i][0],
+                             lims[i][1],
+                             lims[i][2],
+                             lims[i][3],
+                             edges);
+                    if (memcmp(buf0, buf1, sizeof(buf0)))
+                        fail();
+                }
+            }
+        }
+
+        init_loopfilter_buffer(buf1);
+        fill_smooth_buffer_h(LOOPFILTER_DATA(buf1), 20, 8);
+        bench_new(dst1, MB_STRIDE, 24, 20, 10, 2, 3);
+    }
+}
+
 static void check_all(VP8DSPContext *d) {
     ff_vp8dsp_init(d);
     check_idct(d);
@@ -620,6 +671,7 @@ static void check_all(VP8DSPContext *d) {
     check_loopfilter_8uv_mb(d);
     check_loopfilter_16y_mb_v(d);
     check_loopfilter_8uv_mb_v(d);
+    check_loopfilter16y_all(d);
     report("loopfilter");
 }
 

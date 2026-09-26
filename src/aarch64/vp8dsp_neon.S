@@ -731,6 +731,162 @@ endfunc
         eor             \q1\().16b, \q1\().16b, v16.16b
 .endm
 
+/* Every edge of a luma macroblock whose inner edges are filtered, in the
+ * spec's order: the left edge (w6 bit 0), the three inner columns, the top
+ * edge (w6 bit 1), the three inner rows. The block stays in registers from
+ * the first load to the last store: one transpose turns its rows into
+ * columns and another turns them back.
+ *
+ * The left edge reads the 8 bytes before each row and writes back 4. The
+ * neighbour stored those rows whole, so the narrow loads forward from its
+ * stores, where a 16-byte load straddling both macroblocks would not. */
+function wpd_vp8_loop_filter16y_neon, export=1
+        stp             d8,  d9,  [sp, #-64]!
+        stp             d10, d11, [sp, #16]
+        stp             d12, d13, [sp, #32]
+        stp             d14, d15, [sp, #48]
+
+        mov             x8,  x0
+        add             x9,  x0,  x1
+        lsl             x10, x1,  #1
+        ld1             {v0.16b},  [x8], x10
+        ld1             {v1.16b},  [x9], x10
+        ld1             {v2.16b},  [x8], x10
+        ld1             {v3.16b},  [x9], x10
+        ld1             {v4.16b},  [x8], x10
+        ld1             {v5.16b},  [x9], x10
+        ld1             {v6.16b},  [x8], x10
+        ld1             {v7.16b},  [x9], x10
+        ld1             {v8.16b},  [x8], x10
+        ld1             {v9.16b},  [x9], x10
+        ld1             {v10.16b}, [x8], x10
+        ld1             {v11.16b}, [x9], x10
+        ld1             {v12.16b}, [x8], x10
+        ld1             {v13.16b}, [x9], x10
+        ld1             {v14.16b}, [x8]
+        ld1             {v15.16b}, [x9]
+
+        transpose_16x16B
+
+        tbz             w6,  #0,  1f
+
+        sub             x8,  x0,  #8
+        ld1             {v16.8b},  [x8], x1
+        ld1             {v17.8b},  [x8], x1
+        ld1             {v18.8b},  [x8], x1
+        ld1             {v19.8b},  [x8], x1
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v28.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x8], x1
+        ld1             {v17.8b},  [x8], x1
+        ld1             {v18.8b},  [x8], x1
+        ld1             {v19.8b},  [x8], x1
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v29.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x8], x1
+        ld1             {v17.8b},  [x8], x1
+        ld1             {v18.8b},  [x8], x1
+        ld1             {v19.8b},  [x8], x1
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v30.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x8], x1
+        ld1             {v17.8b},  [x8], x1
+        ld1             {v18.8b},  [x8], x1
+        ld1             {v19.8b},  [x8], x1
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v31.2d,  v20.2d,  v21.2d
+        uzp1            v16.16b, v28.16b, v29.16b
+        uzp1            v17.16b, v30.16b, v31.16b
+        uzp2            v18.16b, v28.16b, v29.16b
+        uzp2            v19.16b, v30.16b, v31.16b
+        uzp1            v24.16b, v16.16b, v17.16b
+        uzp1            v25.16b, v18.16b, v19.16b
+        uzp2            v26.16b, v16.16b, v17.16b
+        uzp2            v27.16b, v18.16b, v19.16b
+
+        vp8_lf16        v24, v25, v26, v27, v0,  v1,  v2,  v3,  w2, w4, w5, 1
+
+        zip1            v16.16b, v24.16b, v26.16b
+        zip2            v17.16b, v24.16b, v26.16b
+        zip1            v18.16b, v25.16b, v27.16b
+        zip2            v19.16b, v25.16b, v27.16b
+        zip1            v20.16b, v16.16b, v18.16b
+        zip2            v21.16b, v16.16b, v18.16b
+        zip1            v22.16b, v17.16b, v19.16b
+        zip2            v23.16b, v17.16b, v19.16b
+        sub             x8,  x0,  #4
+        st1             {v20.s}[0], [x8], x1
+        st1             {v20.s}[1], [x8], x1
+        st1             {v20.s}[2], [x8], x1
+        st1             {v20.s}[3], [x8], x1
+        st1             {v21.s}[0], [x8], x1
+        st1             {v21.s}[1], [x8], x1
+        st1             {v21.s}[2], [x8], x1
+        st1             {v21.s}[3], [x8], x1
+        st1             {v22.s}[0], [x8], x1
+        st1             {v22.s}[1], [x8], x1
+        st1             {v22.s}[2], [x8], x1
+        st1             {v22.s}[3], [x8], x1
+        st1             {v23.s}[0], [x8], x1
+        st1             {v23.s}[1], [x8], x1
+        st1             {v23.s}[2], [x8], x1
+        st1             {v23.s}[3], [x8]
+1:
+        vp8_lf16        v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7,  w3, w4, w5, 0
+        vp8_lf16        v4,  v5,  v6,  v7,  v8,  v9,  v10, v11, w3, w4, w5, 0
+        vp8_lf16        v8,  v9,  v10, v11, v12, v13, v14, v15, w3, w4, w5, 0
+
+        transpose_16x16B
+
+        tbz             w6,  #1,  2f
+
+        sub             x8,  x0,  x1,  lsl #2
+        ld1             {v24.16b},  [x8], x1
+        ld1             {v25.16b},  [x8], x1
+        ld1             {v26.16b},  [x8], x1
+        ld1             {v27.16b},  [x8]
+
+        vp8_lf16        v24, v25, v26, v27, v0,  v1,  v2,  v3,  w2, w4, w5, 1
+
+        sub             x8,  x8,  x1,  lsl #1
+        st1             {v25.16b},  [x8], x1
+        st1             {v26.16b},  [x8], x1
+        st1             {v27.16b},  [x8]
+2:
+        vp8_lf16        v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7,  w3, w4, w5, 0
+        vp8_lf16        v4,  v5,  v6,  v7,  v8,  v9,  v10, v11, w3, w4, w5, 0
+        vp8_lf16        v8,  v9,  v10, v11, v12, v13, v14, v15, w3, w4, w5, 0
+
+        mov             x8,  x0
+        add             x9,  x0,  x1
+        st1             {v0.16b},  [x8], x10
+        st1             {v1.16b},  [x9], x10
+        st1             {v2.16b},  [x8], x10
+        st1             {v3.16b},  [x9], x10
+        st1             {v4.16b},  [x8], x10
+        st1             {v5.16b},  [x9], x10
+        st1             {v6.16b},  [x8], x10
+        st1             {v7.16b},  [x9], x10
+        st1             {v8.16b},  [x8], x10
+        st1             {v9.16b},  [x9], x10
+        st1             {v10.16b}, [x8], x10
+        st1             {v11.16b}, [x9], x10
+        st1             {v12.16b}, [x8], x10
+        st1             {v13.16b}, [x9], x10
+        st1             {v14.16b}, [x8]
+        st1             {v15.16b}, [x9]
+
+        ldp             d10, d11, [sp, #16]
+        ldp             d12, d13, [sp, #32]
+        ldp             d14, d15, [sp, #48]
+        ldp             d8,  d9,  [sp], #64
+        ret
+endfunc
+
 function wpd_vp8_h_loop_filter_simple_mb_neon, export=1
         stp             d8,  d9,  [sp, #-64]!
         stp             d10, d11, [sp, #16]

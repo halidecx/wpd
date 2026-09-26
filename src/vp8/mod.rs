@@ -1165,16 +1165,35 @@ impl Recon {
         let inner = f.inner_filter;
         let [y, u, v] = planes;
 
-        if mb_x != 0 && inner {
-            (self.dsp.h_loop_filter16y_mb)(
+        match self.dsp.loop_filter16y {
+            Some(all) if inner => {
+                let edges = u32::from(mb_x != 0) | u32::from(mb_y != 0) << 1;
+
+                all(
+                    y,
+                    off[0],
+                    ls,
+                    mbedge_lim,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                    edges,
+                );
+            }
+            _ => self.filter_mb_luma(
                 y,
                 off[0],
-                ls,
                 mbedge_lim,
                 bedge_lim,
                 inner_limit,
                 hev,
-            );
+                inner,
+                mb_x,
+                mb_y,
+            ),
+        }
+
+        if mb_x != 0 && inner {
             (self.dsp.h_loop_filter8uv_mb)(
                 u,
                 off[1],
@@ -1187,7 +1206,6 @@ impl Recon {
                 hev,
             );
         } else if mb_x != 0 {
-            (self.dsp.h_loop_filter16y)(y, off[0], ls, mbedge_lim, inner_limit, hev);
             (self.dsp.h_loop_filter8uv)(
                 u,
                 off[1],
@@ -1201,16 +1219,6 @@ impl Recon {
         }
 
         if inner && mb_x == 0 {
-            for k in 1..4 {
-                (self.dsp.h_loop_filter16y_inner)(
-                    y,
-                    off[0] + 4 * k,
-                    ls,
-                    bedge_lim,
-                    inner_limit,
-                    hev,
-                );
-            }
             (self.dsp.h_loop_filter8uv_inner)(
                 u,
                 off[1] + 4,
@@ -1224,15 +1232,6 @@ impl Recon {
         }
 
         if mb_y != 0 && inner {
-            (self.dsp.v_loop_filter16y_mb)(
-                y,
-                off[0],
-                ls,
-                mbedge_lim,
-                bedge_lim,
-                inner_limit,
-                hev,
-            );
             (self.dsp.v_loop_filter8uv_mb)(
                 u,
                 off[1],
@@ -1245,7 +1244,6 @@ impl Recon {
                 hev,
             );
         } else if mb_y != 0 {
-            (self.dsp.v_loop_filter16y)(y, off[0], ls, mbedge_lim, inner_limit, hev);
             (self.dsp.v_loop_filter8uv)(
                 u,
                 off[1],
@@ -1259,16 +1257,6 @@ impl Recon {
         }
 
         if inner && mb_y == 0 {
-            for k in 1..4 {
-                (self.dsp.v_loop_filter16y_inner)(
-                    y,
-                    off[0] + 4 * k * ls,
-                    ls,
-                    bedge_lim,
-                    inner_limit,
-                    hev,
-                );
-            }
             (self.dsp.v_loop_filter8uv_inner)(
                 u,
                 off[1] + 4 * uvls,
@@ -1279,6 +1267,77 @@ impl Recon {
                 inner_limit,
                 hev,
             );
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn filter_mb_luma(
+        &self,
+        y: &mut [u8],
+        off: usize,
+        mbedge_lim: i32,
+        bedge_lim: i32,
+        inner_limit: i32,
+        hev: i32,
+        inner: bool,
+        mb_x: usize,
+        mb_y: usize,
+    ) {
+        let ls = self.linesize();
+
+        if mb_x != 0 && inner {
+            (self.dsp.h_loop_filter16y_mb)(
+                y,
+                off,
+                ls,
+                mbedge_lim,
+                bedge_lim,
+                inner_limit,
+                hev,
+            );
+        } else if mb_x != 0 {
+            (self.dsp.h_loop_filter16y)(y, off, ls, mbedge_lim, inner_limit, hev);
+        }
+
+        if inner && mb_x == 0 {
+            for k in 1..4 {
+                (self.dsp.h_loop_filter16y_inner)(
+                    y,
+                    off + 4 * k,
+                    ls,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                );
+            }
+        }
+
+        if mb_y != 0 && inner {
+            (self.dsp.v_loop_filter16y_mb)(
+                y,
+                off,
+                ls,
+                mbedge_lim,
+                bedge_lim,
+                inner_limit,
+                hev,
+            );
+        } else if mb_y != 0 {
+            (self.dsp.v_loop_filter16y)(y, off, ls, mbedge_lim, inner_limit, hev);
+        }
+
+        if inner && mb_y == 0 {
+            for k in 1..4 {
+                (self.dsp.v_loop_filter16y_inner)(
+                    y,
+                    off + 4 * k * ls,
+                    ls,
+                    bedge_lim,
+                    inner_limit,
+                    hev,
+                );
+            }
         }
     }
 

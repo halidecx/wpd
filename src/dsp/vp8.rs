@@ -303,6 +303,7 @@ pub type LfMbFn = fn(&mut [u8], usize, usize, i32, i32, i32, i32);
 pub type LfUvMbFn = fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32, i32);
 pub type LfSimpleFn = fn(&mut [u8], usize, usize, i32);
 pub type LfSimpleMbFn = fn(&mut [u8], usize, usize, i32, i32);
+pub type LfAllFn = fn(&mut [u8], usize, usize, i32, i32, i32, i32, u32);
 
 pub struct Vp8Dsp {
     pub luma_dc_wht: WhtFn,
@@ -331,6 +332,12 @@ pub struct Vp8Dsp {
     pub h_loop_filter_simple: LfSimpleFn,
     pub h_loop_filter_simple_mb: LfSimpleMbFn,
     pub v_loop_filter_simple_mb: LfSimpleMbFn,
+
+    /* Every edge of a luma macroblock with inner edges, in the spec's order.
+     * Bit 0 of the last argument asks for the left edge, bit 1 the top. Only
+     * worth having where one kernel can keep the block in registers
+     * throughout. */
+    pub loop_filter16y: Option<LfAllFn>,
 }
 
 fn wht_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
@@ -495,6 +502,8 @@ impl Vp8Dsp {
             h_loop_filter_simple: h_simple_c,
             h_loop_filter_simple_mb: h_simple_mb_c,
             v_loop_filter_simple_mb: v_simple_mb_c,
+
+            loop_filter16y: None,
         }
     }
 
