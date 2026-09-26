@@ -22,25 +22,6 @@ fn clip_uintp2(value: i32, bits: u32) -> i32 {
 
 type Planes<'a> = [&'a mut [u8]; 3];
 
-#[inline(always)]
-fn xchg8(
-    border: &mut [[u8; 32]],
-    tb: usize,
-    to: usize,
-    data: &mut [u8],
-    po: usize,
-    swap: bool,
-) {
-    let saved: [u8; 8] = border[tb][to..to + 8].try_into().unwrap();
-
-    if swap {
-        let old: [u8; 8] = data[po..po + 8].try_into().unwrap();
-
-        border[tb][to..to + 8].copy_from_slice(&old);
-    }
-    data[po..po + 8].copy_from_slice(&saved);
-}
-
 #[derive(Clone, Copy, Default)]
 pub struct Plane {
     pub stride: usize,
@@ -278,11 +259,13 @@ struct Recon {
     pred: Vp8Pred,
     planes: [Plane; 3],
     mb_width: usize,
+    mb_height: usize,
     deblock_filter: bool,
     filter: Filter,
     filter_levels: [[FilterStrength; 2]; 4],
+    /* Two rows, by mb_y parity: a row is filtered while the next one is
+     * decoded. */
     filter_strength: Vec<FilterStrength>,
-    top_border: Vec<[u8; 32]>,
 }
 
 /// What parsing the coefficients reads and writes, apart from the modes, so
@@ -359,10 +342,9 @@ impl Decoder {
         let mut filter_strength = Vec::new();
         let mut intra4x4_pred_mode_top = Vec::new();
         let mut top_nnz = Vec::new();
-        let mut top_border = Vec::new();
 
         filter_strength
-            .try_reserve_exact(mb_width)
+            .try_reserve_exact(2 * mb_width)
             .map_err(|_| Error::NoMemory)?;
         intra4x4_pred_mode_top
             .try_reserve_exact(mb_width * 4)
@@ -370,14 +352,10 @@ impl Decoder {
         top_nnz
             .try_reserve_exact(mb_width)
             .map_err(|_| Error::NoMemory)?;
-        top_border
-            .try_reserve_exact(mb_width + 1)
-            .map_err(|_| Error::NoMemory)?;
 
-        filter_strength.resize(mb_width, FilterStrength::default());
+        filter_strength.resize(2 * mb_width, FilterStrength::default());
         intra4x4_pred_mode_top.resize(mb_width * 4, 0);
         top_nnz.resize(mb_width, 0);
-        top_border.resize(mb_width + 1, [0; 32]);
 
         self.width = width;
         self.height = height;
@@ -386,10 +364,10 @@ impl Decoder {
 
         self.picture.invalidate();
         self.recon.mb_width = mb_width;
+        self.recon.mb_height = mb_height;
         self.recon.filter_strength = filter_strength;
         self.intra4x4_pred_mode_top = intra4x4_pred_mode_top;
         self.coeffs.top_nnz = top_nnz;
-        self.recon.top_border = top_border;
         Ok(())
     }
 
@@ -911,66 +889,6 @@ impl Recon {
     }
 
     #[inline(always)]
-    fn backup_mb_border(
-        &mut self,
-        planes: &Planes<'_>,
-        mb_x: usize,
-        off: [usize; 3],
-        simple: bool,
-    ) {
-        let ls = self.linesize();
-        let uvls = self.uvlinesize();
-        let border = &mut self.top_border[mb_x + 1];
-
-        border[..16].copy_from_slice(&planes[0][off[0] + 15 * ls..][..16]);
-        if !simple {
-            for (i, p) in [1usize, 2].into_iter().enumerate() {
-                let from = off[p] + 7 * uvls;
-
-                border[16 + 8 * i..24 + 8 * i]
-                    .copy_from_slice(&planes[p][from..from + 8]);
-            }
-        }
-    }
-
-    #[inline(always)]
-    #[allow(clippy::too_many_arguments)]
-    fn xchg_mb_border(
-        &mut self,
-        planes: &mut Planes<'_>,
-        mb_x: usize,
-        mb_y: usize,
-        off: [usize; 3],
-        simple: bool,
-        swap: bool,
-    ) {
-        let ls = self.linesize();
-        let uvls = self.uvlinesize();
-        let y = off[0] - ls;
-        let cb = off[1] - uvls;
-        let cr = off[2] - uvls;
-        let this = mb_x + 1;
-        let prev = mb_x;
-        let last = mb_x == self.mb_width - 1;
-        let border = &mut self.top_border;
-        let [luma, cbp, crp] = planes;
-
-        xchg8(border, prev, 8, luma, y - 8, swap);
-        xchg8(border, this, 0, luma, y, swap);
-        xchg8(border, this, 8, luma, y + 8, true);
-        if !last {
-            xchg8(border, this + 1, 0, luma, y + 16, true);
-        }
-
-        if !simple || mb_y == 0 {
-            xchg8(border, prev, 16, cbp, cb - 8, swap);
-            xchg8(border, prev, 24, crp, cr - 8, swap);
-            xchg8(border, this, 16, cbp, cb, true);
-            xchg8(border, this, 24, crp, cr, true);
-        }
-    }
-
-    #[inline(always)]
     fn intra_predict(
         &mut self,
         planes: &mut Planes<'_>,
@@ -981,11 +899,6 @@ impl Recon {
     ) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
-        let simple = self.filter.simple;
-
-        if self.deblock_filter || mb_y == 0 {
-            self.xchg_mb_border(planes, mb_x, mb_y, off, simple, true);
-        }
 
         if mb.mode < MODE_I4 {
             let mode = check_intra_pred8x8_mode(mb.mode, mb_x, mb_y);
@@ -1040,10 +953,6 @@ impl Recon {
 
         (self.pred.pred8x8[mode])(planes[1], off[1], uvls);
         (self.pred.pred8x8[mode])(planes[2], off[2], uvls);
-
-        if self.deblock_filter || mb_y == 0 {
-            self.xchg_mb_border(planes, mb_x, mb_y, off, simple, false);
-        }
     }
 
     #[inline(always)]
@@ -1429,15 +1338,13 @@ impl Recon {
     }
 
     fn filter_mb_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
-        let mut off = [
-            self.planes[0].at(0, 16 * mb_y),
-            self.planes[1].at(0, 8 * mb_y),
-            self.planes[2].at(0, 8 * mb_y),
-        ];
+        let mut off = self.row_offsets(mb_y);
+        let row = (mb_y & 1) * self.mb_width;
 
         for mb_x in 0..self.mb_width {
-            self.backup_mb_border(planes, mb_x, off, false);
-            self.filter_mb(planes, off, self.filter_strength[mb_x], mb_x, mb_y);
+            let strength = self.filter_strength[row + mb_x];
+
+            self.filter_mb(planes, off, strength, mb_x, mb_y);
             off[0] += 16;
             off[1] += 8;
             off[2] += 8;
@@ -1445,13 +1352,13 @@ impl Recon {
     }
 
     fn filter_mb_row_simple(&mut self, luma: &mut [u8], mb_y: usize) {
-        let ls = self.linesize();
         let mut off = self.planes[0].at(0, 16 * mb_y);
+        let row = (mb_y & 1) * self.mb_width;
 
         for mb_x in 0..self.mb_width {
-            self.top_border[mb_x + 1][..16]
-                .copy_from_slice(&luma[off + 15 * ls..][..16]);
-            self.filter_mb_simple(luma, off, self.filter_strength[mb_x], mb_x, mb_y);
+            let strength = self.filter_strength[row + mb_x];
+
+            self.filter_mb_simple(luma, off, strength, mb_x, mb_y);
             off += 16;
         }
     }
@@ -1465,7 +1372,7 @@ impl Recon {
     }
 
     /// Sets the column left of a row, which intra prediction reads as 129.
-    fn start_row(&mut self, planes: &mut Planes<'_>, off: [usize; 3], mb_y: usize) {
+    fn start_row(&self, planes: &mut Planes<'_>, off: [usize; 3]) {
         for (i, &at) in off.iter().enumerate() {
             let rows = if i == 0 { 16 } else { 8 };
             let stride = self.planes[i].stride;
@@ -1474,27 +1381,20 @@ impl Recon {
                 planes[i][at + y * stride - 1] = 129;
             }
         }
-        if mb_y == 1 {
-            self.top_border[0][15] = 129;
-            self.top_border[0][23] = 129;
-            self.top_border[0][31] = 129;
-        }
     }
 
     fn reconstruct_row(&mut self, planes: &mut Planes<'_>, row: &mut MbRow) {
         let mb_y = row.mb_y;
         let mut off = self.row_offsets(mb_y);
 
-        self.start_row(planes, off, mb_y);
+        self.start_row(planes, off);
         for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
             self.reconstruct_mb(planes, mb, off, mb_x, mb_y);
             off[0] += 16;
             off[1] += 8;
             off[2] += 8;
         }
-        if row.filter {
-            self.filter_row(planes, mb_y);
-        }
+        self.finish_row(planes, mb_y, row.filter);
     }
 
     #[inline(always)]
@@ -1513,7 +1413,9 @@ impl Recon {
         }
 
         if self.deblock_filter {
-            self.filter_strength[mb_x] = self.filter_level_for_mb(mb);
+            let at = (mb_y & 1) * self.mb_width + mb_x;
+
+            self.filter_strength[at] = self.filter_level_for_mb(mb);
         }
     }
 
@@ -1524,6 +1426,21 @@ impl Recon {
             } else {
                 self.filter_mb_row(planes, mb_y);
             }
+        }
+    }
+
+    /// Filters what reconstructing row `mb_y` has made final. VP8 predicts
+    /// from unfiltered pixels, so a row is filtered only once the row below
+    /// it is decoded, and the last row after itself. `filter` is false for
+    /// a row a partition ran dry in: the frame ends there, with that row
+    /// unfiltered below filtered ones, as when each row was filtered as it
+    /// was decoded.
+    fn finish_row(&mut self, planes: &mut Planes<'_>, mb_y: usize, filter: bool) {
+        if mb_y > 0 {
+            self.filter_row(planes, mb_y - 1);
+        }
+        if filter && mb_y + 1 == self.mb_height {
+            self.filter_row(planes, mb_y);
         }
     }
 }
@@ -1594,15 +1511,13 @@ impl Decoder {
         self.coeffs.top_nnz.fill(0);
         self.intra4x4_pred_mode_top.fill(pred::DC_PRED as u8);
 
-        let top_border = &mut self.recon.top_border;
+        /* The first row predicts from 127 above it, the corner included. */
+        for (p, g) in self.picture.planes.iter().enumerate() {
+            let n = if p == 0 { 16 } else { 8 } * self.mb_width;
+            let at = g.base + g.origin - g.stride - 1;
 
-        top_border[0] = [0; 32];
-        top_border[0][15] = 127;
-        top_border[0][23] = 127;
-        for entry in top_border.iter_mut().skip(1) {
-            entry.fill(127);
+            self.picture.data[at..=at + n].fill(127);
         }
-        top_border[0][31] = 127;
 
         self.mb_x = 0;
         self.mb_y = 0;
@@ -1713,7 +1628,7 @@ impl Decoder {
 
             if !resumable || mb_x0 == 0 {
                 self.start_row();
-                self.recon.start_row(planes, off, mb_y);
+                self.recon.start_row(planes, off);
             } else {
                 off[0] += 16 * mb_x0;
                 off[1] += 8 * mb_x0;
@@ -1745,15 +1660,18 @@ impl Decoder {
                 off[2] += 8;
             }
 
-            if !check && self.ran_dry(part) {
+            let dry = !check && self.ran_dry(part);
+
+            self.recon.finish_row(planes, mb_y, !dry);
+            if dry {
                 return Err(Error::InvalidData);
             }
 
-            self.recon.filter_row(planes, mb_y);
-
             if resumable {
+                /* A row's pixels are final once the row below it is decoded
+                 * and it is filtered. */
                 self.mb_x = 0;
-                self.mb_rows_done = mb_y + 1;
+                self.mb_rows_done = mb_y + usize::from(!self.recon.deblock_filter);
             }
         }
 
