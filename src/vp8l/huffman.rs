@@ -1,4 +1,4 @@
-use super::bitreader::BitReader;
+use super::bitreader::{BitReader, Fast};
 use crate::error::{Error, Result};
 
 pub const MAX_CODE_LENGTH: usize = 15;
@@ -34,6 +34,37 @@ impl Reader {
             root: &full[..=self.mask as usize],
             full,
         }
+    }
+
+    /// `Tree::read` for a `Fast` reader. It finds the table in `arena` at
+    /// each read, which keeps the five tables of a group out of registers.
+    /// With `REFILL`, the refill goes between the lookup and the shift that
+    /// consumes the code, off the chain from one code to the next: the lookup
+    /// indexes with the bits already there, of which there are at least 15.
+    #[inline(always)]
+    pub fn read_fast<const REFILL: bool>(
+        &self,
+        arena: &[u32],
+        f: &mut Fast,
+        buf: &[u8],
+    ) -> u32 {
+        let table = &arena[self.start as usize..];
+        let val = f.peek() as usize;
+        let mut index = val & self.mask as usize;
+        let mut entry = table[index];
+        let mut bits = entry & 0xFF;
+
+        if bits > TABLE_BITS {
+            index += (entry >> 8) as usize
+                + ((val >> TABLE_BITS) & ((1 << (bits - TABLE_BITS)) - 1));
+            entry = table[index];
+            bits = TABLE_BITS + (entry & 0xFF);
+        }
+        if REFILL {
+            f.refill(buf);
+        }
+        f.consume(bits);
+        entry >> 8
     }
 }
 

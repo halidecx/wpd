@@ -1,4 +1,4 @@
-use super::bitreader::{BitReader, TAIL_MARGIN};
+use super::bitreader::{BitReader, Fast, FAST_MARGIN, TAIL_MARGIN};
 use super::huffman::Tree;
 use super::{
     HTreeGroup, Picture, Resume, HUFFMAN_CODES_PER_META_CODE, HUFF_IDX_ALPHA,
@@ -350,6 +350,100 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
 
     let mut hg = &groups[hgi];
     let mut trees = resolve(hg, arena);
+
+    // The bulk of the stream cannot run out mid-pixel, so it needs none of
+    // the end-of-stream checks or snapshots below.
+    if let Some(mut f) = gb.fast(buf) {
+        let limit = buf.len() - FAST_MARGIN;
+
+        while pos < total && f.pos() <= limit {
+            if x & huff_mask == 0 {
+                hgi = map.at(x, y);
+                hg = &groups[hgi];
+            }
+            let v = hg.trees[HUFF_IDX_GREEN].read_fast::<true>(arena, &mut f, buf);
+
+            if v < NUM_LITERAL_CODES {
+                let mut px;
+
+                if hg.trivial_literal {
+                    px = hg.literal;
+                    px[2] = v as u8;
+                } else {
+                    let r =
+                        hg.trees[HUFF_IDX_RED].read_fast::<false>(arena, &mut f, buf);
+                    let b =
+                        hg.trees[HUFF_IDX_BLUE].read_fast::<true>(arena, &mut f, buf);
+                    let a =
+                        hg.trees[HUFF_IDX_ALPHA].read_fast::<false>(arena, &mut f, buf);
+
+                    px = [a as u8, r as u8, v as u8, b as u8];
+                }
+                pixels[pos] = u32::from_ne_bytes(px);
+                pos += 1;
+                x += 1;
+                if x == width as i32 {
+                    x = 0;
+                    y += 1;
+                    if cache_bits != 0 {
+                        cached = cache_fill(cache, cache_bits, pixels, cached, pos);
+                    }
+                }
+            } else if v < NUM_LITERAL_CODES + NUM_LENGTH_CODES {
+                let length = extend_fast(&mut f, v - NUM_LITERAL_CODES);
+                let prefix =
+                    hg.trees[HUFF_IDX_DIST].read_fast::<true>(arena, &mut f, buf);
+
+                if prefix > 39 {
+                    crate::log::error_args(format_args!(
+                        "distance prefix code too large: {prefix}"
+                    ));
+                    return Err(Error::InvalidData);
+                }
+
+                let coded = extend_fast(&mut f, prefix);
+                let (distance, length) =
+                    backward_reference(coded, length, width, pos, total)?;
+
+                copy_block(pixels, pos, distance, length);
+                pos += length;
+                x += length as i32;
+                while x >= width as i32 {
+                    x -= width as i32;
+                    y += 1;
+                }
+                if multi_group && x & huff_mask != 0 {
+                    hgi = map.at(x, y);
+                    hg = &groups[hgi];
+                }
+                if cache_bits != 0 {
+                    cached = cache_fill(cache, cache_bits, pixels, cached, pos);
+                }
+            } else {
+                let slot = (v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES)) as usize;
+
+                if cache_bits == 0 {
+                    crate::log::error("color cache not found");
+                    return Err(Error::InvalidData);
+                }
+                if slot >= 1 << cache_bits {
+                    crate::log::error("color cache index out-of-bounds");
+                    return Err(Error::InvalidData);
+                }
+                cached = cache_fill(cache, cache_bits, pixels, cached, pos);
+                pixels[pos] = u32::from_ne_bytes(cache[slot].to_be_bytes());
+                pos += 1;
+                x += 1;
+                if x == width as i32 {
+                    x = 0;
+                    y += 1;
+                }
+            }
+        }
+        gb.resume(&f, buf);
+        trees = resolve(hg, arena);
+    }
+
     let mut snap = *gb;
     let mut near = false;
 
@@ -586,6 +680,17 @@ fn extend(gb: &mut BitReader, buf: &[u8], prefix: u32) -> u32 {
     let offset = (2 + (prefix & 1)) << extra_bits;
 
     offset + gb.bits(buf, extra_bits) + 1
+}
+
+#[inline(always)]
+fn extend_fast(f: &mut Fast, prefix: u32) -> u32 {
+    if prefix < 4 {
+        return prefix + 1;
+    }
+    let extra_bits = (prefix - 2) >> 1;
+    let offset = (2 + (prefix & 1)) << extra_bits;
+
+    offset + f.bits(extra_bits) + 1
 }
 
 #[cfg(test)]
