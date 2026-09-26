@@ -269,8 +269,9 @@ function wpd_vp8_idct_dc_add_neon, export=1
         ret
 endfunc
 
-.macro  vp8_loop_filter, inner=0, simple=0, hev_thresh
-    .if \simple
+/* The simple filter across one edge, on p1..q1 in v2..v5, with the edge limit
+ * in v22. */
+.macro  vp8_loop_filter_simple
         uabd            v17.16b, v3.16b,  v4.16b
         uabd            v23.16b, v2.16b,  v5.16b
         uqadd           v17.16b, v17.16b, v17.16b
@@ -278,37 +279,6 @@ endfunc
         uqadd           v19.16b, v17.16b,  v18.16b
         movi            v21.16b, #0x80
         cmhs            v16.16b, v22.16b, v19.16b
-    .else
-        uabd            v20.16b, v2.16b,  v3.16b
-        uabd            v21.16b, v5.16b,  v4.16b
-        uabd            v18.16b, v0.16b,  v1.16b
-        uabd            v19.16b, v1.16b,  v2.16b
-        cmhs            v16.16b, v23.16b, v20.16b
-        cmhs            v17.16b, v23.16b, v21.16b
-        cmhs            v18.16b, v23.16b, v18.16b
-        cmhs            v19.16b, v23.16b, v19.16b
-        and             v16.16b, v17.16b, v16.16b
-        uabd            v17.16b, v7.16b,  v6.16b
-        and             v16.16b, v16.16b, v19.16b
-        uabd            v19.16b, v6.16b,  v5.16b
-        and             v16.16b, v16.16b, v18.16b
-        cmhs            v18.16b, v23.16b, v17.16b
-        cmhs            v19.16b, v23.16b, v19.16b
-        uabd            v17.16b, v3.16b,  v4.16b
-        uabd            v23.16b, v2.16b,  v5.16b
-        and             v16.16b, v16.16b, v18.16b
-        uqadd           v17.16b, v17.16b, v17.16b
-        and             v16.16b, v16.16b, v19.16b
-        ushr            v18.16b, v23.16b, #1
-        dup             v23.16b, \hev_thresh
-        uqadd           v19.16b, v17.16b, v18.16b
-        cmhi            v20.16b, v20.16b, v23.16b
-        cmhs            v19.16b, v22.16b, v19.16b
-        cmhi            v22.16b, v21.16b, v23.16b
-        and             v16.16b, v16.16b, v19.16b
-        movi            v21.16b, #0x80
-        orr             v17.16b, v20.16b, v22.16b
-    .endif
 
         eor             v3.16b, v3.16b, v21.16b
         eor             v4.16b, v4.16b, v21.16b
@@ -324,20 +294,12 @@ endfunc
         sqsub           v20.16b, v2.16b, v5.16b
         movi            v22.16b, #4
         movi            v23.16b, #3
-    .if \inner
-        and             v20.16b, v20.16b, v17.16b
-    .endif
         saddw           v18.8h,  v18.8h, v20.8b
         saddw2          v19.8h,  v19.8h, v20.16b
         sqxtn           v18.8b,  v18.8h
         sqxtn2          v18.16b, v19.8h
-    .if !\inner && !\simple
-        eor             v1.16b,  v1.16b,  v21.16b
-        eor             v6.16b,  v6.16b,  v21.16b
-    .endif
         and             v18.16b, v18.16b, v16.16b
 
-    .if \simple
         sqadd           v19.16b, v18.16b, v22.16b
         sqadd           v20.16b, v18.16b, v23.16b
         sshr            v19.16b, v19.16b, #3
@@ -348,61 +310,113 @@ endfunc
         eor             v3.16b,  v3.16b,  v21.16b
         eor             v5.16b,  v5.16b,  v21.16b
         eor             v2.16b,  v2.16b,  v21.16b
-    .elseif \inner
-        sqadd           v19.16b, v18.16b, v22.16b
-        sqadd           v20.16b, v18.16b, v23.16b
-        sshr            v19.16b, v19.16b, #3
-        sshr            v20.16b, v20.16b, #3
-        sqsub           v4.16b,  v4.16b,  v19.16b
-        sqadd           v3.16b,  v3.16b,  v20.16b
-        bic             v19.16b, v19.16b, v17.16b
-        eor             v4.16b,  v4.16b,  v21.16b
-        srshr           v19.16b, v19.16b, #1
-        eor             v3.16b,  v3.16b,  v21.16b
-        sqsub           v5.16b,  v5.16b,  v19.16b
-        sqadd           v2.16b,  v2.16b,  v19.16b
-        eor             v5.16b,  v5.16b,  v21.16b
-        eor             v2.16b,  v2.16b,  v21.16b
-    .else
-        and             v20.16b, v18.16b, v17.16b
-        sqadd           v19.16b, v20.16b, v22.16b
-        sqadd           v20.16b, v20.16b, v23.16b
-        sshr            v19.16b, v19.16b, #3
-        sshr            v20.16b, v20.16b, #3
-        bic             v18.16b, v18.16b, v17.16b
-        sqsub           v4.16b,  v4.16b,  v19.16b
-        sqadd           v3.16b,  v3.16b,  v20.16b
+.endm
 
-        movi            v17.8h,  #63
-        sshll           v22.8h,  v18.8b, #3
-        sshll2          v23.8h,  v18.16b, #3
-        saddw           v22.8h,  v22.8h, v18.8b
-        saddw2          v23.8h,  v23.8h, v18.16b
-        add             v16.8h,  v17.8h, v22.8h
-        add             v17.8h,  v17.8h, v23.8h
-        add             v19.8h,  v16.8h, v22.8h
-        add             v20.8h,  v17.8h, v23.8h
-        add             v22.8h,  v19.8h, v22.8h
-        add             v23.8h,  v20.8h, v23.8h
-        sqshrn          v16.8b,  v16.8h,  #7
-        sqshrn2         v16.16b, v17.8h, #7
-        sqshrn          v19.8b,  v19.8h, #7
-        sqshrn2         v19.16b, v20.8h, #7
-        sqshrn          v22.8b,  v22.8h, #7
-        sqshrn2         v22.16b, v23.8h, #7
-        sqadd           v1.16b,  v1.16b,  v16.16b
-        sqsub           v6.16b,  v6.16b,  v16.16b
-        sqadd           v2.16b,  v2.16b,  v19.16b
-        sqsub           v5.16b,  v5.16b,  v19.16b
-        sqadd           v3.16b,  v3.16b,  v22.16b
-        sqsub           v4.16b,  v4.16b,  v22.16b
-        eor             v3.16b,  v3.16b,  v21.16b
-        eor             v4.16b,  v4.16b,  v21.16b
-        eor             v2.16b,  v2.16b,  v21.16b
-        eor             v5.16b,  v5.16b,  v21.16b
-        eor             v1.16b,  v1.16b,  v21.16b
-        eor             v6.16b,  v6.16b,  v21.16b
+/* The normal filter across one edge, 16 lanes wide, in place on p3..q3. \e,
+ * \i and \h are the GPRs holding the edge limit, the interior limit and the
+ * hev threshold. Clobbers v16-v23 and v28-v31.
+ *
+ * The limits take a max over the six interior differences, then one compare,
+ * and the base delta clamp(clamp(p1 - q1) + 3 * (q0 - p0)) is three saturating
+ * byte adds of clamp(q0 - p0): once any partial sum saturates, the remaining
+ * adds share its sign and |3 * (q0 - p0)| alone would have saturated it, so
+ * the result matches the wide sum. On a macroblock edge the +4/+3 taps (hev
+ * lanes) and the 27/18/9 taps (the rest) never both move a lane, so their
+ * p0/q0 corrections combine with one orr. (k * w + 63) >> 7 is the high byte
+ * of 2 * k * w + 126. */
+.macro  vp8_lf16 p3, p2, p1, p0, q0, q1, q2, q3, e, i, h, mbedge
+        uabd            v16.16b, \p3\().16b, \p2\().16b
+        uabd            v17.16b, \p2\().16b, \p1\().16b
+        uabd            v18.16b, \p1\().16b, \p0\().16b
+        uabd            v19.16b, \q1\().16b, \q0\().16b
+        uabd            v20.16b, \q2\().16b, \q1\().16b
+        uabd            v21.16b, \q3\().16b, \q2\().16b
+        uabd            v22.16b, \p0\().16b, \q0\().16b
+        uabd            v23.16b, \p1\().16b, \q1\().16b
+        dup             v28.16b, \i
+        dup             v29.16b, \e
+        dup             v30.16b, \h
+        movi            v31.16b, #0x80
+        umax            v16.16b, v16.16b, v17.16b
+        umax            v18.16b, v18.16b, v19.16b
+        umax            v20.16b, v20.16b, v21.16b
+        uqadd           v22.16b, v22.16b, v22.16b
+        ushr            v23.16b, v23.16b, #1
+        umax            v16.16b, v16.16b, v20.16b
+        uqadd           v22.16b, v22.16b, v23.16b
+        umax            v16.16b, v16.16b, v18.16b
+        cmhi            v17.16b, v18.16b, v30.16b
+        cmhs            v22.16b, v29.16b, v22.16b
+        cmhs            v16.16b, v28.16b, v16.16b
+        and             v16.16b, v16.16b, v22.16b
+    .if \mbedge
+        eor             \p2\().16b, \p2\().16b, v31.16b
+        eor             \q2\().16b, \q2\().16b, v31.16b
     .endif
+        eor             \p1\().16b, \p1\().16b, v31.16b
+        eor             \p0\().16b, \p0\().16b, v31.16b
+        eor             \q0\().16b, \q0\().16b, v31.16b
+        eor             \q1\().16b, \q1\().16b, v31.16b
+        sqsub           v18.16b, \q0\().16b, \p0\().16b
+        sqsub           v19.16b, \p1\().16b, \q1\().16b
+        movi            v20.16b, #4
+        movi            v21.16b, #3
+    .if !\mbedge
+        and             v19.16b, v19.16b, v17.16b
+    .endif
+        sqadd           v19.16b, v19.16b, v18.16b
+        sqadd           v19.16b, v19.16b, v18.16b
+        sqadd           v19.16b, v19.16b, v18.16b
+        and             v19.16b, v19.16b, v16.16b
+    .if \mbedge
+        and             v22.16b, v19.16b, v17.16b
+        bic             v23.16b, v19.16b, v17.16b
+        movi            v28.16b, #54
+        movi            v29.16b, #36
+        movi            v30.16b, #18
+        movi            v16.8h,  #126
+        sqadd           v20.16b, v22.16b, v20.16b
+        sqadd           v21.16b, v22.16b, v21.16b
+        smull           v17.8h,  v23.8b,  v28.8b
+        smull2          v18.8h,  v23.16b, v28.16b
+        smull           v19.8h,  v23.8b,  v29.8b
+        smull2          v22.8h,  v23.16b, v29.16b
+        smull           v28.8h,  v23.8b,  v30.8b
+        smull2          v29.8h,  v23.16b, v30.16b
+        sshr            v20.16b, v20.16b, #3
+        sshr            v21.16b, v21.16b, #3
+        addhn           v17.8b,  v17.8h,  v16.8h
+        addhn           v19.8b,  v19.8h,  v16.8h
+        addhn           v28.8b,  v28.8h,  v16.8h
+        addhn2          v17.16b, v18.8h,  v16.8h
+        addhn2          v19.16b, v22.8h,  v16.8h
+        addhn2          v28.16b, v29.8h,  v16.8h
+        orr             v20.16b, v20.16b, v17.16b
+        orr             v21.16b, v21.16b, v17.16b
+        sqsub           \q1\().16b, \q1\().16b, v19.16b
+        sqadd           \p1\().16b, \p1\().16b, v19.16b
+        sqsub           \q2\().16b, \q2\().16b, v28.16b
+        sqadd           \p2\().16b, \p2\().16b, v28.16b
+        sqsub           \q0\().16b, \q0\().16b, v20.16b
+        sqadd           \p0\().16b, \p0\().16b, v21.16b
+        eor             \p2\().16b, \p2\().16b, v31.16b
+        eor             \q2\().16b, \q2\().16b, v31.16b
+    .else
+        sqadd           v20.16b, v19.16b, v20.16b
+        sqadd           v21.16b, v19.16b, v21.16b
+        sshr            v20.16b, v20.16b, #3
+        sshr            v21.16b, v21.16b, #3
+        sqsub           \q0\().16b, \q0\().16b, v20.16b
+        sqadd           \p0\().16b, \p0\().16b, v21.16b
+        bic             v20.16b, v20.16b, v17.16b
+        srshr           v20.16b, v20.16b, #1
+        sqsub           \q1\().16b, \q1\().16b, v20.16b
+        sqadd           \p1\().16b, \p1\().16b, v20.16b
+    .endif
+        eor             \p1\().16b, \p1\().16b, v31.16b
+        eor             \p0\().16b, \p0\().16b, v31.16b
+        eor             \q0\().16b, \q0\().16b, v31.16b
+        eor             \q1\().16b, \q1\().16b, v31.16b
 .endm
 
 .macro  vp8_v_loop_filter16 name, inner=0, simple=0
@@ -420,11 +434,13 @@ function wpd_vp8_v_loop_filter16\name\()_neon, export=1
     .if !\simple
         ld1             {v6.16b},     [x0], x1
         ld1             {v7.16b},     [x0]
-        dup             v23.16b, w3
-    .endif
+
+        vp8_lf16        v0, v1, v2, v3, v4, v5, v6, v7, w2, w3, w4, !\inner
+    .else
         dup             v22.16b, w2
 
-        vp8_loop_filter inner=\inner, simple=\simple, hev_thresh=w4
+        vp8_loop_filter_simple
+    .endif
 
         sub             x0,  x0,  x1,  lsl #2
     .if !\simple
@@ -469,10 +485,7 @@ function wpd_vp8_v_loop_filter8uv\name\()_neon, export=1
         ld1             {v7.d}[0],     [x0]
         ld1             {v7.d}[1],     [x1]
 
-        dup             v22.16b, w3
-        dup             v23.16b, w4
-
-        vp8_loop_filter inner=\inner, hev_thresh=w5
+        vp8_lf16        v0, v1, v2, v3, v4, v5, v6, v7, w3, w4, w5, !\inner
 
         sub             x0,  x0,  x2,  lsl #2
         sub             x1,  x1,  x2,  lsl #2
@@ -522,10 +535,7 @@ function wpd_vp8_h_loop_filter16\name\()_neon, export=1
 
         transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
 
-        dup             v22.16b, w2
-        dup             v23.16b, w3
-
-        vp8_loop_filter inner=\inner, hev_thresh=w4
+        vp8_lf16        v0, v1, v2, v3, v4, v5, v6, v7, w2, w3, w4, !\inner
 
         sub             x0,  x0,  x1, lsl #4
 
@@ -593,7 +603,7 @@ function wpd_vp8_h_loop_filter16_simple_neon, export=1
         trn1            v3.8h,   v25.8h,  v27.8h
         trn2            v5.8h,   v25.8h,  v27.8h
 
-        vp8_loop_filter simple=1
+        vp8_loop_filter_simple
 
         zip1            v24.16b, v3.16b, v4.16b
         zip2            v25.16b, v3.16b, v4.16b
@@ -1053,10 +1063,7 @@ function wpd_vp8_h_loop_filter8uv\name\()_neon, export=1
 
         transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
 
-        dup             v22.16b, w3
-        dup             v23.16b, w4
-
-        vp8_loop_filter inner=\inner, hev_thresh=w5
+        vp8_lf16        v0, v1, v2, v3, v4, v5, v6, v7, w3, w4, w5, !\inner
 
         sub             x0,  x0,  x2, lsl #3
         sub             x1,  x1,  x2, lsl #3
