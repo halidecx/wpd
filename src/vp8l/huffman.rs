@@ -176,20 +176,22 @@ fn next_table_bits(
 
 fn table_size(p: &Plan) -> usize {
     let mut count = p.count;
-    let mut key = 0u32;
     let mut low = 0xFFFF_FFFFu32;
     let mut total = 1usize << p.root_bits;
     let root_mask = (1u32 << p.root_bits) - 1;
 
-    for len in 1..=MAX_CODE_LENGTH as u32 {
-        if len > p.root_bits {
-            break;
-        }
-        while count[len as usize] > 0 {
-            key = next_key(key, len);
-            count[len as usize] -= 1;
-        }
+    // The codes that fit in the root take the first `code` of its entries in
+    // canonical order, so the first longer code starts at `code`, which the
+    // table indexes bit-reversed.
+    let code = (1..=p.root_bits as usize)
+        .map(|len| (count[len] as u32) << (p.root_bits as usize - len))
+        .sum::<u32>();
+
+    if code >= 1 << p.root_bits {
+        return total;
     }
+
+    let mut key = code.reverse_bits() >> (32 - p.root_bits);
 
     for len in p.root_bits + 1..=MAX_CODE_LENGTH as u32 {
         while count[len as usize] > 0 {
@@ -796,6 +798,55 @@ mod tests {
                     readers[k].read_fast::<true>(&arena, &mut fast[k], &buf),
                     symbol,
                     "read {i}"
+                );
+            }
+        }
+    }
+
+    /// A complete code of `n` symbols: splits a code in two, the last one made
+    /// half of the time so that some grow long, until there are enough.
+    fn random_code(seed: u32, n: usize) -> Vec<u8> {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let mut lengths = vec![1u8, 1];
+
+        while lengths.len() < n {
+            let r = next() as usize;
+            let i = if r & 1 == 0 {
+                lengths.len() - 1
+            } else {
+                (r >> 1) % lengths.len()
+            };
+
+            if usize::from(lengths[i]) < MAX_CODE_LENGTH {
+                lengths[i] += 1;
+                lengths.push(lengths[i]);
+            }
+        }
+        lengths
+    }
+
+    #[test]
+    fn a_table_takes_the_size_its_plan_computes() {
+        for seed in 1..300u32 {
+            let lengths = random_code(seed, 2 + seed as usize);
+
+            for bits in [8, 9, 10, 11] {
+                let mut arena = Vec::new();
+                let mut plan = Plan::with_root_bits(bits);
+                let mut sorted = vec![0u16; lengths.len()];
+
+                count_lengths(&mut plan, &lengths);
+                // `fill` rejects a table that does not come out at the size
+                // `table_size` gave.
+                assert!(
+                    build(&mut arena, &mut plan, &lengths, &mut sorted).is_ok(),
+                    "seed {seed}, root bits {bits}"
                 );
             }
         }
