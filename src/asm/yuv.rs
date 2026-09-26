@@ -438,6 +438,7 @@ macro_rules! upsample_table {
             upsample_block::<$set::UpsampleRgb, LAYOUT_RGB>,
             upsample_block::<$set::UpsampleBgr, LAYOUT_BGR>,
         ];
+        $dsp.upsample_overlap = [true; crate::dsp::yuv::LAYOUT_NB];
     };
 }
 
@@ -469,10 +470,16 @@ macro_rules! ladder {
                 $(#[$attr])*
                 if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
                     $( upsample_table!(dsp, $up); )?
-                    $( dsp.upsample_block[LAYOUT_RGB] =
-                        upsample_block::<$up_rgb::UpsampleRgb, LAYOUT_RGB>; )?
-                    $( dsp.upsample_block[LAYOUT_BGR] =
-                        upsample_block::<$up_bgr::UpsampleBgr, LAYOUT_BGR>; )?
+                    $(
+                        dsp.upsample_block[LAYOUT_RGB] =
+                            upsample_block::<$up_rgb::UpsampleRgb, LAYOUT_RGB>;
+                        dsp.upsample_overlap[LAYOUT_RGB] = true;
+                    )?
+                    $(
+                        dsp.upsample_block[LAYOUT_BGR] =
+                            upsample_block::<$up_bgr::UpsampleBgr, LAYOUT_BGR>;
+                        dsp.upsample_overlap[LAYOUT_BGR] = true;
+                    )?
                     $( packers!(dsp, $packers); )?
                     $( yuv_rows!(dsp, $rows); )?
                     $( yuv_rows_rgb!(dsp, $rows_rgb); )?
