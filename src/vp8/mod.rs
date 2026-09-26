@@ -154,10 +154,18 @@ impl FilterStrength {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+/// A macroblock as parsing leaves it for reconstruction: its modes, which of
+/// its blocks carry coefficients, and the coefficients. Reconstruction clears
+/// every block it uses, so one parsed after it starts from zeroes again.
+#[derive(Default)]
 struct Macroblock {
+    block: Blocks,
+    non_zero_count_cache: [[u8; 4]; 6],
+    intra4x4_pred_mode_mb: [u8; 16],
     skip: bool,
     mode: usize,
+    segment: usize,
+    chroma_pred_mode: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -193,7 +201,6 @@ struct QMat {
 struct Probs {
     segmentid: [u8; 3],
     mbskip: u8,
-    token: [[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16]; 4],
 }
 
 impl Default for Probs {
@@ -201,7 +208,6 @@ impl Default for Probs {
         Self {
             segmentid: [255; 3],
             mbskip: 0,
-            token: [[[[0; NUM_DCT_TOKENS - 1]; 3]; 16]; 4],
         }
     }
 }
@@ -224,10 +230,39 @@ struct ResumeState {
     left_nnz: [u8; 9],
 }
 
+/// What reconstruction and the loop filter read and write, apart from the
+/// parser's state, so the two can run on different threads.
 #[derive(Default)]
-pub struct Decoder {
+struct Recon {
     dsp: Vp8Dsp,
     pred: Vp8Pred,
+    planes: [Plane; 3],
+    mb_width: usize,
+    deblock_filter: bool,
+    filter: Filter,
+    filter_levels: [[FilterStrength; 2]; 4],
+    filter_strength: Vec<FilterStrength>,
+    top_border: Vec<[u8; 32]>,
+}
+
+/// What parsing the coefficients reads and writes, apart from the modes, so
+/// the two can run on different threads.
+#[derive(Default)]
+struct Coeffs {
+    /* Its own table, for the WHT it runs on the DC coefficients. */
+    dsp: Vp8Dsp,
+    qmat: [QMat; 4],
+    token: [[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16]; 4],
+    top_nnz: Vec<[u8; 9]>,
+    left_nnz: [u8; 9],
+    block_dc: BlockDc,
+    coeff_partition: [RangeCoder; MAX_PARTITIONS],
+}
+
+#[derive(Default)]
+pub struct Decoder {
+    coeffs: Coeffs,
+    recon: Recon,
 
     pub picture: Picture,
     pub width: i32,
@@ -237,34 +272,19 @@ pub struct Decoder {
     mb_width: usize,
     mb_height: usize,
 
-    deblock_filter: bool,
     mbskip_enabled: bool,
-    segment: usize,
-    chroma_pred_mode: usize,
     profile: u8,
 
     segmentation: Segmentation,
-    filter: Filter,
     lf_delta: LfDelta,
-    qmat: [QMat; 4],
-    filter_levels: [[FilterStrength; 2]; 4],
 
-    filter_strength: Vec<FilterStrength>,
     intra4x4_pred_mode_top: Vec<u8>,
     intra4x4_pred_mode_left: [u8; 4],
-    intra4x4_pred_mode_mb: [u8; 16],
-    top_nnz: Vec<[u8; 9]>,
-    left_nnz: [u8; 9],
-    top_border: Vec<[u8; 32]>,
 
-    non_zero_count_cache: [[u8; 4]; 6],
-    block: Blocks,
-    block_dc: BlockDc,
     prob: Probs,
 
     c: RangeCoder,
     num_coeff_partitions: usize,
-    coeff_partition: [RangeCoder; MAX_PARTITIONS],
     partition_start: [usize; MAX_PARTITIONS],
     partition_size: [usize; MAX_PARTITIONS],
     partition_ready: u8,
@@ -282,21 +302,13 @@ impl Decoder {
         Self::default()
     }
 
-    fn linesize(&self) -> usize {
-        self.picture.planes[0].stride
-    }
-
-    fn uvlinesize(&self) -> usize {
-        self.picture.planes[1].stride
-    }
-
     fn update_dimensions(&mut self, width: i32, height: i32) -> Result<()> {
         check_image_size(width, height).map_err(|_| Error::InvalidData)?;
 
         if width == self.width
             && height == self.height
             && self.picture.allocated()
-            && !self.filter_strength.is_empty()
+            && !self.recon.filter_strength.is_empty()
         {
             return Ok(());
         }
@@ -332,10 +344,11 @@ impl Decoder {
         self.mb_height = mb_height;
 
         self.picture.invalidate();
-        self.filter_strength = filter_strength;
+        self.recon.mb_width = mb_width;
+        self.recon.filter_strength = filter_strength;
         self.intra4x4_pred_mode_top = intra4x4_pred_mode_top;
-        self.top_nnz = top_nnz;
-        self.top_border = top_border;
+        self.coeffs.top_nnz = top_nnz;
+        self.recon.top_border = top_border;
         Ok(())
     }
 
@@ -436,11 +449,13 @@ impl Decoder {
                 continue;
             };
 
+            let coder = &mut self.coeffs.coeff_partition[i];
+
             if self.partition_ready & (1 << i) == 0 {
-                self.coeff_partition[i] = RangeCoder::start(buf, start, win);
+                *coder = RangeCoder::start(buf, start, win);
                 self.partition_ready |= 1 << i;
-            } else if self.coeff_partition[i].end() != start + win {
-                self.coeff_partition[i].extend(start + win);
+            } else if coder.end() != start + win {
+                coder.extend(start + win);
             }
 
             if win < size {
@@ -474,7 +489,7 @@ impl Decoder {
             let dc =
                 |d: i32| i16::from(DC_QLOOKUP[clip_uintp2(base_qi + d, 7) as usize]);
             let ac = |d: i32| AC_QLOOKUP[clip_uintp2(base_qi + d, 7) as usize] as i32;
-            let q = &mut self.qmat[i];
+            let q = &mut self.coeffs.qmat[i];
 
             q.luma_qmul[0] = dc(ydc_delta);
             q.luma_qmul[1] = ac(0) as i16;
@@ -496,10 +511,10 @@ impl Decoder {
                 if self.segmentation.absolute_vals {
                     level
                 } else {
-                    level + i32::from(self.filter.level)
+                    level + i32::from(self.recon.filter.level)
                 }
             } else {
-                i32::from(self.filter.level)
+                i32::from(self.recon.filter.level)
             };
 
             for i4 in 0..2 {
@@ -515,14 +530,15 @@ impl Decoder {
                 let filter_level = clip_uintp2(filter_level, 6);
                 let mut interior_limit = filter_level;
 
-                if self.filter.sharpness != 0 {
-                    interior_limit >>= (i32::from(self.filter.sharpness) + 3) >> 2;
-                    interior_limit =
-                        interior_limit.min(9 - i32::from(self.filter.sharpness));
+                let sharpness = i32::from(self.recon.filter.sharpness);
+
+                if sharpness != 0 {
+                    interior_limit >>= (sharpness + 3) >> 2;
+                    interior_limit = interior_limit.min(9 - sharpness);
                 }
                 interior_limit = interior_limit.max(1);
 
-                self.filter_levels[segment][i4] = FilterStrength {
+                self.recon.filter_levels[segment][i4] = FilterStrength {
                     filter_level: filter_level as u8,
                     inner_limit: interior_limit as u8,
                     inner_filter: i4 == 1,
@@ -578,7 +594,8 @@ impl Decoder {
             crate::log::warning("Upscaling is not supported");
         }
 
-        for (plane, defaults) in self.prob.token.iter_mut().zip(&TOKEN_DEFAULT_PROBS) {
+        for (plane, defaults) in self.coeffs.token.iter_mut().zip(&TOKEN_DEFAULT_PROBS)
+        {
             for (band, probs) in plane.iter_mut().zip(&COEFF_BAND) {
                 *band = defaults[*probs as usize];
             }
@@ -601,9 +618,9 @@ impl Decoder {
             self.segmentation.update_map = false;
         }
 
-        self.filter.simple = self.c.get(buf) != 0;
-        self.filter.level = self.c.get_uint(buf, 6) as u8;
-        self.filter.sharpness = self.c.get_uint(buf, 3) as u8;
+        self.recon.filter.simple = self.c.get(buf) != 0;
+        self.recon.filter.level = self.c.get_uint(buf, 6) as u8;
+        self.recon.filter.sharpness = self.c.get_uint(buf, 3) as u8;
 
         self.lf_delta.enabled = self.c.get(buf) != 0;
         if self.lf_delta.enabled && self.c.get(buf) != 0 {
@@ -636,7 +653,7 @@ impl Decoder {
                             if index < 0 {
                                 break;
                             }
-                            self.prob.token[i][index as usize][k][l] = prob;
+                            self.coeffs.token[i][index as usize][k][l] = prob;
                         }
                     }
                 }
@@ -651,7 +668,7 @@ impl Decoder {
     }
 
     #[inline(always)]
-    fn decode_intra4x4_modes(&mut self, buf: &[u8], mb_x: usize) {
+    fn decode_intra4x4_modes(&mut self, buf: &[u8], mb: &mut Macroblock, mb_x: usize) {
         for y in 0..4 {
             for x in 0..4 {
                 let top = self.intra4x4_pred_mode_top[4 * mb_x + x] as usize;
@@ -659,7 +676,7 @@ impl Decoder {
                 let ctx = &PRED4X4_PROB_INTRA[top][left];
                 let mode = self.c.get_tree(buf, &PRED4X4_TREE, ctx) as u8;
 
-                self.intra4x4_pred_mode_mb[4 * y + x] = mode;
+                mb.intra4x4_pred_mode_mb[4 * y + x] = mode;
                 self.intra4x4_pred_mode_left[y] = mode;
                 self.intra4x4_pred_mode_top[4 * mb_x + x] = mode;
             }
@@ -671,10 +688,10 @@ impl Decoder {
         if self.segmentation.update_map {
             let bit = self.c.get_prob(buf, self.prob.segmentid[0]) as usize;
 
-            self.segment =
+            mb.segment =
                 self.c.get_prob(buf, self.prob.segmentid[1 + bit]) as usize + 2 * bit;
         } else {
-            self.segment = 0;
+            mb.segment = 0;
         }
 
         mb.skip = self.mbskip_enabled && self.c.get_prob(buf, self.prob.mbskip) != 0;
@@ -683,7 +700,7 @@ impl Decoder {
             .get_tree(buf, &PRED16X16_TREE_INTRA, &PRED16X16_PROB_INTRA);
 
         if mb.mode == MODE_I4 {
-            self.decode_intra4x4_modes(buf, mb_x);
+            self.decode_intra4x4_modes(buf, mb, mb_x);
         } else {
             let mode = PRED4X4_MODE[mb.mode] as u8;
 
@@ -691,10 +708,19 @@ impl Decoder {
             self.intra4x4_pred_mode_left.fill(mode);
         }
 
-        self.chroma_pred_mode =
+        mb.chroma_pred_mode =
             self.c.get_tree(buf, &PRED8X8C_TREE, &PRED8X8C_PROB_INTRA);
     }
 
+    /// Reads one macroblock's modes and coefficients into `mb`.
+    #[inline(always)]
+    fn parse_mb(&mut self, buf: &[u8], part: usize, mb: &mut Macroblock, mb_x: usize) {
+        self.decode_mb_mode(buf, mb, mb_x);
+        self.coeffs.parse_mb(buf, part, mb, mb_x);
+    }
+}
+
+impl Coeffs {
     #[inline(always)]
     fn decode_mb_coeffs(
         &mut self,
@@ -707,7 +733,7 @@ impl Decoder {
         let mut luma_start = 0;
         let mut luma_ctx = 3;
         let mut block_dc = 0;
-        let segment = self.segment;
+        let segment = mb.segment;
         let mut t_nnz = self.top_nnz[mb_x];
         let mut l_nnz = self.left_nnz;
 
@@ -718,7 +744,7 @@ impl Decoder {
                 &mut self.coeff_partition[part],
                 buf,
                 &mut self.block_dc.0,
-                &self.prob.token[1],
+                &self.token[1],
                 0,
                 nnz_pred,
                 qmul,
@@ -731,7 +757,7 @@ impl Decoder {
                 block_dc = 1;
 
                 let luma: &mut [[i16; 16]; 16] =
-                    (&mut self.block.0[..16]).try_into().unwrap();
+                    (&mut mb.block.0[..16]).try_into().unwrap();
 
                 if nnz == 1 {
                     (self.dsp.luma_dc_wht_dc)(luma, &mut self.block_dc.0);
@@ -751,14 +777,14 @@ impl Decoder {
                 let nnz = decode_block_coeffs(
                     &mut self.coeff_partition[part],
                     buf,
-                    &mut self.block.0[4 * y + x],
-                    &self.prob.token[luma_ctx],
+                    &mut mb.block.0[4 * y + x],
+                    &self.token[luma_ctx],
                     luma_start,
                     nnz_pred,
                     qmul,
                 );
 
-                self.non_zero_count_cache[y][x] = (nnz + block_dc) as u8;
+                mb.non_zero_count_cache[y][x] = (nnz + block_dc) as u8;
                 t_nnz[x] = u8::from(nnz != 0);
                 l_nnz[y] = u8::from(nnz != 0);
                 nnz_total += nnz;
@@ -774,14 +800,14 @@ impl Decoder {
                     let nnz = decode_block_coeffs(
                         &mut self.coeff_partition[part],
                         buf,
-                        &mut self.block.0[4 * i + (y << 1) + x],
-                        &self.prob.token[2],
+                        &mut mb.block.0[4 * i + (y << 1) + x],
+                        &self.token[2],
                         0,
                         nnz_pred,
                         qmul,
                     );
 
-                    self.non_zero_count_cache[i][(y << 1) + x] = nnz as u8;
+                    mb.non_zero_count_cache[i][(y << 1) + x] = nnz as u8;
                     t_nnz[i + 2 * x] = u8::from(nnz != 0);
                     l_nnz[i + 2 * y] = u8::from(nnz != 0);
                     nnz_total += nnz;
@@ -795,6 +821,33 @@ impl Decoder {
         if nnz_total == 0 {
             mb.skip = true;
         }
+    }
+
+    /// Reads the coefficients of a macroblock whose modes are in `mb`.
+    #[inline(always)]
+    fn parse_mb(&mut self, buf: &[u8], part: usize, mb: &mut Macroblock, mb_x: usize) {
+        if !mb.skip {
+            self.decode_mb_coeffs(buf, part, mb, mb_x);
+        }
+        if mb.skip {
+            self.left_nnz[..8].fill(0);
+            self.top_nnz[mb_x][..8].fill(0);
+
+            if mb.mode != MODE_I4 {
+                self.left_nnz[8] = 0;
+                self.top_nnz[mb_x][8] = 0;
+            }
+        }
+    }
+}
+
+impl Recon {
+    fn linesize(&self) -> usize {
+        self.planes[0].stride
+    }
+
+    fn uvlinesize(&self) -> usize {
+        self.planes[1].stride
     }
 
     #[inline(always)]
@@ -861,7 +914,7 @@ impl Decoder {
     fn intra_predict(
         &mut self,
         planes: &mut Planes<'_>,
-        mb: &Macroblock,
+        mb: &mut Macroblock,
         off: [usize; 3],
         mb_x: usize,
         mb_y: usize,
@@ -882,7 +935,7 @@ impl Decoder {
             let last = mb_x == self.mb_width - 1;
 
             if mb.skip {
-                self.non_zero_count_cache[..4].fill([0; 4]);
+                mb.non_zero_count_cache[..4].fill([0; 4]);
             }
 
             let mut ptr = off[0];
@@ -902,14 +955,14 @@ impl Decoder {
 
                         luma[at..at + 4].try_into().unwrap()
                     };
-                    let mode = self.intra4x4_pred_mode_mb[4 * y + x] as usize;
+                    let mode = mb.intra4x4_pred_mode_mb[4 * y + x] as usize;
 
                     (self.pred.pred4x4[mode])(luma, ptr + 4 * x, ls, &topright);
 
-                    let nnz = self.non_zero_count_cache[y][x];
+                    let nnz = mb.non_zero_count_cache[y][x];
 
                     if nnz != 0 {
-                        let block = &mut self.block.0[4 * y + x];
+                        let block = &mut mb.block.0[4 * y + x];
                         let f = if nnz == 1 {
                             self.dsp.idct_dc_add
                         } else {
@@ -923,7 +976,7 @@ impl Decoder {
             }
         }
 
-        let mode = check_intra_pred8x8_mode(self.chroma_pred_mode, mb_x, mb_y);
+        let mode = check_intra_pred8x8_mode(mb.chroma_pred_mode, mb_x, mb_y);
 
         (self.pred.pred8x8[mode])(planes[1], off[1], uvls);
         (self.pred.pred8x8[mode])(planes[2], off[2], uvls);
@@ -934,7 +987,7 @@ impl Decoder {
     }
 
     #[inline(always)]
-    fn idct_mb(&mut self, planes: &mut Planes<'_>, mb: &Macroblock, off: [usize; 3]) {
+    fn idct_mb(&self, planes: &mut Planes<'_>, mb: &mut Macroblock, off: [usize; 3]) {
         let ls = self.linesize();
         let uvls = self.uvlinesize();
 
@@ -943,7 +996,7 @@ impl Decoder {
             let luma = &mut *planes[0];
 
             for y in 0..4 {
-                let mut nnz4 = u32::from_le_bytes(self.non_zero_count_cache[y]);
+                let mut nnz4 = u32::from_le_bytes(mb.non_zero_count_cache[y]);
 
                 if nnz4 != 0 {
                     if nnz4 & !0x0101_0101 != 0 {
@@ -955,14 +1008,14 @@ impl Decoder {
                                     luma,
                                     y_dst + 4 * x,
                                     ls,
-                                    &mut self.block.0[4 * y + x],
+                                    &mut mb.block.0[4 * y + x],
                                 );
                             } else if n > 1 {
                                 (self.dsp.idct_add)(
                                     luma,
                                     y_dst + 4 * x,
                                     ls,
-                                    &mut self.block.0[4 * y + x],
+                                    &mut mb.block.0[4 * y + x],
                                 );
                             }
                             nnz4 >>= 8;
@@ -972,7 +1025,7 @@ impl Decoder {
                         }
                     } else {
                         let block: &mut [[i16; 16]; 4] =
-                            (&mut self.block.0[4 * y..4 * y + 4]).try_into().unwrap();
+                            (&mut mb.block.0[4 * y..4 * y + 4]).try_into().unwrap();
 
                         (self.dsp.idct_dc_add4y)(luma, y_dst, ls, block);
                     }
@@ -982,7 +1035,7 @@ impl Decoder {
         }
 
         for ch in 0..2 {
-            let mut nnz4 = u32::from_le_bytes(self.non_zero_count_cache[4 + ch]);
+            let mut nnz4 = u32::from_le_bytes(mb.non_zero_count_cache[4 + ch]);
 
             if nnz4 == 0 {
                 continue;
@@ -994,7 +1047,7 @@ impl Decoder {
                 'plane: for y in 0..2 {
                     for x in 0..2 {
                         let n = nnz4 as u8;
-                        let block = &mut self.block.0[4 * (4 + ch) + (y << 1) + x];
+                        let block = &mut mb.block.0[4 * (4 + ch) + (y << 1) + x];
 
                         if n == 1 {
                             (self.dsp.idct_dc_add)(chroma, ch_dst + 4 * x, uvls, block);
@@ -1011,7 +1064,7 @@ impl Decoder {
             } else {
                 let base = 4 * (4 + ch);
                 let block: &mut [[i16; 16]; 4] =
-                    (&mut self.block.0[base..base + 4]).try_into().unwrap();
+                    (&mut mb.block.0[base..base + 4]).try_into().unwrap();
 
                 (self.dsp.idct_dc_add4uv)(chroma, ch_dst, uvls, block);
             }
@@ -1021,7 +1074,7 @@ impl Decoder {
     #[inline(always)]
     fn filter_level_for_mb(&self, mb: &Macroblock) -> FilterStrength {
         let i4 = usize::from(mb.mode == MODE_I4);
-        let mut f = self.filter_levels[self.segment][i4];
+        let mut f = self.filter_levels[mb.segment][i4];
 
         f.inner_filter = !mb.skip || i4 == 1;
         f
@@ -1215,9 +1268,9 @@ impl Decoder {
 
     fn filter_mb_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
         let mut off = [
-            self.picture.planes[0].at(0, 16 * mb_y),
-            self.picture.planes[1].at(0, 8 * mb_y),
-            self.picture.planes[2].at(0, 8 * mb_y),
+            self.planes[0].at(0, 16 * mb_y),
+            self.planes[1].at(0, 8 * mb_y),
+            self.planes[2].at(0, 8 * mb_y),
         ];
 
         for mb_x in 0..self.mb_width {
@@ -1231,7 +1284,7 @@ impl Decoder {
 
     fn filter_mb_row_simple(&mut self, luma: &mut [u8], mb_y: usize) {
         let ls = self.linesize();
-        let mut off = self.picture.planes[0].at(0, 16 * mb_y);
+        let mut off = self.planes[0].at(0, 16 * mb_y);
 
         for mb_x in 0..self.mb_width {
             self.top_border[mb_x + 1][..16]
@@ -1241,29 +1294,92 @@ impl Decoder {
         }
     }
 
+    fn row_offsets(&self, mb_y: usize) -> [usize; 3] {
+        [
+            self.planes[0].at(0, 16 * mb_y),
+            self.planes[1].at(0, 8 * mb_y),
+            self.planes[2].at(0, 8 * mb_y),
+        ]
+    }
+
+    /// Sets the column left of a row, which intra prediction reads as 129.
+    fn start_row(&mut self, planes: &mut Planes<'_>, off: [usize; 3], mb_y: usize) {
+        for (i, &at) in off.iter().enumerate() {
+            let rows = if i == 0 { 16 } else { 8 };
+            let stride = self.planes[i].stride;
+
+            for y in 0..rows {
+                planes[i][at + y * stride - 1] = 129;
+            }
+        }
+        if mb_y == 1 {
+            self.top_border[0][15] = 129;
+            self.top_border[0][23] = 129;
+            self.top_border[0][31] = 129;
+        }
+    }
+
+    #[inline(always)]
+    fn reconstruct_mb(
+        &mut self,
+        planes: &mut Planes<'_>,
+        mb: &mut Macroblock,
+        off: [usize; 3],
+        mb_x: usize,
+        mb_y: usize,
+    ) {
+        self.intra_predict(planes, mb, off, mb_x, mb_y);
+
+        if !mb.skip {
+            self.idct_mb(planes, mb, off);
+        }
+
+        if self.deblock_filter {
+            self.filter_strength[mb_x] = self.filter_level_for_mb(mb);
+        }
+    }
+
+    fn filter_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
+        if self.deblock_filter {
+            if self.filter.simple {
+                self.filter_mb_row_simple(planes[0], mb_y);
+            } else {
+                self.filter_mb_row(planes, mb_y);
+            }
+        }
+    }
+}
+
+impl Decoder {
     fn save_mb_state(&self, part: usize, mb_x: usize) -> ResumeState {
         ResumeState {
             c: self.c,
-            part: self.coeff_partition[part],
+            part: self.coeffs.coeff_partition[part],
             intra4x4_top: self.intra4x4_pred_mode_top[4 * mb_x..4 * mb_x + 4]
                 .try_into()
                 .unwrap(),
             intra4x4_left: self.intra4x4_pred_mode_left,
-            top_nnz: self.top_nnz[mb_x],
-            left_nnz: self.left_nnz,
+            top_nnz: self.coeffs.top_nnz[mb_x],
+            left_nnz: self.coeffs.left_nnz,
         }
     }
 
-    fn restore_mb_state(&mut self, snap: &ResumeState, part: usize, mb_x: usize) {
+    fn restore_mb_state(
+        &mut self,
+        snap: &ResumeState,
+        part: usize,
+        mb: &mut Macroblock,
+        mb_x: usize,
+    ) {
         self.c = snap.c;
-        self.coeff_partition[part] = snap.part;
+        self.coeffs.coeff_partition[part] = snap.part;
         self.intra4x4_pred_mode_top[4 * mb_x..4 * mb_x + 4]
             .copy_from_slice(&snap.intra4x4_top);
         self.intra4x4_pred_mode_left = snap.intra4x4_left;
-        self.top_nnz[mb_x] = snap.top_nnz;
-        self.left_nnz = snap.left_nnz;
-        self.block.0 = [[0; 16]; 24];
-        self.block_dc.0 = [0; 16];
+        self.coeffs.top_nnz[mb_x] = snap.top_nnz;
+        self.coeffs.left_nnz = snap.left_nnz;
+        mb.block.0 = [[0; 16]; 24];
+        self.coeffs.block_dc.0 = [0; 16];
     }
 
     pub fn frame_init(
@@ -1294,20 +1410,23 @@ impl Decoder {
                 .inspect_err(|_| crate::log::error("Frame allocation failed"))?;
         }
 
-        self.deblock_filter = self.filter.level != 0 && !self.bypass_filtering;
+        self.recon.deblock_filter =
+            self.recon.filter.level != 0 && !self.bypass_filtering;
 
-        for row in self.top_nnz.iter_mut() {
+        for row in self.coeffs.top_nnz.iter_mut() {
             *row = [0; 9];
         }
         self.intra4x4_pred_mode_top.fill(pred::DC_PRED as u8);
 
-        self.top_border[0] = [0; 32];
-        self.top_border[0][15] = 127;
-        self.top_border[0][23] = 127;
-        for entry in self.top_border.iter_mut().skip(1) {
+        let top_border = &mut self.recon.top_border;
+
+        top_border[0] = [0; 32];
+        top_border[0][15] = 127;
+        top_border[0][23] = 127;
+        for entry in top_border.iter_mut().skip(1) {
             entry.fill(127);
         }
-        self.top_border[0][31] = 127;
+        top_border[0][31] = 127;
 
         self.mb_x = 0;
         self.mb_y = 0;
@@ -1357,7 +1476,7 @@ impl Decoder {
 
         if status == Status::Done
             && (self.c.overran()
-                || self.coeff_partition.iter().any(RangeCoder::overran))
+                || self.coeffs.coeff_partition.iter().any(RangeCoder::overran))
         {
             return Err(Error::InvalidData);
         }
@@ -1378,17 +1497,16 @@ impl Decoder {
             &mut second[..g[1].len],
             &mut third[..g[2].len],
         ];
+        self.recon.planes = g;
+
         let start_row = if resumable { self.mb_y } else { 0 };
+        let mut mb = Macroblock::default();
 
         for mb_y in start_row..self.mb_height {
             let part = mb_y & (self.num_coeff_partitions - 1);
             let mut mb_x0 = 0;
             let mut check = false;
-            let mut off = [
-                self.picture.planes[0].at(0, 16 * mb_y),
-                self.picture.planes[1].at(0, 8 * mb_y),
-                self.picture.planes[2].at(0, 8 * mb_y),
-            ];
+            let mut off = self.recon.row_offsets(mb_y);
 
             if resumable {
                 if self.partition_ready & (1 << part) == 0 {
@@ -1401,22 +1519,8 @@ impl Decoder {
             }
 
             if !resumable || mb_x0 == 0 {
-                self.left_nnz = [0; 9];
-                self.intra4x4_pred_mode_left = [pred::DC_PRED as u8; 4];
-
-                for (i, &at) in off.iter().enumerate() {
-                    let rows = if i == 0 { 16 } else { 8 };
-                    let stride = g[i].stride;
-
-                    for y in 0..rows {
-                        planes[i][at + y * stride - 1] = 129;
-                    }
-                }
-                if mb_y == 1 {
-                    self.top_border[0][15] = 129;
-                    self.top_border[0][23] = 129;
-                    self.top_border[0][31] = 129;
-                }
+                self.start_row();
+                self.recon.start_row(planes, off, mb_y);
             } else {
                 off[0] += 16 * mb_x0;
                 off[1] += 8 * mb_x0;
@@ -1424,66 +1528,35 @@ impl Decoder {
             }
 
             for mb_x in mb_x0..self.mb_width {
-                let mut mb = Macroblock::default();
                 let snap = if resumable && check {
                     Some(self.save_mb_state(part, mb_x))
                 } else {
                     None
                 };
 
-                self.decode_mb_mode(chunk, &mut mb, mb_x);
-
-                if !mb.skip {
-                    self.decode_mb_coeffs(chunk, part, &mut mb, mb_x);
-                }
+                self.parse_mb(chunk, part, &mut mb, mb_x);
 
                 if let Some(snap) = snap {
-                    if self.coeff_partition[part].overran() {
-                        self.restore_mb_state(&snap, part, mb_x);
+                    if self.coeffs.coeff_partition[part].overran() {
+                        self.restore_mb_state(&snap, part, &mut mb, mb_x);
                         self.mb_x = mb_x;
                         self.mb_y = mb_y;
                         return Ok(Status::NeedMore);
                     }
                 }
 
-                self.intra_predict(planes, &mb, off, mb_x, mb_y);
-
-                if !mb.skip {
-                    self.idct_mb(planes, &mb, off);
-                } else {
-                    self.left_nnz[..8].fill(0);
-                    self.top_nnz[mb_x][..8].fill(0);
-
-                    if mb.mode != MODE_I4 {
-                        self.left_nnz[8] = 0;
-                        self.top_nnz[mb_x][8] = 0;
-                    }
-                }
-
-                if self.deblock_filter {
-                    self.filter_strength[mb_x] = self.filter_level_for_mb(&mb);
-                }
+                self.recon.reconstruct_mb(planes, &mut mb, off, mb_x, mb_y);
 
                 off[0] += 16;
                 off[1] += 8;
                 off[2] += 8;
             }
 
-            /* Overrun is sticky and fails the frame once it is done, so a
-             * whole partition that has run dry fails it here instead, before
-             * a chunk of a few bytes pays for reconstructing a frame of up to
-             * 16383x16383; libwebp stops at the first such macroblock. */
-            if !check && (self.c.overran() || self.coeff_partition[part].overran()) {
+            if !check && self.ran_dry(part) {
                 return Err(Error::InvalidData);
             }
 
-            if self.deblock_filter {
-                if self.filter.simple {
-                    self.filter_mb_row_simple(planes[0], mb_y);
-                } else {
-                    self.filter_mb_row(planes, mb_y);
-                }
-            }
+            self.recon.filter_row(planes, mb_y);
 
             if resumable {
                 self.mb_x = 0;
@@ -1496,6 +1569,19 @@ impl Decoder {
         Ok(Status::Done)
     }
 
+    fn start_row(&mut self) {
+        self.coeffs.left_nnz = [0; 9];
+        self.intra4x4_pred_mode_left = [pred::DC_PRED as u8; 4];
+    }
+
+    /* Overrun is sticky and fails the frame once it is done, so a whole
+     * partition that has run dry fails it at the end of the row instead,
+     * before a chunk of a few bytes pays for reconstructing a frame of up to
+     * 16383x16383; libwebp stops at the first such macroblock. */
+    fn ran_dry(&self, part: usize) -> bool {
+        self.c.overran() || self.coeffs.coeff_partition[part].overran()
+    }
+
     pub fn rows_finalized(&self) -> i32 {
         const EXTRA: [i32; 3] = [0, 2, 8];
 
@@ -1503,9 +1589,9 @@ impl Decoder {
             return self.height;
         }
 
-        let kind = if !self.deblock_filter {
+        let kind = if !self.recon.deblock_filter {
             0
-        } else if self.filter.simple {
+        } else if self.recon.filter.simple {
             1
         } else {
             2
