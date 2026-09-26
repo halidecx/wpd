@@ -288,6 +288,37 @@ fn copy_disjoint<T: Copy>(dst: &mut [T], src: &[T]) {
     }
 }
 
+/// `copy_disjoint`, for a run of one value.
+#[inline(always)]
+fn fill_pieces<T: Copy>(dst: &mut [T], v: T) {
+    let n = dst.len();
+    let piece = (32 / std::mem::size_of::<T>()).max(1);
+
+    if n >= piece {
+        for d in dst.chunks_exact_mut(piece) {
+            d.fill(v);
+        }
+        dst[n - piece..].fill(v);
+        return;
+    }
+
+    let mut part = piece / 2;
+
+    while part >= 4 {
+        if n >= part {
+            dst[..part].fill(v);
+            dst[n - part..].fill(v);
+            return;
+        }
+        part /= 2;
+    }
+    if n != 0 {
+        dst[0] = v;
+        dst[n / 2] = v;
+        dst[n - 1] = v;
+    }
+}
+
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
@@ -298,7 +329,7 @@ fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize)
     if dist == 1 {
         let v = pixels[pos - 1];
 
-        pixels[pos..][..length].fill(v);
+        fill_pieces(&mut pixels[pos..][..length], v);
         return;
     }
 
