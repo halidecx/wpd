@@ -49,7 +49,8 @@ mod imp {
         }
 
         #[cold]
-        fn load_final_bytes(&mut self, buf: &[u8]) {
+        #[inline(never)]
+        fn load_final_bytes(mut self, buf: &[u8]) -> Self {
             if self.pos < self.end {
                 self.value = (self.value << 8) | u64::from(buf[self.pos]);
                 self.pos += 1;
@@ -61,6 +62,7 @@ mod imp {
             } else {
                 self.bits = 0;
             }
+            self
         }
 
         #[inline(always)]
@@ -73,7 +75,7 @@ mod imp {
                 self.pos += 7;
                 self.bits += 56;
             } else {
-                self.load_final_bytes(buf);
+                *self = self.load_final_bytes(buf);
             }
         }
 
