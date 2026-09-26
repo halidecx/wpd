@@ -260,6 +260,19 @@ impl Mix {
     }
 }
 
+/* Animation frames are mostly made of runs that are wholly opaque or wholly
+ * clear, which need no arithmetic; runs of this many samples are sorted by
+ * their source alphas before any is blended one by one. */
+const RUN: usize = 16;
+
+/// The AND and the OR of a run of alphas: 255 for the first means all are
+/// opaque, 0 for the second that all are clear.
+fn run_alpha(alpha: &[u8]) -> (u8, u8) {
+    alpha
+        .iter()
+        .fold((0xff, 0), |(all, any), &a| (all & a, any | a))
+}
+
 pub fn blend_row_ya(dst_y: &mut [u8], dst_a: &mut [u8], src_y: &[u8], src_a: &[u8]) {
     let n = dst_y
         .len()
@@ -271,13 +284,29 @@ pub fn blend_row_ya(dst_y: &mut [u8], dst_a: &mut [u8], src_y: &[u8], src_a: &[u
     let src_y = &src_y[..n];
     let src_a = &src_a[..n];
 
-    for (((dy, da), sy), sa) in
-        dst_y.iter_mut().zip(dst_a.iter_mut()).zip(src_y).zip(src_a)
+    for (((dy, da), sy), sa) in dst_y
+        .chunks_mut(RUN)
+        .zip(dst_a.chunks_mut(RUN))
+        .zip(src_y.chunks(RUN))
+        .zip(src_a.chunks(RUN))
     {
-        let m = mix(*sa, *da);
+        match run_alpha(sa) {
+            (0xff, _) => {
+                dy.copy_from_slice(sy);
+                da.fill(0xff);
+            }
+            (_, 0) => {}
+            _ => {
+                for (((dy, da), sy), sa) in
+                    dy.iter_mut().zip(da.iter_mut()).zip(sy).zip(sa)
+                {
+                    let m = mix(*sa, *da);
 
-        *dy = m.apply(*dy, *sy);
-        *da = m.alpha(*da);
+                    *dy = m.apply(*dy, *sy);
+                    *da = m.alpha(*da);
+                }
+            }
+        }
     }
 }
 
@@ -318,14 +347,31 @@ pub fn blend_row_uv<const ROWS: usize>(
         n.saturating_sub(1)
     };
 
-    for x in 0..full {
-        let m = mix(
-            block_alpha::<ROWS, 2>(src_alpha, x),
-            block_alpha::<ROWS, 2>(dst_alpha, x),
-        );
+    let mut start = 0;
 
-        dst_u[x] = m.apply(dst_u[x], src_u[x]);
-        dst_v[x] = m.apply(dst_v[x], src_v[x]);
+    while start < full {
+        let end = (start + RUN).min(full);
+        let (all, any) = src_alpha.iter().fold((0xff, 0), |(all, any), row| {
+            let (a, o) = run_alpha(&row[start * 2..end * 2]);
+
+            (all & a, any | o)
+        });
+
+        if all == 0xff {
+            dst_u[start..end].copy_from_slice(&src_u[start..end]);
+            dst_v[start..end].copy_from_slice(&src_v[start..end]);
+        } else if any != 0 {
+            for x in start..end {
+                let m = mix(
+                    block_alpha::<ROWS, 2>(src_alpha, x),
+                    block_alpha::<ROWS, 2>(dst_alpha, x),
+                );
+
+                dst_u[x] = m.apply(dst_u[x], src_u[x]);
+                dst_v[x] = m.apply(dst_v[x], src_v[x]);
+            }
+        }
+        start = end;
     }
     for x in full..n {
         let m = mix(
@@ -450,6 +496,30 @@ mod tests {
         blend_row_ya(&mut dst_y, &mut dst_a, &src_y, &src_a);
         assert_eq!(dst_y, [137, 50, 200]);
         assert_eq!(dst_a, [128, 255, 255]);
+    }
+
+    #[test]
+    fn opaque_and_clear_runs_blend_as_their_samples_would() {
+        let src_a: Vec<u8> = (0..40)
+            .map(|i| match i {
+                0..16 => 255,
+                16..32 => 0,
+                _ => 60 + i as u8,
+            })
+            .collect();
+        let src_y: Vec<u8> = (0..40).map(|i| 3 * i as u8).collect();
+        let mut dst_y: Vec<u8> = (0..40).map(|i| 200 - i as u8).collect();
+        let mut dst_a: Vec<u8> = (0..40).map(|i| 5 * i as u8).collect();
+        let mut want = (dst_y.clone(), dst_a.clone());
+
+        for i in 0..40 {
+            let m = mix(src_a[i], want.1[i]);
+
+            want.0[i] = m.apply(want.0[i], src_y[i]);
+            want.1[i] = m.alpha(want.1[i]);
+        }
+        blend_row_ya(&mut dst_y, &mut dst_a, &src_y, &src_a);
+        assert_eq!((dst_y, dst_a), want);
     }
 
     #[test]
