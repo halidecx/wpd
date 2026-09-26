@@ -3,7 +3,7 @@ use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{Error, Result, Status};
 use crate::input::Input;
 use crate::picture::PlaneMut;
-use crate::vp8l::{AlphaDst, Target};
+use crate::vp8l::{AlphaDst, Target, Unfilter};
 
 use super::convert::scaled_size;
 use super::slot::{FrameEnv, FrameSlot};
@@ -61,6 +61,7 @@ struct Alpha<'p, 'i> {
     height: i32,
     compression: i32,
     filter: i32,
+    threads: usize,
 }
 
 fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
@@ -76,6 +77,7 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         height,
         compression,
         filter,
+        threads,
     } = a;
     let extent = width
         .checked_mul(height.max(0) as usize)
@@ -95,13 +97,28 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         plane[..extent].copy_from_slice(&raw[..extent]);
     } else if compression == ALPHA_COMPRESSION_VP8L {
         vp8l.set_canvas(width as i32, height);
+        vp8l.threads = threads;
 
+        let rest = match filter {
+            ALPHA_FILTER_HORIZONTAL => Some(fdsp.horizontal_unfilter),
+            ALPHA_FILTER_VERTICAL => Some(fdsp.vertical_unfilter),
+            ALPHA_FILTER_GRADIENT => Some(fdsp.gradient_unfilter),
+            _ => None,
+        };
         let dst = AlphaDst {
             data: &mut plane[..extent],
             stride: width,
+            unfilter: rest.map(|rest| Unfilter {
+                first: fdsp.horizontal_unfilter,
+                rest,
+            }),
         };
 
         vp8l.decode_frame(Target::Alpha, input.chunk(offset, size), true, Some(dst))?;
+        if vp8l.alpha_unfiltered() {
+            vp8l.release_alpha_canvas();
+            return Ok(());
+        }
 
         if !vp8l.alpha_dst_used() {
             let argb = vp8l.picture(Target::Alpha).frame();
@@ -181,6 +198,7 @@ impl FrameSlot {
                 height: (*height).max(0),
                 compression: *alpha_compression,
                 filter: *alpha_filter,
+                threads: env.threads,
             },
             vp8.first_mut(),
         )
@@ -228,10 +246,15 @@ impl FrameSlot {
         let big_enough = (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS;
         let threads = if big_enough { env.threads } else { 1 };
         let chunk = env.input.chunk(offset, size);
-        let (alpha, vp8) = self.alpha_work(env);
+        let (mut alpha, vp8) = self.alpha_work(env);
         let Some(vp8) = vp8 else {
             return Err(Error::InvalidData);
         };
+
+        /* Beside the colour planes, alpha has one thread fewer to spend. */
+        if threads > 1 {
+            alpha.threads = threads - 1;
+        }
         let (alpha_ret, rows_ret) = crate::task::join(
             threads,
             || decode_alpha(alpha),

@@ -5,6 +5,7 @@ pub mod transform;
 
 use zerocopy::IntoBytes;
 
+use crate::dsp::filters::UnfilterFn;
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{check_image_size, Error, Result, Status};
 use crate::image::Format;
@@ -19,6 +20,22 @@ const NUM_DISTANCE_CODES: u32 = 40;
 const NUM_SHORT_DISTANCES: u32 = 120;
 
 const ROW_BATCH: i32 = 16;
+
+/// Below this many pixels an image's transforms run after its pixels on the
+/// one thread, rather than beside them on a second. Measured on crops of a
+/// photo: 128x128 loses 4% to the handoff, 160x160 gains 8%, 200x200 23%.
+const PIPELINE_PIXELS: usize = 192 * 192;
+
+/// The payload goes to the entropy decoder in about this many pieces, and the
+/// rows each piece finishes go to the transform thread together.
+const PIPELINE_PIECES: usize = 32;
+
+/// Pieces are never smaller than this many bytes.
+const PIPELINE_MIN_STEP: usize = 4096;
+
+/// An alpha plane's rows cross to the transform thread at most this many at
+/// a time, in bands that are handed back and reused.
+const ALPHA_BAND_ROWS: i32 = 32;
 
 const PADDING: usize = 16;
 
@@ -97,6 +114,17 @@ fn target_picture<'p>(
 pub struct AlphaDst<'a> {
     pub data: &'a mut [u8],
     pub stride: usize,
+    /// How the plane is unfiltered, for a decode that can do it as the rows
+    /// come; `alpha_unfiltered` says whether it did.
+    pub unfilter: Option<Unfilter>,
+}
+
+/// An alpha plane's unfiltering: its first row by `first` alone, every row
+/// after that by `rest` against the row above.
+#[derive(Clone, Copy)]
+pub struct Unfilter {
+    pub first: UnfilterFn,
+    pub rest: UnfilterFn,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -238,6 +266,7 @@ pub struct Decoder {
     image: [ImageContext; ROLE_NB],
 
     alpha_dst_used: bool,
+    alpha_unfiltered: bool,
 
     argb: Picture,
     alpha_argb: Picture,
@@ -253,6 +282,9 @@ pub struct Decoder {
     resume: Resume,
     rows_out: i32,
     peeked: bool,
+
+    /// The threads a decode may use, counting the calling one.
+    pub threads: usize,
 }
 
 impl Decoder {
@@ -305,6 +337,11 @@ impl Decoder {
 
     pub fn alpha_dst_used(&self) -> bool {
         self.alpha_dst_used
+    }
+
+    /// Whether the last alpha decode unfiltered its plane as well.
+    pub fn alpha_unfiltered(&self) -> bool {
+        self.alpha_unfiltered
     }
 
     pub fn still_active(&self) -> bool {
@@ -717,34 +754,9 @@ impl Decoder {
             });
         }
 
-        let (head, tail) = image.split_at_mut(ROLE_ENTROPY);
-        let ImageContext {
-            color_cache,
-            color_cache_bits,
-            groups,
-            arena,
-            ..
-        } = &mut head[ROLE_ARGB];
-        let ent = &tail[0];
         let pic = target_picture(target, argb, alpha_argb);
 
-        entropy::decode_pixels(entropy::Args {
-            gb,
-            buf,
-            pic,
-            groups,
-            arena,
-            cache: color_cache,
-            cache_bits: *color_cache_bits,
-            reduced_width: Some(*reduced_width),
-            entropy: (ent.size_reduction > 0).then(|| entropy::Entropy {
-                data: &ent.storage.data,
-                stride: ent.storage.stride,
-                bits: ent.size_reduction,
-            }),
-            st: resume,
-            resumable,
-        })
+        decode_argb(gb, buf, image, pic, *reduced_width, resume, resumable)
     }
 
     fn read_frame_header(
@@ -835,6 +847,7 @@ impl Decoder {
         alpha_dst: Option<AlphaDst<'_>>,
     ) -> Result<()> {
         self.alpha_dst_used = false;
+        self.alpha_unfiltered = false;
 
         let ret = self.decode_frame_inner(target, buf, is_alpha_chunk, alpha_dst);
 
@@ -867,6 +880,23 @@ impl Decoder {
         };
 
         self.picture_mut(ROLE_ARGB, target).alloc(w, h)?;
+        let alpha_dst = if self.pipelines() {
+            match (target, alpha_dst) {
+                (Target::Argb, _) => {
+                    self.still_alloc()?;
+                    self.resume = Resume::default();
+                    self.pipeline(buf, 0)?;
+                    /* The transformed image is in `out`; the pixels it came
+                     * from are spent. */
+                    std::mem::swap(&mut self.argb, &mut self.out);
+                    return Ok(());
+                }
+                (Target::Alpha, Some(dst)) => return self.alpha_pipelined(buf, dst),
+                (Target::Alpha, None) => None,
+            }
+        } else {
+            alpha_dst
+        };
         self.decode_pixels(ROLE_ARGB, target, buf, false)?;
         self.apply_transforms(target, alpha_dst)
     }
@@ -1241,6 +1271,10 @@ impl Decoder {
     }
 
     fn still_rows(&mut self, payload: &[u8], complete: bool) -> Result<Status> {
+        if complete && self.pipelines() {
+            return self.still_rows_pipelined(payload);
+        }
+
         let status = self.decode_pixels(ROLE_ARGB, Target::Argb, payload, true)?;
 
         if status == Status::NeedMore && complete {
@@ -1274,6 +1308,18 @@ impl Decoder {
         ret.map(|()| Status::Done)
     }
 
+    /// Whether an image's transforms are worth a thread of their own. The
+    /// predictor and colour transforms are; subtracting green or expanding a
+    /// palette costs less than handing the rows over does.
+    fn pipelines(&self) -> bool {
+        self.threads > 1
+            && self.transforms[..self.nb_transforms]
+                .iter()
+                .any(|t| matches!(t, Transform::Predictor | Transform::Color))
+            && (self.width.max(0) as usize) * (self.height.max(0) as usize)
+                >= PIPELINE_PIXELS
+    }
+
     pub fn still_peek(&mut self) -> Result<()> {
         if !self.active {
             return Ok(());
@@ -1305,57 +1351,415 @@ impl Decoder {
             width,
             ..
         } = self;
-        let packed = *reduced_width;
-        let packed_row = packed.max(0) as usize;
         let stride = out.stride;
-        let src_stride = argb.stride;
         let base = y0 as usize * stride;
 
-        for i in 0..(y1 - y0) as usize {
-            let src = (y0 as usize + i) * src_stride;
+        copy_packed_rows(&mut out.data[base..], stride, argb, *reduced_width, y0, y1);
 
-            out.data[base + i * stride..][..packed_row]
-                .copy_from_slice(&argb.data[src..][..packed_row]);
+        let xf = Inverse {
+            dsp,
+            side: &image[ROLE_PREDICTOR..],
+            list: &transforms[..*nb_transforms],
+            packed: *reduced_width,
+            width: *width,
+            out_width: out.width,
+            out_height: out.height,
+        };
+
+        xf.rows(&mut out.data, scratch, base, stride, y0, y1)
+    }
+
+    /// A still whose whole payload is here: the rows the pipeline finishes
+    /// land in `out`, as they would have had the still been peeked at.
+    fn still_rows_pipelined(&mut self, payload: &[u8]) -> Result<Status> {
+        if !self.peeked {
+            self.still_alloc()?;
+            self.peeked = true;
         }
+        self.rows_out = self.pipeline(payload, self.rows_out)?;
+        self.argb.stride = self.argb.width.max(0) as usize;
+        for img in &mut self.image {
+            img.clear();
+        }
+        self.active = false;
+        Ok(Status::Done)
+    }
 
-        let mut ret = Ok(());
+    /// Decodes the main image from row `first` on with two threads: this one
+    /// runs the entropy decoder and copies each run of rows it finishes to
+    /// `out`, and the other runs the inverse transforms there. Returns the
+    /// rows done, which is all of them.
+    fn pipeline(&mut self, payload: &[u8], first: i32) -> Result<i32> {
+        let Decoder {
+            dsp,
+            gb,
+            image,
+            argb,
+            out,
+            scratch,
+            resume,
+            reduced_width,
+            transforms,
+            nb_transforms,
+            width,
+            threads,
+            ..
+        } = self;
+        let (coded, side) = image.split_at_mut(ROLE_PREDICTOR);
+        let stride = out.stride;
+        let packed = *reduced_width;
+        let xf = Inverse {
+            dsp,
+            side,
+            list: &transforms[..*nb_transforms],
+            packed,
+            width: *width,
+            out_width: out.width,
+            out_height: out.height,
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, &mut [u32])>();
+        let (xf_ret, dec_ret) = crate::task::join(
+            *threads,
+            move || {
+                let mut ret = Ok(());
 
-        for i in (0..*nb_transforms).rev() {
-            if ret.is_err() {
-                break;
+                for (y0, y1, band) in rx {
+                    if ret.is_ok() {
+                        ret = xf.rows(band, scratch, 0, stride, y0, y1);
+                    }
+                }
+                ret
+            },
+            || {
+                let tx = tx;
+                let mut rest = &mut out.data[first as usize * stride..];
+                let pieces = Pieces {
+                    gb,
+                    payload,
+                    coded,
+                    pic: argb,
+                    packed,
+                    resume,
+                };
+
+                pieces.decode(first, |y0, y1, pic| {
+                    let (band, tail) = std::mem::take(&mut rest)
+                        .split_at_mut((y1 - y0) as usize * stride);
+
+                    rest = tail;
+                    copy_packed_rows(band, stride, pic, packed, y0, y1);
+                    /* The receiver outlives this loop, so the send cannot fail. */
+                    let _ = tx.send((y0, y1, band));
+                    Ok(())
+                })
+            },
+        );
+
+        /* The pixels failing is what a single pass would have reported. */
+        let rows = dec_ret?;
+
+        xf_ret.map(|()| rows)
+    }
+
+    /// An alpha plane decoded with two threads, as `pipeline` decodes a still,
+    /// except that the transformed rows go through a few recycled bands, and
+    /// the thread that transforms them also takes their green to `dst` and
+    /// unfilters it there.
+    fn alpha_pipelined(&mut self, payload: &[u8], dst: AlphaDst<'_>) -> Result<()> {
+        let w = self.width.max(0) as usize;
+
+        grow(&mut self.scratch, 2 * w + 1, 0)?;
+        self.resume = Resume::default();
+
+        let Decoder {
+            dsp,
+            gb,
+            image,
+            alpha_argb,
+            scratch,
+            resume,
+            reduced_width,
+            transforms,
+            nb_transforms,
+            width,
+            height,
+            threads,
+            ..
+        } = self;
+        let (coded, side) = image.split_at_mut(ROLE_PREDICTOR);
+        let packed = *reduced_width;
+        let extract_green = dsp.extract_green;
+        let xf = Inverse {
+            dsp,
+            side,
+            list: &transforms[..*nb_transforms],
+            packed,
+            width: *width,
+            out_width: *width,
+            out_height: *height,
+        };
+        let AlphaDst {
+            data,
+            stride: dst_stride,
+            unfilter,
+        } = dst;
+        let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, Vec<u32>)>();
+        let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u32>>();
+        let (xf_ret, dec_ret) = crate::task::join(
+            *threads,
+            move || {
+                let mut ret = Ok(());
+
+                for (y0, y1, mut band) in rx {
+                    if ret.is_ok() {
+                        ret = xf.rows(&mut band, scratch, 0, w, y0, y1);
+                    }
+                    if ret.is_ok() {
+                        for (row, y) in
+                            band.chunks_exact(w).zip(y0 as usize..y1 as usize)
+                        {
+                            let at = y * dst_stride;
+
+                            extract_green(&mut data[at..at + w], row.as_bytes());
+                            match unfilter {
+                                Some(u) if y == 0 => (u.first)(None, &mut data[..w]),
+                                Some(u) => {
+                                    let (above, here) = data[at - dst_stride..]
+                                        .split_at_mut(dst_stride);
+
+                                    (u.rest)(Some(&above[..w]), &mut here[..w]);
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    /* The decoding side may be gone already; the band then
+                     * has nowhere to go but away. */
+                    let _ = back_tx.send(band);
+                }
+                ret
+            },
+            || {
+                let tx = tx;
+                let pieces = Pieces {
+                    gb,
+                    payload,
+                    coded,
+                    pic: alpha_argb,
+                    packed,
+                    resume,
+                };
+
+                pieces.decode(0, |y0, y1, pic| {
+                    let mut y = y0;
+
+                    while y < y1 {
+                        let end = (y + ALPHA_BAND_ROWS).min(y1);
+                        let len = (end - y) as usize * w;
+                        let mut band = back_rx.try_recv().unwrap_or_default();
+
+                        band.clear();
+                        band.try_reserve(len).map_err(|_| Error::NoMemory)?;
+                        band.resize(len, 0);
+                        copy_packed_rows(&mut band, w, pic, packed, y, end);
+                        let _ = tx.send((y, end, band));
+                        y = end;
+                    }
+                    Ok(())
+                })
+            },
+        );
+
+        dec_ret?;
+        xf_ret?;
+        self.alpha_unfiltered = unfilter.is_some();
+        self.alpha_dst_used = true;
+        Ok(())
+    }
+}
+
+/// The entropy decoder run over growing prefixes of a complete payload, so it
+/// stops every so often with rows finished that another thread can take. The
+/// prefixes are only stopping points; the pixels are the ones a single pass
+/// would decode.
+struct Pieces<'a> {
+    gb: &'a mut BitReader,
+    payload: &'a [u8],
+    coded: &'a mut [ImageContext],
+    pic: &'a mut Picture,
+    packed: i32,
+    resume: &'a mut Resume,
+}
+
+impl Pieces<'_> {
+    /// Decodes on from row `first`, calling `done` with each run of rows
+    /// finished. Returns the rows done, which is all of them.
+    fn decode(
+        self,
+        first: i32,
+        mut done: impl FnMut(i32, i32, &Picture) -> Result<()>,
+    ) -> Result<i32> {
+        let Pieces {
+            gb,
+            payload,
+            coded,
+            pic,
+            packed,
+            resume,
+        } = self;
+        let mut sent = first;
+        let start = payload.len() - gb.left(payload);
+        let step = ((payload.len() - start) / PIPELINE_PIECES).max(PIPELINE_MIN_STEP);
+        let mut end = start;
+
+        loop {
+            end = (end + step).min(payload.len());
+
+            let last = end == payload.len();
+            let status =
+                decode_argb(gb, &payload[..end], coded, pic, packed, resume, true)?;
+
+            if status == Status::NeedMore && last {
+                crate::log::error("image data runs past the end of the chunk");
+                return Err(Error::InvalidData);
             }
-            match transforms[i] {
-                Transform::Predictor => {
-                    let modes = &image[ROLE_PREDICTOR];
-                    let w = *reduced_width as usize;
 
-                    ret = predict_batch(
+            let rows = resume.rows_done;
+
+            if rows > sent {
+                done(sent, rows, pic)?;
+                sent = rows;
+            }
+            if status == Status::Done {
+                return Ok(sent);
+            }
+        }
+    }
+}
+
+/// Copies rows y0..y1 of the entropy-coded pixels, `packed` wide, to the start
+/// of `dst`, whose rows are `stride` apart.
+fn copy_packed_rows(
+    dst: &mut [u32],
+    stride: usize,
+    src: &Picture,
+    packed: i32,
+    y0: i32,
+    y1: i32,
+) {
+    let packed = packed.max(0) as usize;
+
+    for (i, y) in (y0..y1).enumerate() {
+        dst[i * stride..][..packed]
+            .copy_from_slice(&src.data[y as usize * src.stride..][..packed]);
+    }
+}
+
+/// Decodes the main image's pixels. `coded` is the argb and entropy images'
+/// contexts, the two the entropy decoder reads.
+fn decode_argb(
+    gb: &mut BitReader,
+    buf: &[u8],
+    coded: &mut [ImageContext],
+    pic: &mut Picture,
+    reduced_width: i32,
+    resume: &mut Resume,
+    resumable: bool,
+) -> Result<Status> {
+    let (head, tail) = coded.split_at_mut(ROLE_ENTROPY);
+    let ImageContext {
+        color_cache,
+        color_cache_bits,
+        groups,
+        arena,
+        ..
+    } = &mut head[ROLE_ARGB];
+    let ent = &tail[0];
+
+    entropy::decode_pixels(entropy::Args {
+        gb,
+        buf,
+        pic,
+        groups,
+        arena,
+        cache: color_cache,
+        cache_bits: *color_cache_bits,
+        reduced_width: Some(reduced_width),
+        entropy: (ent.size_reduction > 0).then(|| entropy::Entropy {
+            data: &ent.storage.data,
+            stride: ent.storage.stride,
+            bits: ent.size_reduction,
+        }),
+        st: resume,
+        resumable,
+    })
+}
+
+/// What the inverse transforms read besides the pixels they rewrite, apart
+/// from the decoder so rows can be transformed on another thread.
+struct Inverse<'a> {
+    dsp: &'a Vp8lDsp,
+    /// The predictor, colour and palette images, from ROLE_PREDICTOR on.
+    side: &'a [ImageContext],
+    list: &'a [Transform],
+    packed: i32,
+    width: i32,
+    out_width: i32,
+    out_height: i32,
+}
+
+impl Inverse<'_> {
+    fn side(&self, role: usize) -> &ImageContext {
+        &self.side[role - ROLE_PREDICTOR]
+    }
+
+    /// Runs the inverse transforms over rows y0..y1 of `plane`, whose row y0
+    /// starts at `base`. `scratch` carries the last predicted row from one
+    /// batch to the next.
+    fn rows(
+        &self,
+        plane: &mut [u32],
+        scratch: &mut [u32],
+        base: usize,
+        stride: usize,
+        y0: i32,
+        y1: i32,
+    ) -> Result<()> {
+        let dsp = self.dsp;
+        let mut reduced = self.packed;
+
+        for &transform in self.list.iter().rev() {
+            match transform {
+                Transform::Predictor => {
+                    let modes = self.side(ROLE_PREDICTOR);
+                    let w = reduced as usize;
+
+                    predict_batch(
                         dsp,
-                        &mut out.data,
+                        plane,
                         scratch,
                         base,
                         stride,
                         w,
-                        *width as usize,
+                        self.width as usize,
                         modes,
                         y0,
                         y1,
-                    );
-                    if ret.is_ok() {
-                        let last = base + (y1 - 1 - y0) as usize * stride;
+                    )?;
 
-                        scratch[..w].copy_from_slice(&out.data[last..][..w]);
-                    }
+                    let last = base + (y1 - 1 - y0) as usize * stride;
+
+                    scratch[..w].copy_from_slice(&plane[last..][..w]);
                 }
                 Transform::Color => {
-                    let mult = &image[ROLE_COLOR];
+                    let mult = self.side(ROLE_COLOR);
 
                     transform::color_rows(
                         dsp,
-                        &mut out.data,
+                        plane,
                         base,
                         stride,
-                        *reduced_width as usize,
+                        reduced as usize,
                         &mult.storage.data,
                         mult.storage.stride,
                         mult.size_reduction,
@@ -1366,34 +1770,33 @@ impl Decoder {
                 Transform::SubtractGreen => {
                     transform::subtract_green_rows(
                         dsp,
-                        &mut out.data,
+                        plane,
                         base,
                         stride,
-                        *reduced_width as usize,
+                        reduced as usize,
                         y1 - y0,
                     );
                 }
                 Transform::ColorIndexing => {
-                    let pal = &image[ROLE_PALETTE];
+                    let pal = self.side(ROLE_PALETTE);
 
                     transform::color_indexing_rows(
                         dsp,
-                        &mut out.data,
+                        plane,
                         base,
                         stride,
                         stride,
-                        out.width as usize,
+                        self.out_width as usize,
                         y1 - y0,
                         &pal.storage.data[..pal.storage.width as usize],
                         pal.size_reduction,
-                        out.height as usize * out.width as usize > 300,
+                        self.out_height as usize * self.out_width as usize > 300,
                     );
-                    *reduced_width = *width;
+                    reduced = self.width;
                 }
             }
         }
-        *reduced_width = packed;
-        ret
+        Ok(())
     }
 }
 
@@ -1674,6 +2077,84 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn inverse_transforms_over_bands_match_the_whole_image() {
+        use Transform::{Color, Predictor, SubtractGreen};
+        let (width, height) = (37, 41);
+        let make = || {
+            let mut d = Decoder::new();
+            d.width = width;
+            d.height = height;
+            d.reduced_width = width;
+            d.transforms[..3].copy_from_slice(&[SubtractGreen, Predictor, Color]);
+            d.nb_transforms = 3;
+            d.argb.alloc(width, height).unwrap();
+            let mut v = 7u32;
+            for px in &mut d.argb.data {
+                v = v.wrapping_mul(1664525).wrapping_add(1013904223);
+                *px = v;
+            }
+            for role in [ROLE_PREDICTOR, ROLE_COLOR] {
+                let img = &mut d.image[role];
+                img.size_reduction = 2;
+                img.storage
+                    .alloc(ceil_shift(width, 2), ceil_shift(height, 2))
+                    .unwrap();
+                for (i, px) in img.storage.data.iter_mut().enumerate() {
+                    *px = if role == ROLE_PREDICTOR {
+                        u32::from_ne_bytes([0, 0, (i % 14) as u8, 0])
+                    } else {
+                        (i as u32).wrapping_mul(0x7313_fa19)
+                    };
+                }
+            }
+            d
+        };
+        let mut expected = make();
+        expected.apply_transforms(Target::Argb, None).unwrap();
+
+        /* Bands of every size the pipeline might hand over, each copied out
+         * of the pixels and transformed where it lands, as the second
+         * thread does. */
+        for step in [1, 2, 5, 16, 41] {
+            let mut d = make();
+            d.still_alloc().unwrap();
+            let Decoder {
+                dsp,
+                image,
+                argb,
+                out,
+                scratch,
+                transforms,
+                nb_transforms,
+                ..
+            } = &mut d;
+            let stride = out.stride;
+            let xf = Inverse {
+                dsp,
+                side: &image[ROLE_PREDICTOR..],
+                list: &transforms[..*nb_transforms],
+                packed: width,
+                width,
+                out_width: width,
+                out_height: height,
+            };
+            let mut rest = &mut out.data[..];
+            let mut y0 = 0;
+            while y0 < height {
+                let y1 = (y0 + step).min(height);
+                let (band, tail) =
+                    std::mem::take(&mut rest).split_at_mut((y1 - y0) as usize * stride);
+                rest = tail;
+                copy_packed_rows(band, stride, argb, width, y0, y1);
+                xf.rows(band, scratch, 0, stride, y0, y1).unwrap();
+                y0 = y1;
+            }
+            let n = (width * height) as usize;
+            assert_eq!(out.data[..n], expected.argb.data[..n], "bands of {step}");
         }
     }
 

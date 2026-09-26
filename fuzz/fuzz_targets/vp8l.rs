@@ -12,6 +12,10 @@ fuzz_target!(|data: &[u8]| {
     let mut decoder = Decoder::new();
     let alpha_chunk = head[0] & 1 != 0;
 
+    /* A second thread runs the inverse transforms beside the entropy decoder
+     * of an image at least 192x192. */
+    decoder.threads = 1 + usize::from(head[1] & 1);
+
     decoder.set_canvas(i32::from(head[0]), i32::from(head[1]));
     if alpha_chunk {
         let width = usize::from(head[0]);
@@ -19,6 +23,7 @@ fuzz_target!(|data: &[u8]| {
         let dst = AlphaDst {
             data: &mut plane,
             stride: width,
+            unfilter: None,
         };
 
         let _ = decoder.decode_frame(Target::Alpha, payload, true, Some(dst));

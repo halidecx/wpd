@@ -288,7 +288,7 @@ pub fn color_indexing_alpha<T: Indexed>(
         return;
     }
 
-    let AlphaDst { data, stride } = dst;
+    let AlphaDst { data, stride, .. } = dst;
 
     for y in 0..height as usize {
         let row = &src[y * src_stride..];
@@ -308,7 +308,7 @@ fn expand_alpha_rows<const PPB: usize, T: Indexed>(
     palette: &[u8; 256],
     dst: AlphaDst<'_>,
 ) {
-    let AlphaDst { data, stride } = dst;
+    let AlphaDst { data, stride, .. } = dst;
     let pixel_bits = 8 / PPB as u32;
     let bit_mask = (1u32 << pixel_bits) - 1;
     let expand: [[u8; PPB]; 256] = core::array::from_fn(|i| {

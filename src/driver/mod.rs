@@ -889,6 +889,7 @@ impl<'a> Decoder<'a> {
         complete: bool,
     ) -> Result<bool, Error> {
         self.frame.lossless_canvas_in();
+        self.frame.vp8l.threads = self.threads.0;
 
         let Self { frame, input, .. } = self;
         let ret = frame

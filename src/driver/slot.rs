@@ -223,6 +223,7 @@ impl FrameSlot {
          * slot has been told to expect, which is nothing for a still and the
          * sub-frame's declared size inside an ANMF. */
         self.lossless_canvas_in();
+        self.vp8l.threads = env.threads;
 
         let ret = self.vp8l.decode_frame(
             crate::vp8l::Target::Argb,
