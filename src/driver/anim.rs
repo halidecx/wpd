@@ -14,6 +14,33 @@ use super::convert::{convert_to_argb, format_is_packed, format_is_premultiplied}
 use super::slot::{AheadEntry, FrameSlot, MAX_SLOTS};
 use super::{Decoder, InputMode, Source, ANIM_SUBFRAME};
 
+/// What a run of frames decoded ahead may hold at once: each slot's decoded
+/// frame, and the copy of the payload it decodes from.
+const AHEAD_BUDGET: u64 = 96 << 20;
+
+/// Y, U, V, alpha and the ARGB a sub-frame may be converted into.
+const AHEAD_BYTES_PER_PIXEL: u64 = 6;
+
+/// How many of the frames whose payload sizes are `sizes` a run can take, the
+/// first of them decoded from the file and the rest from copies, and the most
+/// bytes each slot's copy may then hold. Every slot keeps a decoded frame of
+/// `frame` bytes and a copy it reuses for the frames that follow, so the
+/// count comes down until an equal share of what the budget leaves over
+/// covers every copy. A run shorter than two frames is not worth starting.
+fn ahead_share(frame: u64, sizes: &[usize]) -> Option<(usize, usize)> {
+    let share = |n: usize| (AHEAD_BUDGET / n as u64).saturating_sub(frame);
+
+    (2..=sizes.len()).rev().find_map(|n| {
+        let cap = share(n);
+        let copy = |size: usize| size as u64 + crate::image::FILE_PADDING as u64;
+
+        sizes[1..n]
+            .iter()
+            .all(|&size| copy(size) <= cap)
+            .then(|| (n, usize::try_from(cap).unwrap_or(usize::MAX)))
+    })
+}
+
 pub struct CPlacement {
     pub geom: Placement,
     pub premultiply: bool,
@@ -236,10 +263,6 @@ impl<'a> Decoder<'a> {
     /// streamed animation or replaceable input gets one. The work threshold
     /// is checked against sub-frame dimensions after lookahead.
     fn ahead_count(&self) -> usize {
-        /* Y, U, V, alpha and the ARGB a sub-frame may be converted into. */
-        const BYTES_PER_PIXEL: i64 = 6;
-        const BUDGET: i64 = 96 << 20;
-
         if self.threads.0 < 2 || self.streaming || !self.eos {
             return 1;
         }
@@ -247,13 +270,19 @@ impl<'a> Decoder<'a> {
             return 1;
         }
 
-        let pixels = i64::from(self.canvas_width) * i64::from(self.canvas_height);
-
-        let by_memory = BUDGET / (pixels * BYTES_PER_PIXEL).max(1);
+        let by_memory = AHEAD_BUDGET / self.ahead_frame_bytes().max(1);
 
         (by_memory.max(1) as usize)
             .min(self.threads.0)
             .min(MAX_SLOTS)
+    }
+
+    /// What a slot's decoded frame is counted as against the budget.
+    fn ahead_frame_bytes(&self) -> u64 {
+        let pixels =
+            u64::from(self.canvas_width as u32) * u64::from(self.canvas_height as u32);
+
+        pixels * AHEAD_BYTES_PER_PIXEL
     }
 
     /// The ANMF payloads from `first` onwards, at most `want` of them, and
@@ -389,7 +418,8 @@ impl<'a> Decoder<'a> {
 
         let (mut entries, next) = self.anmf_lookahead((base, size), want);
 
-        let mut pixels: u64 = 0;
+        let mut area = [0u64; MAX_SLOTS];
+        let mut sizes = [0usize; MAX_SLOTS];
         let mut usable = 0;
 
         for entry in &entries {
@@ -397,15 +427,31 @@ impl<'a> Decoder<'a> {
                 break;
             };
 
-            pixels += u64::from(w as u32) * u64::from(h as u32);
+            area[usable] = u64::from(w as u32) * u64::from(h as u32);
+            sizes[usable] = entry.size;
             usable += 1;
         }
         /* The run cannot go past a frame that does not fit. */
-        let next = (usable == entries.len()).then_some(next);
+        let mut next = (usable == entries.len()).then_some(next);
 
         entries.truncate(usable);
 
-        if entries.len() < 2 || pixels < entries.len() as u64 * 96 * 96 {
+        let Some((n, payload_cap)) =
+            ahead_share(self.ahead_frame_bytes(), &sizes[..usable])
+        else {
+            return;
+        };
+
+        if n < usable {
+            /* The frames left out are handed on as slots free, if their
+             * payloads fit; the chunk header is eight bytes before them. */
+            next = Some(entries[n].base - 8);
+            entries.truncate(n);
+        }
+
+        let pixels: u64 = area[..n].iter().sum();
+
+        if pixels < entries.len() as u64 * 96 * 96 {
             return;
         }
 
@@ -429,7 +475,7 @@ impl<'a> Decoder<'a> {
         let beside = (threads - 1).min(workers);
         let (_, ahead, env) = self.frame_parts();
 
-        ahead.start(&env, entries, next, workers, beside);
+        ahead.start(&env, entries, next, workers, beside, payload_cap);
         ahead.threads = threads;
 
         let first = &mut ahead.entries[0];
@@ -715,5 +761,39 @@ mod tests {
             decoder.decode_anmf(second, frames[1].1),
             Err(Error::InvalidData)
         );
+    }
+
+    #[test]
+    fn copied_payloads_count_against_the_lookahead_budget() {
+        let frame = 1024 * 1024 * AHEAD_BYTES_PER_PIXEL;
+        let held = |n: usize, cap: usize| n as u64 * (frame + cap as u64);
+
+        /* Small payloads leave the count to the decoded frames. */
+        let small = frame / 4;
+        let (n, cap) = ahead_share(small, &[4096; 16]).unwrap();
+
+        assert_eq!(n, 16);
+        assert!(n as u64 * (small + cap as u64) <= AHEAD_BUDGET);
+
+        /* Sixteen of these frames fill the budget alone, with no room left
+         * for a copy. */
+        assert_eq!(ahead_share(frame, &[4096; 16]).map(|(n, _)| n), Some(15));
+
+        /* A high-entropy lossless frame of this canvas is about 4 MiB. */
+        let (n, cap) = ahead_share(frame, &[4 << 20; 16]).unwrap();
+
+        assert_eq!(n, 9);
+        assert!(cap >= (4 << 20) + crate::image::FILE_PADDING);
+        assert!(held(n, cap) <= AHEAD_BUDGET);
+
+        /* The first frame is decoded from the file, not a copy. */
+        let mut sizes = [4096; 4];
+
+        sizes[0] = 1 << 30;
+        assert_eq!(ahead_share(frame, &sizes).map(|(n, _)| n), Some(4));
+
+        /* Nothing is gained when the second frame alone is over its share. */
+        sizes[1] = 1 << 30;
+        assert_eq!(ahead_share(frame, &sizes), None);
     }
 }

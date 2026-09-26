@@ -2,6 +2,7 @@ use crate::dsp::filters::FilterDsp;
 use crate::dsp::vp8l::Vp8lDsp;
 use crate::dsp::yuv::YuvDsp;
 use crate::error::{Error, Result};
+use crate::image::FILE_PADDING;
 use crate::input::Input;
 use crate::picture::{Buffer, Frame};
 use crate::vp8l::Output as Lossless;
@@ -421,6 +422,10 @@ pub(crate) struct Ahead {
     pub(crate) threads: usize,
     /// Each slot's copy of the payload it is decoding, kept to be reused.
     inputs: Vec<Input<'static>>,
+    /// The most bytes a slot's copy may hold, padding included: its share of
+    /// what the run may spend beside the decoded frames. A frame with a
+    /// larger payload ends the run.
+    payload_cap: usize,
     pool: Option<Pool>,
 }
 
@@ -457,8 +462,9 @@ impl Ahead {
     /// Starts a run with `entries`, handing every one after the first to a
     /// pool of up to `workers` threads, at most `beside` of which decode
     /// while the calling thread is not waiting on them. `next` is where the
-    /// chunk after the last entry starts, if the run may go on past it. An
-    /// entry whose payload cannot be copied ends the run.
+    /// chunk after the last entry starts, if the run may go on past it.
+    /// `payload_cap` bounds each slot's copy of a payload; an entry whose
+    /// payload is larger, or cannot be copied, ends the run.
     pub(crate) fn start(
         &mut self,
         env: &FrameEnv<'_, '_>,
@@ -466,6 +472,7 @@ impl Ahead {
         next: Option<usize>,
         workers: usize,
         beside: usize,
+        payload_cap: usize,
     ) {
         if self.pool.as_ref().is_none_or(|pool| {
             (pool.shared.size, pool.shared.beside) != (workers, beside)
@@ -474,9 +481,10 @@ impl Ahead {
              * started once the one before it has been collected. */
             self.pool = Some(Pool::new(workers, beside, env));
         }
-        if self.inputs.len() < entries.len() {
-            self.inputs.resize_with(entries.len(), Input::default);
-        }
+        /* Copies kept from a longer run were sized to a smaller share. */
+        self.inputs.truncate(entries.len());
+        self.inputs.resize_with(entries.len(), Input::default);
+        self.payload_cap = payload_cap;
         self.entries = entries;
         self.pos = 0;
         self.end = self.entries.len();
@@ -558,13 +566,21 @@ impl Ahead {
     }
 
     /// Packs frame `j` of the run up for the pool, with its slot and a copy
-    /// of its payload.
+    /// of its payload, unless that payload is over the slot's share.
     fn job(&mut self, input: &Input<'_>, j: usize) -> Option<Job> {
         let k = j % self.entries.len();
         let entry = &mut self.entries[k];
+
+        if entry.size > self.payload_cap.saturating_sub(FILE_PADDING) {
+            return None;
+        }
+
         let mut copy = std::mem::take(&mut self.inputs[k]);
 
-        copy.own(input.chunk(entry.base, entry.size)).ok()?;
+        if copy.own_exact(input.chunk(entry.base, entry.size)).is_err() {
+            self.inputs[k] = copy;
+            return None;
+        }
         entry.pending = true;
         Some(Job {
             index: j,

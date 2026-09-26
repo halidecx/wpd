@@ -132,6 +132,27 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
+    /// Like own(), for a copy that is never appended to: the buffer grows
+    /// only to what `data` needs, not to the next power of two, so what it
+    /// keeps for reuse is no more than the largest copy it has held.
+    pub fn own_exact(&mut self, data: &[u8]) -> Result<()> {
+        let needed = data.len() + FILE_PADDING;
+
+        self.borrowed = None;
+        self.window = Window::default();
+        self.owned.clear();
+        if self.owned.capacity() < needed {
+            self.owned = Vec::new();
+            self.owned
+                .try_reserve_exact(needed)
+                .map_err(|_| Error::NoMemory)?;
+        }
+        self.owned.extend_from_slice(data);
+        self.pad(data.len());
+        self.window.size = data.len();
+        Ok(())
+    }
+
     pub fn borrow(&mut self, data: &'a [u8]) {
         self.borrowed = Some(data);
         self.window = Window {
@@ -356,5 +377,18 @@ mod tests {
         assert!(input.bytes().is_empty());
         input.own(&[4, 5]).unwrap();
         assert_eq!(input.bytes(), &[4, 5]);
+    }
+
+    #[test]
+    fn an_exact_copy_holds_no_more_than_its_largest_payload() {
+        let mut input = Input::new();
+        let big = vec![3u8; 3 * INITIAL_CAPACITY];
+
+        input.own_exact(&big).unwrap();
+        assert_eq!(input.owned.capacity(), big.len() + FILE_PADDING);
+        assert_eq!(input.bytes(), &big[..]);
+        input.own_exact(&[1, 2]).unwrap();
+        assert_eq!(input.bytes(), &[1, 2]);
+        assert_eq!(input.owned.capacity(), big.len() + FILE_PADDING);
     }
 }
