@@ -319,6 +319,7 @@ fn fill_pieces<T: Copy>(dst: &mut [T], v: T) {
     }
 }
 
+#[inline(always)]
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
@@ -332,7 +333,14 @@ fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize)
         fill_pieces(&mut pixels[pos..][..length], v);
         return;
     }
+    copy_repeating(pixels, pos, dist, length);
+}
 
+/// A reference that overlaps its source further back than one pixel. Out of
+/// line, so that its calls to `memcpy` stay out of the loops that inline
+/// `copy_block`.
+#[inline(never)]
+fn copy_repeating<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     let mut i = 0;
 
     // The source grows with the output, so short patterns take logarithmically
