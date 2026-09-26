@@ -346,9 +346,10 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
     declare_func(void, uint8_t *, const uint8_t *, int);
 
     if (check_func(dsp->blend_row_argb_premult, "blend_row_argb_premult")) {
-        for (int mode = 0; mode < 3; mode++) {
+        for (int mode = 0; mode < 6; mode++) {
             for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-                const int n = lengths[i];
+                const int n   = lengths[i];
+                int       run = 0;
 
                 for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
                     WPD_WN32A(src + x, rnd());
@@ -357,6 +358,19 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
                         src[x] = 255;
                     else if (mode == 2 && (rnd() & 7))
                         src[x] = 0;
+                    else if (mode == 3)
+                        src[x] = rnd() & 1 ? 255 : 0;
+                    else if (mode >= 4) {
+                        /* runs of opaque and clear, now and then an edge */
+                        if (!(rnd() % 23))
+                            run = rnd() % 3;
+                        if (run < 2 && rnd() % 97)
+                            src[x] = run ? 255 : 0;
+                    }
+                    /* premultiplied, clear is zero throughout; mode 4
+                     * leaves an odd clear pixel with colour */
+                    if (mode >= 3 && !src[x] && (mode != 4 || rnd() % 61))
+                        WPD_WN32A(src + x, 0);
                     memcpy(dst1 + x, dst0 + x, 4);
                 }
 
@@ -365,6 +379,18 @@ static void check_blend_row_argb_premult(WPDLosslessDSP *dsp) {
                 if (memcmp(dst0, dst1, sizeof(dst0)))
                     fail();
             }
+        }
+
+        for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
+            const int opaque = (x / (4 * 24)) & 1;
+
+            WPD_WN32A(src + x, opaque ? rnd() : 0);
+            WPD_WN32A(dst1 + x, rnd());
+            /* mostly binary alpha in runs, as animations tend to have */
+            if (opaque)
+                src[x] = 255;
+            if (x == 4 * 100)
+                src[x] = 128;
         }
         bench_new(dst1, src, MAX_PIXELS);
     }

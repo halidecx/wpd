@@ -54,11 +54,9 @@ endfunc
         add             v\dst\().8b, v\dst\().8b, v\src\().8b
 .endm
 
-function wpd_blend_row_argb_premult_neon, export=1
-        cmp             w2,  #8
-        b.lt            2f
-        movi            v17.8h,  #1, lsl #8
-1:      ld4             {v0.8b-v3.8b}, [x1], #32
+/* Eight pixels from x1 over x0, advancing both; v17 holds 256 per lane. */
+.macro  blend_premult8
+        ld4             {v0.8b-v3.8b}, [x1], #32
         ld4             {v4.8b-v7.8b}, [x0]
         uxtl            v16.8h, v0.8b
         sub             v16.8h,  v17.8h, v16.8h
@@ -66,10 +64,64 @@ function wpd_blend_row_argb_premult_neon, export=1
         blend_premult_ch 5, 1, 19
         blend_premult_ch 6, 2, 20
         blend_premult_ch 7, 3, 21
-        sub             w2,  w2,  #8
         st4             {v4.8b-v7.8b}, [x0], #32
-        cmp             w2,  #8
+.endm
+
+/* Sorted sixteen pixels at a time as blend_row_argb is. A premultiplied
+ * clear pixel is all zeros and adds nothing, so a run of those touches
+ * nothing, an opaque run is stored whole, and a mix of the two is a select.
+ * A clear alpha over colour that is not zero is left to the arithmetic. */
+function wpd_blend_row_argb_premult_neon, export=1
+        movi            v17.8h,  #1, lsl #8
+        cmp             w2,  #16
+        b.lt            20f
+        movi            v31.16b, #255
+1:      ldp             q0,  q1,  [x1]
+        ldp             q2,  q3,  [x1, #32]
+        uzp1            v24.8h,  v0.8h,   v1.8h
+        uzp1            v25.8h,  v2.8h,   v3.8h
+        uzp1            v24.16b, v24.16b, v25.16b
+        cmeq            v24.16b, v24.16b, v31.16b
+        cmeq            v20.4s,  v0.4s,   #0
+        cmeq            v21.4s,  v1.4s,   #0
+        cmeq            v22.4s,  v2.4s,   #0
+        cmeq            v23.4s,  v3.4s,   #0
+        uzp1            v25.8h,  v20.8h,  v21.8h
+        uzp1            v26.8h,  v22.8h,  v23.8h
+        uzp1            v25.16b, v25.16b, v26.16b
+        orr             v26.16b, v24.16b, v25.16b
+        shrn            v26.8b,  v26.8h,  #4
+        shrn            v24.8b,  v24.8h,  #4
+        fmov            x4,  d26
+        fmov            x5,  d24
+        cmn             x4,  #1
+        b.ne            5f              // a pixel needs the arithmetic
+        cmn             x5,  #1
+        b.eq            2f              // all opaque
+        cbz             x5,  3f         // all clear
+        ldp             q4,  q5,  [x0]
+        ldp             q6,  q7,  [x0, #32]
+        bit             v0.16b,  v4.16b,  v20.16b
+        bit             v1.16b,  v5.16b,  v21.16b
+        bit             v2.16b,  v6.16b,  v22.16b
+        bit             v3.16b,  v7.16b,  v23.16b
+2:      stp             q0,  q1,  [x0]
+        stp             q2,  q3,  [x0, #32]
+3:      add             x1,  x1,  #64
+        add             x0,  x0,  #64
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
         b.ge            1b
+        b               20f
+5:      blend_premult8
+        blend_premult8
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
+        b.ge            1b
+20:     cmp             w2,  #8
+        b.lt            2f
+        blend_premult8
+        sub             w2,  w2,  #8
 2:      cbz             w2,  9f
         mov             w5,  #256
 3:      ldrb            w3,  [x1]
