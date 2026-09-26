@@ -230,25 +230,32 @@ macro_rules! preds {
 
 macro_rules! ladder {
     ($(
-        $flag:ident {
+        $(#[$attr:meta])*
+        $($flag:ident)|+ {
             $( @preds $preds:ident [ $($idx:tt),* ]; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
         pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
-            $(if flags.contains(CpuFlags::$flag) {
-                $( $( dsp.pred_add[$idx] = pred_slot!($preds, $idx); )* )?
-                $( dsp.$field = $wrap::<$marker>; )*
-            })*
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
+                    $( $( dsp.pred_add[$idx] = pred_slot!($preds, $idx); )* )?
+                    $( dsp.$field = $wrap::<$marker>; )*
+                }
+            )*
         }
 
         pub fn raw_table(flags: CpuFlags) -> RawTable {
             let mut t = RawTable::default();
 
-            $(if flags.contains(CpuFlags::$flag) {
-                $( $( t.pred_add[$idx] = Some(pred_raw!($preds, $idx)); )* )?
-                $( t.$field = Some(<$marker as Raw>::F); )*
-            })*
+            $(
+                $(#[$attr])*
+                if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
+                    $( $( t.pred_add[$idx] = Some(pred_raw!($preds, $idx)); )* )?
+                    $( t.$field = Some(<$marker as Raw>::F); )*
+                }
+            )*
             t
         }
     };
@@ -399,6 +406,15 @@ mod arch {
         );
     }
 
+    #[cfg(wpd_asm_dotprod)]
+    pub mod dotprod {
+        use super::*;
+
+        preds! {
+            Pred11, pred11, "wpd_pred_add_11_neon_dotprod";
+        }
+    }
+
     ladder! {
         NEON {
             @preds neon [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
@@ -408,6 +424,10 @@ mod arch {
             add_green = add_green::<neon::AddGreen>;
             blend_row_argb = blend_row::<neon::Blend>;
             blend_row_argb_premult = blend_row::<neon::BlendPremult>;
+        }
+        #[cfg(wpd_asm_dotprod)]
+        NEON | DOTPROD {
+            @preds dotprod [11];
         }
     }
 }

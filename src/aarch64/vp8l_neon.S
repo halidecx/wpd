@@ -322,47 +322,94 @@ function wpd_pred_add_10_neon, export=1
 9:      ret
 endfunc
 
-.macro  pred11_pixel
-        uabd            v17.8b,  v0.8b,   v3.8b
-        uaddlp          v17.4h,  v17.8b
-        uaddlp          v17.2s,  v17.4h
-        cmhs            v17.2s,  v4.2s,   v17.2s
-        add             v0.8b,   v0.8b,   v1.8b
-        bit             v0.8b,   v5.8b,   v17.8b
+.macro  sum4_uaddlp     dst, src
+        uaddlp          \dst\().8h, \src\().16b
+        uaddlp          \dst\().4s, \dst\().8h
+.endm
+
+/* Select picks T + in when sum|L - TL| <= sum|T - TL|, else L + in, and
+ * the sum over L is what chains one pixel to the next. So both of the
+ * next pixel's comparisons are made ahead: the one for when this pixel
+ * takes T + in (MA, from four pixels at once) and the one for when it
+ * takes L + in (s, from B = L + in before the select resolves). The
+ * select of the mask itself is then the only step the two share. */
+.macro  pred11_pixel    sum4
+        cmhs            v22.4s,  v17.4s,  v7.4s         // MB: s <= pb
+        bsl             v20.16b, v19.16b, v22.16b       // mask
+        add             v0.16b,  v0.16b,  v1.16b        // B = L + in
+        uabd            v23.16b, v0.16b,  v2.16b
+        \sum4           v7,  v23                        // s for the next
+        bit             v0.16b,  v5.16b,  v20.16b
         str             s0,  [x3], #4
 .endm
 
-function wpd_pred_add_11_neon, export=1
+.macro  pred_add_11     sum4
         ldur            s0,  [x3, #-4]
+        ldur            s3,  [x1, #-4]
+        uabd            v23.8b,  v0.8b,   v3.8b
+        \sum4           v7,  v23
+        movi            v20.16b, #0
         cmp             w2,  #4
         b.lt            2f
 1:      ldr             q1,  [x0], #16
         ldur            q3,  [x1, #-4]
         ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
-        uabd            v4.16b,  v2.16b,  v3.16b
-        uaddlp          v4.8h,   v4.16b
-        uaddlp          v4.4s,   v4.8h
-        add             v5.16b,  v2.16b,  v1.16b
-.irp    lane, 0, 1, 2, 3
-        pred11_pixel
-        step_pixel      v1,  v3,  v4,  v5
+        add             v5.16b,  v2.16b,  v1.16b        // A = T + in
+        uabd            v16.16b, v2.16b,  v3.16b
+        \sum4           v17, v16                        // pb
+        ext             v18.16b, v21.16b, v5.16b, #12   // previous pixels' A
+        mov             v21.16b, v5.16b
+        uabd            v18.16b, v18.16b, v3.16b
+        \sum4           v19, v18
+        cmhs            v19.4s,  v17.4s,  v19.4s        // MA
+.irp    lane, 0, 1, 2
+        pred11_pixel    \sum4
+        step_pixel      v1,  v2,  v5,  v17
+        ext             v19.16b, v19.16b, v19.16b, #4
 .endr
+        pred11_pixel    \sum4
         cmp             w2,  #4
         b.ge            1b
+        /* The tail compares against L itself, so s must match it. */
+        uabd            v23.8b,  v0.8b,   v2.8b
+        \sum4           v7,  v23
+        mov             v3.8b,   v2.8b
 2:      cbz             w2,  9f
 3:      ldr             s1,  [x0], #4
-        ldur            s3,  [x1, #-4]
         ldr             s2,  [x1], #4
         subs            w2,  w2,  #1
-        uabd            v4.8b,   v2.8b,   v3.8b
-        uaddlp          v4.4h,   v4.8b
-        uaddlp          v4.2s,   v4.4h
+        uabd            v16.8b,  v2.8b,   v3.8b
+        \sum4           v17, v16
+        cmhs            v20.4s,  v17.4s,  v7.4s
+        add             v0.8b,   v0.8b,   v1.8b
         add             v5.8b,   v2.8b,   v1.8b
-        pred11_pixel
+        bit             v0.8b,   v5.8b,   v20.8b
+        str             s0,  [x3], #4
+        uabd            v23.8b,  v0.8b,   v2.8b
+        \sum4           v7,  v23
+        mov             v3.8b,   v2.8b
         b.gt            3b
 9:      ret
+.endm
+
+.macro  sum4_udot       dst, src
+        movi            \dst\().4s, #0
+        udot            \dst\().4s, \src\().16b, v31.16b
+.endm
+
+function wpd_pred_add_11_neon, export=1
+        pred_add_11     sum4_uaddlp
 endfunc
+
+#if HAVE_DOTPROD
+ENABLE_DOTPROD
+function wpd_pred_add_11_neon_dotprod, export=1
+        movi            v31.16b, #1
+        pred_add_11     sum4_udot
+endfunc
+DISABLE_DOTPROD
+#endif
 
 .macro  pred12_pixel    diff
         add             v16.8h,  v0.8h,   \diff\().8h
