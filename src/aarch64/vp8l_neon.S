@@ -411,32 +411,31 @@ endfunc
 DISABLE_DOTPROD
 #endif
 
-.macro  pred12_pixel    diff
-        add             v16.8h,  v0.8h,   \diff\().8h
-        sqxtun          v16.8b,  v16.8h
-        add             v16.8b,  v16.8b,  v1.8b
-        str             s16, [x3], #4
-        uxtl            v0.8h,   v16.8b
+/* clamp(L + T - TL) is L raised by T - TL or lowered by TL - T, only one
+ * of which is nonzero, so it takes two saturating steps in bytes and L
+ * never has to be widened. */
+.macro  pred12_pixel
+        uqadd           v0.8b,   v0.8b,   v4.8b
+        uqsub           v0.8b,   v0.8b,   v5.8b
+        add             v0.8b,   v0.8b,   v1.8b
+        str             s0,  [x3], #4
 .endm
 
 function wpd_pred_add_12_neon, export=1
         ldur            s0,  [x3, #-4]
-        uxtl            v0.8h,   v0.8b
         cmp             w2,  #4
         b.lt            2f
 1:      ldr             q1,  [x0], #16
         ldur            q3,  [x1, #-4]
         ldr             q2,  [x1], #16
         sub             w2,  w2,  #4
-        usubl           v4.8h,   v2.8b,   v3.8b
-        usubl2          v5.8h,   v2.16b,  v3.16b
-.irp    diff, v4, v5
-.irp    lane, 0, 1
-        pred12_pixel    \diff
-        ext             v1.16b,  v1.16b,  v1.16b, #4
-        ext             \diff\().16b, \diff\().16b, \diff\().16b, #8
+        uqsub           v4.16b,  v2.16b,  v3.16b
+        uqsub           v5.16b,  v3.16b,  v2.16b
+.irp    lane, 0, 1, 2
+        pred12_pixel
+        step_pixel      v1,  v4,  v5
 .endr
-.endr
+        pred12_pixel
         cmp             w2,  #4
         b.ge            1b
 2:      cbz             w2,  9f
@@ -444,21 +443,25 @@ function wpd_pred_add_12_neon, export=1
         ldur            s3,  [x1, #-4]
         ldr             s2,  [x1], #4
         subs            w2,  w2,  #1
-        usubl           v4.8h,   v2.8b,   v3.8b
-        pred12_pixel    v4
+        uqsub           v4.8b,   v2.8b,   v3.8b
+        uqsub           v5.8b,   v3.8b,   v2.8b
+        pred12_pixel
         b.gt            3b
 9:      ret
 endfunc
 
+/* avg + (avg - TL) / 2 rounds toward zero, so it is avg raised by
+ * (avg - TL) >> 1 when avg >= TL and lowered by (TL - avg) >> 1 when not;
+ * both saturate on their own and the compare picks one. */
 .macro  pred13_pixel
         uhadd           v16.8b,  v0.8b,   v2.8b
-        cmhi            v17.8b,  v3.8b,   v16.8b
-        add             v17.8b,  v3.8b,   v17.8b
-        uhsub           v18.8b,  v16.8b,  v17.8b
-        uxtl            v19.8h,  v16.8b
-        saddw           v19.8h,  v19.8h,  v18.8b
-        sqxtun          v20.8b,  v19.8h
-        add             v0.8b,   v20.8b,  v1.8b
+        uhsub           v17.8b,  v16.8b,  v3.8b
+        uhsub           v18.8b,  v3.8b,   v16.8b
+        cmhs            v19.8b,  v16.8b,  v3.8b
+        uqadd           v17.8b,  v16.8b,  v17.8b
+        uqsub           v18.8b,  v16.8b,  v18.8b
+        bsl             v19.8b,  v17.8b,  v18.8b
+        add             v0.8b,   v19.8b,  v1.8b
         str             s0,  [x3], #4
 .endm
 
