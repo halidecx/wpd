@@ -6,6 +6,8 @@ use std::slice;
 use wpd::dsp::vp8l as k;
 
 pub type PredAddFn = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
+pub type PredPairFn =
+    unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32, *const u32, *mut u32);
 pub type PredGreenFn = unsafe extern "C" fn(*const u32, *const u8, c_int, *mut u8);
 pub type RowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MapColorFn = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
@@ -17,6 +19,7 @@ pub const PRED_COUNT: usize = 14;
 #[repr(C)]
 pub struct WPDLosslessDSP {
     pub pred_add: [PredAddFn; PRED_COUNT],
+    pub pred_add_pair: [PredPairFn; PRED_COUNT],
     pub extract_green: RowFn,
     pub map_color32: MapColorFn,
     pub blend_row_argb: RowFn,
@@ -93,6 +96,40 @@ pred_tramp!(pred_add_10_c, pred_add_10, true, true, true);
 pred_tramp!(pred_add_11_c, pred_add_11, true, true, false);
 pred_tramp!(pred_add_12_c, pred_add_12, true, true, false);
 pred_tramp!(pred_add_13_c, pred_add_13, true, true, false);
+
+/* The lower row after the upper, over its output. */
+macro_rules! pair_tramp {
+    ($name:ident, $single:ident) => {
+        unsafe extern "C" fn $name(
+            inp: *const u32,
+            upper: *const u32,
+            n: c_int,
+            out: *mut u32,
+            in_b: *const u32,
+            out_b: *mut u32,
+        ) {
+            unsafe {
+                $single(inp, upper, n, out);
+                $single(in_b, out.cast_const(), n, out_b);
+            }
+        }
+    };
+}
+
+pair_tramp!(pred_add_pair_0_c, pred_add_0_c);
+pair_tramp!(pred_add_pair_1_c, pred_add_1_c);
+pair_tramp!(pred_add_pair_2_c, pred_add_2_c);
+pair_tramp!(pred_add_pair_3_c, pred_add_3_c);
+pair_tramp!(pred_add_pair_4_c, pred_add_4_c);
+pair_tramp!(pred_add_pair_5_c, pred_add_5_c);
+pair_tramp!(pred_add_pair_6_c, pred_add_6_c);
+pair_tramp!(pred_add_pair_7_c, pred_add_7_c);
+pair_tramp!(pred_add_pair_8_c, pred_add_8_c);
+pair_tramp!(pred_add_pair_9_c, pred_add_9_c);
+pair_tramp!(pred_add_pair_10_c, pred_add_10_c);
+pair_tramp!(pred_add_pair_11_c, pred_add_11_c);
+pair_tramp!(pred_add_pair_12_c, pred_add_12_c);
+pair_tramp!(pred_add_pair_13_c, pred_add_13_c);
 
 /* The green predictors read out[-1] and upper[-1..=n]; mode 1 no upper. */
 macro_rules! green_tramp {
@@ -234,6 +271,11 @@ fn init_asm(dsp: &mut WPDLosslessDSP) {
             *slot = v;
         }
     }
+    for (slot, sel) in dsp.pred_add_pair.iter_mut().zip(t.pred_add_pair) {
+        if let Some(v) = sel {
+            *slot = v;
+        }
+    }
     for (slot, sel) in dsp.pred_green.iter_mut().zip(t.pred_green) {
         if let Some(v) = sel {
             *slot = v;
@@ -278,6 +320,22 @@ impl WPDLosslessDSP {
                 pred_add_11_c,
                 pred_add_12_c,
                 pred_add_13_c,
+            ],
+            pred_add_pair: [
+                pred_add_pair_0_c,
+                pred_add_pair_1_c,
+                pred_add_pair_2_c,
+                pred_add_pair_3_c,
+                pred_add_pair_4_c,
+                pred_add_pair_5_c,
+                pred_add_pair_6_c,
+                pred_add_pair_7_c,
+                pred_add_pair_8_c,
+                pred_add_pair_9_c,
+                pred_add_pair_10_c,
+                pred_add_pair_11_c,
+                pred_add_pair_12_c,
+                pred_add_pair_13_c,
             ],
             extract_green: extract_green_c,
             map_color32: map_color32_c,

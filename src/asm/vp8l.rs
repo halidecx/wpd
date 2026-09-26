@@ -7,6 +7,8 @@ use crate::dsp::vp8l::Vp8lDsp;
 use std::ffi::c_int;
 
 pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
+pub type PredPairRaw =
+    unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32, *const u32, *mut u32);
 pub type PredGreenRaw = unsafe extern "C" fn(*const u32, *const u8, c_int, *mut u8);
 pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
@@ -24,6 +26,22 @@ macro_rules! raw_vp8l {
             PredAddRaw,
             $sym,
             (*const u32, *const u32, c_int, *mut u32)
+        );
+    };
+    ($m:ident, $i:ident, pred_pair, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            PredPairRaw,
+            $sym,
+            (
+                *const u32,
+                *const u32,
+                c_int,
+                *mut u32,
+                *const u32,
+                *mut u32
+            )
         );
     };
     ($m:ident, $i:ident, pred_green, $sym:literal) => {
@@ -94,8 +112,37 @@ fn pred_add<
     }
 }
 
+/* Each row's left is at [-1] and the upper row's top left at up - 1; the
+ * lower row's above is the upper row's output, from out - 1. */
+#[cfg(target_arch = "aarch64")]
+fn pred_pair<T: Raw<Sig = PredPairRaw>>(
+    plane: &mut [u32],
+    out: usize,
+    up: usize,
+    below: usize,
+    n: usize,
+) {
+    assert!(
+        up >= 1 && up + n <= out && out + n <= below && below + n <= plane.len(),
+        "picture too small"
+    );
+    unsafe {
+        let base = plane.as_mut_ptr();
+
+        (T::F)(
+            base.add(out).cast_const(),
+            base.add(up).cast_const(),
+            n as c_int,
+            base.add(out),
+            base.add(below).cast_const(),
+            base.add(below),
+        )
+    }
+}
+
 /* The kernel reads the left pixel at out[-1] and, with UP, the row above
  * from upper[-1] (top left) to upper[n] (the last pixel's top right). */
+#[cfg(target_arch = "aarch64")]
 fn pred_green<T: Raw<Sig = PredGreenRaw>, const UP: bool>(
     row: &mut [u8],
     above: &[u8],
@@ -161,6 +208,7 @@ fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
 #[derive(Default)]
 pub struct RawTable {
     pub pred_add: [Option<PredAddRaw>; 14],
+    pub pred_add_pair: [Option<PredPairRaw>; 14],
     pub pred_green: [Option<PredGreenRaw>; 14],
     pub extract_green: Option<BlendRowRaw>,
     pub add_green: Option<AddGreenRaw>,
@@ -260,6 +308,30 @@ macro_rules! pred_raw {
     };
 }
 
+macro_rules! pair_slot {
+    ($set:ident, 11) => {
+        Some(pred_pair::<$set::Pair11>)
+    };
+    ($set:ident, 12) => {
+        Some(pred_pair::<$set::Pair12>)
+    };
+    ($set:ident, 13) => {
+        Some(pred_pair::<$set::Pair13>)
+    };
+}
+
+macro_rules! pair_raw {
+    ($set:ident, 11) => {
+        <$set::Pair11 as Raw>::F
+    };
+    ($set:ident, 12) => {
+        <$set::Pair12 as Raw>::F
+    };
+    ($set:ident, 13) => {
+        <$set::Pair13 as Raw>::F
+    };
+}
+
 macro_rules! green_slot {
     ($set:ident, 1) => {
         pred_green::<$set::Green1, false>
@@ -289,6 +361,7 @@ macro_rules! ladder {
         $(#[$attr:meta])*
         $($flag:ident)|+ {
             $( @preds $preds:ident [ $($idx:tt),* ]; )?
+            $( @pairs $pairs:ident [ $($pidx:tt),* ]; )?
             $( @greens $greens:ident [ $($gidx:tt),* ]; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
@@ -298,6 +371,7 @@ macro_rules! ladder {
                 $(#[$attr])*
                 if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
                     $( $( dsp.pred_add[$idx] = pred_slot!($preds, $idx); )* )?
+                    $( $( dsp.pred_add_pair[$pidx] = pair_slot!($pairs, $pidx); )* )?
                     $( $( dsp.pred_green[$gidx] = green_slot!($greens, $gidx); )* )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
@@ -311,6 +385,7 @@ macro_rules! ladder {
                 $(#[$attr])*
                 if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
                     $( $( t.pred_add[$idx] = Some(pred_raw!($preds, $idx)); )* )?
+                    $( $( t.pred_add_pair[$pidx] = Some(pair_raw!($pairs, $pidx)); )* )?
                     $( $( t.pred_green[$gidx] = Some(green_raw!($greens, $gidx)); )* )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
@@ -447,6 +522,10 @@ mod arch {
             Pred13, pred13, "wpd_pred_add_13_neon";
         }
 
+        raw_vp8l!(Pair11, pair11, pred_pair, "wpd_pred_add_11_pair_neon");
+        raw_vp8l!(Pair12, pair12, pred_pair, "wpd_pred_add_12_pair_neon");
+        raw_vp8l!(Pair13, pair13, pred_pair, "wpd_pred_add_13_pair_neon");
+
         raw_vp8l!(Green1, green1, pred_green, "wpd_pred_green_1_neon");
         raw_vp8l!(Green11, green11, pred_green, "wpd_pred_green_11_neon");
 
@@ -475,11 +554,19 @@ mod arch {
         preds! {
             Pred11, pred11, "wpd_pred_add_11_neon_dotprod";
         }
+
+        raw_vp8l!(
+            Pair11,
+            pair11,
+            pred_pair,
+            "wpd_pred_add_11_pair_neon_dotprod"
+        );
     }
 
     ladder! {
         NEON {
             @preds neon [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+            @pairs neon [11, 12, 13];
             @greens neon [1, 11];
             map_color32 = map_color32::<neon::MapColor>;
             color_row = color_row::<neon::ColorRow>;
@@ -491,6 +578,7 @@ mod arch {
         #[cfg(wpd_asm_dotprod)]
         NEON | DOTPROD {
             @preds dotprod [11];
+            @pairs dotprod [11];
         }
     }
 }

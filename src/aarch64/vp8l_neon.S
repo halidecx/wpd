@@ -408,6 +408,7 @@ function wpd_pred_add_11_neon_dotprod, export=1
         movi            v31.16b, #1
         pred_add_11     sum4_udot
 endfunc
+
 DISABLE_DOTPROD
 #endif
 
@@ -487,6 +488,310 @@ function wpd_pred_add_13_neon, export=1
         pred13_pixel
         b.gt            3b
 9:      ret
+endfunc
+
+/* Two rows at once, the lower (in x4, out x5) under the upper (in x0,
+ * above x1, out x3), for the predictors that read no top right. A lone
+ * row is one chain of pixels, each waiting on its left, and leaves the
+ * core idle for most of a pixel's latency; the lower row a block behind
+ * the upper is a second chain to fill that wait. The upper row's blocks
+ * are gathered in v4 as they are made, which is all the lower row needs
+ * of its above, and v25 keeps the block before for its top left. */
+.macro  pair_start_a
+        ldr             q1,  [x0], #16
+        ldur            q3,  [x1, #-4]
+        ldr             q2,  [x1], #16
+        sub             w2,  w2,  #4
+.endm
+
+.macro  pair_start_b    tl
+        ldr             q24, [x4], #16
+        ext             \tl\().16b, v25.16b, v4.16b,  #12
+        mov             v25.16b, v4.16b
+        add             x6,  x6,  #16
+.endm
+
+/* From the upper row's first block alone to the lower row's last; each
+ * mode's pieces take the sum macro, which only select uses. */
+.macro  pair_blocks     m, sum4
+        p\m\()_start_a  \sum4
+.irp    lane, 0, 1, 2
+        p\m\()_pixel_a  \sum4
+        p\m\()_step_a
+.endr
+        p\m\()_pixel_a  \sum4
+        str             q4,  [x3], #16
+        cmp             w2,  #4
+        b.lt            3f
+2:      p\m\()_start_b  \sum4
+        p\m\()_start_a  \sum4
+.irp    lane, 0, 1, 2
+        p\m\()_pixel_a  \sum4
+        p\m\()_pixel_b  \sum4
+        p\m\()_step_a
+        p\m\()_step_b
+.endr
+        p\m\()_pixel_a  \sum4
+        p\m\()_pixel_b  \sum4
+        p\m\()_end_b
+        str             q4,  [x3], #16
+        cmp             w2,  #4
+        b.ge            2b
+3:      p\m\()_start_b  \sum4
+.irp    lane, 0, 1, 2
+        p\m\()_pixel_b  \sum4
+        p\m\()_step_b
+.endr
+        p\m\()_pixel_b  \sum4
+        p\m\()_end_b
+.endm
+
+.macro  p11_pixel       sum4, l, in, t, aval, s, pb, ma, mask
+        cmhs            v22.4s,  \pb\().4s,  \s\().4s
+        bsl             \mask\().16b, \ma\().16b, v22.16b
+        add             \l\().16b,  \l\().16b,  \in\().16b
+        uabd            v23.16b, \l\().16b,  \t\().16b
+        \sum4           \s,  v23
+        bit             \l\().16b,  \aval\().16b, \mask\().16b
+.endm
+
+.macro  p11_start_a     sum4
+        pair_start_a
+        add             v5.16b,  v2.16b,  v1.16b
+        uabd            v16.16b, v2.16b,  v3.16b
+        \sum4           v17, v16
+        ext             v18.16b, v21.16b, v5.16b, #12
+        mov             v21.16b, v5.16b
+        uabd            v18.16b, v18.16b, v3.16b
+        \sum4           v19, v18
+        cmhs            v19.4s,  v17.4s,  v19.4s
+.endm
+
+.macro  p11_start_b     sum4
+        pair_start_b    v3
+        add             v26.16b, v25.16b, v24.16b
+        uabd            v16.16b, v25.16b, v3.16b
+        \sum4           v28, v16
+        ext             v18.16b, v8.16b,  v26.16b, #12
+        mov             v8.16b,  v26.16b
+        uabd            v18.16b, v18.16b, v3.16b
+        \sum4           v29, v18
+        cmhs            v29.4s,  v28.4s,  v29.4s
+.endm
+
+.macro  p11_pixel_a     sum4
+        p11_pixel       \sum4, v0,  v1,  v2,  v5,  v7,  v17, v19, v20
+        ext             v4.16b,  v4.16b,  v0.16b,  #4
+.endm
+
+.macro  p11_pixel_b     sum4
+        p11_pixel       \sum4, v6,  v24, v25, v26, v27, v28, v29, v30
+        str             s6,  [x5], #4
+.endm
+
+.macro  p11_step_a
+        step_pixel      v1,  v2,  v5,  v17
+        ext             v19.16b, v19.16b, v19.16b, #4
+.endm
+
+.macro  p11_step_b
+        step_pixel      v24, v25, v26, v28
+        ext             v29.16b, v29.16b, v29.16b, #4
+.endm
+
+.macro  p11_end_b
+        ext             v25.16b, v25.16b, v25.16b, #4
+.endm
+
+/* A pixel on its own, from the left in v0, the top left in v3 and the
+ * distance between them in v7. */
+.macro  p11_tail        sum4, in, up, out, n
+        ldr             s1,  [\in], #4
+        ldr             s2,  [\up], #4
+        subs            \n,  \n,  #1
+        uabd            v16.8b,  v2.8b,   v3.8b
+        \sum4           v17, v16
+        cmhs            v20.4s,  v17.4s,  v7.4s
+        add             v0.8b,   v0.8b,   v1.8b
+        add             v5.8b,   v2.8b,   v1.8b
+        bit             v0.8b,   v5.8b,   v20.8b
+        str             s0,  [\out], #4
+        uabd            v23.8b,  v0.8b,   v2.8b
+        \sum4           v7,  v23
+        mov             v3.8b,   v2.8b
+.endm
+
+.macro  pred_add_11_pair sum4
+        str             d8,  [sp, #-16]!
+        mov             x6,  x3
+        ldur            s0,  [x3, #-4]
+        ldur            s3,  [x1, #-4]
+        ldur            s6,  [x5, #-4]
+        dup             v25.4s,  v0.s[0]
+        cmp             w2,  #4
+        b.lt            4f
+        uabd            v23.8b,  v0.8b,   v3.8b
+        \sum4           v7,  v23
+        uabd            v23.8b,  v6.8b,   v25.8b
+        \sum4           v27, v23
+        movi            v20.16b, #0
+        movi            v30.16b, #0
+        pair_blocks     11,  \sum4
+        mov             v3.8b,   v2.8b
+4:      cbz             w2,  9f
+        mov             w7,  w2
+        uabd            v23.8b,  v0.8b,   v3.8b
+        \sum4           v7,  v23
+5:      p11_tail        \sum4, x0,  x1,  x3,  w2
+        b.gt            5b
+        mov             v0.8b,   v6.8b
+        dup             v3.4s,   v25.s[3]
+        uabd            v23.8b,  v0.8b,   v3.8b
+        \sum4           v7,  v23
+6:      p11_tail        \sum4, x4,  x6,  x5,  w7
+        b.gt            6b
+9:      ldr             d8,  [sp], #16
+        ret
+.endm
+
+function wpd_pred_add_11_pair_neon, export=1
+        pred_add_11_pair sum4_uaddlp
+endfunc
+
+#if HAVE_DOTPROD
+ENABLE_DOTPROD
+function wpd_pred_add_11_pair_neon_dotprod, export=1
+        movi            v31.16b, #1
+        pred_add_11_pair sum4_udot
+endfunc
+DISABLE_DOTPROD
+#endif
+
+.macro  p12_px          l, in, up, down
+        uqadd           \l\().8b,  \l\().8b,  \up\().8b
+        uqsub           \l\().8b,  \l\().8b,  \down\().8b
+        add             \l\().8b,  \l\().8b,  \in\().8b
+.endm
+
+.macro  p12_start_a     sum4
+        pair_start_a
+        uqsub           v16.16b, v2.16b,  v3.16b
+        uqsub           v17.16b, v3.16b,  v2.16b
+.endm
+
+.macro  p12_start_b     sum4
+        pair_start_b    v3
+        uqsub           v26.16b, v25.16b, v3.16b
+        uqsub           v27.16b, v3.16b,  v25.16b
+.endm
+
+.macro  p12_pixel_a     sum4
+        p12_px          v0,  v1,  v16, v17
+        ext             v4.16b,  v4.16b,  v0.16b,  #4
+.endm
+
+.macro  p12_pixel_b     sum4
+        p12_px          v6,  v24, v26, v27
+        str             s6,  [x5], #4
+.endm
+
+.macro  p12_step_a
+        step_pixel      v1,  v16, v17
+.endm
+
+.macro  p12_step_b
+        step_pixel      v24, v26, v27
+.endm
+
+.macro  p12_end_b
+.endm
+
+.macro  p12_tail        in, up, out, n, l
+        ldr             s1,  [\in], #4
+        ldur            s3,  [\up, #-4]
+        ldr             s2,  [\up], #4
+        subs            \n,  \n,  #1
+        uqsub           v16.8b,  v2.8b,   v3.8b
+        uqsub           v17.8b,  v3.8b,   v2.8b
+        p12_px          v\l, v1,  v16, v17
+        str             s\l, [\out], #4
+.endm
+
+.macro  p13_px          l, in, t, tl
+        uhadd           v16.8b,  \l\().8b,  \t\().8b
+        uhsub           v17.8b,  v16.8b,  \tl\().8b
+        uhsub           v18.8b,  \tl\().8b, v16.8b
+        cmhs            v19.8b,  v16.8b,  \tl\().8b
+        uqadd           v17.8b,  v16.8b,  v17.8b
+        uqsub           v18.8b,  v16.8b,  v18.8b
+        bsl             v19.8b,  v17.8b,  v18.8b
+        add             \l\().8b,  v19.8b,  \in\().8b
+.endm
+
+.macro  p13_start_a     sum4
+        pair_start_a
+.endm
+
+.macro  p13_start_b     sum4
+        pair_start_b    v26
+.endm
+
+.macro  p13_pixel_a     sum4
+        p13_px          v0,  v1,  v2,  v3
+        ext             v4.16b,  v4.16b,  v0.16b,  #4
+.endm
+
+.macro  p13_pixel_b     sum4
+        p13_px          v6,  v24, v25, v26
+        str             s6,  [x5], #4
+.endm
+
+.macro  p13_step_a
+        step_pixel      v1,  v2,  v3
+.endm
+
+.macro  p13_step_b
+        step_pixel      v24, v25, v26
+.endm
+
+.macro  p13_end_b
+        ext             v25.16b, v25.16b, v25.16b, #4
+.endm
+
+.macro  p13_tail        in, up, out, n, l
+        ldr             s1,  [\in], #4
+        ldur            s3,  [\up, #-4]
+        ldr             s2,  [\up], #4
+        subs            \n,  \n,  #1
+        p13_px          v\l, v1,  v2,  v3
+        str             s\l, [\out], #4
+.endm
+
+/* The top lefts of both rows' tails are read back, the lower row's from
+ * the upper row's output. */
+.macro  pred_add_pair   m
+        mov             x6,  x3
+        ldur            s0,  [x3, #-4]
+        ldur            s6,  [x5, #-4]
+        dup             v25.4s,  v0.s[0]
+        cmp             w2,  #4
+        b.lt            4f
+        pair_blocks     \m
+4:      cbz             w2,  9f
+        mov             w7,  w2
+5:      p\m\()_tail     x0,  x1,  x3,  w2,  0
+        b.gt            5b
+6:      p\m\()_tail     x4,  x6,  x5,  w7,  6
+        b.gt            6b
+9:      ret
+.endm
+
+function wpd_pred_add_12_pair_neon, export=1
+        pred_add_pair   12
+endfunc
+
+function wpd_pred_add_13_pair_neon, export=1
+        pred_add_pair   13
 endfunc
 
 function wpd_extract_green_neon, export=1

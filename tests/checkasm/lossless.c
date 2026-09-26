@@ -44,6 +44,60 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
     }
 }
 
+/* Two rows, the second over the first. Values narrowed to a few steps make
+ * the select predictor's distances tie, and a flat regime lets a pixel's
+ * pick carry from one block to the next. */
+static uint32_t pair_sample(int regime) {
+    switch (regime) {
+    case 1: return (uint32_t)rnd() & 0x03030303u;
+    case 2: return (rnd() & 15) ? 0 : (uint32_t)rnd();
+    default: return (uint32_t)rnd();
+    }
+}
+
+static void check_pred_pair(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, upper, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, a0, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, a1, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, b0, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, b1, [BUF_PIXELS]);
+    declare_func(void,
+                 const uint32_t *,
+                 const uint32_t *,
+                 int,
+                 uint32_t *,
+                 const uint32_t *,
+                 uint32_t *);
+
+    for (int mode = 0; mode < WPD_PRED_COUNT; mode++) {
+        if (check_func(dsp->pred_add_pair[mode], "pred_add_pair_%d", mode)) {
+            for (int regime = 0; regime < 3; regime++) {
+                for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths);
+                     i++) {
+                    const int n = lengths[i];
+
+                    for (int x = 0; x < BUF_PIXELS; x++) {
+                        upper[x] = pair_sample(regime);
+                        a0[x] = a1[x] = pair_sample(regime);
+                        b0[x] = b1[x] = pair_sample(regime);
+                    }
+                    call_ref(a0 + 1, upper + 1, n, a0 + 1, b0 + 1, b0 + 1);
+                    call_new(a1 + 1, upper + 1, n, a1 + 1, b1 + 1, b1 + 1);
+                    if (memcmp(a0, a1, sizeof(a0)) ||
+                        memcmp(b0, b1, sizeof(b0)))
+                        fail();
+                }
+            }
+            for (int x = 0; x < BUF_PIXELS; x++) {
+                upper[x] = (uint32_t)rnd();
+                a1[x]    = (uint32_t)rnd();
+                b1[x]    = (uint32_t)rnd();
+            }
+            bench_new(a1 + 1, upper + 1, MAX_PIXELS, a1 + 1, b1 + 1, b1 + 1);
+        }
+    }
+}
+
 #define GREEN_PIXELS 1024
 
 static const int green_lengths[] = {
@@ -336,6 +390,8 @@ void checkasm_check_lossless(void) {
     wpd_vp8l_dsp_init(&dsp);
     check_pred_add(&dsp);
     report("pred_add");
+    check_pred_pair(&dsp);
+    report("pred_add_pair");
     check_pred_green(&dsp);
     report("pred_green");
     check_extract_green(&dsp);

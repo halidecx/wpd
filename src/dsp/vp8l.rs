@@ -445,6 +445,12 @@ pred_green!(pred_green_13, |l, t, tl, tr, g| {
 
 pub type PredAddFn = fn(plane: &mut [u32], out: usize, up: usize, n: usize);
 
+/// Inverse predicts a run in two rows of one tile row: `n` pixels at `out`
+/// over the row at `up`, and `n` at `below` over the first. Only modes that
+/// read no top right have one, since the lower row's would not be made yet.
+pub type PredPairFn =
+    fn(plane: &mut [u32], out: usize, up: usize, below: usize, n: usize);
+
 /// Inverse predicts a run of an alpha image's green on its own, adding the
 /// green of each of `res` to its prediction. `row` starts with the run's
 /// left neighbour and `above` with its top left, so pixel i reads its left
@@ -454,6 +460,7 @@ pub type PredGreenFn = fn(row: &mut [u8], above: &[u8], res: &[u32]);
 
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
+    pub pred_add_pair: [Option<PredPairFn>; 14],
     pub pred_green: [PredGreenFn; 14],
     pub map_color32: fn(&mut [u32], &[u32]),
     pub color_row: fn(&mut [u32], u32),
@@ -523,6 +530,7 @@ impl Vp8lDsp {
                 plane_pred_12,
                 plane_pred_13,
             ],
+            pred_add_pair: [None; 14],
             pred_green: [
                 pred_green_0,
                 pred_green_1,
