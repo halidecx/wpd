@@ -1165,21 +1165,19 @@ impl Recon {
         let inner = f.inner_filter;
         let [y, u, v] = planes;
 
-        match self.dsp.loop_filter16y {
-            Some(all) if inner => {
-                let edges = u32::from(mb_x != 0) | u32::from(mb_y != 0) << 1;
+        let edges = u32::from(mb_x != 0) | u32::from(mb_y != 0) << 1;
 
-                all(
-                    y,
-                    off[0],
-                    ls,
-                    mbedge_lim,
-                    bedge_lim,
-                    inner_limit,
-                    hev,
-                    edges,
-                );
-            }
+        match self.dsp.loop_filter16y {
+            Some(all) if inner => all(
+                y,
+                off[0],
+                ls,
+                mbedge_lim,
+                bedge_lim,
+                inner_limit,
+                hev,
+                edges,
+            ),
             _ => self.filter_mb_luma(
                 y,
                 off[0],
@@ -1192,6 +1190,51 @@ impl Recon {
                 mb_y,
             ),
         }
+
+        match self.dsp.loop_filter8uv {
+            Some(all) if inner => all(
+                u,
+                off[1],
+                v,
+                off[2],
+                uvls,
+                mbedge_lim,
+                bedge_lim,
+                inner_limit,
+                hev,
+                edges,
+            ),
+            _ => self.filter_mb_chroma(
+                u,
+                v,
+                off,
+                mbedge_lim,
+                bedge_lim,
+                inner_limit,
+                hev,
+                inner,
+                mb_x,
+                mb_y,
+            ),
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn filter_mb_chroma(
+        &self,
+        u: &mut [u8],
+        v: &mut [u8],
+        off: [usize; 3],
+        mbedge_lim: i32,
+        bedge_lim: i32,
+        inner_limit: i32,
+        hev: i32,
+        inner: bool,
+        mb_x: usize,
+        mb_y: usize,
+    ) {
+        let uvls = self.uvlinesize();
 
         if mb_x != 0 && inner {
             (self.dsp.h_loop_filter8uv_mb)(

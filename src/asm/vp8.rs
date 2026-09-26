@@ -12,6 +12,8 @@ pub type LfSimpleRaw = unsafe extern "C" fn(*mut u8, isize, c_int);
 pub type LfSimpleMbRaw = unsafe extern "C" fn(*mut u8, isize, c_int, c_int);
 pub type LfAllRaw =
     unsafe extern "C" fn(*mut u8, isize, c_int, c_int, c_int, c_int, c_int);
+pub type LfUvAllRaw =
+    unsafe extern "C" fn(*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int, c_int);
 /* The transform scatters one DC into each of the macroblock's sixteen blocks,
  * so the pointer spans all of them. */
 pub type WhtRaw = unsafe extern "C" fn(*mut [[i16; 16]; 16], *mut i16);
@@ -141,6 +143,15 @@ macro_rules! raw_vp8 {
             LfAllRaw,
             $sym,
             (*mut u8, isize, c_int, c_int, c_int, c_int, c_int)
+        );
+    };
+    ($m:ident, $i:ident, lf_uv_all, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            LfUvAllRaw,
+            $sym,
+            (*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int, c_int)
         );
     };
     ($m:ident, $i:ident, wht, $sym:literal) => {
@@ -435,6 +446,38 @@ fn checked_lf16y<T: Raw<Sig = LfAllRaw>>(
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev, edges as c_int) }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+fn checked_lf8uv<T: Raw<Sig = LfUvAllRaw>>(
+    u: &mut [u8],
+    ou: usize,
+    v: &mut [u8],
+    ov: usize,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+    edges: u32,
+) {
+    let up = if edges & 2 != 0 { 4 } else { 0 };
+    let (u, v) = (check_v(u, ou, s, up, 7, 8), check_v(v, ov, s, up, 7, 8));
+
+    assert!(edges & 1 == 0 || (ou >= 8 && ov >= 8), "plane too small");
+    unsafe {
+        (T::F)(
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            s as isize,
+            e,
+            be,
+            i,
+            hev,
+            edges as c_int,
+        )
+    }
+}
+
 fn mb_from<E, I, const VERT: bool>(
     p: &mut [u8],
     o: usize,
@@ -676,6 +719,7 @@ pub struct RawTable {
     pub v_loop_filter8uv_mb: Option<LfUvMbRaw>,
     pub h_loop_filter8uv_mb: Option<LfUvMbRaw>,
     pub loop_filter16y: Option<LfAllRaw>,
+    pub loop_filter8uv: Option<LfUvAllRaw>,
 }
 
 macro_rules! install_lf {
@@ -968,6 +1012,7 @@ mod arch {
             "wpd_vp8_h_loop_filter8uv_mb_neon"
         );
         raw_vp8!(Lf16y, lf16y, lf_all, "wpd_vp8_loop_filter16y_neon");
+        raw_vp8!(Lf8uv, lf8uv, lf_uv_all, "wpd_vp8_loop_filter8uv_neon");
     }
 
     ladder! {
@@ -975,6 +1020,7 @@ mod arch {
             @lf neon, neon_mb;
             @idct neon_idct;
             @opt loop_filter16y = checked_lf16y::<fused::Lf16y>;
+            @opt loop_filter8uv = checked_lf8uv::<fused::Lf8uv>;
 
             luma_dc_wht_dc = wht::<neon_wht_dc::WhtDc>;
             h_loop_filter_simple_mb = checked_lf_h_simple_mb::<fused::HSimpleMb>;

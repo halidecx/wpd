@@ -887,6 +887,153 @@ function wpd_vp8_loop_filter16y_neon, export=1
         ret
 endfunc
 
+/* The chroma counterpart: the U and V rows share each vector, U in the low
+ * half, so both planes filter together. With one inner edge each way, it
+ * fits in registers the callee may clobber. */
+function wpd_vp8_loop_filter8uv_neon, export=1
+        mov             x8,  x0
+        mov             x9,  x1
+        ld1             {v0.8b},      [x8], x2
+        ld1             {v0.d}[1],    [x9], x2
+        ld1             {v1.8b},      [x8], x2
+        ld1             {v1.d}[1],    [x9], x2
+        ld1             {v2.8b},      [x8], x2
+        ld1             {v2.d}[1],    [x9], x2
+        ld1             {v3.8b},      [x8], x2
+        ld1             {v3.d}[1],    [x9], x2
+        ld1             {v4.8b},      [x8], x2
+        ld1             {v4.d}[1],    [x9], x2
+        ld1             {v5.8b},      [x8], x2
+        ld1             {v5.d}[1],    [x9], x2
+        ld1             {v6.8b},      [x8], x2
+        ld1             {v6.d}[1],    [x9], x2
+        ld1             {v7.8b},      [x8]
+        ld1             {v7.d}[1],    [x9]
+
+        transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
+
+        tbz             w7,  #0,  1f
+
+        sub             x8,  x0,  #8
+        sub             x9,  x1,  #8
+        ld1             {v16.8b},  [x8], x2
+        ld1             {v17.8b},  [x8], x2
+        ld1             {v18.8b},  [x8], x2
+        ld1             {v19.8b},  [x8], x2
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v28.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x8], x2
+        ld1             {v17.8b},  [x8], x2
+        ld1             {v18.8b},  [x8], x2
+        ld1             {v19.8b},  [x8], x2
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v29.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x9], x2
+        ld1             {v17.8b},  [x9], x2
+        ld1             {v18.8b},  [x9], x2
+        ld1             {v19.8b},  [x9], x2
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v30.2d,  v20.2d,  v21.2d
+        ld1             {v16.8b},  [x9], x2
+        ld1             {v17.8b},  [x9], x2
+        ld1             {v18.8b},  [x9], x2
+        ld1             {v19.8b},  [x9], x2
+        trn2            v20.4s,  v16.4s,  v17.4s
+        trn2            v21.4s,  v18.4s,  v19.4s
+        zip1            v31.2d,  v20.2d,  v21.2d
+        uzp1            v16.16b, v28.16b, v29.16b
+        uzp1            v17.16b, v30.16b, v31.16b
+        uzp2            v18.16b, v28.16b, v29.16b
+        uzp2            v19.16b, v30.16b, v31.16b
+        uzp1            v24.16b, v16.16b, v17.16b
+        uzp1            v25.16b, v18.16b, v19.16b
+        uzp2            v26.16b, v16.16b, v17.16b
+        uzp2            v27.16b, v18.16b, v19.16b
+
+        vp8_lf16        v24, v25, v26, v27, v0,  v1,  v2,  v3,  w3, w5, w6, 1
+
+        zip1            v16.16b, v24.16b, v26.16b
+        zip2            v17.16b, v24.16b, v26.16b
+        zip1            v18.16b, v25.16b, v27.16b
+        zip2            v19.16b, v25.16b, v27.16b
+        zip1            v20.16b, v16.16b, v18.16b
+        zip2            v21.16b, v16.16b, v18.16b
+        zip1            v22.16b, v17.16b, v19.16b
+        zip2            v23.16b, v17.16b, v19.16b
+        sub             x8,  x0,  #4
+        sub             x9,  x1,  #4
+        st1             {v20.s}[0], [x8], x2
+        st1             {v20.s}[1], [x8], x2
+        st1             {v20.s}[2], [x8], x2
+        st1             {v20.s}[3], [x8], x2
+        st1             {v21.s}[0], [x8], x2
+        st1             {v21.s}[1], [x8], x2
+        st1             {v21.s}[2], [x8], x2
+        st1             {v21.s}[3], [x8]
+        st1             {v22.s}[0], [x9], x2
+        st1             {v22.s}[1], [x9], x2
+        st1             {v22.s}[2], [x9], x2
+        st1             {v22.s}[3], [x9], x2
+        st1             {v23.s}[0], [x9], x2
+        st1             {v23.s}[1], [x9], x2
+        st1             {v23.s}[2], [x9], x2
+        st1             {v23.s}[3], [x9]
+1:
+        vp8_lf16        v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7,  w4, w5, w6, 0
+
+        transpose_8x16B v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7, v30, v31
+
+        tbz             w7,  #1,  2f
+
+        sub             x8,  x0,  x2,  lsl #2
+        sub             x9,  x1,  x2,  lsl #2
+        ld1             {v24.8b},     [x8], x2
+        ld1             {v24.d}[1],   [x9], x2
+        ld1             {v25.8b},     [x8], x2
+        ld1             {v25.d}[1],   [x9], x2
+        ld1             {v26.8b},     [x8], x2
+        ld1             {v26.d}[1],   [x9], x2
+        ld1             {v27.8b},     [x8]
+        ld1             {v27.d}[1],   [x9]
+
+        vp8_lf16        v24, v25, v26, v27, v0,  v1,  v2,  v3,  w3, w5, w6, 1
+
+        sub             x8,  x8,  x2,  lsl #1
+        sub             x9,  x9,  x2,  lsl #1
+        st1             {v25.d}[0],   [x8], x2
+        st1             {v25.d}[1],   [x9], x2
+        st1             {v26.d}[0],   [x8], x2
+        st1             {v26.d}[1],   [x9], x2
+        st1             {v27.d}[0],   [x8]
+        st1             {v27.d}[1],   [x9]
+2:
+        vp8_lf16        v0,  v1,  v2,  v3,  v4,  v5,  v6,  v7,  w4, w5, w6, 0
+
+        mov             x8,  x0
+        mov             x9,  x1
+        st1             {v0.d}[0],    [x8], x2
+        st1             {v0.d}[1],    [x9], x2
+        st1             {v1.d}[0],    [x8], x2
+        st1             {v1.d}[1],    [x9], x2
+        st1             {v2.d}[0],    [x8], x2
+        st1             {v2.d}[1],    [x9], x2
+        st1             {v3.d}[0],    [x8], x2
+        st1             {v3.d}[1],    [x9], x2
+        st1             {v4.d}[0],    [x8], x2
+        st1             {v4.d}[1],    [x9], x2
+        st1             {v5.d}[0],    [x8], x2
+        st1             {v5.d}[1],    [x9], x2
+        st1             {v6.d}[0],    [x8], x2
+        st1             {v6.d}[1],    [x9], x2
+        st1             {v7.d}[0],    [x8]
+        st1             {v7.d}[1],    [x9]
+
+        ret
+endfunc
+
 function wpd_vp8_h_loop_filter_simple_mb_neon, export=1
         stp             d8,  d9,  [sp, #-64]!
         stp             d10, d11, [sp, #16]

@@ -304,6 +304,8 @@ pub type LfUvMbFn = fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32,
 pub type LfSimpleFn = fn(&mut [u8], usize, usize, i32);
 pub type LfSimpleMbFn = fn(&mut [u8], usize, usize, i32, i32);
 pub type LfAllFn = fn(&mut [u8], usize, usize, i32, i32, i32, i32, u32);
+pub type LfUvAllFn =
+    fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32, i32, u32);
 
 pub struct Vp8Dsp {
     pub luma_dc_wht: WhtFn,
@@ -338,6 +340,7 @@ pub struct Vp8Dsp {
      * worth having where one kernel can keep the block in registers
      * throughout. */
     pub loop_filter16y: Option<LfAllFn>,
+    pub loop_filter8uv: Option<LfUvAllFn>,
 }
 
 fn wht_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
@@ -504,6 +507,7 @@ impl Vp8Dsp {
             v_loop_filter_simple_mb: v_simple_mb_c,
 
             loop_filter16y: None,
+            loop_filter8uv: None,
         }
     }
 

@@ -61,6 +61,9 @@ typedef struct VP8DSPContext {
     void (*vp8_loop_filter16y)(uint8_t *dst, ptrdiff_t stride, int mbedge_E,
                                int bedge_E, int flim_I, int hev_thresh,
                                int edges);
+    void (*vp8_loop_filter8uv)(uint8_t *dstU, uint8_t *dstV, ptrdiff_t stride,
+                               int mbedge_E, int bedge_E, int flim_I,
+                               int hev_thresh, int edges);
 } VP8DSPContext;
 
 void ff_vp8dsp_init(VP8DSPContext *c);

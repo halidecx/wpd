@@ -15,6 +15,8 @@ pub type LfSimpleFn = unsafe extern "C" fn(*mut u8, isize, c_int);
 pub type LfSimpleMbFn = unsafe extern "C" fn(*mut u8, isize, c_int, c_int);
 pub type LfAllFn =
     unsafe extern "C" fn(*mut u8, isize, c_int, c_int, c_int, c_int, c_int);
+pub type LfUvAllFn =
+    unsafe extern "C" fn(*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int, c_int);
 
 #[repr(C)]
 pub struct VP8DSPContext {
@@ -47,6 +49,7 @@ pub struct VP8DSPContext {
     pub vp8_v_loop_filter_simple_mb: LfSimpleMbFn,
 
     pub vp8_loop_filter16y: LfAllFn,
+    pub vp8_loop_filter8uv: LfUvAllFn,
 }
 
 unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
@@ -171,6 +174,34 @@ unsafe extern "C" fn loop_filter16y_c(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn loop_filter8uv_c(
+    dst_u: *mut u8,
+    dst_v: *mut u8,
+    stride: isize,
+    mbedge_e: c_int,
+    bedge_e: c_int,
+    flim_i: c_int,
+    hev: c_int,
+    edges: c_int,
+) {
+    unsafe {
+        let (u4, v4) = (dst_u.add(4), dst_v.add(4));
+
+        if edges & 1 != 0 {
+            h_loop_filter8uv_c(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
+        }
+        h_loop_filter8uv_inner_c(u4, v4, stride, bedge_e, flim_i, hev);
+        if edges & 2 != 0 {
+            v_loop_filter8uv_c(dst_u, dst_v, stride, mbedge_e, flim_i, hev);
+        }
+
+        let (u4, v4) = (dst_u.offset(4 * stride), dst_v.offset(4 * stride));
+
+        v_loop_filter8uv_inner_c(u4, v4, stride, bedge_e, flim_i, hev);
+    }
+}
+
 unsafe extern "C" fn luma_dc_wht_c(block: *mut [[i16; 16]; 16], dc: *mut i16) {
     unsafe { k::luma_dc_wht(&mut *block, &mut *dc.cast::<[i16; 16]>()) }
 }
@@ -270,6 +301,7 @@ fn init_asm(c: &mut VP8DSPContext) {
         v_loop_filter_simple_mb => vp8_v_loop_filter_simple_mb,
         h_loop_filter_simple_mb => vp8_h_loop_filter_simple_mb,
         loop_filter16y => vp8_loop_filter16y,
+        loop_filter8uv => vp8_loop_filter8uv,
     }
 }
 
@@ -307,6 +339,7 @@ pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
         vp8_v_loop_filter_simple_mb: v_loop_filter_simple_mb_c,
 
         vp8_loop_filter16y: loop_filter16y_c,
+        vp8_loop_filter8uv: loop_filter8uv_c,
     };
 
     #[cfg(all(
