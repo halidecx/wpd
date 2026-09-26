@@ -436,7 +436,7 @@ impl Ahead {
         self.entries.clear();
         self.pos = 0;
         self.end = 0;
-        self.next = None;
+        self.stop();
     }
 
     pub(crate) fn release(&mut self) {
@@ -492,7 +492,7 @@ impl Ahead {
             }
         }
         if let Some(pool) = &mut self.pool {
-            pool.submit(jobs);
+            pool.submit(jobs, self.next.is_none());
         }
     }
 
@@ -514,16 +514,19 @@ impl Ahead {
                 self.end += 1;
                 self.next = Some(next);
                 if let Some(pool) = &mut self.pool {
-                    pool.submit(vec![job]);
+                    pool.submit(vec![job], false);
                 }
             }
-            None => self.next = None,
+            None => self.stop(),
         }
     }
 
     /// Ends the run at the frames already handed out.
     pub(crate) fn stop(&mut self) {
         self.next = None;
+        if let Some(pool) = &self.pool {
+            pool.end();
+        }
     }
 
     /// Ends the first batch of a run before frame `j`, which is not queued.
@@ -578,10 +581,22 @@ impl Ahead {
             self.collect(j);
         }
     }
+
+    /// Counts what holds the pool's state, which stays above zero while any
+    /// of its threads has yet to leave.
+    #[cfg(all(test, feature = "threads"))]
+    pub(crate) fn pool_holders(&self) -> impl Fn() -> usize {
+        let shared = self
+            .pool
+            .as_ref()
+            .map(|pool| std::sync::Arc::downgrade(&pool.shared));
+
+        move || shared.as_ref().map_or(0, std::sync::Weak::strong_count)
+    }
 }
 
 /// Threads that decode an animation's frames ahead of the walk, kept from
-/// one frame to the next and from one file to the next.
+/// one frame of a run to the next.
 ///
 /// A batch decoded inside a scope has to be finished before the call that
 /// started it returns, so the walk could composite nothing until the last
@@ -591,18 +606,20 @@ impl Ahead {
 /// before while the rest are still being decoded. A job owns everything it
 /// touches, the slot it decodes into and a copy of its ANMF payload, so
 /// nothing it holds is borrowed from the decoder. Idle threads wait on a
-/// condition variable, and leave once the decoder is dropped.
+/// condition variable while the run may go on, and leave once it cannot,
+/// while the walk composites the last of its frames.
 struct Pool {
     shared: std::sync::Arc<Shared>,
-    /// Threads started, which spawning may have fallen short of.
-    threads: usize,
+    /// The threads started from here, each of which joins the ones it
+    /// started in turn.
+    starters: Vec<std::thread::JoinHandle<()>>,
     /// The most threads the pool may start.
     size: usize,
 }
 
 struct Shared {
     queue: std::sync::Mutex<Queue>,
-    /// Signalled when a job is queued, or the pool is closing.
+    /// Signalled when a job is queued, or the run is ending.
     work: std::sync::Condvar,
     /// Signalled when a job has finished.
     done: std::sync::Condvar,
@@ -616,7 +633,11 @@ struct Queue {
     waiting: std::collections::VecDeque<Job>,
     finished: Vec<Finished>,
     running: usize,
-    closing: bool,
+    /// Threads started and not leaving yet.
+    threads: usize,
+    /// No job will be queued before another run starts, so a thread that
+    /// finds none waiting leaves.
+    ending: bool,
 }
 
 struct Job {
@@ -639,6 +660,11 @@ impl Shared {
         self.queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Forgets `n` threads counted as started that could not be.
+    fn lost(&self, n: usize) {
+        self.lock().threads -= n;
     }
 
     fn wait<'q>(
@@ -683,8 +709,11 @@ impl Shared {
     fn work(&self) {
         let mut queue = self.lock();
 
-        while !queue.closing {
+        loop {
             let Some(job) = queue.waiting.pop_front() else {
+                if queue.ending {
+                    break;
+                }
                 queue = self.wait(&self.work, queue);
                 continue;
             };
@@ -699,6 +728,7 @@ impl Shared {
             queue.finished.push(finished);
             self.done.notify_all();
         }
+        queue.threads -= 1;
     }
 }
 
@@ -715,25 +745,31 @@ impl Pool {
 
         Self {
             shared,
-            threads: 0,
+            starters: Vec::new(),
             size,
         }
     }
 
-    /// Queues `jobs`, then starts as many more threads as they could use.
-    /// The jobs go first so that each thread finds one the moment it runs.
-    /// One thread is started here and it starts the rest, since a spawn
-    /// costs the spawning thread several microseconds that this one would
-    /// rather spend decoding the first frame.
-    fn submit(&mut self, jobs: Vec<Job>) {
+    /// Queues `jobs`, then starts as many more threads as they could use;
+    /// `last` if no job will follow them in this run. The jobs go first so
+    /// that each thread finds one the moment it runs. One thread is started
+    /// here and it starts the rest, since a spawn costs the spawning thread
+    /// several microseconds that this one would rather spend decoding the
+    /// first frame.
+    fn submit(&mut self, jobs: Vec<Job>, last: bool) {
         let single = jobs.len() == 1;
         let more = {
             let mut queue = self.shared.lock();
 
             queue.waiting.extend(jobs);
-            (queue.waiting.len() + queue.running)
+            queue.ending = last;
+
+            let more = (queue.waiting.len() + queue.running)
                 .min(self.size)
-                .saturating_sub(self.threads)
+                .saturating_sub(queue.threads);
+
+            queue.threads += more;
+            more
         };
 
         if single {
@@ -745,26 +781,49 @@ impl Pool {
             return;
         }
 
+        let mut at = 0;
+
+        while at < self.starters.len() {
+            if self.starters[at].is_finished() {
+                let _ = self.starters.swap_remove(at).join();
+            } else {
+                at += 1;
+            }
+        }
+
         /* Fewer threads than asked for, or none, still gets every job done:
          * collect() runs whatever no thread has taken. */
         let shared = std::sync::Arc::clone(&self.shared);
         let starter = std::thread::Builder::new().spawn(move || {
-            for _ in 1..more {
-                let shared = std::sync::Arc::clone(&shared);
+            let mut started = Vec::with_capacity(more - 1);
 
-                if std::thread::Builder::new()
-                    .spawn(move || shared.work())
-                    .is_err()
-                {
-                    break;
+            for _ in 1..more {
+                let worker = std::sync::Arc::clone(&shared);
+
+                match std::thread::Builder::new().spawn(move || worker.work()) {
+                    Ok(thread) => started.push(thread),
+                    Err(_) => {
+                        shared.lost(more - 1 - started.len());
+                        break;
+                    }
                 }
             }
             shared.work();
+            for thread in started {
+                let _ = thread.join();
+            }
         });
 
-        if starter.is_ok() {
-            self.threads += more;
+        match starter {
+            Ok(starter) => self.starters.push(starter),
+            Err(_) => self.shared.lost(more),
         }
+    }
+
+    /// Ends the run: once the jobs queued are done, the threads leave.
+    fn end(&self) {
+        self.shared.lock().ending = true;
+        self.shared.work.notify_all();
     }
 
     fn collect(&self, index: usize) -> Finished {
@@ -810,16 +869,20 @@ impl Pool {
 }
 
 impl Drop for Pool {
-    /// Tells the threads to finish without waiting for them to: each owns
-    /// everything it holds, and waiting would cost the decoder's owner the
-    /// time it takes every thread to wake and exit.
+    /// Waits for every thread to leave, as dav1d_close joins its workers:
+    /// nothing may still be running the library's code once the decoder is
+    /// gone, since a C caller is free to unload the library next. A job still
+    /// running is one frame's decode, which finishes.
     fn drop(&mut self) {
         {
             let mut queue = self.shared.lock();
 
-            queue.closing = true;
+            queue.ending = true;
             queue.waiting.clear();
         }
         self.shared.work.notify_all();
+        for starter in self.starters.drain(..) {
+            let _ = starter.join();
+        }
     }
 }

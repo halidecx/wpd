@@ -1784,6 +1784,33 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "threads", not(miri)))]
+    fn dropping_a_decoder_joins_its_frame_threads() {
+        /* Fourteen frames, so the run is still going after the first. */
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(Options {
+                n_threads: 4,
+                ..Options::default()
+            })
+            .unwrap();
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+
+        let holders = decoder.ahead.pool_holders();
+
+        assert!(holders() > 1);
+        drop(decoder);
+        assert_eq!(holders(), 0);
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
     fn a_run_longer_than_its_slots_composites_as_a_serial_decode_does() {
         let data = std::fs::read(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -232,8 +232,10 @@ typedef struct WPDDecoderOptions {
      * 0 lets the decoder choose, which is the number of processors it is
      * allowed to run on; 1 keeps everything on the calling thread. Threads are
      * started where a decode has work that need not be done in order, and are
-     * joined before the call that started them returns. Output is identical
-     * whatever the number.
+     * joined before the call that started them returns, except those decoding
+     * an animation's frames ahead of the one returned: they leave once the
+     * animation has no frame left to give them, and wpd_decoder_free() joins
+     * any still there. Output is identical whatever the number.
      *
      * A caller that sets struct_size to the size of an older struct, which had
      * no such field, retains one thread and serial log callbacks.
