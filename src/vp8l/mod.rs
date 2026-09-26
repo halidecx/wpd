@@ -3,6 +3,8 @@ pub mod entropy;
 pub mod huffman;
 pub mod transform;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use zerocopy::IntoBytes;
 
 use crate::dsp::filters::UnfilterFn;
@@ -1431,6 +1433,7 @@ impl Decoder {
             out_width: out.width,
             out_height: out.height,
         };
+        let failed = &AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, &mut [u32])>();
         let (xf_ret, dec_ret) = crate::task::join(
             *threads,
@@ -1440,6 +1443,9 @@ impl Decoder {
                 for (y0, y1, band) in rx {
                     if ret.is_ok() {
                         ret = xf.rows(band, scratch, 0, stride, y0, y1);
+                        if ret.is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
                     }
                 }
                 ret
@@ -1454,6 +1460,7 @@ impl Decoder {
                     pic: argb,
                     packed,
                     resume,
+                    failed,
                 };
 
                 pieces.decode(first, |y0, y1, pic| {
@@ -1469,7 +1476,8 @@ impl Decoder {
             },
         );
 
-        /* The pixels failing is what a single pass would have reported. */
+        /* The pixels failing is what a single pass would have reported, if
+         * the transforms did not fail first and stop them. */
         let rows = dec_ret?;
 
         xf_ret.map(|()| rows)
@@ -1523,6 +1531,7 @@ impl Decoder {
             rest: 0,
         };
         let most = alpha_bands(*height);
+        let failed = &AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, Vec<u32>)>();
         let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u32>>();
         let (xf_ret, dec_ret) = crate::task::join(
@@ -1533,6 +1542,9 @@ impl Decoder {
                 for (y0, y1, mut band) in rx {
                     if ret.is_ok() {
                         ret = rows.rows(&mut band, w, scratch, y0, y1);
+                        if ret.is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
                     }
                     /* The decoding side may be gone already; the band then
                      * has nowhere to go but away. */
@@ -1550,6 +1562,7 @@ impl Decoder {
                     pic: alpha_argb,
                     packed,
                     resume,
+                    failed,
                 };
 
                 pieces.decode(0, |y0, y1, pic| {
@@ -1837,11 +1850,15 @@ struct Pieces<'a> {
     pic: &'a mut Picture,
     packed: i32,
     resume: &'a mut Resume,
+    /// Raised once the rows handed over have failed, which leaves the rest
+    /// nothing to be decoded for.
+    failed: &'a AtomicBool,
 }
 
 impl Pieces<'_> {
     /// Decodes on from row `first`, calling `done` with each run of rows
-    /// finished. Returns the rows done, which is all of them.
+    /// finished. Returns the rows done, which is all of them unless `failed`
+    /// was raised.
     fn decode(
         self,
         first: i32,
@@ -1854,6 +1871,7 @@ impl Pieces<'_> {
             pic,
             packed,
             resume,
+            failed,
         } = self;
         let mut sent = first;
         let start = payload.len() - gb.left(payload);
@@ -1861,6 +1879,10 @@ impl Pieces<'_> {
         let mut end = start;
 
         loop {
+            if failed.load(Ordering::Relaxed) {
+                return Ok(sent);
+            }
+
             /* The last piece's rows are transformed with nothing left to
              * decode beside them, so the pieces shrink toward the end. */
             let step = step.min(((payload.len() - end) / 4).max(PIPELINE_MIN_STEP));
@@ -2163,6 +2185,110 @@ mod tests {
             data[i / 8] |= bit << (i % 8);
         }
         data
+    }
+
+    /// A 1024x1024 image predicted throughout by `mode`, whose green costs
+    /// a bit a pixel so that its payload comes in many pieces.
+    #[cfg(not(miri))]
+    fn predicted_image(mode: u32) -> Vec<u8> {
+        fn put(bits: &mut Vec<u8>, value: u32, count: u32) {
+            for i in 0..count {
+                bits.push(((value >> i) & 1) as u8);
+            }
+        }
+
+        fn simple_tree(bits: &mut Vec<u8>, symbol: u32) {
+            put(bits, 1, 1);
+            put(bits, 0, 1);
+            put(bits, u32::from(symbol > 1), 1);
+            put(bits, symbol, if symbol > 1 { 8 } else { 1 });
+        }
+
+        let mut bits = Vec::new();
+
+        put(&mut bits, 0x2f, 8);
+        put(&mut bits, 1023, 14);
+        put(&mut bits, 1023, 14);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 0, 3);
+        /* A predictor over 512x512 tiles, every one of them `mode`. */
+        put(&mut bits, 1, 1);
+        put(&mut bits, 0, 2);
+        put(&mut bits, 7, 3);
+        put(&mut bits, 0, 1);
+        for symbol in [mode, 0, 0, 0, 0] {
+            simple_tree(&mut bits, symbol);
+        }
+        put(&mut bits, 0, 1);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 0, 1);
+        /* Green is 0 or 1, a bit each. */
+        put(&mut bits, 1, 1);
+        put(&mut bits, 1, 1);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 0, 1);
+        put(&mut bits, 1, 8);
+        for _ in 1..HUFFMAN_CODES_PER_META_CODE {
+            simple_tree(&mut bits, 0);
+        }
+
+        let mut v = 7u32;
+
+        for _ in 0..1024 * 1024 {
+            v = v.wrapping_mul(1664525).wrapping_add(1013904223);
+            put(&mut bits, v >> 31, 1);
+        }
+
+        let mut data = vec![0u8; bits.len().div_ceil(8)];
+
+        for (i, bit) in bits.into_iter().enumerate() {
+            data[i / 8] |= bit << (i % 8);
+        }
+        data
+    }
+
+    #[test]
+    #[cfg(not(miri))]
+    fn a_failed_transform_stops_the_pixels_beside_it() {
+        let bad_image = predicted_image(14);
+
+        for threads in [1, 2] {
+            let beside = threads > 1 && cfg!(feature = "threads");
+            let mut good = Decoder::new();
+
+            good.threads = threads;
+            good.decode_frame(Target::Argb, &predicted_image(1), false, None)
+                .unwrap();
+            assert_eq!(good.resume.rows_done, 1024);
+
+            /* Mode 14 fails at the second row, and the pieces after the
+             * first few are never decoded. How few depends on when the
+             * transform thread first runs, and a loaded machine may not run
+             * it until the entropy decoder is through: beside 24 busy
+             * threads, 7 runs in 600 got to 512 rows or more, one of them to
+             * all 1024. A decoder that never stopped would get to 1024 every
+             * time, so it is enough that one of a few tries stops early.
+             * Without the threads feature the transforms wait for the last
+             * row, and nothing stops early. */
+            let mut rows = Vec::new();
+
+            for _ in 0..if beside { 8 } else { 1 } {
+                let mut bad = Decoder::new();
+
+                bad.threads = threads;
+                assert_eq!(
+                    bad.decode_frame(Target::Argb, &bad_image, false, None),
+                    Err(Error::InvalidData)
+                );
+                rows.push(bad.resume.rows_done);
+                if bad.resume.rows_done < 512 {
+                    break;
+                }
+            }
+            if beside {
+                assert!(rows.iter().any(|&r| r < 512), "{rows:?}");
+            }
+        }
     }
 
     #[test]
