@@ -310,7 +310,7 @@ impl<'a> Decoder<'a> {
                 self.frame.has_alpha || self.frame.lossless_has_alpha
             },
             timestamp: self.frame_timestamp - self.frame_duration as i64,
-            threads: self.threads.0,
+            threads: self.ahead.walk_threads(self.threads.0),
         }
     }
 
@@ -1807,6 +1807,33 @@ mod tests {
         assert!(holders() > 1);
         drop(decoder);
         assert_eq!(holders(), 0);
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn frames_decoded_ahead_keep_to_the_thread_budget() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+
+        for n_threads in [2, 3, 4] {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            while decoder.next_picture(&mut Handout::default()).unwrap() {}
+
+            let peak = decoder.ahead.peak();
+
+            assert!((1..=n_threads as usize).contains(&peak), "{peak}");
+        }
     }
 
     #[test]

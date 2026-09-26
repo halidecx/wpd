@@ -452,20 +452,24 @@ impl Ahead {
     }
 
     /// Starts a run with `entries`, handing every one after the first to a
-    /// pool of up to `workers` threads. `next` is where the chunk after the
-    /// last entry starts, if the run may go on past it. An entry whose
-    /// payload cannot be copied ends the run.
+    /// pool of up to `workers` threads, at most `beside` of which decode
+    /// while the calling thread is not waiting on them. `next` is where the
+    /// chunk after the last entry starts, if the run may go on past it. An
+    /// entry whose payload cannot be copied ends the run.
     pub(crate) fn start(
         &mut self,
         env: &FrameEnv<'_, '_>,
         entries: Vec<AheadEntry>,
         next: Option<usize>,
         workers: usize,
+        beside: usize,
     ) {
-        if self.pool.as_ref().is_none_or(|pool| pool.size != workers) {
+        if self.pool.as_ref().is_none_or(|pool| {
+            (pool.shared.size, pool.shared.beside) != (workers, beside)
+        }) {
             /* The old threads have nothing left to do: a run is only
              * started once the one before it has been collected. */
-            self.pool = Some(Pool::new(workers, env));
+            self.pool = Some(Pool::new(workers, beside, env));
         }
         if self.inputs.len() < entries.len() {
             self.inputs.resize_with(entries.len(), Input::default);
@@ -519,6 +523,20 @@ impl Ahead {
             }
             None => self.stop(),
         }
+    }
+
+    /// The threads the walk may spread its own work over, out of the
+    /// `threads` the decode may use: those the pool is not decoding frames
+    /// on, or about to. Only the walk hands the pool frames, so the pool can
+    /// only get less busy while that work runs.
+    pub(crate) fn walk_threads(&self, threads: usize) -> usize {
+        let Some(pool) = &self.pool else {
+            return threads;
+        };
+        let queue = pool.shared.lock();
+        let busy = (queue.running + queue.waiting.len()).min(pool.shared.beside);
+
+        threads.saturating_sub(busy).max(1)
     }
 
     /// Ends the run at the frames already handed out.
@@ -593,6 +611,13 @@ impl Ahead {
 
         move || shared.as_ref().map_or(0, std::sync::Weak::strong_count)
     }
+
+    /// The most threads that have decoded at once, the calling one counted
+    /// unless it was waiting on the pool.
+    #[cfg(all(test, feature = "threads"))]
+    pub(crate) fn peak(&self) -> usize {
+        self.pool.as_ref().map_or(0, |pool| pool.shared.lock().peak)
+    }
 }
 
 /// Threads that decode an animation's frames ahead of the walk, kept from
@@ -608,16 +633,30 @@ impl Ahead {
 /// nothing it holds is borrowed from the decoder. Idle threads wait on a
 /// condition variable while the run may go on, and leave once it cannot,
 /// while the walk composites the last of its frames.
+///
+/// The calling thread counts against the threads a decode may use: it
+/// decodes a run's first frame and any frame no thread has started on when
+/// the walk reaches it, and composites every frame. So while it works the
+/// pool decodes a frame fewer at once than the budget allows, and its last
+/// thread decodes only while the calling thread waits on the pool. That is
+/// not left to the calling thread, which would then still be decoding when
+/// the frame it waited on came in, and hold up compositing it: at four
+/// threads a 60-frame 480x360 lossy animation took 10.7ms that way, and
+/// 10.5ms with a pool a thread smaller and the calling thread idle while it
+/// waits, against 8.9ms this way.
 struct Pool {
     shared: std::sync::Arc<Shared>,
     /// The threads started from here, each of which joins the ones it
     /// started in turn.
     starters: Vec<std::thread::JoinHandle<()>>,
-    /// The most threads the pool may start.
-    size: usize,
 }
 
 struct Shared {
+    /// The most threads the pool may start, and the most frames it decodes
+    /// at once while the calling thread waits on one.
+    size: usize,
+    /// The most frames it decodes at once otherwise.
+    beside: usize,
     queue: std::sync::Mutex<Queue>,
     /// Signalled when a job is queued, or the run is ending.
     work: std::sync::Condvar,
@@ -638,6 +677,12 @@ struct Queue {
     /// No job will be queued before another run starts, so a thread that
     /// finds none waiting leaves.
     ending: bool,
+    /// The job the calling thread waits on, which lends it its turn.
+    lent: Option<usize>,
+    /// The most threads that have decoded at once, the calling one counted
+    /// unless it was waiting on the pool.
+    #[cfg(test)]
+    peak: usize,
 }
 
 struct Job {
@@ -710,21 +755,47 @@ impl Shared {
         let mut queue = self.lock();
 
         loop {
-            let Some(job) = queue.waiting.pop_front() else {
-                if queue.ending {
+            let turns = match queue.lent {
+                Some(_) => self.size,
+                None => self.beside,
+            };
+            let job = if queue.running < turns {
+                queue.waiting.pop_front()
+            } else {
+                None
+            };
+            let Some(job) = job else {
+                if queue.ending && queue.waiting.is_empty() {
                     break;
                 }
                 queue = self.wait(&self.work, queue);
                 continue;
             };
 
+            if queue.ending && queue.waiting.is_empty() {
+                /* Held back for want of a turn, the others would otherwise
+                 * wait for the drop to tell them to leave. */
+                self.work.notify_all();
+            }
             queue.running += 1;
+            #[cfg(test)]
+            {
+                let calling = usize::from(queue.lent.is_none());
+
+                queue.peak = queue.peak.max(queue.running + calling);
+            }
             drop(queue);
 
+            let index = job.index;
             let finished = self.run(job);
 
             queue = self.lock();
             queue.running -= 1;
+            if queue.lent == Some(index) {
+                /* The calling thread takes its turn back, and this thread's
+                 * ends with it. */
+                queue.lent = None;
+            }
             queue.finished.push(finished);
             self.done.notify_all();
         }
@@ -733,8 +804,10 @@ impl Shared {
 }
 
 impl Pool {
-    fn new(size: usize, env: &FrameEnv<'_, '_>) -> Self {
+    fn new(size: usize, beside: usize, env: &FrameEnv<'_, '_>) -> Self {
         let shared = std::sync::Arc::new(Shared {
+            size,
+            beside,
             queue: std::sync::Mutex::default(),
             work: std::sync::Condvar::new(),
             done: std::sync::Condvar::new(),
@@ -746,7 +819,6 @@ impl Pool {
         Self {
             shared,
             starters: Vec::new(),
-            size,
         }
     }
 
@@ -765,7 +837,7 @@ impl Pool {
             queue.ending = last;
 
             let more = (queue.waiting.len() + queue.running)
-                .min(self.size)
+                .min(self.shared.size)
                 .saturating_sub(queue.threads);
 
             queue.threads += more;
@@ -839,6 +911,12 @@ impl Pool {
             if let Some(job) = waiting.and_then(|at| queue.waiting.remove(at)) {
                 drop(queue);
                 return self.shared.run(job);
+            }
+            if queue.lent.is_none() {
+                queue.lent = Some(index);
+                if !queue.waiting.is_empty() {
+                    self.shared.work.notify_one();
+                }
             }
             queue = self.shared.wait(&self.shared.done, queue);
         }

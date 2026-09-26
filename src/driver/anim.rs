@@ -214,7 +214,7 @@ impl<'a> Decoder<'a> {
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva.0,
-            threads: self.threads.0,
+            threads: self.ahead.walk_threads(self.threads.0),
         }
     }
 
@@ -422,15 +422,13 @@ impl<'a> Decoder<'a> {
 
         /* A thread for every frame a run can have in flight, the same count
          * whatever the canvas so that one pool serves every file the decoder
-         * opens. Once a run is going the calling thread only composites, and
-         * otherwise waits on the pool as a dav1d caller waits on its
-         * workers: with a thread fewer, a frame waited whenever the rest
-         * were busy while this thread sat beside it, and at four threads 42
-         * frames took 6.6ms instead of 5.2ms. */
+         * opens. This thread counts against the budget, so while it is not
+         * waiting on the pool one of them is held back. */
         let workers = self.threads.0.min(MAX_SLOTS);
+        let beside = (self.threads.0 - 1).min(workers);
         let (_, ahead, env) = self.frame_parts();
 
-        ahead.start(&env, entries, next, workers);
+        ahead.start(&env, entries, next, workers, beside);
 
         let first = &mut ahead.entries[0];
 
