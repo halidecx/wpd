@@ -1327,6 +1327,13 @@ impl Decoder {
     /// Whether an image's transforms are worth a thread of their own. The
     /// predictor and colour transforms are; subtracting green or expanding a
     /// palette costs less than handing the rows over does.
+    ///
+    /// Backward references read the pixels as coded, as far back as the
+    /// image goes, so the transforms cannot overwrite them in place while
+    /// the entropy decoder runs; a pipelined image holds a second ARGB copy,
+    /// 4 bytes a pixel. Peak RSS for a 1024x1024 photo goes from 7.5 to
+    /// 11.6 MB and for a 4096x4096 one from 135 to 199 MB, which buys the
+    /// first 4.27 -> 3.25ms at two threads and the second 124 -> 114ms.
     fn pipelines(&self) -> bool {
         self.threads > 1
             && self.transforms[..self.nb_transforms]
