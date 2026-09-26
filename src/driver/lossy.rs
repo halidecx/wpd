@@ -251,14 +251,31 @@ impl FrameSlot {
             return Err(Error::InvalidData);
         };
 
-        /* Beside the colour planes, alpha has one thread fewer to spend. */
+        /* The two share the threads. Alpha's decode uses two at most, one for
+         * its entropy decoder and one for its transforms, and the colour
+         * planes' row relay three, so from five threads on each has all it
+         * can use. Below that, alpha's second thread is worth more than the
+         * relay's last only where alpha is most of the work. At three threads
+         * it made a_tall.webp (1024x6000, its ALPH chunk 17 times the size of
+         * its VP8 one) 1.12x faster, but alpha4k.webp (4096x4096, 5.6 times)
+         * 0.73x as fast, and a 600x600 photo whose alpha is half its colour
+         * 0.79x. */
+        let mut colour = threads;
+
         if threads > 1 {
-            alpha.threads = threads - 1;
+            let heavy = alpha.size / 8 >= size;
+
+            alpha.threads = if threads >= 5 || heavy {
+                2.min(threads - 1)
+            } else {
+                1
+            };
+            colour = threads - alpha.threads;
         }
         let (alpha_ret, rows_ret) = crate::task::join(
             threads,
             || decode_alpha(alpha),
-            |_| vp8.decode_rows_whole(chunk, threads - 1),
+            |_| vp8.decode_rows_whole(chunk, colour),
         );
 
         /* The colour planes still decide the frame, as they did when alpha
