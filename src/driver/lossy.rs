@@ -217,7 +217,7 @@ impl FrameSlot {
         if !self.has_alpha {
             let chunk = env.input.chunk(offset, size);
 
-            return self.vp8_decoder()?.decode_rows_whole(chunk);
+            return self.vp8_decoder()?.decode_rows_whole(chunk, env.threads);
         }
 
         self.alpha_plane_reserve()?;
@@ -235,7 +235,7 @@ impl FrameSlot {
         let (alpha_ret, rows_ret) = crate::task::join(
             threads,
             || decode_alpha(alpha),
-            || vp8.decode_rows_whole(chunk),
+            || vp8.decode_rows_whole(chunk, 1),
         );
 
         /* The colour planes still decide the frame, as they did when alpha

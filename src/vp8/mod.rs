@@ -230,6 +230,28 @@ struct ResumeState {
     left_nnz: [u8; 9],
 }
 
+/// A row of macroblocks parsed ahead of its reconstruction.
+#[derive(Default)]
+struct MbRow {
+    mb_y: usize,
+    /// Whether the first partition ran dry in this row, for the coefficients
+    /// when they are parsed apart from the modes.
+    modes_dry: bool,
+    /// False for a row a partition ran dry in, which is reconstructed as the
+    /// serial decode would but neither filtered nor followed.
+    filter: bool,
+    mbs: Vec<Macroblock>,
+}
+
+/// Rows a parser may run ahead of reconstruction by. Eight did no better.
+const RELAY_ROWS: usize = 4;
+
+/// Below this a frame is decoded on one thread: the relay's threads cost
+/// about 20us to start, which a lossy 192x192 still does not make back (0.96x
+/// the time on one thread) and a 224x224 one barely does (1.05x), while
+/// 256x256 is 1.09-1.18x faster (Apple M-series, 3 threads, min of 21-31).
+const RELAY_PIXELS: usize = 256 * 256;
+
 /// What reconstruction and the loop filter read and write, apart from the
 /// parser's state, so the two can run on different threads.
 #[derive(Default)]
@@ -282,6 +304,7 @@ pub struct Decoder {
     intra4x4_pred_mode_left: [u8; 4],
 
     prob: Probs,
+    rows: Vec<MbRow>,
 
     c: RangeCoder,
     num_coeff_partitions: usize,
@@ -839,6 +862,17 @@ impl Coeffs {
             }
         }
     }
+
+    /// Reads the coefficients of a row whose modes are parsed. False once a
+    /// partition has run dry in it, and the frame stops there.
+    fn parse_row(&mut self, buf: &[u8], part: usize, row: &mut MbRow) -> bool {
+        self.left_nnz = [0; 9];
+        for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
+            self.parse_mb(buf, part, mb, mb_x);
+        }
+        row.filter = !row.modes_dry && !self.coeff_partition[part].overran();
+        row.filter
+    }
 }
 
 impl Recon {
@@ -1319,6 +1353,22 @@ impl Recon {
         }
     }
 
+    fn reconstruct_row(&mut self, planes: &mut Planes<'_>, row: &mut MbRow) {
+        let mb_y = row.mb_y;
+        let mut off = self.row_offsets(mb_y);
+
+        self.start_row(planes, off, mb_y);
+        for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
+            self.reconstruct_mb(planes, mb, off, mb_x, mb_y);
+            off[0] += 16;
+            off[1] += 8;
+            off[2] += 8;
+        }
+        if row.filter {
+            self.filter_row(planes, mb_y);
+        }
+    }
+
     #[inline(always)]
     fn reconstruct_mb(
         &mut self,
@@ -1441,35 +1491,40 @@ impl Decoder {
     }
 
     pub fn decode_rows(&mut self, chunk: &[u8]) -> Result<Status> {
-        self.decode_rows_tmpl(chunk, true)
+        self.decode_rows_tmpl(chunk, true, 1)
     }
 
     pub fn decode_frame(&mut self, chunk: &[u8]) -> Result<()> {
         if self.frame_init(chunk, chunk.len(), chunk.len())? == Status::NeedMore {
             return Err(Error::InvalidData);
         }
-        self.decode_rows_whole(chunk)
+        self.decode_rows_whole(chunk, 1)
     }
 
-    /// Reconstructs the whole frame, which frame_init() must have opened.
-    /// The complete chunk must be available; partial input is rejected.
-    /// Apart from decode_frame() this is for a caller that wants to put
-    /// something else on another thread in between the two.
-    pub fn decode_rows_whole(&mut self, chunk: &[u8]) -> Result<()> {
+    /// Reconstructs the whole frame, which frame_init() must have opened, on
+    /// up to `threads` threads. The complete chunk must be available; partial
+    /// input is rejected. Apart from decode_frame() this is for a caller that
+    /// wants to put something else on another thread in between the two.
+    pub fn decode_rows_whole(&mut self, chunk: &[u8], threads: usize) -> Result<()> {
         if self.chunk_avail != self.chunk_size || chunk.len() < self.chunk_size {
             return Err(Error::InvalidData);
         }
-        self.decode_rows_tmpl(chunk, false)?;
+        self.decode_rows_tmpl(chunk, false, threads)?;
         Ok(())
     }
 
-    fn decode_rows_tmpl(&mut self, chunk: &[u8], resumable: bool) -> Result<Status> {
+    fn decode_rows_tmpl(
+        &mut self,
+        chunk: &[u8],
+        resumable: bool,
+        threads: usize,
+    ) -> Result<Status> {
         if !self.picture.allocated() || chunk.len() < self.chunk_avail {
             return Err(Error::InvalidData);
         }
 
         let mut data = std::mem::take(&mut self.picture.data);
-        let ret = self.decode_rows_planes(&mut data, chunk, resumable);
+        let ret = self.decode_rows_planes(&mut data, chunk, resumable, threads);
 
         self.picture.data = data;
         let status = ret?;
@@ -1488,6 +1543,7 @@ impl Decoder {
         data: &mut [u8],
         chunk: &[u8],
         resumable: bool,
+        threads: usize,
     ) -> Result<Status> {
         let g = self.picture.planes;
         let (head, third) = data.split_at_mut(g[2].base);
@@ -1498,6 +1554,12 @@ impl Decoder {
             &mut third[..g[2].len],
         ];
         self.recon.planes = g;
+
+        let pixels = self.width as usize * self.height as usize;
+
+        if !resumable && threads > 1 && self.mb_height > 1 && pixels >= RELAY_PIXELS {
+            return self.decode_rows_relayed(planes, chunk, threads);
+        }
 
         let start_row = if resumable { self.mb_y } else { 0 };
         let mut mb = Macroblock::default();
@@ -1567,6 +1629,124 @@ impl Decoder {
         self.mb_y = self.mb_height;
         self.mb_rows_done = self.mb_height;
         Ok(Status::Done)
+    }
+
+    /// Parses rows here while other threads reconstruct and filter the ones
+    /// parsed before them. Entropy decoding is most of the work and runs
+    /// through each partition in order, so a still gets its threads from
+    /// splitting the work on a row into steps: the modes, then with three
+    /// threads the coefficients apart from them, then reconstruction.
+    fn decode_rows_relayed(
+        &mut self,
+        planes: &mut Planes<'_>,
+        chunk: &[u8],
+        threads: usize,
+    ) -> Result<Status> {
+        let mut rows = std::mem::take(&mut self.rows);
+
+        rows.resize_with(RELAY_ROWS, MbRow::default);
+        for row in &mut rows {
+            row.mbs
+                .try_reserve(self.mb_width.saturating_sub(row.mbs.len()))
+                .map_err(|_| Error::NoMemory)?;
+            row.mbs.resize_with(self.mb_width, Macroblock::default);
+        }
+
+        let mut recon = std::mem::take(&mut self.recon);
+        let mut reconstruct = |row: &mut MbRow| {
+            recon.reconstruct_row(planes, row);
+            true
+        };
+        let (ret, rows) = if threads >= 3 {
+            let mut coeffs = std::mem::take(&mut self.coeffs);
+            let parts = self.num_coeff_partitions;
+            let mut parse =
+                |row: &mut MbRow| coeffs.parse_row(chunk, row.mb_y & (parts - 1), row);
+            let relayed = crate::task::relay(
+                threads,
+                rows,
+                |relay| self.parse_modes(chunk, relay),
+                &mut [&mut parse, &mut reconstruct],
+            );
+
+            self.coeffs = coeffs;
+            relayed
+        } else {
+            crate::task::relay(
+                threads,
+                rows,
+                |relay| self.parse_rows(chunk, relay),
+                &mut [&mut reconstruct],
+            )
+        };
+
+        self.recon = recon;
+        self.rows = rows;
+        ret?;
+
+        /* The coefficients of the last row can run dry after the modes are
+         * all passed on. */
+        if self.c.overran()
+            || self.coeffs.coeff_partition.iter().any(RangeCoder::overran)
+        {
+            return Err(Error::InvalidData);
+        }
+        self.mb_y = self.mb_height;
+        self.mb_rows_done = self.mb_height;
+        Ok(Status::Done)
+    }
+
+    fn parse_rows(
+        &mut self,
+        chunk: &[u8],
+        relay: &mut crate::task::Relay<'_, '_, MbRow>,
+    ) -> Result<()> {
+        for mb_y in 0..self.mb_height {
+            let part = mb_y & (self.num_coeff_partitions - 1);
+            let Some(mut row) = relay.take() else {
+                return Err(Error::InvalidData);
+            };
+
+            self.start_row();
+            for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
+                self.parse_mb(chunk, part, mb, mb_x);
+            }
+
+            let dry = self.ran_dry(part);
+
+            row.mb_y = mb_y;
+            row.filter = !dry;
+            if !relay.pass(row) || dry {
+                return Err(Error::InvalidData);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_modes(
+        &mut self,
+        chunk: &[u8],
+        relay: &mut crate::task::Relay<'_, '_, MbRow>,
+    ) -> Result<()> {
+        for mb_y in 0..self.mb_height {
+            let Some(mut row) = relay.take() else {
+                return Err(Error::InvalidData);
+            };
+
+            self.intra4x4_pred_mode_left = [pred::DC_PRED as u8; 4];
+            for (mb_x, mb) in row.mbs.iter_mut().enumerate() {
+                self.decode_mb_mode(chunk, mb, mb_x);
+            }
+
+            let dry = self.c.overran();
+
+            row.mb_y = mb_y;
+            row.modes_dry = dry;
+            if !relay.pass(row) || dry {
+                return Err(Error::InvalidData);
+            }
+        }
+        Ok(())
     }
 
     fn start_row(&mut self) {
@@ -1827,9 +2007,9 @@ mod tests {
             dec.frame_init(partial, partial.len(), SOLID.len()),
             Ok(Status::Done)
         );
-        assert_eq!(dec.decode_rows_whole(partial), Err(Error::InvalidData));
+        assert_eq!(dec.decode_rows_whole(partial, 1), Err(Error::InvalidData));
         dec.extend(SOLID, SOLID.len());
-        assert_eq!(dec.decode_rows_whole(SOLID), Ok(()));
+        assert_eq!(dec.decode_rows_whole(SOLID, 1), Ok(()));
     }
 
     #[test]
@@ -1862,6 +2042,61 @@ mod tests {
             last_row.iter().all(|&b| b == 0),
             "the last macroblock row was reconstructed"
         );
+    }
+
+    /// SOLID at `w`x`h`, its first partition padded with `modes` zero bytes
+    /// and its coefficient partition with `coeffs`, so each runs dry some way
+    /// down the frame or not at all.
+    fn padded(w: u16, h: u16, modes: usize, coeffs: usize) -> Vec<u8> {
+        let first = 11 + modes;
+        let tag = (first << 5) as u32 | 0x10;
+        let mut big = tag.to_le_bytes()[..3].to_vec();
+
+        big.extend_from_slice(&SOLID[3..21]);
+        big.extend(std::iter::repeat_n(0, modes));
+        big.extend_from_slice(&SOLID[21..]);
+        big.extend(std::iter::repeat_n(0, coeffs));
+        big[6..8].copy_from_slice(&w.to_le_bytes());
+        big[8..10].copy_from_slice(&h.to_le_bytes());
+        big
+    }
+
+    #[test]
+    fn a_relayed_frame_stops_where_one_thread_stops() {
+        /* At 256x256 the modes run dry in row 2 with 40 bytes and in the
+         * last row with 125, the coefficients in row 5 with 600 and in the
+         * last row with 1900, and 4000 of each is a whole frame. */
+        let cases = [
+            (256, 256, 40, 4000),
+            (256, 256, 125, 4000),
+            (256, 256, 4000, 600),
+            (256, 256, 4000, 1900),
+            (256, 256, 4000, 4000),
+            (1024, 64, 40, 4000),
+            (1024, 64, 4000, 600),
+        ];
+
+        for (w, h, modes, coeffs) in cases {
+            let big = padded(w, h, modes, coeffs);
+            let mut serial = Decoder::new();
+            let want = serial.decode_frame(&big);
+
+            for threads in [2, 3, 4] {
+                let mut dec = Decoder::new();
+
+                assert_eq!(
+                    dec.frame_init(&big, big.len(), big.len()),
+                    Ok(Status::Done)
+                );
+                assert_eq!(dec.decode_rows_whole(&big, threads), want);
+                for p in 0..3 {
+                    assert!(
+                        dec.picture.plane(p) == serial.picture.plane(p),
+                        "{w}x{h}, {modes} and {coeffs} bytes, {threads} threads, plane {p}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
