@@ -298,9 +298,10 @@ static void check_blend_row_argb(WPDLosslessDSP *dsp) {
     declare_func(void, uint8_t *, const uint8_t *, int);
 
     if (check_func(dsp->blend_row_argb, "blend_row_argb")) {
-        for (int mode = 0; mode < 3; mode++) {
+        for (int mode = 0; mode < 5; mode++) {
             for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths); i++) {
-                const int n = lengths[i];
+                const int n   = lengths[i];
+                int       run = 0;
 
                 for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
                     WPD_WN32A(src + x, rnd());
@@ -309,6 +310,15 @@ static void check_blend_row_argb(WPDLosslessDSP *dsp) {
                         src[x] = 255;
                     else if (mode == 2 && (rnd() & 7))
                         src[x] = 0;
+                    else if (mode == 3)
+                        src[x] = rnd() & 1 ? 255 : 0;
+                    else if (mode == 4) {
+                        /* runs of opaque and clear, now and then an edge */
+                        if (!(rnd() % 23))
+                            run = rnd() % 3;
+                        if (run < 2 && rnd() % 97)
+                            src[x] = run ? 255 : 0;
+                    }
                     memcpy(dst1 + x, dst0 + x, 4);
                 }
 
@@ -322,7 +332,8 @@ static void check_blend_row_argb(WPDLosslessDSP *dsp) {
         for (int x = 0; x < 4 * BUF_PIXELS; x += 4) {
             WPD_WN32A(src + x, rnd());
             WPD_WN32A(dst1 + x, rnd());
-            src[x] = (x & 0x3F) < 8 ? (uint8_t)rnd() : (x & 0x80) ? 255 : 0;
+            /* mostly binary alpha in runs, as animations tend to have */
+            src[x] = x == 4 * 100 ? 128 : (x / (4 * 24)) & 1 ? 255 : 0;
         }
         bench_new(dst1, src, MAX_PIXELS);
     }

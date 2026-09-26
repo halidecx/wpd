@@ -1249,12 +1249,9 @@ endconst
         strb            w9,  [x0, #\off]
 .endm
 
-function wpd_blend_row_argb_neon, export=1
-        movrel          x3,  blend_scale
-        movi            v17.8b,  #255
-        cmp             w2,  #8
-        b.lt            4f
-1:      ld4             {v0.8b-v3.8b}, [x1], #32
+/* Eight pixels from x1 over x0, advancing both; v17 holds 255 per byte. */
+.macro  blend8
+        ld4             {v0.8b-v3.8b}, [x1], #32
         ld4             {v4.8b-v7.8b}, [x0]
         cmeq            v16.8b,  v0.8b,  #0
         cmeq            v18.8b,  v0.8b,  v17.8b
@@ -1283,10 +1280,71 @@ function wpd_blend_row_argb_neon, export=1
         bit             v5.8b,   v1.8b,   v18.8b
         bit             v6.8b,   v2.8b,   v18.8b
         bit             v7.8b,   v3.8b,   v18.8b
-        sub             w2,  w2,  #8
         st4             {v4.8b-v7.8b}, [x0], #32
-        cmp             w2,  #8
+.endm
+
+/* Animation frames are mostly binary alpha, so sixteen pixels are first
+ * sorted by their alphas alone: an opaque run is stored without reading the
+ * canvas, a clear one touches nothing, and a mix of the two is a select.
+ * Only a run with a partial alpha goes through the division. */
+function wpd_blend_row_argb_neon, export=1
+        movrel          x3,  blend_scale
+        cmp             w2,  #16
+        b.lt            20f
+        movi            v31.16b, #255
+        movi            v30.4s,  #0xff, lsl #24
+1:      ldp             q0,  q1,  [x1]
+        ldp             q2,  q3,  [x1, #32]
+        uzp1            v16.8h,  v0.8h,   v1.8h
+        uzp1            v17.8h,  v2.8h,   v3.8h
+        uzp1            v16.16b, v16.16b, v17.16b
+        cmeq            v17.16b, v16.16b, v31.16b
+        cmeq            v18.16b, v16.16b, #0
+        orr             v19.16b, v17.16b, v18.16b
+        shrn            v19.8b,  v19.8h,  #4
+        shrn            v17.8b,  v17.8h,  #4
+        fmov            x4,  d19
+        fmov            x5,  d17
+        cmn             x4,  #1
+        b.ne            5f              // a partial alpha
+        cmn             x5,  #1
+        b.eq            2f              // all opaque
+        cbz             x5,  3f         // all clear
+        shl             v20.4s,  v0.4s,  #24
+        shl             v21.4s,  v1.4s,  #24
+        shl             v22.4s,  v2.4s,  #24
+        shl             v23.4s,  v3.4s,  #24
+        ldp             q4,  q5,  [x0]
+        ldp             q6,  q7,  [x0, #32]
+        cmeq            v20.4s,  v20.4s, v30.4s
+        cmeq            v21.4s,  v21.4s, v30.4s
+        cmeq            v22.4s,  v22.4s, v30.4s
+        cmeq            v23.4s,  v23.4s, v30.4s
+        bif             v0.16b,  v4.16b,  v20.16b
+        bif             v1.16b,  v5.16b,  v21.16b
+        bif             v2.16b,  v6.16b,  v22.16b
+        bif             v3.16b,  v7.16b,  v23.16b
+2:      stp             q0,  q1,  [x0]
+        stp             q2,  q3,  [x0, #32]
+3:      add             x1,  x1,  #64
+        add             x0,  x0,  #64
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
         b.ge            1b
+        b               20f
+5:      movi            v17.8b,  #255
+        blend8
+        blend8
+        movi            v31.16b, #255
+        movi            v30.4s,  #0xff, lsl #24
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
+        b.ge            1b
+20:     cmp             w2,  #8
+        b.lt            4f
+        movi            v17.8b,  #255
+        blend8
+        sub             w2,  w2,  #8
 4:      cbz             w2,  9f
         mov             w11, #256
 5:      ldrb            w4,  [x1]
