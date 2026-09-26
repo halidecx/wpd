@@ -672,8 +672,75 @@ endfunc
         b               3f
 .endm
 
+.macro  premultiply8 alpha, c0, c1, c2
+        ld4             {v0.8b-v3.8b}, [x0]
+        premultiply_ch  \c0, \alpha
+        premultiply_ch  \c1, \alpha
+        premultiply_ch  \c2, \alpha
+        st4             {v0.8b-v3.8b}, [x0], #32
+.endm
+
+/* Sixteen pixels at a time, sorted by their alphas as the blends sort them:
+ * v30 masks the alpha byte of a pixel, v31 is 255 per byte and v29 zero. */
+.macro  premultiply16 uzp, alpha, c0, c1, c2
+1:      ldp             q0,  q1,  [x0]
+        ldp             q2,  q3,  [x0, #32]
+        \uzp            v16.8h,  v0.8h,   v1.8h
+        \uzp            v17.8h,  v2.8h,   v3.8h
+        \uzp            v16.16b, v16.16b, v17.16b
+        cmeq            v17.16b, v16.16b, v31.16b
+        cmeq            v18.16b, v16.16b, #0
+        orr             v19.16b, v17.16b, v18.16b
+        shrn            v19.8b,  v19.8h,  #4
+        shrn            v17.8b,  v17.8h,  #4
+        fmov            x4,  d19
+        fmov            x5,  d17
+        cmn             x4,  #1
+        b.ne            5f              // a partial alpha
+        cmn             x5,  #1
+        b.eq            3f              // all opaque, which it leaves alone
+        cbz             x5,  4f         // all clear
+        cmtst           v20.4s,  v0.4s,  v30.4s
+        cmtst           v21.4s,  v1.4s,  v30.4s
+        cmtst           v22.4s,  v2.4s,  v30.4s
+        cmtst           v23.4s,  v3.4s,  v30.4s
+        and             v0.16b,  v0.16b, v20.16b
+        and             v1.16b,  v1.16b, v21.16b
+        and             v2.16b,  v2.16b, v22.16b
+        and             v3.16b,  v3.16b, v23.16b
+        stp             q0,  q1,  [x0]
+        stp             q2,  q3,  [x0, #32]
+        b               3f
+4:      stp             q29, q29, [x0]
+        stp             q29, q29, [x0, #32]
+3:      add             x0,  x0,  #64
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
+        b.ge            1b
+        b               20f
+5:      premultiply8    \alpha, \c0, \c1, \c2
+        premultiply8    \alpha, \c0, \c1, \c2
+        sub             w2,  w2,  #16
+        cmp             w2,  #16
+        b.ge            1b
+        b               20f
+.endm
+
+/* An opaque pixel keeps its colour and a clear one becomes zero, so a run of
+ * binary alpha, which is what an animation's frames mostly are, needs no
+ * multiply, and an opaque run no store. */
 function wpd_premultiply_row_neon, export=1
-        cmp             w2,  #8
+        cmp             w2,  #16
+        b.lt            20f
+        movi            v7.8h,   #1
+        movi            v29.16b, #0
+        movi            v31.16b, #255
+        cbz             w1,  10f
+        movi            v30.4s,  #0xff
+        premultiply16   uzp1, 0, 1, 2, 3
+10:     movi            v30.4s,  #0xff, lsl #24
+        premultiply16   uzp2, 3, 0, 1, 2
+20:     cmp             w2,  #8
         b.lt            3f
         cbz             w1,  2f
         premultiply_loop 0, 1, 2, 3

@@ -293,23 +293,49 @@ static void check_premultiply_row(WPDYUVDSP *dsp) {
     declare_func(void, uint8_t *, int, int);
 
     if (check_func(dsp->premultiply_row, "premultiply_row")) {
-        for (int alpha_first = 0; alpha_first < 2; alpha_first++)
-            for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
-                 i++) {
-                const int n   = row_lengths[i];
-                const int off = alpha_first ? 0 : 3;
+        for (int mode = 0; mode < 5; mode++)
+            for (int alpha_first = 0; alpha_first < 2; alpha_first++)
+                for (size_t i = 0;
+                     i < sizeof(row_lengths) / sizeof(*row_lengths);
+                     i++) {
+                    const int n   = row_lengths[i];
+                    const int off = alpha_first ? 0 : 3;
+                    int       run = 0;
 
-                for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
-                    argb0[x] = argb1[x] = (uint8_t)rnd();
-                argb0[off] = argb1[off] = 0xff;
-                if (n > 1)
-                    argb0[4 + off] = argb1[4 + off] = 0;
+                    for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                        argb0[x] = argb1[x] = (uint8_t)rnd();
+                    for (int x = off; x < 4 * (MAX_PIXELS + GUARD_PIXELS);
+                         x += 4) {
+                        if (mode == 1 && (rnd() & 7))
+                            argb0[x] = 255;
+                        else if (mode == 2 && (rnd() & 7))
+                            argb0[x] = 0;
+                        else if (mode == 3)
+                            argb0[x] = rnd() & 1 ? 255 : 0;
+                        else if (mode == 4) {
+                            /* runs of opaque and clear, now and then an edge */
+                            if (!(rnd() % 23))
+                                run = rnd() % 3;
+                            if (run < 2 && rnd() % 97)
+                                argb0[x] = run ? 255 : 0;
+                        }
+                        argb1[x] = argb0[x];
+                    }
+                    argb0[off] = argb1[off] = 0xff;
+                    if (n > 1)
+                        argb0[4 + off] = argb1[4 + off] = 0;
 
-                call_ref(argb0, alpha_first, n);
-                call_new(argb1, alpha_first, n);
-                if (memcmp(argb0, argb1, sizeof(argb0)))
-                    fail();
-            }
+                    call_ref(argb0, alpha_first, n);
+                    call_new(argb1, alpha_first, n);
+                    if (memcmp(argb0, argb1, sizeof(argb0)))
+                        fail();
+                }
+
+        for (int x = 0; x < 4 * MAX_PIXELS; x += 4) {
+            WPD_WN32A(argb1 + x, rnd());
+            /* mostly binary alpha in runs, as animations tend to have */
+            argb1[x] = x == 4 * 100 ? 128 : (x / (4 * 24)) & 1 ? 255 : 0;
+        }
         bench_new(argb1, 1, MAX_PIXELS);
     }
 }
