@@ -21,7 +21,7 @@ static void check_unfilter(unfilter_func func, const char *name) {
     if (check_func(func, "%s", name)) {
         for (size_t i = 0; i < sizeof(widths) / sizeof(*widths); i++)
             for (int with_prev = 0; with_prev < 2; with_prev++)
-                for (int mode = 0; mode < 3; mode++) {
+                for (int mode = 0; mode < 5; mode++) {
                     const int w = widths[i];
 
                     for (int x = 0; x < MAX_WIDTH; x++)
@@ -29,7 +29,10 @@ static void check_unfilter(unfilter_func func, const char *name) {
                     for (int x = 0; x < MAX_WIDTH + GUARD; x++)
                         row0[x] = row1[x] = (uint8_t)rnd();
                     /* Smooth rows keep the gradient fast path honest; the
-                     * random ones drive it through clip and wrap. */
+                     * random ones drive it through clip and wrap. A ramp
+                     * above with the odd residual clips now and then in
+                     * rows that are otherwise clean, and bands of noise
+                     * make a kernel give up and come back. */
                     if (mode == 1) {
                         for (int x = 0; x < MAX_WIDTH; x++) prev[x] = 128;
                         for (int x = 0; x < MAX_WIDTH + GUARD; x++)
@@ -37,6 +40,19 @@ static void check_unfilter(unfilter_func func, const char *name) {
                     } else if (mode == 2) {
                         for (int x = 0; x < MAX_WIDTH; x++)
                             prev[x] = (x & 1) ? 255 : 0;
+                    } else if (mode == 3) {
+                        for (int x = 0; x < MAX_WIDTH; x++)
+                            prev[x] = (uint8_t)(x * 3);
+                        for (int x = 0; x < MAX_WIDTH + GUARD; x++)
+                            if (rnd() & 31)
+                                row0[x] = row1[x] = 0;
+                    } else if (mode == 4) {
+                        for (int x = 0; x < MAX_WIDTH; x++)
+                            if (x / 96 % 3)
+                                prev[x] = 100;
+                        for (int x = 0; x < MAX_WIDTH + GUARD; x++)
+                            if (x / 96 % 3)
+                                row0[x] = row1[x] = 0;
                     }
 
                     call_ref(with_prev ? prev : NULL, row0, w);
