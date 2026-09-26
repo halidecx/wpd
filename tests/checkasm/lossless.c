@@ -44,6 +44,46 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
     }
 }
 
+/* Narrow values make the select predictor's two distances tie often. */
+static void check_pred_green(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, res, [MAX_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, upper, [BUF_PIXELS + 1]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [BUF_PIXELS]);
+    declare_func(void, const uint32_t *, const uint8_t *, int, uint8_t *);
+
+    for (int mode = 0; mode < WPD_PRED_COUNT; mode++) {
+        if (check_func(dsp->pred_green[mode], "pred_green_%d", mode)) {
+            for (int narrow = 0; narrow < 2; narrow++) {
+                const unsigned mask = narrow ? 3 : 255;
+
+                for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths);
+                     i++) {
+                    const int n = lengths[i];
+
+                    for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+                        res[x] = (uint32_t)rnd();
+                    for (int x = 0; x < BUF_PIXELS + 1; x++)
+                        upper[x] = (uint8_t)(rnd() & mask);
+                    for (int x = 0; x < BUF_PIXELS; x++)
+                        row0[x] = row1[x] = (uint8_t)(rnd() & mask);
+                    if (narrow)
+                        for (int x = 0; x < n; x++) res[x] &= 0xFF03FFFFu;
+
+                    call_ref(res, upper + 1, n, row0 + 1);
+                    call_new(res, upper + 1, n, row1 + 1);
+                    if (memcmp(row0, row1, sizeof(row0)))
+                        fail();
+                }
+            }
+            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+                res[x] = (uint32_t)rnd();
+            for (int x = 0; x < BUF_PIXELS + 1; x++) upper[x] = (uint8_t)rnd();
+            bench_new(res, upper + 1, MAX_PIXELS, row1 + 1);
+        }
+    }
+}
+
 static void check_extract_green(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, src, [4 * MAX_PIXELS]);
     LOCAL_ALIGNED_16(uint8_t, dst0, [MAX_PIXELS + GUARD_PIXELS]);
@@ -239,6 +279,8 @@ void checkasm_check_lossless(void) {
     wpd_vp8l_dsp_init(&dsp);
     check_pred_add(&dsp);
     report("pred_add");
+    check_pred_green(&dsp);
+    report("pred_green");
     check_extract_green(&dsp);
     report("extract_green");
     check_add_green(&dsp);

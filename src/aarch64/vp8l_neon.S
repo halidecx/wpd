@@ -506,6 +506,103 @@ function wpd_extract_green_neon, export=1
 9:      ret
 endfunc
 
+/* The predictors over an alpha image's green alone take the residual
+ * pixels at x0, whose green they add, the green row above at x1 (its top
+ * left at x1[-1]) and write x2 bytes of green from x3, whose left is at
+ * x3[-1]. */
+
+/* Left: 16 sums at once, each block's running sums made apart from the
+ * carry, so from one block to the next the chain is a single add. */
+function wpd_pred_green_1_neon, export=1
+        ldurb           w4,  [x3, #-1]
+        dup             v0.16b,  w4
+        movi            v7.16b,  #0
+        cmp             w2,  #16
+        b.lt            2f
+1:      ldp             q16, q17, [x0], #32
+        ldp             q18, q19, [x0], #32
+        sub             w2,  w2,  #16
+        uzp2            v16.8h,  v16.8h,  v17.8h
+        uzp2            v18.8h,  v18.8h,  v19.8h
+        uzp1            v1.16b,  v16.16b, v18.16b       // green
+        ext             v2.16b,  v7.16b,  v1.16b, #15
+        add             v1.16b,  v1.16b,  v2.16b
+        ext             v2.16b,  v7.16b,  v1.16b, #14
+        add             v1.16b,  v1.16b,  v2.16b
+        ext             v2.16b,  v7.16b,  v1.16b, #12
+        add             v1.16b,  v1.16b,  v2.16b
+        ext             v2.16b,  v7.16b,  v1.16b, #8
+        add             v1.16b,  v1.16b,  v2.16b
+        dup             v3.16b,  v1.b[15]
+        add             v1.16b,  v1.16b,  v0.16b
+        add             v0.16b,  v0.16b,  v3.16b
+        cmp             w2,  #16
+        str             q1,  [x3], #16
+        b.ge            1b
+        umov            w4,  v0.b[0]
+2:      cbz             w2,  9f
+3:      ldrb            w5,  [x0, #2]
+        add             x0,  x0,  #4
+        subs            w2,  w2,  #1
+        add             w4,  w4,  w5
+        strb            w4,  [x3], #1
+        b.gt            3b
+9:      ret
+endfunc
+
+/* Select on green alone takes T + g when |L - TL| <= |T - TL|, else L + g.
+ * That is L inside TL -+ |T - TL|, which a compare and a conditional
+ * compare test while both sums are made, so from one pixel to the next
+ * there are only those two and the pick. Plain scalar code: the chain is
+ * the whole cost, and it runs one pixel at a time. */
+.macro  green11_ahead   t, tl, g, lo, hi, took_t
+        subs            \lo, \t,  \tl
+        cneg            \lo, \lo, mi
+        add             \hi, \tl, \lo
+        sub             \lo, \tl, \lo
+        add             \took_t, \t, \g
+        and             \took_t, \took_t, #0xff
+.endm
+
+.macro  green11_pick    g, lo, hi, took_t
+        add             w12, w4,  \g
+        cmp             w4,  \lo
+        and             w12, w12, #0xff
+        ccmp            w4,  \hi, #0, ge
+        csel            w4,  \took_t, w12, le
+.endm
+
+function wpd_pred_green_11_neon, export=1
+        ldurb           w4,  [x3, #-1]                  // L
+        ldurb           w5,  [x1, #-1]                  // TL
+        subs            w2,  w2,  #2
+        b.lt            2f
+1:      ldrb            w6,  [x1]
+        ldrb            w13, [x1, #1]
+        ldrb            w7,  [x0, #2]
+        ldrb            w14, [x0, #6]
+        add             x1,  x1,  #2
+        add             x0,  x0,  #8
+        green11_ahead   w6,  w5,  w7,  w8,  w9,  w10
+        green11_ahead   w13, w6,  w14, w15, w16, w17
+        green11_pick    w7,  w8,  w9,  w10
+        strb            w4,  [x3]
+        green11_pick    w14, w15, w16, w17
+        mov             w5,  w13
+        subs            w2,  w2,  #2
+        strb            w4,  [x3, #1]
+        add             x3,  x3,  #2
+        b.ge            1b
+2:      adds            w2,  w2,  #2
+        b.eq            9f
+        ldrb            w6,  [x1]
+        ldrb            w7,  [x0, #2]
+        green11_ahead   w6,  w5,  w7,  w8,  w9,  w10
+        green11_pick    w7,  w8,  w9,  w10
+        strb            w4,  [x3]
+9:      ret
+endfunc
+
 function wpd_add_green_neon, export=1
         cmp             w2,  #16
         b.lt            2f

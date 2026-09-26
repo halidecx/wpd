@@ -237,10 +237,224 @@ pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
     }
 }
 
+#[inline(always)]
+fn green(px: u32) -> u8 {
+    px.to_ne_bytes()[2]
+}
+
+#[inline(always)]
+fn avg_u8(a: u8, b: u8) -> u8 {
+    (a & b) + ((a ^ b) >> 1)
+}
+
+#[inline(always)]
+fn clip_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+/* The predictors over an alpha image's green alone; see PredGreenFn. Each
+ * gives a pixel from its neighbours and its residual's green, g. */
+macro_rules! pred_green {
+    ($name:ident, |$l:ident, $t:ident, $tl:ident, $tr:ident, $g:ident| $px:expr) => {
+        #[allow(unused_variables)]
+        pub fn $name(row: &mut [u8], above: &[u8], res: &[u32]) {
+            let n = res.len();
+            let (left, out) = row.split_at_mut(1);
+            let mut l = left[0];
+
+            for ((((o, &r), &$t), &$tl), &$tr) in out[..n]
+                .iter_mut()
+                .zip(res)
+                .zip(&above[1..n + 1])
+                .zip(&above[..n])
+                .zip(&above[2..n + 2])
+            {
+                let ($l, $g) = (l, green(r));
+
+                l = $px;
+                *o = l;
+            }
+        }
+    };
+}
+
+/* Averages nest into one rounding down: avg(avg(a, b), c) is
+ * (a + b + 2c) >> 2, and adding g to an average of two is adding 2g before
+ * the shift. So the averaging predictors only wait on the left pixel for an
+ * add and a shift, once everything else is summed beforehand: a chunk at a
+ * time, through memory, where the compiler cannot fold it back into the
+ * chain. */
+const GREEN_CHUNK: usize = 64;
+
+macro_rules! pred_green_avg {
+    ($name:ident, $shift:literal, |$t:ident, $tl:ident, $tr:ident, $g:ident| $rest:expr) => {
+        #[allow(unused_variables)]
+        pub fn $name(row: &mut [u8], above: &[u8], res: &[u32]) {
+            let n = res.len();
+            let (left, out) = row.split_at_mut(1);
+            let mut l = u32::from(left[0]);
+            let mut rest = [0u16; GREEN_CHUNK];
+
+            for (i, (out, res)) in out[..n]
+                .chunks_mut(GREEN_CHUNK)
+                .zip(res.chunks(GREEN_CHUNK))
+                .enumerate()
+            {
+                let (x, m) = (i * GREEN_CHUNK, res.len());
+
+                for ((((k, &r), &$t), &$tl), &$tr) in rest[..m]
+                    .iter_mut()
+                    .zip(res)
+                    .zip(&above[x + 1..x + m + 1])
+                    .zip(&above[x..x + m])
+                    .zip(&above[x + 2..x + m + 2])
+                {
+                    let $g = green(r);
+
+                    *k = $rest;
+                }
+                for (o, &k) in out.iter_mut().zip(&rest[..m]) {
+                    l = ((l + u32::from(k)) >> $shift) & 0xff;
+                    *o = l as u8;
+                }
+            }
+        }
+    };
+}
+
+/* The select and the clamped predictors are a window around the top left
+ * that the left pixel falls in or not, and one value to take if it does and
+ * another if not, one of the two the left pixel plus a constant. Everything
+ * but the test and the add is worked out a chunk at a time beforehand. */
+#[inline(always)]
+fn pred_green_window(
+    row: &mut [u8],
+    above: &[u8],
+    res: &[u32],
+    prep: impl Fn(u8, u8, u8) -> (i16, i16, u8, u8),
+    pick: impl Fn(u8, bool, u8, u8) -> u8,
+) {
+    let n = res.len();
+    let (left, out) = row.split_at_mut(1);
+    let mut l = left[0];
+    let mut lo = [0i16; GREEN_CHUNK];
+    let mut hi = [0i16; GREEN_CHUNK];
+    let mut a = [0u8; GREEN_CHUNK];
+    let mut b = [0u8; GREEN_CHUNK];
+
+    for (i, (out, res)) in out[..n]
+        .chunks_mut(GREEN_CHUNK)
+        .zip(res.chunks(GREEN_CHUNK))
+        .enumerate()
+    {
+        let (x, m) = (i * GREEN_CHUNK, res.len());
+
+        for (j, ((&r, &t), &tl)) in res
+            .iter()
+            .zip(&above[x + 1..x + m + 1])
+            .zip(&above[x..x + m])
+            .enumerate()
+        {
+            (lo[j], hi[j], a[j], b[j]) = prep(t, tl, green(r));
+        }
+        for ((((o, &lo), &hi), &a), &b) in out
+            .iter_mut()
+            .zip(&lo[..m])
+            .zip(&hi[..m])
+            .zip(&a[..m])
+            .zip(&b[..m])
+        {
+            let inside = lo <= i16::from(l) && i16::from(l) <= hi;
+
+            l = pick(l, inside, a, b);
+            *o = l;
+        }
+    }
+}
+
+pred_green!(pred_green_0, |l, t, tl, tr, g| g);
+
+/// Left only, so `above` is not read and may be empty.
+pub fn pred_green_1(row: &mut [u8], _above: &[u8], res: &[u32]) {
+    let n = res.len();
+    let (left, out) = row.split_at_mut(1);
+    let mut l = left[0];
+
+    for (o, &r) in out[..n].iter_mut().zip(res) {
+        l = l.wrapping_add(green(r));
+        *o = l;
+    }
+}
+
+pred_green!(pred_green_2, |l, t, tl, tr, g| t.wrapping_add(g));
+pred_green!(pred_green_3, |l, t, tl, tr, g| tr.wrapping_add(g));
+pred_green!(pred_green_4, |l, t, tl, tr, g| tl.wrapping_add(g));
+pred_green_avg!(pred_green_5, 2, |t, tl, tr, g| u16::from(tr)
+    + 2 * u16::from(t)
+    + 4 * u16::from(g));
+pred_green_avg!(pred_green_6, 1, |t, tl, tr, g| u16::from(tl)
+    + 2 * u16::from(g));
+pred_green_avg!(pred_green_7, 1, |t, tl, tr, g| u16::from(t)
+    + 2 * u16::from(g));
+pred_green!(pred_green_8, |l, t, tl, tr, g| avg_u8(tl, t)
+    .wrapping_add(g));
+pred_green!(pred_green_9, |l, t, tl, tr, g| avg_u8(t, tr)
+    .wrapping_add(g));
+pred_green_avg!(pred_green_10, 2, |t, tl, tr, g| u16::from(tl)
+    + 2 * u16::from(avg_u8(t, tr))
+    + 4 * u16::from(g));
+
+/// Top if the left pixel is no further from the top left than top is,
+/// else left.
+pub fn pred_green_11(row: &mut [u8], above: &[u8], res: &[u32]) {
+    pred_green_window(
+        row,
+        above,
+        res,
+        |t, tl, g| {
+            let d = i16::from(t.abs_diff(tl));
+
+            (i16::from(tl) - d, i16::from(tl) + d, t.wrapping_add(g), g)
+        },
+        |l, inside, took_t, g| if inside { took_t } else { l.wrapping_add(g) },
+    );
+}
+
+/// Left plus top less top left, clamped: the window is where it needs no
+/// clamping, and outside it only one of the bounds can be crossed.
+pub fn pred_green_12(row: &mut [u8], above: &[u8], res: &[u32]) {
+    pred_green_window(
+        row,
+        above,
+        res,
+        |t, tl, g| {
+            let d = i16::from(tl) - i16::from(t);
+            let clamped = if t >= tl { g.wrapping_sub(1) } else { g };
+
+            (d, 255 + d, t.wrapping_sub(tl).wrapping_add(g), clamped)
+        },
+        |l, inside, k, clamped| if inside { l.wrapping_add(k) } else { clamped },
+    );
+}
+
+pred_green!(pred_green_13, |l, t, tl, tr, g| {
+    let a = i32::from(avg_u8(l, t));
+
+    clip_u8(a + (a - i32::from(tl)) / 2).wrapping_add(g)
+});
+
 pub type PredAddFn = fn(plane: &mut [u32], out: usize, up: usize, n: usize);
+
+/// Inverse predicts a run of an alpha image's green on its own, adding the
+/// green of each of `res` to its prediction. `row` starts with the run's
+/// left neighbour and `above` with its top left, so pixel i reads its left
+/// at row[i], top left at above[i], top at above[i + 1] and top right at
+/// above[i + 2], and lands at row[i + 1].
+pub type PredGreenFn = fn(row: &mut [u8], above: &[u8], res: &[u32]);
 
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
+    pub pred_green: [PredGreenFn; 14],
     pub map_color32: fn(&mut [u32], &[u32]),
     pub color_row: fn(&mut [u32], u32),
     pub extract_green: fn(&mut [u8], &[u8]),
@@ -309,6 +523,22 @@ impl Vp8lDsp {
                 plane_pred_12,
                 plane_pred_13,
             ],
+            pred_green: [
+                pred_green_0,
+                pred_green_1,
+                pred_green_2,
+                pred_green_3,
+                pred_green_4,
+                pred_green_5,
+                pred_green_6,
+                pred_green_7,
+                pred_green_8,
+                pred_green_9,
+                pred_green_10,
+                pred_green_11,
+                pred_green_12,
+                pred_green_13,
+            ],
             map_color32: map_color32_pixels,
             color_row,
             extract_green,
@@ -341,6 +571,54 @@ mod tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    #[test]
+    fn green_predictors_match_the_full_ones_where_the_rest_is_uniform() {
+        let dsp = Vp8lDsp::scalar();
+        let rest = u32::from_ne_bytes([0x12, 0x34, 0, 0x56]);
+        let with_green = |g: u8| rest | u32::from_ne_bytes([0, 0, g, 0]);
+        let mut state = 7;
+
+        /* Full range, then values bunched at both ends, where the ties and
+         * the clamping are. */
+        for narrow in [false, true] {
+            let mut value = || {
+                let v = lcg(&mut state) as u8;
+
+                match (narrow, v & 0x80 != 0) {
+                    (false, _) => v,
+                    (true, false) => v & 3,
+                    (true, true) => !v & 3 ^ 0xff,
+                }
+            };
+
+            for mode in 0..14 {
+                for n in [1, 2, 3, 15, 63, 64, 65, 130] {
+                    let above: Vec<u8> = (0..n + 2).map(|_| value()).collect();
+                    let left = value();
+                    let res: Vec<u32> = (0..n)
+                        .map(|_| u32::from_ne_bytes([0, 0, value(), 0]))
+                        .collect();
+
+                    let mut plane: Vec<u32> =
+                        above.iter().map(|&g| with_green(g)).collect();
+                    plane.push(with_green(left));
+                    plane.extend(&res);
+                    (dsp.pred_add[mode])(&mut plane, n + 3, 1, n);
+
+                    let mut row = vec![left; n + 1];
+                    let above = if mode == 1 { &[][..] } else { &above[..] };
+
+                    (dsp.pred_green[mode])(&mut row, above, &res);
+
+                    let want: Vec<u8> =
+                        plane[n + 2..].iter().map(|&px| green(px)).collect();
+
+                    assert_eq!(row, want, "mode {mode}, {n} pixels, narrow {narrow}");
+                }
+            }
+        }
     }
 
     #[test]

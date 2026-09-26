@@ -33,8 +33,9 @@ const PIPELINE_PIECES: usize = 32;
 /// Pieces are never smaller than this many bytes.
 const PIPELINE_MIN_STEP: usize = 4096;
 
-/// An alpha plane's rows cross to the transform thread at most this many at
-/// a time, in bands that are handed back and reused.
+/// An alpha plane's rows go from residuals to the plane this many at a time,
+/// and cross to the transform thread, when there is one, in bands of at most
+/// this many that are handed back and reused.
 const ALPHA_BAND_ROWS: i32 = 32;
 
 const PADDING: usize = 16;
@@ -274,6 +275,7 @@ pub struct Decoder {
     indices: Vec<u8>,
     staged: bool,
     scratch: Vec<u32>,
+    green: Vec<u8>,
     sorted: Vec<u16>,
     lengths: Vec<u8>,
 
@@ -321,6 +323,7 @@ impl Decoder {
         self.out.release();
         self.indices = Vec::new();
         self.scratch = Vec::new();
+        self.green = Vec::new();
         self.sorted = Vec::new();
         self.lengths = Vec::new();
         self.huffman_group_map = Vec::new();
@@ -898,7 +901,15 @@ impl Decoder {
             alpha_dst
         };
         self.decode_pixels(ROLE_ARGB, target, buf, false)?;
-        self.apply_transforms(target, alpha_dst)
+        match alpha_dst {
+            Some(dst)
+                if !self.transforms[..self.nb_transforms]
+                    .contains(&Transform::ColorIndexing) =>
+            {
+                self.alpha_rows(dst)
+            }
+            dst => self.apply_transforms(target, dst),
+        }
     }
 
     fn decode_alpha_8b(&mut self, buf: &[u8], dst: AlphaDst<'_>) -> Result<()> {
@@ -1469,14 +1480,17 @@ impl Decoder {
         let w = self.width.max(0) as usize;
 
         grow(&mut self.scratch, 2 * w + 1, 0)?;
+        grow(&mut self.green, 2 * (w + 1), 0)?;
         self.resume = Resume::default();
 
+        let by_green = self.green_alpha();
         let Decoder {
             dsp,
             gb,
             image,
             alpha_argb,
             scratch,
+            green,
             resume,
             reduced_width,
             transforms,
@@ -1488,21 +1502,23 @@ impl Decoder {
         } = self;
         let (coded, side) = image.split_at_mut(ROLE_PREDICTOR);
         let packed = *reduced_width;
-        let extract_green = dsp.extract_green;
-        let xf = Inverse {
-            dsp,
-            side,
-            list: &transforms[..*nb_transforms],
-            packed,
-            width: *width,
-            out_width: *width,
-            out_height: *height,
+        let unfilter = dst.unfilter;
+        let mut rows = AlphaRows {
+            extract_green: dsp.extract_green,
+            xf: Inverse {
+                dsp,
+                side,
+                list: &transforms[..*nb_transforms],
+                packed,
+                width: *width,
+                out_width: *width,
+                out_height: *height,
+            },
+            dst,
+            green,
+            by_green,
+            rest: 0,
         };
-        let AlphaDst {
-            data,
-            stride: dst_stride,
-            unfilter,
-        } = dst;
         let (tx, rx) = std::sync::mpsc::channel::<(i32, i32, Vec<u32>)>();
         let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<u32>>();
         let (xf_ret, dec_ret) = crate::task::join(
@@ -1512,26 +1528,7 @@ impl Decoder {
 
                 for (y0, y1, mut band) in rx {
                     if ret.is_ok() {
-                        ret = xf.rows(&mut band, scratch, 0, w, y0, y1);
-                    }
-                    if ret.is_ok() {
-                        for (row, y) in
-                            band.chunks_exact(w).zip(y0 as usize..y1 as usize)
-                        {
-                            let at = y * dst_stride;
-
-                            extract_green(&mut data[at..at + w], row.as_bytes());
-                            match unfilter {
-                                Some(u) if y == 0 => (u.first)(None, &mut data[..w]),
-                                Some(u) => {
-                                    let (above, here) = data[at - dst_stride..]
-                                        .split_at_mut(dst_stride);
-
-                                    (u.rest)(Some(&above[..w]), &mut here[..w]);
-                                }
-                                None => {}
-                            }
-                        }
+                        ret = rows.rows(&mut band, w, scratch, y0, y1);
                     }
                     /* The decoding side may be gone already; the band then
                      * has nowhere to go but away. */
@@ -1575,6 +1572,229 @@ impl Decoder {
         self.alpha_unfiltered = unfilter.is_some();
         self.alpha_dst_used = true;
         Ok(())
+    }
+
+    /// An alpha plane whose pixels are all decoded, taken to `dst` a band of
+    /// rows at a time, so each band is transformed, has its green taken and
+    /// is unfiltered while it is still in cache.
+    fn alpha_rows(&mut self, dst: AlphaDst<'_>) -> Result<()> {
+        let w = self.width.max(0) as usize;
+
+        grow(&mut self.scratch, 2 * w + 1, 0)?;
+        grow(&mut self.green, 2 * (w + 1), 0)?;
+
+        let by_green = self.green_alpha();
+        let Decoder {
+            dsp,
+            image,
+            alpha_argb,
+            scratch,
+            green,
+            reduced_width,
+            transforms,
+            nb_transforms,
+            width,
+            height,
+            ..
+        } = self;
+        let unfilter = dst.unfilter;
+        let mut rows = AlphaRows {
+            extract_green: dsp.extract_green,
+            xf: Inverse {
+                dsp,
+                side: &image[ROLE_PREDICTOR..],
+                list: &transforms[..*nb_transforms],
+                packed: *reduced_width,
+                width: *width,
+                out_width: *width,
+                out_height: *height,
+            },
+            dst,
+            green,
+            by_green,
+            rest: 0,
+        };
+        let stride = alpha_argb.stride;
+        let mut y0 = 0;
+
+        while y0 < *height {
+            let y1 = (y0 + ALPHA_BAND_ROWS).min(*height);
+
+            rows.rows(
+                &mut alpha_argb.data[y0 as usize * stride..],
+                stride,
+                scratch,
+                y0,
+                y1,
+            )?;
+            y0 = y1;
+        }
+        self.alpha_unfiltered = unfilter.is_some();
+        self.alpha_dst_used = true;
+        Ok(())
+    }
+
+    /// Whether an alpha image's green can be inverse predicted on its own,
+    /// for as long as its pixels' other channels stay the same: it has to be
+    /// the predictor that is undone first, since the transforms after it
+    /// leave green alone and can be skipped, but not those before it.
+    fn green_alpha(&self) -> bool {
+        match self.transforms[..self.nb_transforms].split_last() {
+            Some((Transform::Predictor, rest)) => rest
+                .iter()
+                .all(|t| matches!(t, Transform::Color | Transform::SubtractGreen)),
+            _ => false,
+        }
+    }
+}
+
+/// An alpha image's rows on their way from residuals to the plane: through
+/// the inverse transforms, then their green taken to the plane and
+/// unfiltered there.
+///
+/// The select predictor is the only one to look across channels, and an
+/// alpha image's other channels are usually the same in every pixel, where
+/// they make no difference to it. While they are, the rows skip the full
+/// transforms, and green is inverse predicted by itself.
+struct AlphaRows<'a> {
+    xf: Inverse<'a>,
+    extract_green: fn(&mut [u8], &[u8]),
+    dst: AlphaDst<'a>,
+    /// Two rows of predicted green, each one longer than a row.
+    green: &'a mut [u8],
+    by_green: bool,
+    /// The channels other than green that every pixel so far has.
+    rest: u32,
+}
+
+impl AlphaRows<'_> {
+    /// Rows y0..y1 in order, from their residuals in `band`, `stride` apart.
+    /// `scratch` carries the last row predicted in full from one call to the
+    /// next.
+    fn rows(
+        &mut self,
+        band: &mut [u32],
+        stride: usize,
+        scratch: &mut [u32],
+        y0: i32,
+        y1: i32,
+    ) -> Result<()> {
+        let w = self.xf.width as usize;
+        let mut y = y0;
+
+        while self.by_green && y < y1 {
+            let res = &band[(y - y0) as usize * stride..][..w];
+
+            if !self.green_row(res, y)? {
+                self.by_green = false;
+                if y > 0 {
+                    /* The full predictor picks up from the row above,
+                     * rebuilt whole. */
+                    let above = &self.green[(y as usize - 1) % 2 * (w + 1)..][..w];
+
+                    for (px, &g) in scratch[..w].iter_mut().zip(above) {
+                        let mut b = self.rest.to_ne_bytes();
+
+                        b[2] = g;
+                        *px = u32::from_ne_bytes(b);
+                    }
+                }
+                break;
+            }
+            y += 1;
+        }
+        if y == y1 {
+            return Ok(());
+        }
+
+        let base = (y - y0) as usize * stride;
+
+        self.xf.rows(band, scratch, base, stride, y, y1)?;
+        for (i, y) in (y..y1).enumerate() {
+            let row = &band[base + i * stride..][..w];
+            let at = y as usize * self.dst.stride;
+
+            (self.extract_green)(&mut self.dst.data[at..at + w], row.as_bytes());
+            self.unfilter(y);
+        }
+        Ok(())
+    }
+
+    /// Predicts row y's green from its residuals, and takes it to the plane,
+    /// unless a pixel's other channels would differ from the rest.
+    fn green_row(&mut self, res: &[u32], y: i32) -> Result<bool> {
+        let w = res.len();
+        let (a, b) = self.green[..2 * (w + 1)].split_at_mut(w + 1);
+        let (above, here) = if y % 2 == 0 { (b, a) } else { (a, b) };
+        let here = &mut here[..w];
+        let modes = self.xf.side(ROLE_PREDICTOR);
+
+        if y == 0 {
+            let black = u32::from_ne_bytes([0xFF, 0, 0, 0]);
+            let first =
+                crate::dsp::vp8l::add_pixels(res[0], black) & transform::NOT_GREEN;
+
+            if res[1..].iter().fold(0, |acc, &px| acc | px) & transform::NOT_GREEN != 0
+            {
+                return Ok(false);
+            }
+            /* Black, what mode 0 predicts, has to match as well. */
+            if first != black && Self::uses_black(modes) {
+                return Ok(false);
+            }
+            self.rest = first;
+            transform::predict_green_first_row(self.xf.dsp, res, here);
+        } else {
+            if res.iter().fold(0, |acc, &px| acc | px) & transform::NOT_GREEN != 0 {
+                return Ok(false);
+            }
+
+            let bits = modes.size_reduction;
+            let storage = &modes.storage;
+
+            transform::predict_green_row(
+                self.xf.dsp,
+                &storage.data[(y >> bits) as usize * storage.stride..],
+                bits,
+                res,
+                above,
+                here,
+            )?;
+        }
+
+        let at = y as usize * self.dst.stride;
+
+        self.dst.data[at..at + w].copy_from_slice(here);
+        self.unfilter(y);
+        Ok(true)
+    }
+
+    fn uses_black(modes: &ImageContext) -> bool {
+        let storage = &modes.storage;
+        let w = storage.width.max(0) as usize;
+
+        (0..storage.height.max(0) as usize).any(|y| {
+            storage.data[y * storage.stride..][..w]
+                .iter()
+                .any(|m| m.to_ne_bytes()[2] == 0)
+        })
+    }
+
+    fn unfilter(&mut self, y: i32) {
+        let Some(u) = self.dst.unfilter else {
+            return;
+        };
+        let w = self.xf.width as usize;
+        let stride = self.dst.stride;
+
+        if y == 0 {
+            (u.first)(None, &mut self.dst.data[..w]);
+        } else {
+            let at = (y as usize - 1) * stride;
+            let (above, here) = self.dst.data[at..].split_at_mut(stride);
+
+            (u.rest)(Some(&above[..w]), &mut here[..w]);
+        }
     }
 }
 
@@ -2155,6 +2375,156 @@ mod tests {
             }
             let n = (width * height) as usize;
             assert_eq!(out.data[..n], expected.argb.data[..n], "bands of {step}");
+        }
+    }
+
+    #[test]
+    fn alpha_rows_by_green_match_the_full_transforms() {
+        use Transform::{Color, Predictor, SubtractGreen};
+
+        fn prefix(_: Option<&[u8]>, row: &mut [u8]) {
+            for i in 1..row.len() {
+                row[i] = row[i].wrapping_add(row[i - 1]);
+            }
+        }
+
+        fn down(above: Option<&[u8]>, row: &mut [u8]) {
+            for (px, &up) in row.iter_mut().zip(above.unwrap()) {
+                *px = px.wrapping_add(up);
+            }
+        }
+
+        let (width, height) = (45, 75);
+        let w = width as usize;
+        let lists: [&[Transform]; 4] = [
+            &[Predictor],
+            &[SubtractGreen, Predictor],
+            &[Color, SubtractGreen, Predictor],
+            &[Predictor, Color],
+        ];
+        let unfilters = [
+            None,
+            Some(Unfilter {
+                first: prefix,
+                rest: down,
+            }),
+        ];
+
+        for list in lists {
+            for first_black in [false, true] {
+                for mode_0 in [false, true] {
+                    /* A residual with more than green, where the rows have to
+                     * be predicted in full from then on. */
+                    for stray in [
+                        None,
+                        Some((0, 5)),
+                        Some((31, 44)),
+                        Some((32, 0)),
+                        Some((50, 3)),
+                    ] {
+                        let make = || {
+                            let mut d = Decoder::new();
+                            d.width = width;
+                            d.height = height;
+                            d.reduced_width = width;
+                            d.transforms[..list.len()].copy_from_slice(list);
+                            d.nb_transforms = list.len();
+                            d.alpha_argb.alloc(width, height).unwrap();
+
+                            let stride = d.alpha_argb.stride;
+                            let mut v = 99u32;
+
+                            for y in 0..height as usize {
+                                for px in &mut d.alpha_argb.data[y * stride..][..w] {
+                                    v = v
+                                        .wrapping_mul(1664525)
+                                        .wrapping_add(1013904223);
+                                    /* Small steps, for ties and clamping. */
+                                    let g = ((v >> 24) as u8 & 3).wrapping_sub(1);
+
+                                    *px = u32::from_ne_bytes([0, 0, g, 0]);
+                                }
+                            }
+                            /* As an encoder leaves it: an alpha of 0 less black's. */
+                            if !first_black {
+                                d.alpha_argb.data[0] |=
+                                    u32::from_ne_bytes([1, 0, 0, 0]);
+                            }
+                            if let Some((y, x)) = stray {
+                                d.alpha_argb.data[y * stride + x] |=
+                                    u32::from_ne_bytes([0, 1, 0, 0]);
+                            }
+                            for role in [ROLE_PREDICTOR, ROLE_COLOR] {
+                                let img = &mut d.image[role];
+                                img.size_reduction = 2;
+                                img.storage
+                                    .alloc(ceil_shift(width, 2), ceil_shift(height, 2))
+                                    .unwrap();
+                                for (i, px) in img.storage.data.iter_mut().enumerate() {
+                                    /* Half select, the one predictor a mode 0
+                                     * tile's black would lead astray. */
+                                    let mode = match i {
+                                        30 if mode_0 => 0,
+                                        _ if i % 2 == 0 => 11,
+                                        _ => 1 + i % 13,
+                                    };
+
+                                    *px = if role == ROLE_PREDICTOR {
+                                        u32::from_ne_bytes([0, 0, mode as u8, 0])
+                                    } else {
+                                        (i as u32).wrapping_mul(0x7313_fa19)
+                                    };
+                                }
+                            }
+                            d
+                        };
+
+                        for unfilter in unfilters {
+                            let mut expected = make();
+                            let mut want = vec![0u8; w * height as usize];
+
+                            expected.apply_transforms(Target::Alpha, None).unwrap();
+                            for (y, row) in want.chunks_exact_mut(w).enumerate() {
+                                let stride = expected.alpha_argb.stride;
+
+                                for (a, &px) in row
+                                    .iter_mut()
+                                    .zip(&expected.alpha_argb.data[y * stride..][..w])
+                                {
+                                    *a = px.to_ne_bytes()[2];
+                                }
+                            }
+                            if let Some(u) = unfilter {
+                                (u.first)(None, &mut want[..w]);
+                                for y in 1..height as usize {
+                                    let (above, here) =
+                                        want[(y - 1) * w..].split_at_mut(w);
+
+                                    (u.rest)(Some(above), &mut here[..w]);
+                                }
+                            }
+
+                            let mut actual = make();
+                            let mut got = vec![0u8; w * height as usize];
+
+                            actual
+                                .alpha_rows(AlphaDst {
+                                    data: &mut got,
+                                    stride: w,
+                                    unfilter,
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                got,
+                                want,
+                                "{list:?} first black {first_black}, mode 0 {mode_0}, \
+                                 stray {stray:?}, unfilter {}",
+                                unfilter.is_some()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

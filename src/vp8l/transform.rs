@@ -338,3 +338,63 @@ fn expand_alpha_rows<const PPB: usize, T: Indexed>(
         }
     }
 }
+
+/// The channels of a pixel other than green, which an alpha image keeps.
+pub const NOT_GREEN: u32 = u32::from_ne_bytes([0xFF, 0xFF, 0x00, 0xFF]);
+
+/// Inverse predicts the green of row 0, whose pixels are each predicted
+/// from the one to their left and the first from black.
+pub fn predict_green_first_row(dsp: &Vp8lDsp, res: &[u32], row: &mut [u8]) {
+    row[0] = res[0].to_ne_bytes()[2];
+    (dsp.pred_green[1])(row, &[], &res[1..]);
+}
+
+/// Inverse predicts the green of a row below the first, on its own. The
+/// predictors work on each channel apart, except the select one, which
+/// sums differences over all four; when every pixel's other channels are
+/// the same, they add nothing to its sums, and green alone decides.
+///
+/// `above` is the row above's green, one longer than `row`: its last byte
+/// is where the top right of the row's last pixel is read, which is the
+/// row's first pixel, as it is in a contiguous plane.
+pub fn predict_green_row(
+    dsp: &Vp8lDsp,
+    modes: &[u32],
+    tile_bits: u32,
+    res: &[u32],
+    above: &mut [u8],
+    row: &mut [u8],
+) -> Result<()> {
+    let width = row.len();
+    let tiles = ((width - 1) >> tile_bits) + 1;
+    let modes = &modes[..tiles];
+
+    row[0] = above[0].wrapping_add(res[0].to_ne_bytes()[2]);
+    above[width] = row[0];
+
+    let mut x = 1usize;
+    let mut tile = 0;
+
+    while x < width {
+        let mode = modes[tile].to_ne_bytes()[2];
+
+        if mode > 13 {
+            crate::log::error_args(format_args!("invalid predictor mode: {mode}"));
+            return Err(Error::InvalidData);
+        }
+        tile += 1;
+        while tile < tiles && modes[tile].to_ne_bytes()[2] == mode {
+            tile += 1;
+        }
+
+        let end = (tile << tile_bits).min(width);
+
+        (dsp.pred_green[usize::from(mode)])(
+            &mut row[x - 1..end],
+            &above[x - 1..end + 1],
+            &res[x..end],
+        );
+        x = end;
+    }
+    Ok(())
+}

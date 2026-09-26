@@ -7,6 +7,7 @@ use crate::dsp::vp8l::Vp8lDsp;
 use std::ffi::c_int;
 
 pub type PredAddRaw = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
+pub type PredGreenRaw = unsafe extern "C" fn(*const u32, *const u8, c_int, *mut u8);
 pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
@@ -23,6 +24,15 @@ macro_rules! raw_vp8l {
             PredAddRaw,
             $sym,
             (*const u32, *const u32, c_int, *mut u32)
+        );
+    };
+    ($m:ident, $i:ident, pred_green, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            PredGreenRaw,
+            $sym,
+            (*const u32, *const u8, c_int, *mut u8)
         );
     };
     ($m:ident, $i:ident, map_color, $sym:literal) => {
@@ -84,6 +94,33 @@ fn pred_add<
     }
 }
 
+/* The kernel reads the left pixel at out[-1] and, with UP, the row above
+ * from upper[-1] (top left) to upper[n] (the last pixel's top right). */
+fn pred_green<T: Raw<Sig = PredGreenRaw>, const UP: bool>(
+    row: &mut [u8],
+    above: &[u8],
+    res: &[u32],
+) {
+    let n = res.len();
+
+    assert!(row.len() > n, "row too short");
+    if UP {
+        assert!(above.len() > n + 1, "row above too short");
+    }
+    unsafe {
+        (T::F)(
+            res.as_ptr(),
+            if UP {
+                above.as_ptr().add(1)
+            } else {
+                above.as_ptr()
+            },
+            n as c_int,
+            row.as_mut_ptr().add(1),
+        )
+    }
+}
+
 fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
     assert!(palette.len() >= 256, "short palette");
     unsafe {
@@ -124,6 +161,7 @@ fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
 #[derive(Default)]
 pub struct RawTable {
     pub pred_add: [Option<PredAddRaw>; 14],
+    pub pred_green: [Option<PredGreenRaw>; 14],
     pub extract_green: Option<BlendRowRaw>,
     pub add_green: Option<AddGreenRaw>,
     pub map_color32: Option<MapColorRaw>,
@@ -222,6 +260,24 @@ macro_rules! pred_raw {
     };
 }
 
+macro_rules! green_slot {
+    ($set:ident, 1) => {
+        pred_green::<$set::Green1, false>
+    };
+    ($set:ident, 11) => {
+        pred_green::<$set::Green11, true>
+    };
+}
+
+macro_rules! green_raw {
+    ($set:ident, 1) => {
+        <$set::Green1 as Raw>::F
+    };
+    ($set:ident, 11) => {
+        <$set::Green11 as Raw>::F
+    };
+}
+
 macro_rules! preds {
     ($($marker:ident, $inner:ident, $sym:literal;)*) => {
         $(raw_vp8l!($marker, $inner, pred_add, $sym);)*
@@ -233,6 +289,7 @@ macro_rules! ladder {
         $(#[$attr:meta])*
         $($flag:ident)|+ {
             $( @preds $preds:ident [ $($idx:tt),* ]; )?
+            $( @greens $greens:ident [ $($gidx:tt),* ]; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -241,6 +298,7 @@ macro_rules! ladder {
                 $(#[$attr])*
                 if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
                     $( $( dsp.pred_add[$idx] = pred_slot!($preds, $idx); )* )?
+                    $( $( dsp.pred_green[$gidx] = green_slot!($greens, $gidx); )* )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
             )*
@@ -253,6 +311,7 @@ macro_rules! ladder {
                 $(#[$attr])*
                 if flags.contains(CpuFlags::NONE$(.union(CpuFlags::$flag))+) {
                     $( $( t.pred_add[$idx] = Some(pred_raw!($preds, $idx)); )* )?
+                    $( $( t.pred_green[$gidx] = Some(green_raw!($greens, $gidx)); )* )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
             )*
@@ -388,6 +447,9 @@ mod arch {
             Pred13, pred13, "wpd_pred_add_13_neon";
         }
 
+        raw_vp8l!(Green1, green1, pred_green, "wpd_pred_green_1_neon");
+        raw_vp8l!(Green11, green11, pred_green, "wpd_pred_green_11_neon");
+
         raw_vp8l!(MapColor, map_color, map_color, "wpd_map_color32_neon");
         raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_neon");
         raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_neon");
@@ -418,6 +480,7 @@ mod arch {
     ladder! {
         NEON {
             @preds neon [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+            @greens neon [1, 11];
             map_color32 = map_color32::<neon::MapColor>;
             color_row = color_row::<neon::ColorRow>;
             extract_green = extract_green::<neon::ExtractGreen>;

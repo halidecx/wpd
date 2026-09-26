@@ -6,6 +6,7 @@ use std::slice;
 use wpd::dsp::vp8l as k;
 
 pub type PredAddFn = unsafe extern "C" fn(*const u32, *const u32, c_int, *mut u32);
+pub type PredGreenFn = unsafe extern "C" fn(*const u32, *const u8, c_int, *mut u8);
 pub type RowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MapColorFn = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_int);
 pub type ColorRowFn = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
@@ -22,6 +23,7 @@ pub struct WPDLosslessDSP {
     pub blend_row_argb_premult: RowFn,
     pub color_row: ColorRowFn,
     pub add_green: AddGreenFn,
+    pub pred_green: [PredGreenFn; PRED_COUNT],
 }
 
 unsafe extern "C" fn pred_add_0_c(
@@ -91,6 +93,49 @@ pred_tramp!(pred_add_10_c, pred_add_10, true, true, true);
 pred_tramp!(pred_add_11_c, pred_add_11, true, true, false);
 pred_tramp!(pred_add_12_c, pred_add_12, true, true, false);
 pred_tramp!(pred_add_13_c, pred_add_13, true, true, false);
+
+/* The green predictors read out[-1] and upper[-1..=n]; mode 1 no upper. */
+macro_rules! green_tramp {
+    ($name:ident, $kernel:ident, $up:literal) => {
+        unsafe extern "C" fn $name(
+            res: *const u32,
+            upper: *const u8,
+            n: c_int,
+            out: *mut u8,
+        ) {
+            let Some(n) = count(n) else {
+                return;
+            };
+            unsafe {
+                let above: &[u8] = if $up {
+                    slice::from_raw_parts(upper.sub(1), n + 2)
+                } else {
+                    &[]
+                };
+                k::$kernel(
+                    slice::from_raw_parts_mut(out.sub(1), n + 1),
+                    above,
+                    slice::from_raw_parts(res, n),
+                );
+            }
+        }
+    };
+}
+
+green_tramp!(pred_green_0_c, pred_green_0, true);
+green_tramp!(pred_green_1_c, pred_green_1, false);
+green_tramp!(pred_green_2_c, pred_green_2, true);
+green_tramp!(pred_green_3_c, pred_green_3, true);
+green_tramp!(pred_green_4_c, pred_green_4, true);
+green_tramp!(pred_green_5_c, pred_green_5, true);
+green_tramp!(pred_green_6_c, pred_green_6, true);
+green_tramp!(pred_green_7_c, pred_green_7, true);
+green_tramp!(pred_green_8_c, pred_green_8, true);
+green_tramp!(pred_green_9_c, pred_green_9, true);
+green_tramp!(pred_green_10_c, pred_green_10, true);
+green_tramp!(pred_green_11_c, pred_green_11, true);
+green_tramp!(pred_green_12_c, pred_green_12, true);
+green_tramp!(pred_green_13_c, pred_green_13, true);
 
 unsafe extern "C" fn add_green_c(dst: *mut u32, src: *const u32, n: c_int) {
     let Some(n) = count(n) else {
@@ -189,6 +234,11 @@ fn init_asm(dsp: &mut WPDLosslessDSP) {
             *slot = v;
         }
     }
+    for (slot, sel) in dsp.pred_green.iter_mut().zip(t.pred_green) {
+        if let Some(v) = sel {
+            *slot = v;
+        }
+    }
     if let Some(v) = t.extract_green {
         dsp.extract_green = v;
     }
@@ -235,6 +285,22 @@ impl WPDLosslessDSP {
             blend_row_argb_premult: blend_row_argb_premult_c,
             color_row: color_row_c,
             add_green: add_green_c,
+            pred_green: [
+                pred_green_0_c,
+                pred_green_1_c,
+                pred_green_2_c,
+                pred_green_3_c,
+                pred_green_4_c,
+                pred_green_5_c,
+                pred_green_6_c,
+                pred_green_7_c,
+                pred_green_8_c,
+                pred_green_9_c,
+                pred_green_10_c,
+                pred_green_11_c,
+                pred_green_12_c,
+                pred_green_13_c,
+            ],
         };
 
         #[cfg(all(
