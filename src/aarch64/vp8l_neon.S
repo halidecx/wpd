@@ -553,8 +553,7 @@ endfunc
 /* Select on green alone takes T + g when |L - TL| <= |T - TL|, else L + g.
  * That is L inside TL -+ |T - TL|, which a compare and a conditional
  * compare test while both sums are made, so from one pixel to the next
- * there are only those two and the pick. Plain scalar code: the chain is
- * the whole cost, and it runs one pixel at a time. */
+ * there are only those two and the pick. */
 .macro  green11_ahead   t, tl, g, lo, hi, took_t
         subs            \lo, \t,  \tl
         cneg            \lo, \lo, mi
@@ -572,35 +571,111 @@ endfunc
         csel            w4,  \took_t, w12, le
 .endm
 
-function wpd_pred_green_11_neon, export=1
-        ldurb           w4,  [x3, #-1]                  // L
-        ldurb           w5,  [x1, #-1]                  // TL
-        subs            w2,  w2,  #2
-        b.lt            2f
-1:      ldrb            w6,  [x1]
+/* Runs w16 pixels one at a time, two to an iteration. */
+.macro  green11_serial
+        subs            w16, w16, #2
+        b.lt            21f
+20:     ldrb            w6,  [x1]
         ldrb            w13, [x1, #1]
         ldrb            w7,  [x0, #2]
         ldrb            w14, [x0, #6]
         add             x1,  x1,  #2
         add             x0,  x0,  #8
         green11_ahead   w6,  w5,  w7,  w8,  w9,  w10
-        green11_ahead   w13, w6,  w14, w15, w16, w17
+        green11_ahead   w13, w6,  w14, w15, w11, w17
         green11_pick    w7,  w8,  w9,  w10
         strb            w4,  [x3]
-        green11_pick    w14, w15, w16, w17
+        green11_pick    w14, w15, w11, w17
         mov             w5,  w13
-        subs            w2,  w2,  #2
+        subs            w16, w16, #2
         strb            w4,  [x3, #1]
         add             x3,  x3,  #2
-        b.ge            1b
-2:      adds            w2,  w2,  #2
-        b.eq            9f
-        ldrb            w6,  [x1]
+        b.ge            20b
+21:     tbz             w16, #0, 22f                    // -1: one left
+        ldrb            w6,  [x1], #1
         ldrb            w7,  [x0, #2]
+        add             x0,  x0,  #4
         green11_ahead   w6,  w5,  w7,  w8,  w9,  w10
         green11_pick    w7,  w8,  w9,  w10
-        strb            w4,  [x3]
-9:      ret
+        mov             w5,  w6
+        strb            w4,  [x3], #1
+22:
+.endm
+
+/* Where every pixel of a block takes T + g, each one's L is its left
+ * neighbour's T + g, so the whole block's picks can be checked at once from
+ * those sums; flat alpha passes nearly always. A block that fails is redone
+ * one pixel at a time, from its first: starting at the first pixel to take
+ * L instead would hang the serial chain on the check. As with the gradient
+ * unfilter, GIVE_UP failed blocks in a row stop the speculation for the next
+ * SERIAL_RUN pixels, doubling with each further give-up in the call. */
+#define GREEN11_GIVE_UP    4
+#define GREEN11_SERIAL_RUN 128
+
+function wpd_pred_green_11_neon, export=1
+        stp             x19, x20, [sp, #-16]!
+        ldurb           w4,  [x3, #-1]                  // L
+        ldurb           w5,  [x1, #-1]                  // TL
+        mov             w19, #0                         // failed blocks in a row
+        mov             w20, #GREEN11_SERIAL_RUN
+        cmp             w2,  #16
+        b.lt            3f
+        dup             v0.16b,  w4
+1:      ldp             q16, q17, [x0]
+        ldp             q18, q19, [x0, #32]
+        ldr             q2,  [x1]                       // T
+        ldur            q3,  [x1, #-1]                  // TL
+        uzp2            v16.8h,  v16.8h,  v17.8h
+        uzp2            v18.8h,  v18.8h,  v19.8h
+        uzp1            v1.16b,  v16.16b, v18.16b       // g
+        add             v1.16b,  v1.16b,  v2.16b        // T + g
+        ext             v4.16b,  v0.16b,  v1.16b, #15   // L, had all taken T
+        uabd            v5.16b,  v2.16b,  v3.16b
+        uabd            v6.16b,  v4.16b,  v3.16b
+        cmhi            v6.16b,  v6.16b,  v5.16b        // took L instead
+        shrn            v6.8b,   v6.8h,   #4
+        fmov            x15, d6
+        cbnz            x15, 5f
+        str             q1,  [x3]
+        mov             v0.16b,  v1.16b
+        mov             w19, #0
+        add             x0,  x0,  #64
+        add             x1,  x1,  #16
+        add             x3,  x3,  #16
+2:      sub             w2,  w2,  #16
+        cmp             w2,  #16
+        b.ge            1b
+        umov            w4,  v0.b[15]
+        ldurb           w5,  [x1, #-1]
+3:      cmp             w2,  #0
+        b.le            9f
+        mov             w16, w2
+        green11_serial
+9:      ldp             x19, x20, [sp], #16
+        ret
+
+5:      mov             w16, #16
+        ldurb           w4,  [x3, #-1]
+        ldurb           w5,  [x1, #-1]
+        green11_serial
+        add             w19, w19, #1
+        cmp             w19, #GREEN11_GIVE_UP
+        b.ge            7f
+        dup             v0.16b,  w4
+        b               2b
+
+        // Enough of them in a row: stop speculating for a while.
+7:      sub             w2,  w2,  #16
+        cmp             w2,  w20
+        csel            w16, w2,  w20, lt
+        sub             w2,  w2,  w16
+        lsl             w20, w20, #1
+        green11_serial
+        cmp             w2,  #16
+        b.lt            3b
+        mov             w19, #0
+        dup             v0.16b,  w4
+        b               1b
 endfunc
 
 function wpd_add_green_neon, export=1

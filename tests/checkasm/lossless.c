@@ -44,31 +44,58 @@ static void check_pred_add(WPDLosslessDSP *dsp) {
     }
 }
 
-/* Narrow values make the select predictor's two distances tie often. */
+#define GREEN_PIXELS 1024
+
+static const int green_lengths[] = {
+    1, 2, 3, 5, 8, 15, 16, 17, 31, 33, 63, 64, 65, 255, 257, GREEN_PIXELS};
+
+/* The green of an alpha image's pixel x in one of a few regimes. Narrow
+ * values make the select predictor's two distances tie often. Flat rows
+ * with sparse changes keep whole blocks taking T, as alpha does, and throw
+ * each lane of a block off in turn. Banded rows alternate a stretch of
+ * noise with a flat one, so a kernel that gives up on a noisy stretch has
+ * a flat one to come back for. Last, a flat row above residuals that are
+ * never 0 (their flat is 0): from a left off the flat, no pixel of a block
+ * takes T. */
+static uint8_t green_sample(int regime, int x, uint8_t flat) {
+    switch (regime) {
+    case 1: return (uint8_t)(rnd() & 3);
+    case 2: return (rnd() & 63) ? flat : (uint8_t)rnd();
+    case 3: return (rnd() & 7) ? flat : (uint8_t)rnd();
+    case 4: return (x / 80) % 3 == 0 ? (uint8_t)rnd() : flat;
+    case 5: return flat ? flat : (uint8_t)(rnd() | 1);
+    default: return (uint8_t)rnd();
+    }
+}
+
 static void check_pred_green(WPDLosslessDSP *dsp) {
-    LOCAL_ALIGNED_16(uint32_t, res, [MAX_PIXELS + GUARD_PIXELS]);
-    LOCAL_ALIGNED_16(uint8_t, upper, [BUF_PIXELS + 1]);
-    LOCAL_ALIGNED_16(uint8_t, row0, [BUF_PIXELS]);
-    LOCAL_ALIGNED_16(uint8_t, row1, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, res, [GREEN_PIXELS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, upper, [GREEN_PIXELS + GUARD_PIXELS + 2]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [GREEN_PIXELS + GUARD_PIXELS + 1]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [GREEN_PIXELS + GUARD_PIXELS + 1]);
     declare_func(void, const uint32_t *, const uint8_t *, int, uint8_t *);
 
     for (int mode = 0; mode < WPD_PRED_COUNT; mode++) {
         if (check_func(dsp->pred_green[mode], "pred_green_%d", mode)) {
-            for (int narrow = 0; narrow < 2; narrow++) {
-                const unsigned mask = narrow ? 3 : 255;
-
-                for (size_t i = 0; i < sizeof(lengths) / sizeof(*lengths);
+            for (int regime = 0; regime < 6; regime++) {
+                for (size_t i = 0;
+                     i < sizeof(green_lengths) / sizeof(*green_lengths);
                      i++) {
-                    const int n = lengths[i];
+                    const int     n    = green_lengths[i];
+                    const uint8_t flat = (uint8_t)rnd();
 
-                    for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
-                        res[x] = (uint32_t)rnd();
-                    for (int x = 0; x < BUF_PIXELS + 1; x++)
-                        upper[x] = (uint8_t)(rnd() & mask);
-                    for (int x = 0; x < BUF_PIXELS; x++)
-                        row0[x] = row1[x] = (uint8_t)(rnd() & mask);
-                    if (narrow)
-                        for (int x = 0; x < n; x++) res[x] &= 0xFF03FFFFu;
+                    for (int x = 0; x < GREEN_PIXELS + GUARD_PIXELS; x++) {
+                        const uint32_t g = green_sample(regime, x, 0);
+
+                        res[x] = ((uint32_t)rnd() & 0xFF00FFFFu) | g << 16;
+                    }
+                    for (int x = 0; x < GREEN_PIXELS + GUARD_PIXELS + 2; x++)
+                        upper[x] = green_sample(regime, x, flat);
+                    for (int x = 0; x < GREEN_PIXELS + GUARD_PIXELS + 1; x++)
+                        row0[x] = row1[x] = green_sample(regime, x, flat);
+                    /* A left off the flat takes L all along a flat row. */
+                    if (i & 1)
+                        row0[0] = row1[0] = (uint8_t)rnd();
 
                     call_ref(res, upper + 1, n, row0 + 1);
                     call_new(res, upper + 1, n, row1 + 1);
@@ -76,9 +103,10 @@ static void check_pred_green(WPDLosslessDSP *dsp) {
                         fail();
                 }
             }
-            for (int x = 0; x < MAX_PIXELS + GUARD_PIXELS; x++)
+            for (int x = 0; x < GREEN_PIXELS + GUARD_PIXELS; x++)
                 res[x] = (uint32_t)rnd();
-            for (int x = 0; x < BUF_PIXELS + 1; x++) upper[x] = (uint8_t)rnd();
+            for (int x = 0; x < GREEN_PIXELS + GUARD_PIXELS + 2; x++)
+                upper[x] = (uint8_t)rnd();
             bench_new(res, upper + 1, MAX_PIXELS, row1 + 1);
         }
     }
