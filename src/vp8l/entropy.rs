@@ -434,7 +434,18 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
 
                 copy_block(pixels, pos, distance, length);
                 if cache_bits != 0 {
-                    cache_fill(cache, cache_bits, pixels, pos, pos + length);
+                    // A copy longer than its distance repeats its last
+                    // `distance` pixels, which leave the cache as the whole
+                    // copy would.
+                    let end = pos + length;
+
+                    cache_fill(
+                        cache,
+                        cache_bits,
+                        pixels,
+                        end - length.min(distance),
+                        end,
+                    );
                 }
                 pos += length;
                 x += length as i32;
@@ -773,5 +784,35 @@ mod tests {
 
         copy_block(&mut px, 3, 3, 5);
         assert_eq!(px, [1, 2, 3, 1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn the_last_period_of_a_copy_leaves_the_cache_as_the_whole_copy_does() {
+        let seed: [u32; 16] =
+            std::array::from_fn(|i| (i as u32).wrapping_mul(0x9E37_79B9));
+
+        for bits in [1, 2, 4] {
+            for dist in 1..=seed.len() {
+                for length in 1..40 {
+                    let mut px = vec![0u32; seed.len() + length];
+                    let pos = seed.len();
+
+                    px[..pos].copy_from_slice(&seed);
+                    copy_block(&mut px, pos, dist, length);
+
+                    let mut want = vec![0u32; 1 << bits];
+                    let mut got = want.clone();
+                    let end = pos + length;
+
+                    cache_fill(&mut want, bits, &px, 0, end);
+                    cache_fill(&mut got, bits, &px, 0, pos);
+                    cache_fill(&mut got, bits, &px, end - length.min(dist), end);
+                    assert_eq!(
+                        got, want,
+                        "bits {bits}, distance {dist}, length {length}"
+                    );
+                }
+            }
+        }
     }
 }
