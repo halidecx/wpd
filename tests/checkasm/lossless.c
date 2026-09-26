@@ -253,6 +253,38 @@ static void check_map_color32(WPDLosslessDSP *dsp) {
     }
 }
 
+#define NIBBLE_BLOCKS 64
+
+static const int nibble_blocks[] = {
+    0, 1, 2, 3, 4, 5, 7, 8, 9, 31, NIBBLE_BLOCKS};
+
+static void check_expand_alpha_nibbles(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, palette, [16]);
+    LOCAL_ALIGNED_16(uint8_t, src, [8 * NIBBLE_BLOCKS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [16 * NIBBLE_BLOCKS + GUARD_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [16 * NIBBLE_BLOCKS + GUARD_PIXELS]);
+    declare_func(void, uint8_t *, const uint8_t *, const uint8_t *, int);
+
+    if (check_func(dsp->expand_alpha_nibbles, "expand_alpha_nibbles")) {
+        for (size_t i = 0; i < sizeof(nibble_blocks) / sizeof(*nibble_blocks);
+             i++) {
+            const int n = nibble_blocks[i];
+
+            for (int x = 0; x < 16; x++) palette[x] = (uint8_t)rnd();
+            for (int x = 0; x < 8 * NIBBLE_BLOCKS + GUARD_PIXELS; x++)
+                src[x] = (uint8_t)rnd();
+            for (int x = 0; x < 16 * NIBBLE_BLOCKS + GUARD_PIXELS; x++)
+                dst0[x] = dst1[x] = (uint8_t)rnd();
+
+            call_ref(dst0, src, palette, n);
+            call_new(dst1, src, palette, n);
+            if (memcmp(dst0, dst1, 16 * NIBBLE_BLOCKS + GUARD_PIXELS))
+                fail();
+        }
+        bench_new(dst1, src, palette, NIBBLE_BLOCKS);
+    }
+}
+
 static void check_blend_row_argb(WPDLosslessDSP *dsp) {
     LOCAL_ALIGNED_16(uint8_t, src, [4 * BUF_PIXELS]);
     LOCAL_ALIGNED_16(uint8_t, dst0, [4 * BUF_PIXELS]);
@@ -400,6 +432,8 @@ void checkasm_check_lossless(void) {
     report("add_green");
     check_map_color32(&dsp);
     report("map_color32");
+    check_expand_alpha_nibbles(&dsp);
+    report("expand_alpha_nibbles");
     check_blend_row_argb(&dsp);
     report("blend_row_argb");
     check_blend_row_argb_premult(&dsp);

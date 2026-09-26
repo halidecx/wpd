@@ -19,6 +19,12 @@ typedef void (*pred_pair_func)(const uint32_t *in, const uint32_t *upper,
 typedef void (*pred_green_func)(const uint32_t *in, const uint8_t *upper,
                                 int num_pixels, uint8_t *out);
 
+/* An alpha image's palette indices, two to a byte with the first pixel in
+ * the low nibble, looked up among sixteen alphas: num_blocks blocks of
+ * sixteen pixels, from eight bytes each. */
+typedef void (*expand_alpha_func)(uint8_t *dst, const uint8_t *src,
+                                  const uint8_t *palette, int num_blocks);
+
 typedef struct WPDLosslessDSP {
     pred_add_func  pred_add[WPD_PRED_COUNT];
     pred_pair_func pred_add_pair[WPD_PRED_COUNT];
@@ -31,7 +37,8 @@ typedef struct WPDLosslessDSP {
     void (*color_row)(uint32_t *dst, const uint32_t *src, int num_pixels,
                       uint32_t mult);
     void (*add_green)(uint32_t *dst, const uint32_t *src, int num_pixels);
-    pred_green_func pred_green[WPD_PRED_COUNT];
+    pred_green_func   pred_green[WPD_PRED_COUNT];
+    expand_alpha_func expand_alpha_nibbles;
 } WPDLosslessDSP;
 
 void wpd_vp8l_dsp_init(WPDLosslessDSP *dsp);

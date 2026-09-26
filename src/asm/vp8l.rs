@@ -14,6 +14,7 @@ pub type MapColorRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u32, c_in
 pub type ColorRowRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int, u32);
 pub type BlendRowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type AddGreenRaw = unsafe extern "C" fn(*mut u32, *const u32, c_int);
+pub type ExpandAlphaRaw = unsafe extern "C" fn(*mut u8, *const u8, *const u8, c_int);
 
 pub(crate) use super::Raw;
 
@@ -76,6 +77,15 @@ macro_rules! raw_vp8l {
     };
     ($m:ident, $i:ident, add_green, $sym:literal) => {
         raw!($m, $i, AddGreenRaw, $sym, (*mut u32, *const u32, c_int));
+    };
+    ($m:ident, $i:ident, expand_alpha, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            ExpandAlphaRaw,
+            $sym,
+            (*mut u8, *const u8, *const u8, c_int)
+        );
     };
 }
 
@@ -199,6 +209,31 @@ fn add_green<T: Raw<Sig = AddGreenRaw>>(row: &mut [u32]) {
     }
 }
 
+/* The kernel takes whole blocks of sixteen pixels; the rest go one by one. */
+#[cfg(target_arch = "aarch64")]
+fn expand_alpha<T: Raw<Sig = ExpandAlphaRaw>>(
+    dst: &mut [u8],
+    src: &[u8],
+    palette: &[u8; 16],
+) {
+    let whole = dst.len() & !15;
+
+    assert!(src.len() >= dst.len().div_ceil(2), "short indices");
+    unsafe {
+        (T::F)(
+            dst.as_mut_ptr(),
+            src.as_ptr(),
+            palette.as_ptr(),
+            (whole / 16) as c_int,
+        )
+    }
+    crate::dsp::vp8l::expand_alpha_nibbles(
+        &mut dst[whole..],
+        &src[whole / 2..],
+        palette,
+    );
+}
+
 fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len() / 4);
 
@@ -216,6 +251,7 @@ pub struct RawTable {
     pub blend_row_argb: Option<BlendRowRaw>,
     pub blend_row_argb_premult: Option<BlendRowRaw>,
     pub color_row: Option<ColorRowRaw>,
+    pub expand_alpha_nibbles: Option<ExpandAlphaRaw>,
 }
 
 macro_rules! pred_slot {
@@ -364,6 +400,7 @@ macro_rules! ladder {
             $( @pairs $pairs:ident [ $($pidx:tt),* ]; )?
             $( @greens $greens:ident [ $($gidx:tt),* ]; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
+            $( @some $ofield:ident = $owrap:ident::<$omarker:path>; )*
         }
     )*) => {
         pub fn init(dsp: &mut Vp8lDsp, flags: CpuFlags) {
@@ -374,6 +411,7 @@ macro_rules! ladder {
                     $( $( dsp.pred_add_pair[$pidx] = pair_slot!($pairs, $pidx); )* )?
                     $( $( dsp.pred_green[$gidx] = green_slot!($greens, $gidx); )* )?
                     $( dsp.$field = $wrap::<$marker>; )*
+                    $( dsp.$ofield = Some($owrap::<$omarker>); )*
                 }
             )*
         }
@@ -388,6 +426,7 @@ macro_rules! ladder {
                     $( $( t.pred_add_pair[$pidx] = Some(pair_raw!($pairs, $pidx)); )* )?
                     $( $( t.pred_green[$gidx] = Some(green_raw!($greens, $gidx)); )* )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
+                    $( t.$ofield = Some(<$omarker as Raw>::F); )*
                 }
             )*
             t
@@ -533,6 +572,12 @@ mod arch {
         raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_neon");
         raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_neon");
         raw_vp8l!(
+            ExpandAlpha,
+            expand_alpha,
+            expand_alpha,
+            "wpd_expand_alpha_nibbles_neon"
+        );
+        raw_vp8l!(
             ExtractGreen,
             extract_green,
             blend_row,
@@ -574,6 +619,7 @@ mod arch {
             add_green = add_green::<neon::AddGreen>;
             blend_row_argb = blend_row::<neon::Blend>;
             blend_row_argb_premult = blend_row::<neon::BlendPremult>;
+            @some expand_alpha_nibbles = expand_alpha::<neon::ExpandAlpha>;
         }
         #[cfg(wpd_asm_dotprod)]
         NEON | DOTPROD {

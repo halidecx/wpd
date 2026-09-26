@@ -280,12 +280,19 @@ fn expand_palette_rows<const PPB: usize>(
 
 pub trait Indexed: Copy {
     fn palette_index(self) -> usize;
+
+    /// The indices as bytes, when they are bytes.
+    fn bytes(src: &[Self]) -> Option<&[u8]>;
 }
 
 impl Indexed for u32 {
     #[inline(always)]
     fn palette_index(self) -> usize {
         usize::from(self.to_ne_bytes()[2])
+    }
+
+    fn bytes(_: &[Self]) -> Option<&[u8]> {
+        None
     }
 }
 
@@ -294,9 +301,15 @@ impl Indexed for u8 {
     fn palette_index(self) -> usize {
         usize::from(self)
     }
+
+    fn bytes(src: &[Self]) -> Option<&[u8]> {
+        Some(src)
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn color_indexing_alpha<T: Indexed>(
+    dsp: &Vp8lDsp,
     src: &[T],
     src_stride: usize,
     width: usize,
@@ -311,6 +324,21 @@ pub fn color_indexing_alpha<T: Indexed>(
         *slot = entry.to_ne_bytes()[2];
     }
 
+    if let (1, Some(expand), Some(src)) =
+        (size_reduction, dsp.expand_alpha_nibbles, T::bytes(src))
+    {
+        let AlphaDst { data, stride, .. } = dst;
+        let lut: &[u8; 16] = palette.first_chunk().unwrap();
+
+        for y in 0..height as usize {
+            expand(
+                &mut data[y * stride..][..width],
+                &src[y * src_stride..],
+                lut,
+            );
+        }
+        return;
+    }
     if size_reduction > 0 {
         match 1usize << size_reduction {
             2 => {
@@ -561,6 +589,47 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /* Byte indices a nibble each go through the dsp's kernel, where it has
+     * one, and must land as the table does, tails and all. */
+    #[test]
+    fn nibble_alpha_matches_the_table() {
+        let mut state = 9;
+
+        crate::cpu::init();
+        for width in [1usize, 2, 15, 16, 17, 31, 32, 33, 63, 64, 65, 600] {
+            let height = 3;
+            let src_stride = width.div_ceil(2);
+            let stride = width + 5;
+            let src: Vec<u8> = (0..src_stride * height)
+                .map(|_| (lcg(&mut state) >> 24) as u8)
+                .collect();
+            let pal: Vec<u32> = (0..16).map(|_| lcg(&mut state)).collect();
+            let mut planes = [vec![7u8; stride * height], vec![7u8; stride * height]];
+
+            for (dsp, data) in
+                [Vp8lDsp::scalar(), Vp8lDsp::new()].iter().zip(&mut planes)
+            {
+                let dst = AlphaDst {
+                    data,
+                    stride,
+                    unfilter: None,
+                };
+
+                color_indexing_alpha(
+                    dsp,
+                    &src,
+                    src_stride,
+                    width,
+                    height as i32,
+                    &pal,
+                    1,
+                    dst,
+                );
+            }
+            assert!(planes[0] == planes[1], "width {width}");
         }
     }
 }

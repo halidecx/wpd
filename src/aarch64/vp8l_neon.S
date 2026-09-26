@@ -1171,6 +1171,40 @@ function wpd_map_color32_neon, export=1
 9:      ret
 endfunc
 
+/* An alpha image's palette indices packed two to a byte, the first pixel
+ * in the low nibble, looked up among the sixteen alphas at x2: w3 blocks
+ * of sixteen pixels, from eight bytes each. */
+function wpd_expand_alpha_nibbles_neon, export=1
+        ld1             {v31.16b}, [x2]
+        movi            v30.16b, #15
+        subs            w3,  w3,  #4
+        b.lt            2f
+1:      ldp             q0,  q1,  [x1], #32
+        subs            w3,  w3,  #4
+        and             v2.16b,  v0.16b,  v30.16b
+        ushr            v3.16b,  v0.16b,  #4
+        and             v4.16b,  v1.16b,  v30.16b
+        ushr            v5.16b,  v1.16b,  #4
+        tbl             v2.16b,  {v31.16b}, v2.16b
+        tbl             v3.16b,  {v31.16b}, v3.16b
+        tbl             v4.16b,  {v31.16b}, v4.16b
+        tbl             v5.16b,  {v31.16b}, v5.16b
+        st2             {v2.16b, v3.16b}, [x0], #32
+        st2             {v4.16b, v5.16b}, [x0], #32
+        b.ge            1b
+2:      adds            w3,  w3,  #4
+        b.eq            9f
+3:      ldr             d0,  [x1], #8
+        subs            w3,  w3,  #1
+        and             v2.8b,   v0.8b,   v30.8b
+        ushr            v3.8b,   v0.8b,   #4
+        tbl             v2.8b,   {v31.16b}, v2.8b
+        tbl             v3.8b,   {v31.16b}, v3.8b
+        st2             {v2.8b,  v3.8b},  [x0], #16
+        b.gt            3b
+9:      ret
+endfunc
+
 const blend_scale
         .long           0
         .set            bsi, 1

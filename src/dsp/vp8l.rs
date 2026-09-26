@@ -237,6 +237,14 @@ pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
     }
 }
 
+/// Expands an alpha image's palette indices packed two to a byte, the
+/// first pixel in the low nibble: `dst` from `src[..dst.len().div_ceil(2)]`.
+pub fn expand_alpha_nibbles(dst: &mut [u8], src: &[u8], palette: &[u8; 16]) {
+    for (x, o) in dst.iter_mut().enumerate() {
+        *o = palette[usize::from(src[x / 2] >> (x % 2 * 4)) & 15];
+    }
+}
+
 #[inline(always)]
 fn green(px: u32) -> u8 {
     px.to_ne_bytes()[2]
@@ -458,6 +466,10 @@ pub type PredPairFn =
 /// above[i + 2], and lands at row[i + 1].
 pub type PredGreenFn = fn(row: &mut [u8], above: &[u8], res: &[u32]);
 
+/// Expands an alpha image's palette indices packed two to a byte, as
+/// [`expand_alpha_nibbles`] does.
+pub type ExpandAlphaFn = fn(dst: &mut [u8], src: &[u8], palette: &[u8; 16]);
+
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
     pub pred_add_pair: [Option<PredPairFn>; 14],
@@ -468,6 +480,8 @@ pub struct Vp8lDsp {
     pub add_green: fn(&mut [u32]),
     pub blend_row_argb: fn(&mut [u8], &[u8]),
     pub blend_row_argb_premult: fn(&mut [u8], &[u8]),
+    /// Only where it beats the table the portable path builds per image.
+    pub expand_alpha_nibbles: Option<ExpandAlphaFn>,
 }
 
 fn plane_pred_0(plane: &mut [u32], out: usize, _up: usize, n: usize) {
@@ -553,6 +567,7 @@ impl Vp8lDsp {
             add_green,
             blend_row_argb,
             blend_row_argb_premult,
+            expand_alpha_nibbles: None,
         }
     }
 

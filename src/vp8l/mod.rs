@@ -946,6 +946,7 @@ impl Decoder {
         let pal = &self.image[ROLE_PALETTE];
 
         transform::color_indexing_alpha(
+            &self.dsp,
             &self.indices[..total],
             width,
             self.width.max(0) as usize,
@@ -1170,6 +1171,7 @@ impl Decoder {
 
     fn apply_color_indexing_alpha(&mut self, target: Target, dst: AlphaDst<'_>) {
         let Decoder {
+            dsp,
             image,
             argb,
             alpha_argb,
@@ -1181,6 +1183,7 @@ impl Decoder {
         let pal = &image[ROLE_PALETTE];
 
         transform::color_indexing_alpha(
+            dsp,
             &pic.data,
             pic.stride,
             pic.width as usize,
