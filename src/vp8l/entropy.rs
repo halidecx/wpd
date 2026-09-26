@@ -371,16 +371,21 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
                 if hg.trivial_literal {
                     px = hg.literal;
                 } else {
-                    px = match hg.packed {
+                    let packed = match hg.packed {
                         Some(at) => {
-                            let index = f.peek() as usize & PACKED_MASK;
-
-                            arena[at as usize + index].to_ne_bytes()
+                            arena[at as usize + (f.peek() as usize & PACKED_MASK)]
                         }
-                        None => [0; 4],
+                        None => 0,
                     };
-                    if px[2] != 0 {
-                        f.consume(u32::from(px[2]));
+
+                    if packed != 0 {
+                        f.consume_entry(packed);
+                        px = [
+                            (packed >> 16) as u8,
+                            (packed >> 8) as u8,
+                            0,
+                            (packed >> 24) as u8,
+                        ];
                     } else {
                         let r = hg.trees[HUFF_IDX_RED]
                             .read_fast::<false>(arena, &mut f, buf);

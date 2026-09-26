@@ -61,18 +61,17 @@ impl Reader {
         let val = f.peek() as usize;
         let mut index = val & self.mask as usize;
         let mut entry = table[index];
-        let mut bits = entry & 0xFF;
+        let bits = entry & 0xFF;
 
         if bits > TABLE_BITS {
             index += (entry >> 8) as usize
                 + ((val >> TABLE_BITS) & ((1 << (bits - TABLE_BITS)) - 1));
             entry = table[index];
-            bits = TABLE_BITS + (entry & 0xFF);
         }
         if REFILL {
             f.refill(buf);
         }
-        f.consume(bits);
+        f.consume_entry(entry);
         entry >> 8
     }
 }
@@ -91,7 +90,7 @@ impl Tree<'_> {
             index += (entry >> 8) as usize
                 + (val & ((1 << (bits - TABLE_BITS)) - 1)) as usize;
             entry = self.full[index];
-            bits = entry & 0xFF;
+            bits = (entry & 0xFF) - TABLE_BITS;
         }
         br.advance(bits as i32);
         entry >> 8
@@ -336,8 +335,9 @@ fn fill(p: &Plan, table: &mut [u32], sorted: &[u16]) -> bool {
             let slot = &mut table[sub..sub + span];
 
             double_to(slot, &mut filled, span);
-            slot[(key >> root_bits) as usize] =
-                entry(len - root_bits, u32::from(sorted[symbol]));
+            // The whole length, not what is left of it past the root, so that
+            // `read_fast` consumes by the entry as it comes out of the table.
+            slot[(key >> root_bits) as usize] = entry(len, u32::from(sorted[symbol]));
             symbol += 1;
             key = next_key(key, len);
             count[len as usize] -= 1;
@@ -389,9 +389,9 @@ pub fn build(
 pub const PACKED_BITS: u32 = 8;
 
 /// Appends a table that decodes the red, blue and alpha codes of a literal in
-/// one lookup, for the next `PACKED_BITS` of the stream. An entry is the pixel
-/// in `[a, r, g, b]` order with the bits the three codes take in place of
-/// green, or zero where they take more than `PACKED_BITS`.
+/// one lookup, for the next `PACKED_BITS` of the stream. An entry holds, from
+/// its low byte up, the bits the three codes take, red, alpha and blue, or is
+/// zero where they take more than `PACKED_BITS`.
 pub fn build_packed(arena: &mut Vec<u32>, codes: [Reader; 3]) -> Result<u32> {
     let start = arena.len();
     let size = 1usize << PACKED_BITS;
@@ -421,7 +421,7 @@ pub fn build_packed(arena: &mut Vec<u32>, codes: [Reader; 3]) -> Result<u32> {
         if used <= PACKED_BITS {
             let [r, b, a] = symbols;
 
-            *slot = u32::from_ne_bytes([a, r, used as u8, b]);
+            *slot = used | u32::from(r) << 8 | u32::from(a) << 16 | u32::from(b) << 24;
         }
     }
     Ok(start as u32)
@@ -651,7 +651,7 @@ mod tests {
             });
             let want = if used <= PACKED_BITS {
                 packed += 1;
-                u32::from_ne_bytes([a, r, used as u8, b])
+                u32::from_le_bytes([used as u8, r, a, b])
             } else {
                 0
             };

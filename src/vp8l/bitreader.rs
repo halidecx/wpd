@@ -193,6 +193,16 @@ impl Fast {
         self.avail -= n;
     }
 
+    /// Consumes as many bits as the low byte of a table entry says, of at
+    /// most 63. The shift looks at only the low six bits of its amount, so
+    /// it takes the entry as it is, with no mask between the load of the
+    /// entry and the bits that index the next one.
+    #[inline(always)]
+    pub fn consume_entry(&mut self, entry: u32) {
+        self.val = self.val.wrapping_shr(entry);
+        self.avail -= entry & 0xFF;
+    }
+
     #[inline(always)]
     pub fn bits(&mut self, n: u32) -> u32 {
         let v = self.val as u32 & ((1u32 << n) - 1);
