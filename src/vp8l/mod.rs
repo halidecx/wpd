@@ -178,9 +178,13 @@ pub struct Resume {
 pub struct HTreeGroup {
     pub trees: [Reader; HUFFMAN_CODES_PER_META_CODE],
     pub trivial_literal: bool,
+    /// The literal pixel, if `trivial_literal`, and else its alpha, if the
+    /// alpha code has a single symbol.
     pub literal: [u8; 4],
     /// Where `huffman::build_packed` put the group's table in the arena.
     pub packed: Option<u32>,
+    /// Where `huffman::build_fused` put the group's table in the arena.
+    pub fused: Option<u32>,
 }
 
 #[derive(Default)]
@@ -635,9 +639,11 @@ impl Decoder {
             };
             let hg = &mut img.groups[group];
 
+            let opaque = hg.trees[HUFF_IDX_ALPHA].mask == 0;
+
             hg.trivial_literal = hg.trees[HUFF_IDX_RED].mask == 0
                 && hg.trees[HUFF_IDX_BLUE].mask == 0
-                && hg.trees[HUFF_IDX_ALPHA].mask == 0;
+                && opaque;
             if hg.trivial_literal {
                 for (slot, tree) in
                     [(0, HUFF_IDX_ALPHA), (1, HUFF_IDX_RED), (3, HUFF_IDX_BLUE)]
@@ -645,14 +651,25 @@ impl Decoder {
                     hg.literal[slot] = hg.trees[tree].tree(&img.arena).only_symbol();
                 }
             } else if pixels / PACKED_MIN_PIXELS >= nb_groups {
-                hg.packed = Some(huffman::build_packed(
+                let packed = huffman::build_packed(
                     &mut img.arena,
                     [
                         hg.trees[HUFF_IDX_RED],
                         hg.trees[HUFF_IDX_BLUE],
                         hg.trees[HUFF_IDX_ALPHA],
                     ],
-                )?);
+                )?;
+
+                hg.packed = Some(packed);
+                if opaque {
+                    hg.literal[0] =
+                        hg.trees[HUFF_IDX_ALPHA].tree(&img.arena).only_symbol();
+                    hg.fused = huffman::build_fused(
+                        &mut img.arena,
+                        hg.trees[HUFF_IDX_GREEN],
+                        packed,
+                    )?;
+                }
             }
         }
         Ok(())

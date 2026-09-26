@@ -423,7 +423,7 @@ pub fn build(
     })
 }
 
-/// Bits that index the table built by `build_packed`.
+/// Bits that index the tables built by `build_packed` and `build_fused`.
 pub const PACKED_BITS: u32 = 8;
 
 /// Appends a table that decodes the red, blue and alpha codes of a literal in
@@ -463,6 +463,56 @@ pub fn build_packed(arena: &mut Vec<u32>, codes: [Reader; 3]) -> Result<u32> {
         }
     }
     Ok(start as u32)
+}
+
+/// Appends a table that decodes a whole literal in one lookup, for the next
+/// `PACKED_BITS` of the stream, from the green code and the table
+/// `build_packed` made at `packed`. An entry is the pixel with the bits its
+/// codes take in place of alpha, which has to have a single symbol, or zero
+/// where green is not a literal or the codes take more than `PACKED_BITS`.
+///
+/// A literal the table cannot decode costs a mispredicted branch on top of
+/// the lookups it takes anyway, so the table is kept only if it decodes
+/// three quarters of the code space.
+pub fn build_fused(
+    arena: &mut Vec<u32>,
+    green: Reader,
+    packed: u32,
+) -> Result<Option<u32>> {
+    let start = arena.len();
+    let size = 1usize << PACKED_BITS;
+
+    if start + size > u32::MAX as usize {
+        return Err(Error::NoMemory);
+    }
+    arena.try_reserve(size).map_err(|_| Error::NoMemory)?;
+    arena.resize(start + size, 0);
+
+    let (tables, fused) = arena.split_at_mut(start);
+    let root = &tables[green.start as usize..][..=green.mask as usize];
+    let packed = &tables[packed as usize..][..size];
+
+    for (i, slot) in fused.iter_mut().enumerate() {
+        let entry = root[i & (root.len() - 1)];
+        let bits = entry & 0xFF;
+        let g = entry >> 8;
+
+        if bits > PACKED_BITS || g >= 256 {
+            continue;
+        }
+
+        let rba = packed[i >> bits];
+        let used = bits + (rba & 0xFF);
+
+        if rba != 0 && used <= PACKED_BITS {
+            *slot = used | (rba & 0xFF00) | g << 16 | (rba & 0xFF00_0000);
+        }
+    }
+    if fused.iter().filter(|&&e| e != 0).count() < size * 3 / 4 {
+        arena.truncate(start);
+        return Ok(None);
+    }
+    Ok(Some(start as u32))
 }
 
 pub fn read_simple_code(
@@ -749,5 +799,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Builds green, red, blue and alpha codes, with green's literals taking
+    /// three quarters of its code space, or half without `three_quarters`,
+    /// and the fused table over them.
+    fn build_fused_from(three_quarters: bool) -> (Vec<u32>, [Reader; 4], Option<u32>) {
+        let mut green = vec![0u8; 280];
+
+        if three_quarters {
+            [green[0], green[1], green[256], green[257]] = [1, 2, 3, 3];
+        } else {
+            [green[0], green[256], green[257]] = [1, 2, 2];
+        }
+
+        let mut arena = Vec::new();
+        let codes: [&[u8]; 4] = [&green, &[1, 2, 3, 3], &[1, 1], &[0, 0, 1]];
+        let readers = codes.map(|lengths| {
+            let mut plan = Plan::default();
+            let mut sorted = vec![0u16; lengths.len()];
+
+            count_lengths(&mut plan, lengths);
+            build(&mut arena, &mut plan, lengths, &mut sorted).unwrap()
+        });
+        let [g, r, b, a] = readers;
+        let packed = build_packed(&mut arena, [r, b, a]).unwrap();
+        let len = arena.len();
+        let fused = build_fused(&mut arena, g, packed).unwrap();
+
+        assert_eq!(arena.len(), len + fused.map_or(0, |_| 1 << PACKED_BITS));
+        (arena, readers, fused)
+    }
+
+    #[test]
+    fn a_fused_entry_is_the_literal_read_code_by_code() {
+        let (arena, readers, at) = build_fused_from(true);
+        let at = at.unwrap() as usize;
+        let codes = [[1u32, 2, 3, 3], [1, 1, 0, 0], [0; 4]];
+        let trees = readers.map(|r| r.tree(&arena));
+        let mut fused = 0;
+
+        for i in 0..1usize << PACKED_BITS {
+            let buf = (i as u64 | 0xA5A5 << PACKED_BITS).to_le_bytes();
+            let mut br = BitReader::new(&buf);
+            let [g, r, b, a] = trees.map(|t| t.read(&mut br));
+            let green_bits = match g {
+                0 => 1,
+                1 => 2,
+                _ => 3,
+            };
+            let used = green_bits + codes[0][r as usize] + codes[1][b as usize];
+            let want = if g < 256 && used <= PACKED_BITS {
+                fused += 1;
+                u32::from_le_bytes([used as u8, r as u8, g as u8, b as u8])
+            } else {
+                0
+            };
+
+            assert_eq!(a, 2);
+            assert_eq!(arena[at + i], want, "index {i:#x}");
+        }
+        assert_eq!(fused, 3 << (PACKED_BITS - 2));
+    }
+
+    #[test]
+    fn a_fused_table_that_decodes_too_little_is_dropped() {
+        assert!(build_fused_from(false).2.is_none());
     }
 }

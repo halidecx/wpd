@@ -295,14 +295,19 @@ fn resolve<'a>(
 }
 
 pub fn decode_pixels(args: Args<'_, '_>) -> Result<Status> {
-    if args.resumable {
-        run::<true>(args)
-    } else {
-        run::<false>(args)
+    // Most images have no fused tables, and their bulk loop does not look
+    // for one at every pixel.
+    let fused = args.groups.iter().any(|hg| hg.fused.is_some());
+
+    match (args.resumable, fused) {
+        (true, true) => run::<true, true>(args),
+        (true, false) => run::<true, false>(args),
+        (false, true) => run::<false, true>(args),
+        (false, false) => run::<false, false>(args),
     }
 }
 
-fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
+fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<Status> {
     let Args {
         gb,
         buf,
@@ -368,6 +373,35 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
             if x & huff_mask == 0 {
                 hgi = map.at(x, y);
                 hg = &groups[hgi];
+            }
+            if let Some(at) = hg.fused.filter(|_| FUSED) {
+                let fused = arena[at as usize + (f.peek() as usize & PACKED_MASK)];
+
+                if fused != 0 {
+                    f.refill(buf);
+                    f.consume_entry(fused);
+
+                    let px = u32::from_ne_bytes([
+                        hg.literal[0],
+                        (fused >> 8) as u8,
+                        (fused >> 16) as u8,
+                        (fused >> 24) as u8,
+                    ]);
+
+                    pixels[pos] = px;
+                    if cache_bits != 0 {
+                        let argb = cache_value(px);
+
+                        cache[cache_slot(argb, cache_bits)] = argb;
+                    }
+                    pos += 1;
+                    x += 1;
+                    if x == width as i32 {
+                        x = 0;
+                        y += 1;
+                    }
+                    continue;
+                }
             }
             let v = hg.trees[HUFF_IDX_GREEN].read_fast::<true>(arena, &mut f, buf);
 
