@@ -4,7 +4,7 @@ pub mod tables;
 use crate::bits::{rl16, rl24};
 use crate::dsp::vp8::Vp8Dsp;
 use crate::dsp::vp8pred::{self as pred, Vp8Pred};
-use rac::RangeCoder;
+use rac::{RangeCoder, TokenCoder};
 use tables::*;
 
 const NUM_DCT_TOKENS: usize = 12;
@@ -775,7 +775,7 @@ impl Coeffs {
         let nzc = mb.non_zero_count_cache.as_flattened_mut();
         /* A local copy stays in registers across all 25 blocks; through
          * &mut it went back to memory after every bit. */
-        let mut c = self.coeff_partition[part];
+        let mut c = self.coeff_partition[part].tokens();
         let mut nz = u32::from(self.top_nnz[mb_x]) | u32::from(self.left_nnz) << 16;
         let mut any = 0;
         let mut dc_nz = 0;
@@ -831,7 +831,7 @@ impl Coeffs {
             any |= n;
         }
 
-        self.coeff_partition[part] = c;
+        self.coeff_partition[part] = c.finish();
         self.top_nnz[mb_x] = nz as u16;
         self.left_nnz = (nz >> 16) as u16;
 
@@ -1887,7 +1887,7 @@ fn nnz_ctx(nz: u32, m: u32) -> usize {
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn decode_block_coeffs(
-    c: &mut RangeCoder,
+    c: &mut TokenCoder,
     buf: &[u8],
     block: &mut [i16; 16],
     probs: &[[[u8; NUM_DCT_TOKENS - 1]; 3]; 16],
