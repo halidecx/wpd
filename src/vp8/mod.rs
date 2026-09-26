@@ -1337,29 +1337,19 @@ impl Recon {
         }
     }
 
-    fn filter_mb_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
-        let mut off = self.row_offsets(mb_y);
-        let row = (mb_y & 1) * self.mb_width;
+    fn filter_mb_at(&self, planes: &mut Planes<'_>, mb_x: usize, mb_y: usize) {
+        let g = self.planes;
+        let strength = self.filter_strength[(mb_y & 1) * self.mb_width + mb_x];
+        let off = [
+            g[0].at(16 * mb_x, 16 * mb_y),
+            g[1].at(8 * mb_x, 8 * mb_y),
+            g[2].at(8 * mb_x, 8 * mb_y),
+        ];
 
-        for mb_x in 0..self.mb_width {
-            let strength = self.filter_strength[row + mb_x];
-
+        if self.filter.simple {
+            self.filter_mb_simple(planes[0], off[0], strength, mb_x, mb_y);
+        } else {
             self.filter_mb(planes, off, strength, mb_x, mb_y);
-            off[0] += 16;
-            off[1] += 8;
-            off[2] += 8;
-        }
-    }
-
-    fn filter_mb_row_simple(&mut self, luma: &mut [u8], mb_y: usize) {
-        let mut off = self.planes[0].at(0, 16 * mb_y);
-        let row = (mb_y & 1) * self.mb_width;
-
-        for mb_x in 0..self.mb_width {
-            let strength = self.filter_strength[row + mb_x];
-
-            self.filter_mb_simple(luma, off, strength, mb_x, mb_y);
-            off += 16;
         }
     }
 
@@ -1416,31 +1406,32 @@ impl Recon {
             let at = (mb_y & 1) * self.mb_width + mb_x;
 
             self.filter_strength[at] = self.filter_level_for_mb(mb);
-        }
-    }
 
-    fn filter_row(&mut self, planes: &mut Planes<'_>, mb_y: usize) {
-        if self.deblock_filter {
-            if self.filter.simple {
-                self.filter_mb_row_simple(planes[0], mb_y);
-            } else {
-                self.filter_mb_row(planes, mb_y);
+            /* The row above is filtered a macroblock behind this one: its
+             * bottom edge stays unfiltered until every macroblock that
+             * predicts from it is done. */
+            if mb_y > 0 && mb_x > 0 {
+                self.filter_mb_at(planes, mb_x - 1, mb_y - 1);
             }
         }
     }
 
-    /// Filters what reconstructing row `mb_y` has made final. VP8 predicts
-    /// from unfiltered pixels, so a row is filtered only once the row below
-    /// it is decoded, and the last row after itself. `filter` is false for
-    /// a row a partition ran dry in: the frame ends there, with that row
-    /// unfiltered below filtered ones, as when each row was filtered as it
-    /// was decoded.
+    /// Filters what reconstructing row `mb_y` has made final: the end of the
+    /// row above, which reconstruct_mb() filters a macroblock behind itself,
+    /// and the last row whole. `filter` is false for a row a partition ran
+    /// dry in: the frame ends there, with that row unfiltered below filtered
+    /// ones, as when each row was filtered as it was decoded.
     fn finish_row(&mut self, planes: &mut Planes<'_>, mb_y: usize, filter: bool) {
+        if !self.deblock_filter {
+            return;
+        }
         if mb_y > 0 {
-            self.filter_row(planes, mb_y - 1);
+            self.filter_mb_at(planes, self.mb_width - 1, mb_y - 1);
         }
         if filter && mb_y + 1 == self.mb_height {
-            self.filter_row(planes, mb_y);
+            for mb_x in 0..self.mb_width {
+                self.filter_mb_at(planes, mb_x, mb_y);
+            }
         }
     }
 }
