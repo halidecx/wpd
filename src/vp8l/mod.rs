@@ -24,6 +24,13 @@ const PADDING: usize = 16;
 
 const ARENA_CHUNK: usize = 4096;
 
+/// Bits that can index the root of a green table. Green has the most
+/// symbols, and a code too long for the root takes a second lookup behind a
+/// branch that mispredicts. A group gets a root of at most a quarter as many
+/// entries as it covers pixels, on average, so that small images and images
+/// of many groups do not spend longer building tables than using them.
+const GREEN_TABLE_BITS: u32 = 11;
+
 /// Pixels a group has to cover, on average, before it gets the table
 /// `huffman::build_packed` makes. A table takes about as long to build as it
 /// saves over 200 literals.
@@ -574,6 +581,13 @@ impl Decoder {
         img.arena
             .try_reserve(ARENA_CHUNK)
             .map_err(|_| Error::NoMemory)?;
+
+        let green_bits = (pixels / nb_groups)
+            .max(1)
+            .ilog2()
+            .saturating_sub(2)
+            .clamp(huffman::TABLE_BITS, GREEN_TABLE_BITS);
+
         #[allow(clippy::needless_range_loop)]
         for code in 0..nb_group_codes {
             let group = if role == ROLE_ARGB && *huffman_groups_mapped {
@@ -591,7 +605,11 @@ impl Decoder {
                 };
                 let alphabet_size = ALPHABET_SIZES[j] as usize + extra;
                 let lengths = &mut lengths[..alphabet_size];
-                let mut plan = Plan::default();
+                let mut plan = if j == HUFF_IDX_GREEN {
+                    Plan::with_root_bits(green_bits)
+                } else {
+                    Plan::default()
+                };
 
                 lengths.fill(0);
                 if gb.bit(buf) != 0 {
