@@ -54,6 +54,7 @@ pub fn gradient_unfilter(prev: Option<&[u8]>, row: &mut [u8]) {
 
 pub type UnfilterFn = fn(Option<&[u8]>, &mut [u8]);
 
+#[derive(Clone)]
 pub struct FilterDsp {
     pub horizontal_unfilter: UnfilterFn,
     pub vertical_unfilter: UnfilterFn,

@@ -11,7 +11,7 @@ use crate::image::Format;
 use crate::picture::{Buffer, Frame};
 
 use super::convert::{convert_to_argb, format_is_packed, format_is_premultiplied};
-use super::slot::{AheadEntry, FrameSlot};
+use super::slot::{AheadEntry, FrameSlot, MAX_SLOTS};
 use super::{Decoder, InputMode, Source, ANIM_SUBFRAME};
 
 pub struct CPlacement {
@@ -236,12 +236,6 @@ impl<'a> Decoder<'a> {
     /// streamed animation or replaceable input gets one. The work threshold
     /// is checked against sub-frame dimensions after lookahead.
     fn ahead_count(&self) -> usize {
-        /* A batch costs about as long as its slowest frame, so the fewer
-         * batches an animation takes the better, up to the point where the
-         * frames no longer each find a core: on 18 threads, 16 decoded a
-         * 42-frame animation 1.14x faster than 12, and 18 did it 0.85x as
-         * fast as 16 while other work was running. */
-        const MAX_SLOTS: usize = 16;
         /* Y, U, V, alpha and the ARGB a sub-frame may be converted into. */
         const BYTES_PER_PIXEL: i64 = 6;
         const BUDGET: i64 = 96 << 20;
@@ -273,6 +267,7 @@ impl<'a> Decoder<'a> {
             base: first.0,
             size: first.1,
             out: Err(Error::InvalidData),
+            pending: false,
         });
 
         while found.len() < want && at + 8 <= self.end {
@@ -298,6 +293,7 @@ impl<'a> Decoder<'a> {
                 base: at + 8,
                 size,
                 out: Err(Error::InvalidData),
+                pending: false,
             });
             at += 8 + padded;
         }
@@ -400,20 +396,17 @@ impl<'a> Decoder<'a> {
         self.ahead.entries = entries;
         self.ahead.pos = 0;
 
-        let threads = self.threads.0;
-        let (_, ahead, mut env) = self.frame_parts();
+        /* The same count whatever the canvas, so one pool serves every file
+         * the decoder opens; the calling thread is the last of them. */
+        let workers = self.threads.0.min(MAX_SLOTS) - 1;
+        let (_, ahead, env) = self.frame_parts();
 
-        env.threads = 1;
         ahead.settings = env.settings;
-        let mut jobs: Vec<(&mut FrameSlot, &mut AheadEntry)> = ahead
-            .slots
-            .iter_mut()
-            .zip(ahead.entries.iter_mut())
-            .collect();
+        ahead.submit(&env, workers);
 
-        crate::task::for_each(threads, &mut jobs, |(slot, entry)| {
-            entry.out = slot.decode_anmf_image(&env, entry.base, entry.size);
-        });
+        let first = &mut ahead.entries[0];
+
+        first.out = ahead.slots[0].decode_anmf_image(&env, first.base, first.size);
     }
 
     /// Takes the frame decoded ahead for the chunk at `base`, if there is one.
@@ -430,8 +423,9 @@ impl<'a> Decoder<'a> {
             return None;
         }
         self.ahead.pos += 1;
+        self.ahead.collect(i);
         std::mem::swap(&mut self.frame, &mut self.ahead.slots[i]);
-        Some(entry.out)
+        Some(self.ahead.entries[i].out)
     }
 
     pub(crate) fn decode_anmf(&mut self, base: usize, size: usize) -> Result<()> {

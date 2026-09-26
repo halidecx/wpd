@@ -40,6 +40,15 @@ pub(crate) struct FrameSettings {
     pub(crate) premultiply: bool,
 }
 
+/// The frames an animation may have decoded ahead of the walk at once.
+///
+/// A batch costs about as long as its slowest frame, so the fewer batches an
+/// animation takes the better, up to the point where the frames no longer
+/// each find a core: on 18 threads, 16 decoded a 42-frame animation 1.14x
+/// faster than 12, and 18 did it 0.85x as fast as 16 while other work was
+/// running.
+pub(crate) const MAX_SLOTS: usize = 16;
+
 /// Everything one frame's decode produces and nothing that outlives it.
 ///
 /// A still uses a single slot. An animation's frames depend on nothing but
@@ -384,6 +393,9 @@ pub(crate) struct AheadEntry {
     pub(crate) base: usize,
     pub(crate) size: usize,
     pub(crate) out: Result<Source>,
+    /// Handed to the pool and not collected yet, so `out` means nothing and
+    /// the entry's slot is a stand-in.
+    pub(crate) pending: bool,
 }
 
 /// Frames decoded ahead of the one being handed out, and the slots holding
@@ -395,10 +407,21 @@ pub(crate) struct Ahead {
     pub(crate) entries: Vec<AheadEntry>,
     pub(crate) pos: usize,
     pub(crate) settings: FrameSettings,
+    /// Each slot's copy of the payload it is decoding, kept to be reused.
+    inputs: Vec<Input<'static>>,
+    pool: Option<Pool>,
 }
 
 impl Ahead {
     pub(crate) fn clear(&mut self) {
+        if self.entries.iter().any(|e| e.pending) {
+            if let Some(pool) = &self.pool {
+                for finished in pool.drain() {
+                    self.slots[finished.index] = finished.slot;
+                    self.inputs[finished.index] = finished.input;
+                }
+            }
+        }
         self.entries.clear();
         self.pos = 0;
     }
@@ -413,5 +436,303 @@ impl Ahead {
     /// True once every frame decoded ahead has been handed over.
     pub(crate) fn spent(&self) -> bool {
         self.pos >= self.entries.len()
+    }
+
+    /// Hands every entry after the first to a pool of up to `workers`
+    /// threads, each with its own copy of the entry's payload. An entry
+    /// whose payload cannot be copied ends the batch.
+    pub(crate) fn submit(&mut self, env: &FrameEnv<'_, '_>, workers: usize) {
+        let input = env.input;
+
+        if self.pool.as_ref().is_none_or(|pool| pool.size != workers) {
+            /* The old threads have nothing left to do: a batch is only
+             * started once the one before it has been collected. */
+            self.pool = Some(Pool::new(workers, env));
+        }
+        if self.inputs.len() < self.entries.len() {
+            self.inputs.resize_with(self.entries.len(), Input::default);
+        }
+
+        let mut jobs = Vec::new();
+
+        for (index, entry) in self.entries.iter_mut().enumerate().skip(1) {
+            let mut copy = std::mem::take(&mut self.inputs[index]);
+
+            if jobs.try_reserve(1).is_err()
+                || copy.own(input.chunk(entry.base, entry.size)).is_err()
+            {
+                self.entries.truncate(index);
+                break;
+            }
+            jobs.push(Job {
+                index,
+                slot: std::mem::take(&mut self.slots[index]),
+                input: copy,
+                size: entry.size,
+                settings: self.settings,
+            });
+            entry.pending = true;
+        }
+        if let Some(pool) = &mut self.pool {
+            pool.submit(jobs);
+        }
+    }
+
+    /// Brings entry `i` back from the pool, waiting for it to be decoded or
+    /// decoding it here if no thread has started on it.
+    pub(crate) fn collect(&mut self, i: usize) {
+        let (Some(pool), true) = (&self.pool, self.entries[i].pending) else {
+            return;
+        };
+        let finished = pool.collect(i);
+
+        self.slots[i] = finished.slot;
+        self.inputs[i] = finished.input;
+        self.entries[i].pending = false;
+        match finished.out {
+            Ok(out) => self.entries[i].out = out,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Waits for every frame of the batch to be decoded.
+    #[cfg(all(test, feature = "threads"))]
+    pub(crate) fn settle(&mut self) {
+        for i in 0..self.entries.len() {
+            self.collect(i);
+        }
+    }
+}
+
+/// Threads that decode an animation's frames ahead of the walk, kept from
+/// one frame to the next and from one file to the next.
+///
+/// A batch decoded inside a scope has to be finished before the call that
+/// started it returns, so the walk could composite nothing until the last
+/// frame of the batch was in, and every batch paid again for starting its
+/// threads. These outlive the call instead: the frames of a batch are handed
+/// over and the walk collects each as it reaches it, compositing the ones
+/// before while the rest are still being decoded. A job owns everything it
+/// touches, the slot it decodes into and a copy of its ANMF payload, so
+/// nothing it holds is borrowed from the decoder. Idle threads wait on a
+/// condition variable, and leave once the decoder is dropped.
+struct Pool {
+    shared: std::sync::Arc<Shared>,
+    /// Threads started, which spawning may have fallen short of.
+    threads: usize,
+    /// The most threads the pool may start.
+    size: usize,
+}
+
+struct Shared {
+    queue: std::sync::Mutex<Queue>,
+    /// Signalled when a job is queued, or the pool is closing.
+    work: std::sync::Condvar,
+    /// Signalled when a job has finished.
+    done: std::sync::Condvar,
+    ldsp: Vp8lDsp,
+    fdsp: FilterDsp,
+    ydsp: YuvDsp,
+}
+
+#[derive(Default)]
+struct Queue {
+    waiting: std::collections::VecDeque<Job>,
+    finished: Vec<Finished>,
+    running: usize,
+    closing: bool,
+}
+
+struct Job {
+    index: usize,
+    slot: FrameSlot,
+    input: Input<'static>,
+    size: usize,
+    settings: FrameSettings,
+}
+
+struct Finished {
+    index: usize,
+    slot: FrameSlot,
+    input: Input<'static>,
+    out: std::thread::Result<Result<Source>>,
+}
+
+impl Shared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Queue> {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn wait<'q>(
+        &self,
+        on: &std::sync::Condvar,
+        queue: std::sync::MutexGuard<'q, Queue>,
+    ) -> std::sync::MutexGuard<'q, Queue> {
+        on.wait(queue)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn run(&self, job: Job) -> Finished {
+        let Job {
+            index,
+            mut slot,
+            input,
+            size,
+            settings,
+        } = job;
+        let env = FrameEnv {
+            input: &input,
+            ldsp: &self.ldsp,
+            fdsp: &self.fdsp,
+            ydsp: &self.ydsp,
+            settings,
+            threads: 1,
+        };
+        /* The copy starts where the ANMF payload did. A panic is carried
+         * back to be raised on the thread that collects the frame. */
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            slot.decode_anmf_image(&env, 0, size)
+        }));
+
+        Finished {
+            index,
+            slot,
+            input,
+            out,
+        }
+    }
+
+    fn work(&self) {
+        let mut queue = self.lock();
+
+        while !queue.closing {
+            let Some(job) = queue.waiting.pop_front() else {
+                queue = self.wait(&self.work, queue);
+                continue;
+            };
+
+            queue.running += 1;
+            drop(queue);
+
+            let finished = self.run(job);
+
+            queue = self.lock();
+            queue.running -= 1;
+            queue.finished.push(finished);
+            self.done.notify_all();
+        }
+    }
+}
+
+impl Pool {
+    fn new(size: usize, env: &FrameEnv<'_, '_>) -> Self {
+        let shared = std::sync::Arc::new(Shared {
+            queue: std::sync::Mutex::default(),
+            work: std::sync::Condvar::new(),
+            done: std::sync::Condvar::new(),
+            ldsp: env.ldsp.clone(),
+            fdsp: env.fdsp.clone(),
+            ydsp: env.ydsp.clone(),
+        });
+
+        Self {
+            shared,
+            threads: 0,
+            size,
+        }
+    }
+
+    /// Queues `jobs`, then starts as many more threads as they could use.
+    /// The jobs go first so that each thread finds one the moment it runs.
+    /// One thread is started here and it starts the rest, since a spawn
+    /// costs the spawning thread several microseconds that this one would
+    /// rather spend decoding the first frame.
+    fn submit(&mut self, jobs: Vec<Job>) {
+        let more = jobs.len().min(self.size).saturating_sub(self.threads);
+
+        self.shared.lock().waiting.extend(jobs);
+        self.shared.work.notify_all();
+        if more == 0 {
+            return;
+        }
+
+        /* Fewer threads than asked for, or none, still gets every job done:
+         * collect() runs whatever no thread has taken. */
+        let shared = std::sync::Arc::clone(&self.shared);
+        let starter = std::thread::Builder::new().spawn(move || {
+            for _ in 1..more {
+                let shared = std::sync::Arc::clone(&shared);
+
+                if std::thread::Builder::new()
+                    .spawn(move || shared.work())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            shared.work();
+        });
+
+        if starter.is_ok() {
+            self.threads += more;
+        }
+    }
+
+    fn collect(&self, index: usize) -> Finished {
+        let mut queue = self.shared.lock();
+
+        loop {
+            if let Some(at) = queue.finished.iter().position(|f| f.index == index) {
+                return queue.finished.swap_remove(at);
+            }
+
+            let waiting = queue.waiting.iter().position(|j| j.index == index);
+
+            if let Some(job) = waiting.and_then(|at| queue.waiting.remove(at)) {
+                drop(queue);
+                return self.shared.run(job);
+            }
+            queue = self.shared.wait(&self.shared.done, queue);
+        }
+    }
+
+    /// Takes back every job not collected, once none is still running. What
+    /// they decoded is dropped, and so is any panic, which has already been
+    /// reported where it happened.
+    fn drain(&self) -> Vec<Finished> {
+        let mut queue = self.shared.lock();
+        let mut back: Vec<Finished> = queue
+            .waiting
+            .drain(..)
+            .map(|job| Finished {
+                index: job.index,
+                slot: job.slot,
+                input: job.input,
+                out: Ok(Err(Error::InvalidData)),
+            })
+            .collect();
+
+        while queue.running != 0 {
+            queue = self.shared.wait(&self.shared.done, queue);
+        }
+        back.append(&mut queue.finished);
+        back
+    }
+}
+
+impl Drop for Pool {
+    /// Tells the threads to finish without waiting for them to: each owns
+    /// everything it holds, and waiting would cost the decoder's owner the
+    /// time it takes every thread to wake and exit.
+    fn drop(&mut self) {
+        {
+            let mut queue = self.shared.lock();
+
+            queue.closing = true;
+            queue.waiting.clear();
+        }
+        self.shared.work.notify_all();
     }
 }

@@ -470,6 +470,7 @@ pub type PredGreenFn = fn(row: &mut [u8], above: &[u8], res: &[u32]);
 /// [`expand_alpha_nibbles`] does.
 pub type ExpandAlphaFn = fn(dst: &mut [u8], src: &[u8], palette: &[u8; 16]);
 
+#[derive(Clone)]
 pub struct Vp8lDsp {
     pub pred_add: [PredAddFn; 14],
     pub pred_add_pair: [Option<PredPairFn>; 14],

@@ -1757,6 +1757,7 @@ mod tests {
         assert!(decoder.next_picture(&mut Handout::default()).unwrap());
         assert!(!decoder.ahead.slots.is_empty());
         assert!(!decoder.ahead.spent());
+        decoder.ahead.settle();
         let count = decoder.ahead.slots.len();
         let allocated: Vec<_> =
             decoder.ahead.slots.iter().map(|s| s.vp8.as_ptr()).collect();

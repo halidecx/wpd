@@ -591,6 +591,7 @@ fn upsample_block<const L: usize>(
     );
 }
 
+#[derive(Clone)]
 pub struct YuvDsp {
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
     /// Whether a layout's block is fast enough that a row's last few pairs
