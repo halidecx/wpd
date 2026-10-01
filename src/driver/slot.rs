@@ -1071,4 +1071,63 @@ mod tests {
             assert!(held + SLOTS * FRAME_BYTES <= BUDGET);
         }
     }
+
+    #[test]
+    fn a_smaller_share_releases_retained_capacity_and_reuses_copies_that_fit() {
+        let cap = 128 + FILE_PADDING;
+        let mut ahead = Ahead {
+            payload_cap: cap * 2,
+            ..Ahead::default()
+        };
+
+        for capacity in [cap + 1, cap, cap - 1, cap + 32] {
+            let mut input = Input::new();
+
+            input.own_exact(&vec![0; capacity - FILE_PADDING]).unwrap();
+            /* The current payload fits, but its retained allocation may not. */
+            input.own_exact(&[1; 16]).unwrap();
+            assert_eq!(input.capacity(), capacity);
+            ahead.inputs.push(input);
+            ahead.slots.push(FrameSlot::default());
+        }
+        let kept = [
+            ahead.inputs[1].bytes().as_ptr(),
+            ahead.inputs[2].bytes().as_ptr(),
+        ];
+        let mut input = Input::new();
+
+        input.borrow(&[9; 16]);
+        let env = FrameEnv {
+            input: &input,
+            ldsp: &Vp8lDsp::new(),
+            fdsp: &FilterDsp::new(),
+            ydsp: &YuvDsp::new(),
+            settings: FrameSettings::default(),
+            threads: 1,
+        };
+        let entries = vec![
+            AheadEntry {
+                base: 0,
+                size: 16,
+                out: Err(Error::InvalidData),
+                pending: false,
+            };
+            4
+        ];
+
+        /* Leave jobs queued so clear() returns their copies without decoding. */
+        ahead.start(&env, entries, None, 0, 0, cap);
+        assert_eq!(ahead.inputs[0].capacity(), 0);
+        ahead.clear();
+
+        assert!(ahead.inputs.iter().all(|input| input.capacity() <= cap));
+        for (j, capacity) in [(1, cap), (2, cap - 1)] {
+            assert_eq!(ahead.inputs[j].capacity(), capacity);
+            assert_eq!(ahead.inputs[j].bytes().as_ptr(), kept[j - 1]);
+        }
+        assert_eq!(ahead.inputs[3].capacity(), 16 + FILE_PADDING);
+        for input in &ahead.inputs[1..] {
+            assert_eq!(input.bytes(), &[9; 16]);
+        }
+    }
 }
