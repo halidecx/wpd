@@ -725,8 +725,67 @@ static void check_loopfilter8uv_all(VP8DSPContext *d) {
     }
 }
 
+/* The decoder's previous path composes the existing SIMD edge filters.
+ * Keep that baseline in checkasm so a scalar comparison cannot conceal a
+ * regression against the filters the decoder already uses. */
+static void filter16y_composed(VP8DSPContext *d, uint8_t *p, ptrdiff_t s, int e,
+                               int be, int i, int hev) {
+    d->vp8_h_loop_filter16y_mb(p, s, e, be, i, hev);
+    d->vp8_v_loop_filter16y_mb(p, s, e, be, i, hev);
+}
+
+static void filter8uv_composed(VP8DSPContext *d, uint8_t *u, uint8_t *v,
+                               ptrdiff_t s, int e, int be, int i, int hev) {
+    d->vp8_h_loop_filter8uv_mb(u, v, s, e, be, i, hev);
+    d->vp8_v_loop_filter8uv_mb(u, v, s, e, be, i, hev);
+}
+
+static void check_filter16y_composed(VP8DSPContext *d) {
+    LOOPFILTER_BUFFER(buf, 20 * MB_STRIDE);
+    uint8_t *p = LOOPFILTER_DATA(buf) + 4 * MB_STRIDE + 16;
+    declare_func(
+        void, VP8DSPContext *, uint8_t *, ptrdiff_t, int, int, int, int);
+
+    if (check_key((CheckasmKey)d->vp8_h_loop_filter16y_mb,
+                  "vp8_loop_filter16y_composed")) {
+        init_loopfilter_buffer(buf);
+        fill_smooth_buffer_h(LOOPFILTER_DATA(buf), 20, 8);
+        checkasm_key_new = (CheckasmKey)filter16y_composed;
+        bench_new(d, p, MB_STRIDE, 24, 20, 10, 2);
+    }
+}
+
+static void check_filter8uv_composed(VP8DSPContext *d) {
+    LOOPFILTER_BUFFER(bufu, 12 * MB_STRIDE);
+    LOOPFILTER_BUFFER(bufv, 12 * MB_STRIDE);
+    uint8_t *u = LOOPFILTER_DATA(bufu) + 4 * MB_STRIDE + 16;
+    uint8_t *v = LOOPFILTER_DATA(bufv) + 4 * MB_STRIDE + 16;
+    declare_func(void,
+                 VP8DSPContext *,
+                 uint8_t *,
+                 uint8_t *,
+                 ptrdiff_t,
+                 int,
+                 int,
+                 int,
+                 int);
+
+    if (check_key((CheckasmKey)d->vp8_h_loop_filter8uv_mb,
+                  "vp8_loop_filter8uv_composed")) {
+        init_loopfilter_buffer(bufu);
+        init_loopfilter_buffer(bufv);
+        fill_smooth_buffer_h(LOOPFILTER_DATA(bufu), 12, 8);
+        fill_smooth_buffer_h(LOOPFILTER_DATA(bufv), 12, 8);
+        checkasm_key_new = (CheckasmKey)filter8uv_composed;
+        bench_new(d, u, v, MB_STRIDE, 24, 20, 10, 2);
+    }
+}
+
 static void check_all(VP8DSPContext *d) {
     ff_vp8dsp_init(d);
+    check_filter16y_composed(d);
+    check_filter8uv_composed(d);
+    report("composed");
     check_idct(d);
     check_idct_dc4(d);
     check_luma_dc_wht(d);

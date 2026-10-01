@@ -124,7 +124,7 @@ fn pred_add<
 
 /* Each row's left is at [-1] and the upper row's top left at up - 1; the
  * lower row's above is the upper row's output, from out - 1. */
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 fn pred_pair<T: Raw<Sig = PredPairRaw>>(
     plane: &mut [u32],
     out: usize,
@@ -152,7 +152,7 @@ fn pred_pair<T: Raw<Sig = PredPairRaw>>(
 
 /* The kernel reads the left pixel at out[-1] and, with UP, the row above
  * from upper[-1] (top left) to upper[n] (the last pixel's top right). */
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 fn pred_green<T: Raw<Sig = PredGreenRaw>, const UP: bool>(
     row: &mut [u8],
     above: &[u8],
@@ -210,7 +210,7 @@ fn add_green<T: Raw<Sig = AddGreenRaw>>(row: &mut [u32]) {
 }
 
 /* The kernel takes whole blocks of sixteen pixels; the rest go one by one. */
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
 fn expand_alpha<T: Raw<Sig = ExpandAlphaRaw>>(
     dst: &mut [u8],
     src: &[u8],
@@ -494,6 +494,18 @@ mod arch {
             Pred11, pred11, "wpd_pred_add_11_avx2";
         }
 
+        raw_vp8l!(Pair11, pair11, pred_pair, "wpd_pred_add_11_pair_avx2");
+        raw_vp8l!(Pair12, pair12, pred_pair, "wpd_pred_add_12_pair_avx2");
+        raw_vp8l!(Pair13, pair13, pred_pair, "wpd_pred_add_13_pair_avx2");
+        raw_vp8l!(Green1, green1, pred_green, "wpd_pred_green_1_avx2");
+        raw_vp8l!(Green11, green11, pred_green, "wpd_pred_green_11_avx2");
+        raw_vp8l!(
+            ExpandAlpha,
+            expand_alpha,
+            expand_alpha,
+            "wpd_expand_alpha_nibbles_avx2"
+        );
+
         raw_vp8l!(MapColor, map_color, map_color, "wpd_map_color32_avx2");
         raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_avx2");
         raw_vp8l!(
@@ -527,12 +539,15 @@ mod arch {
         }
         AVX2 {
             @preds avx2 [0, 1, 2, 3, 4, 8, 9, 11];
+            @pairs avx2 [11, 12, 13];
+            @greens avx2 [1, 11];
             map_color32 = map_color32::<avx2::MapColor>;
             color_row = color_row::<avx2::ColorRow>;
             extract_green = extract_green::<avx2::ExtractGreen>;
             add_green = add_green::<avx2::AddGreen>;
             blend_row_argb = blend_row::<avx2::Blend>;
             blend_row_argb_premult = blend_row::<avx2::BlendPremult>;
+            @some expand_alpha_nibbles = expand_alpha::<avx2::ExpandAlpha>;
         }
     }
 }

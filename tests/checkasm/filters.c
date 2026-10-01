@@ -8,8 +8,8 @@
 
 /* Besides the usual boundaries, 161 lands a row end exactly where a kernel
  * that falls back to a fixed-length serial burst finishes one. */
-static const int widths[] = {0,   1,   2,   3,   7,   8,        9,
-                             15,  16,  17,  24,  31,  63,       127,
+static const int widths[] = {0,   1,   2,   3,   7,   8,        9,  15,
+                             16,  17,  24,  31,  32,  33,       63, 127,
                              128, 161, 255, 256, 509, MAX_WIDTH};
 
 static void check_unfilter(unfilter_func func, const char *name) {
@@ -68,6 +68,29 @@ static void check_unfilter(unfilter_func func, const char *name) {
     }
 }
 
+static void check_gradient_regimes(unfilter_func func) {
+    LOCAL_ALIGNED_16(uint8_t, prev, [MAX_WIDTH]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [MAX_WIDTH]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [MAX_WIDTH]);
+    static const char *names[] = {"random", "flat", "wrap"};
+    declare_func(void, const uint8_t *, uint8_t *, int);
+
+    for (int regime = 0; regime < 3; regime++) {
+        if (check_func(func, "gradient_unfilter_%s", names[regime])) {
+            for (int x = 0; x < MAX_WIDTH; x++) {
+                prev[x] = regime ? 128 : (uint8_t)rnd();
+                row0[x] = regime == 1 ? 0 : regime == 2 ? 1 : (uint8_t)rnd();
+            }
+            memcpy(row1, row0, sizeof(row0));
+            call_ref(prev, row0, MAX_WIDTH);
+            call_new(prev, row1, MAX_WIDTH);
+            if (memcmp(row0, row1, sizeof(row0)))
+                fail();
+            bench_new(prev, row1, MAX_WIDTH);
+        }
+    }
+}
+
 void checkasm_check_filters(void) {
     WPDFILTERSDSP dsp;
 
@@ -75,5 +98,6 @@ void checkasm_check_filters(void) {
     check_unfilter(dsp.horizontal_unfilter, "horizontal_unfilter");
     check_unfilter(dsp.vertical_unfilter, "vertical_unfilter");
     check_unfilter(dsp.gradient_unfilter, "gradient_unfilter");
+    check_gradient_regimes(dsp.gradient_unfilter);
     report("unfilter");
 }

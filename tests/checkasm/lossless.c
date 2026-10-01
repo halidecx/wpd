@@ -8,8 +8,9 @@
 #define GUARD_PIXELS 8
 #define BUF_PIXELS (1 + MAX_PIXELS + GUARD_PIXELS)
 
-static const int lengths[] = {
-    1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 19, 31, 63, 64, 255, MAX_PIXELS};
+static const int lengths[] = {0,  1,   2,   3,   4,   5,         7,  8,
+                              15, 16,  17,  19,  31,  32,        33, 63,
+                              64, 127, 128, 129, 255, MAX_PIXELS};
 
 #define randomize_pixels(buf0, buf1)                 \
     do {                                             \
@@ -106,8 +107,9 @@ static void check_pred_pair(WPDLosslessDSP *dsp) {
 
 #define GREEN_PIXELS 1024
 
-static const int green_lengths[] = {
-    1, 2, 3, 5, 8, 15, 16, 17, 31, 33, 63, 64, 65, 255, 257, GREEN_PIXELS};
+static const int green_lengths[] = {0,  1,  2,  3,  5,  8,   15,  16,
+                                    17, 31, 32, 33, 47, 48,  49,  63,
+                                    64, 65, 95, 96, 97, 255, 257, GREEN_PIXELS};
 
 /* The green of an alpha image's pixel x in one of a few regimes. Narrow
  * values make the select predictor's two distances tie often. Flat rows
@@ -199,8 +201,9 @@ static void check_extract_green(WPDLosslessDSP *dsp) {
 #define MAP_PIXELS 1024
 #define MAP_BUF (MAP_PIXELS + GUARD_PIXELS)
 
-static const int map_lengths[] = {
-    1, 7, 8, 9, 16, 17, 33, 159, 160, 161, 175, 177, 400, 1023, MAP_PIXELS};
+static const int map_lengths[] = {0,   1,   7,   8,   9,   16,   17,        31,
+                                  32,  33,  63,  64,  79,  80,   81,        159,
+                                  160, 161, 175, 177, 400, 1023, MAP_PIXELS};
 
 /* An index image's pixel x in one of a few regimes. Runs, some long enough
  * for a kernel to follow and some not; one long run with a rare odd pixel,
@@ -216,6 +219,9 @@ static uint32_t map_sample(int regime, int x, uint32_t *run, int *left) {
         return *run;
     case 2: return (rnd() & 127) ? *run : (uint32_t)rnd();
     case 3: return (x & 1) ? ~*run : *run;
+    case 4: return (uint32_t)rnd() & 0xff0fffffu;
+    case 5: return x < 16 ? (uint32_t)rnd() & 0xff0fffffu : (uint32_t)rnd();
+    case 6: return ((uint32_t)rnd() & 0xff00ffffu) | (uint32_t)(x % 16) << 16;
     default: return (uint32_t)rnd();
     }
 }
@@ -228,7 +234,7 @@ static void check_map_color32(WPDLosslessDSP *dsp) {
     declare_func(void, uint8_t *, const uint8_t *, const uint32_t *, int);
 
     if (check_func(dsp->map_color32, "map_color32")) {
-        for (int regime = 0; regime < 4; regime++) {
+        for (int regime = 0; regime < 7; regime++) {
             for (size_t i = 0; i < sizeof(map_lengths) / sizeof(*map_lengths);
                  i++) {
                 const int n    = map_lengths[i];
@@ -459,6 +465,132 @@ static void check_color_row(WPDLosslessDSP *dsp) {
     }
 }
 
+/* Benchmark the previous two-call path as well as the paired kernels. */
+static void pred_pair_composed(pred_add_func single, const uint32_t *upper,
+                               int n, uint32_t *a, uint32_t *b) {
+    single(a, upper, n, a);
+    single(b, a, n, b);
+}
+
+static void check_pair_composed(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, upper, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, a, [BUF_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, b, [BUF_PIXELS]);
+    declare_func(
+        void, pred_add_func, const uint32_t *, int, uint32_t *, uint32_t *);
+
+    for (int mode = 11; mode <= 13; mode++) {
+        if (check_key((CheckasmKey)dsp->pred_add[mode],
+                      "pred_add_pair_%d_composed",
+                      mode)) {
+            for (int x = 0; x < BUF_PIXELS; x++) {
+                upper[x] = (uint32_t)rnd();
+                a[x]     = (uint32_t)rnd();
+                b[x]     = (uint32_t)rnd();
+            }
+            checkasm_key_new = (CheckasmKey)pred_pair_composed;
+            bench_new(dsp->pred_add[mode], upper + 1, MAX_PIXELS, a + 1, b + 1);
+        }
+    }
+}
+
+/* The branch distribution matters as much as vector width for these
+ * kernels. Keep distinct benchmarks for arithmetic and shortcut paths. */
+static void check_blend_regimes(WPDLosslessDSP *dsp, int premult) {
+    LOCAL_ALIGNED_16(uint8_t, src, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst0, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, dst1, [4 * MAX_PIXELS]);
+    static const char *names[] = {"random", "opaque", "clear", "binary"};
+    declare_func(void, uint8_t *, const uint8_t *, int);
+
+    for (int regime = 0; regime < 4; regime++) {
+        if (check_func(
+                premult ? dsp->blend_row_argb_premult : dsp->blend_row_argb,
+                "blend_row_argb%s_%s",
+                premult ? "_premult" : "",
+                names[regime])) {
+            for (int x = 0; x < 4 * MAX_PIXELS; x += 4) {
+                WPD_WN32A(src + x, rnd());
+                WPD_WN32A(dst0 + x, rnd());
+                if (regime == 1)
+                    src[x] = 255;
+                if (regime == 2)
+                    src[x] = 0;
+                if (regime == 3)
+                    src[x] = rnd() & 1 ? 255 : 0;
+                if (premult && !src[x])
+                    WPD_WN32A(src + x, 0);
+            }
+            memcpy(dst1, dst0, sizeof(dst0));
+            call_ref(dst0, src, MAX_PIXELS);
+            call_new(dst1, src, MAX_PIXELS);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+            bench_new(dst1, src, MAX_PIXELS);
+        }
+    }
+}
+
+static void check_green_regimes(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, res, [GREEN_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, upper, [GREEN_PIXELS + 2]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [GREEN_PIXELS + 1]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [GREEN_PIXELS + 1]);
+    static const char *names[] = {"random", "flat", "left"};
+    declare_func(void, const uint32_t *, const uint8_t *, int, uint8_t *);
+
+    for (int mode = 1; mode <= 11; mode += 10) {
+        for (int regime = 0; regime < 3; regime++) {
+            if (check_func(dsp->pred_green[mode],
+                           "pred_green_%d_%s",
+                           mode,
+                           names[regime])) {
+                for (int x = 0; x < GREEN_PIXELS; x++)
+                    res[x] = regime ? 0 : (uint32_t)rnd();
+                for (int x = 0; x < GREEN_PIXELS + 2; x++)
+                    upper[x] = regime ? 100 : (uint8_t)rnd();
+                memset(row0, regime == 2 ? 42 : 100, sizeof(row0));
+                memcpy(row1, row0, sizeof(row0));
+                call_ref(res, upper + 1, GREEN_PIXELS, row0 + 1);
+                call_new(res, upper + 1, GREEN_PIXELS, row1 + 1);
+                if (memcmp(row0, row1, sizeof(row0)))
+                    fail();
+                bench_new(res, upper + 1, GREEN_PIXELS, row1 + 1);
+            }
+        }
+    }
+}
+
+static void check_map_regimes(WPDLosslessDSP *dsp) {
+    LOCAL_ALIGNED_16(uint32_t, palette, [256]);
+    LOCAL_ALIGNED_16(uint32_t, src, [MAP_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst0, [MAP_PIXELS]);
+    LOCAL_ALIGNED_16(uint32_t, dst1, [MAP_PIXELS]);
+    static const char *names[] = {"random", "runs", "short_runs", "small"};
+    declare_func(void, uint8_t *, const uint8_t *, const uint32_t *, int);
+
+    for (int regime = 0; regime < 4; regime++) {
+        if (check_func(dsp->map_color32, "map_color32_%s", names[regime])) {
+            for (int x = 0; x < 256; x++) palette[x] = (uint32_t)rnd();
+            for (int x = 0; x < MAP_PIXELS; x++) {
+                const uint32_t index = regime == 1 ? (unsigned)x / 256
+                    : regime == 2                  ? (unsigned)x / 8
+                    : regime == 3                  ? rnd() & 15
+                                                   : rnd() & 255;
+                src[x] = ((uint32_t)rnd() & 0xff00ffffu) | index << 16;
+            }
+            call_ref(
+                (uint8_t *)dst0, (const uint8_t *)src, palette, MAP_PIXELS);
+            call_new(
+                (uint8_t *)dst1, (const uint8_t *)src, palette, MAP_PIXELS);
+            if (memcmp(dst0, dst1, sizeof(dst0)))
+                fail();
+            bench_new(
+                (uint8_t *)dst1, (const uint8_t *)src, palette, MAP_PIXELS);
+        }
+    }
+}
+
 void checkasm_check_lossless(void) {
     WPDLosslessDSP dsp;
 
@@ -483,4 +615,10 @@ void checkasm_check_lossless(void) {
     report("blend_row_argb_premult");
     check_color_row(&dsp);
     report("color_row");
+    check_pair_composed(&dsp);
+    check_blend_regimes(&dsp, 0);
+    check_blend_regimes(&dsp, 1);
+    check_green_regimes(&dsp);
+    check_map_regimes(&dsp);
+    report("regimes");
 }

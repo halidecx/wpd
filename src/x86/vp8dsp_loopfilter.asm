@@ -1419,3 +1419,480 @@ MBEDGE_LOOPFILTER v, 16
 MBEDGE_LOOPFILTER h, 16
 MBEDGE_LOOPFILTER v,  8
 MBEDGE_LOOPFILTER h,  8
+
+SECTION_RODATA 32
+wf_min: times 16 dw -128
+wf_max: times 16 dw 127
+wf_1:   times 16 dw 1
+wf_3:   times 16 dw 3
+wf_4:   times 16 dw 4
+wf_9:   times 16 dw 9
+wf_18:  times 16 dw 18
+wf_27:  times 16 dw 27
+wf_63:  times 16 dw 63
+
+SECTION .text
+
+; Sixteen independent edge samples in words. Widening once gives exact
+; absolute differences, signed shifts, and three-tap weighted updates
+; without packing and unpacking each intermediate byte expression.
+; m0..m7 are p3..q3; m12..m14 hold the edge, interior and HEV limits.
+%macro WFILTER 2-3 0 ; macroblock edge, columns, paired U/V rows
+%if %2
+%assign wi 0
+%rep 8
+    pmovzxbw m %+ wi, [r2q + (wi - 4)*16]
+%assign wi wi+1
+%endrep
+%else
+    lea       r3q, [r2q+mstrideq*4]
+%if %3
+    lea       r5q, [r4q+mstrideq*4]
+%endif
+%assign wi 0
+%rep 8
+%if %3
+    movq      xm8, [r3q]
+    pinsrq    xm8, xm8, [r5q], 1
+    pmovzxbw m %+ wi, xm8
+%else
+    pmovzxbw m %+ wi, [r3q]
+%endif
+%if wi < 7
+    add       r3q, strideq
+%if %3
+    add       r5q, strideq
+%endif
+%endif
+%assign wi wi+1
+%endrep
+%endif
+    vpbroadcastw m12, [rsp+352+4*(1-%1)]
+    vpbroadcastw m13, [rsp+360]
+    vpbroadcastw m14, [rsp+364]
+    psubw     m8, m0, m1
+    pabsw     m8, m8
+    psubw     m9, m1, m2
+    pabsw     m9, m9
+    pmaxsw    m8, m8, m9
+    psubw     m9, m2, m3
+    pabsw     m9, m9
+    pmaxsw    m8, m8, m9
+    psubw     m10, m5, m4
+    pabsw     m10, m10
+    pmaxsw    m9, m9, m10           ; HEV differences
+    pmaxsw    m8, m8, m10
+    psubw     m10, m6, m5
+    pabsw     m10, m10
+    pmaxsw    m8, m8, m10
+    psubw     m10, m7, m6
+    pabsw     m10, m10
+    pmaxsw    m8, m8, m10
+    pcmpgtw   m8, m8, m13          ; interior limit failed
+    pcmpgtw   m9, m9, m14          ; high edge variance
+    psubw     m10, m3, m4
+    pabsw     m10, m10
+    paddw     m10, m10, m10
+    psubw     m11, m2, m5
+    pabsw     m11, m11
+    psrlw     m11, m11, 1
+    paddw     m10, m10, m11
+    pcmpgtw   m10, m10, m12
+    por       m8, m8, m10
+    pcmpeqw   m15, m15
+    pxor      m8, m8, m15          ; lanes passing both limits
+    ptest     m8, m8
+    jz %%done
+    psubw     m10, m2, m5
+    pminsw    m10, m10, [wf_max]
+    pmaxsw    m10, m10, [wf_min]
+%if !%1
+    pand      m10, m10, m9         ; inner low-variance lanes omit p1-q1
+%endif
+    psubw     m11, m4, m3
+    pmullw    m11, m11, [wf_3]
+    paddw     m10, m10, m11
+    pminsw    m10, m10, [wf_max]
+    pmaxsw    m10, m10, [wf_min]
+    pand      m10, m10, m8
+%if %1
+    pandn     m0, m9, m10          ; macroblock low-variance six-tap filter
+    pand      m10, m10, m9
+%endif
+    paddw     m11, m10, [wf_4]
+    pminsw    m11, m11, [wf_max]
+    psraw     m11, m11, 3          ; f1
+    paddw     m10, m10, [wf_3]
+    pminsw    m10, m10, [wf_max]
+    psraw     m10, m10, 3          ; f2
+    paddw     m3, m3, m10
+    psubw     m4, m4, m11
+%if %1
+    pmullw    m10, m0, [wf_27]
+    paddw     m10, m10, [wf_63]
+    psraw     m10, m10, 7
+    paddw     m3, m3, m10
+    psubw     m4, m4, m10
+    pmullw    m10, m0, [wf_18]
+    paddw     m10, m10, [wf_63]
+    psraw     m10, m10, 7
+    paddw     m2, m2, m10
+    psubw     m5, m5, m10
+    pmullw    m10, m0, [wf_9]
+    paddw     m10, m10, [wf_63]
+    psraw     m10, m10, 7
+    paddw     m1, m1, m10
+    psubw     m6, m6, m10
+%assign first 1
+%assign last 6
+%else
+    paddw     m11, m11, [wf_1]
+    psraw     m11, m11, 1
+    pandn     m11, m9, m11
+    paddw     m2, m2, m11
+    psubw     m5, m5, m11
+%assign first 2
+%assign last 5
+%endif
+%if !%2
+    lea       r3q, [r2q+mstrideq*4]
+%if %3
+    lea       r5q, [r4q+mstrideq*4]
+%if first == 1
+    add       r5q, strideq
+%else
+    lea       r5q, [r5q+strideq*2]
+%endif
+%endif
+%if first == 1
+    add       r3q, strideq
+%else
+    lea       r3q, [r3q+strideq*2]
+%endif
+%endif
+%assign wi first
+%rep last-first+1
+    vextracti128 xm8, m %+ wi, 1
+    packuswb  xm %+ wi, xm %+ wi, xm8
+%if %2
+    movu      [r2q + (wi-4)*16], xm %+ wi
+%else
+%if %3
+    movq      [r3q], xm %+ wi
+    psrldq    xm %+ wi, xm %+ wi, 8
+    movq      [r5q], xm %+ wi
+    add       r5q, strideq
+%else
+    movu      [r3q], xm %+ wi
+%endif
+    add       r3q, strideq
+%endif
+%assign wi wi+1
+%endrep
+%%done:
+%endmacro
+
+; The column buffer holds -4..15, each a vector of 16 edge samples.
+; Both directions run in one call, with one core-block transpose each way.
+INIT_YMM avx2
+cglobal vp8_loop_filter16y, 7, 12, 16, 384, dst, stride, e, be, i, hev, edges, dst4, dst8, dst12, dst16, mstride
+    mov       [rsp+352], ed
+    mov       [rsp+356], bed
+    mov       [rsp+360], id
+    mov       [rsp+364], hevd
+    mov       [rsp+368], edgesd
+    mov       mstrideq, strideq
+    neg       mstrideq
+    lea       dst4q, [dstq+strideq*4]
+    lea       dst8q, [dstq+strideq*8]
+    lea       dst12q, [dst4q+strideq*8]
+    lea       dst16q, [dst8q+strideq*8]
+    LOAD_16x16B
+    TRANSPOSE_16x16B
+    lea       r2q, [rsp+64]
+%define tmpq r2q
+    STORE_TRANSPOSED_16x16B
+    test      dword [rsp+368], 1
+    jz .inner_columns
+    movd      xm0, [dstq-4]
+    movd      xm8, [dst8q-4]
+    vinserti128 m0, m0, xm8, 1
+    movd      xm1, [dstq+strideq-4]
+    movd      xm8, [dst8q+strideq-4]
+    vinserti128 m1, m1, xm8, 1
+    movd      xm2, [dstq+strideq*2-4]
+    movd      xm8, [dst8q+strideq*2-4]
+    vinserti128 m2, m2, xm8, 1
+    movd      xm3, [dst4q+mstrideq-4]
+    movd      xm8, [dst12q+mstrideq-4]
+    vinserti128 m3, m3, xm8, 1
+    movd      xm4, [dst4q-4]
+    movd      xm8, [dst12q-4]
+    vinserti128 m4, m4, xm8, 1
+    movd      xm5, [dst4q+strideq-4]
+    movd      xm8, [dst12q+strideq-4]
+    vinserti128 m5, m5, xm8, 1
+    movd      xm6, [dst4q+strideq*2-4]
+    movd      xm8, [dst12q+strideq*2-4]
+    vinserti128 m6, m6, xm8, 1
+    movd      xm7, [dst8q+mstrideq-4]
+    movd      xm8, [dst16q+mstrideq-4]
+    vinserti128 m7, m7, xm8, 1
+    TRANSPOSE_16x16B
+    movu      [rsp], xm0
+    movu      [rsp+16], xm1
+    movu      [rsp+32], xm2
+    movu      [rsp+48], xm3
+    WFILTER 1, 1
+.inner_columns:
+    add       r2q, 64
+    WFILTER 0, 1
+    add       r2q, 64
+    WFILTER 0, 1
+    add       r2q, 64
+    WFILTER 0, 1
+    test      dword [rsp+368], 1
+    jz .core_store
+    lea       r2q, [rsp]
+    LOAD_TRANSPOSED_16x16B
+    TRANSPOSE_16x16B
+    movd      [dstq-4], xm0
+    vextracti128 xm8, m0, 1
+    movd      [dst8q-4], xm8
+    movd      [dstq+strideq-4], xm1
+    vextracti128 xm8, m1, 1
+    movd      [dst8q+strideq-4], xm8
+    movd      [dstq+strideq*2-4], xm2
+    vextracti128 xm8, m2, 1
+    movd      [dst8q+strideq*2-4], xm8
+    movd      [dst4q+mstrideq-4], xm3
+    vextracti128 xm8, m3, 1
+    movd      [dst12q+mstrideq-4], xm8
+    movd      [dst4q-4], xm4
+    vextracti128 xm8, m4, 1
+    movd      [dst12q-4], xm8
+    movd      [dst4q+strideq-4], xm5
+    vextracti128 xm8, m5, 1
+    movd      [dst12q+strideq-4], xm8
+    movd      [dst4q+strideq*2-4], xm6
+    vextracti128 xm8, m6, 1
+    movd      [dst12q+strideq*2-4], xm8
+    movd      [dst8q+mstrideq-4], xm7
+    vextracti128 xm8, m7, 1
+    movd      [dst16q+mstrideq-4], xm8
+.core_store:
+    lea       r2q, [rsp+64]
+    LOAD_TRANSPOSED_16x16B
+    TRANSPOSE_16x16B
+    STORE_16x16B
+    mov       r2q, dstq
+    test      dword [rsp+368], 2
+    jz .inner_rows
+    WFILTER 1, 0
+.inner_rows:
+    lea       r2q, [dstq+strideq*4]
+    WFILTER 0, 0
+    lea       r2q, [dstq+strideq*8]
+    WFILTER 0, 0
+    lea       r2q, [dst4q+strideq*8]
+    WFILTER 0, 0
+    RET
+%undef tmpq
+
+; Eight rows per plane fit in the low eight bytes of each YMM lane.
+; Unlike the luma transpose, chroma needs no high-byte butterflies.
+%macro TRANSPOSE_8UV 1 ; columns needed: 4 or 8
+    punpcklbw m8, m0, m1
+    punpcklbw m9, m2, m3
+    punpcklbw m10, m4, m5
+    punpcklbw m11, m6, m7
+    punpcklwd m0, m8, m9
+    punpcklwd m2, m10, m11
+%if %1 == 8
+    punpckhwd m1, m8, m9
+    punpckhwd m3, m10, m11
+%endif
+    punpckldq m4, m0, m2
+    punpckhdq m5, m0, m2
+%if %1 == 8
+    punpckldq m6, m1, m3
+    punpckhdq m7, m1, m3
+%endif
+    vpermq    m4, m4, 0xd8
+    vpermq    m5, m5, 0xd8
+%if %1 == 8
+    vpermq    m6, m6, 0xd8
+    vpermq    m7, m7, 0xd8
+%endif
+%endmacro
+
+%macro LOAD_UV_COLUMNS 0
+%assign ci 0
+%rep 8
+    movu      xm %+ ci, [r2q+16*ci]
+    vpermq    m %+ ci, m %+ ci, 0x50
+%assign ci ci+1
+%endrep
+%endmacro
+
+%macro STORE_UV_ROWS 1 ; bytes per plane: 4 or 8
+    mov       r3q, dstUq
+    mov       r5q, dstVq
+%if %1 == 4
+    sub       r3q, 4
+    sub       r5q, 4
+%define uv_mov movd
+%define uv_extract pextrd
+%define uv_index 2
+%else
+%define uv_mov movq
+%define uv_extract pextrq
+%define uv_index 1
+%endif
+%assign ci 4
+%rep 4
+    uv_mov    [r3q], xm %+ ci
+    uv_extract [r5q], xm %+ ci, uv_index
+    add       r3q, strideq
+    add       r5q, strideq
+    vextracti128 xm8, m %+ ci, 1
+    uv_mov    [r3q], xm8
+    uv_extract [r5q], xm8, uv_index
+%if ci != 7
+    add       r3q, strideq
+    add       r5q, strideq
+%endif
+%assign ci ci+1
+%endrep
+%endmacro
+
+; U and V occupy the two halves of each 16-byte column. Border columns
+; are loaded only when the left edge exists; rows likewise need the top
+; border only when its edge bit is set.
+INIT_YMM avx2
+cglobal vp8_loop_filter8uv, 8, 12, 16, 384, dstU, dstV, stride, e, be, i, hev, edges
+    mov       [rsp+352], ed
+    mov       [rsp+356], bed
+    mov       [rsp+360], id
+    mov       [rsp+364], hevd
+    mov       [rsp+368], edgesd
+    mov       r8q, strideq
+    mov       r9q, strideq
+    neg       r9q
+    DEFINE_ARGS dstU, dstV, pointU, workU, pointV, workV, r6, r7, stride, mstride, tmp, unused
+    lea       r2q, [rsp+64]
+    mov       r3q, dstUq
+    mov       r5q, dstVq
+    movq      xm0, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m0, m0, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm1, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m1, m1, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm2, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m2, m2, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm3, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m3, m3, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm4, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m4, m4, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm5, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m5, m5, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm6, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m6, m6, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movq      xm7, [r3q]
+    movq      xm8, [r5q]
+    vinserti128 m7, m7, xm8, 1
+    TRANSPOSE_8UV 8
+    movu      [r2q], m4
+    movu      [r2q+32], m5
+    movu      [r2q+64], m6
+    movu      [r2q+96], m7
+    test      dword [rsp+368], 1
+    jz .inner_columns
+    mov       r3q, dstUq
+    mov       r5q, dstVq
+    movd      xm0, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m0, m0, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm1, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m1, m1, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm2, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m2, m2, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm3, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m3, m3, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm4, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m4, m4, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm5, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m5, m5, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm6, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m6, m6, xm8, 1
+    add       r3q, strideq
+    add       r5q, strideq
+    movd      xm7, [r3q-4]
+    movd      xm8, [r5q-4]
+    vinserti128 m7, m7, xm8, 1
+    TRANSPOSE_8UV 4
+    movu      [rsp], m4
+    movu      [rsp+32], m5
+    WFILTER 1, 1
+.inner_columns:
+    add       r2q, 64
+    WFILTER 0, 1
+    test      dword [rsp+368], 1
+    jz .core_store
+    lea       r2q, [rsp]
+    LOAD_UV_COLUMNS
+    TRANSPOSE_8UV 8
+    STORE_UV_ROWS 4
+.core_store:
+    lea       r2q, [rsp+64]
+    LOAD_UV_COLUMNS
+    TRANSPOSE_8UV 8
+    STORE_UV_ROWS 8
+    mov       r2q, dstUq
+    mov       r4q, dstVq
+    test      dword [rsp+368], 2
+    jz .inner_rows
+    WFILTER 1, 0, 1
+.inner_rows:
+    lea       r2q, [dstUq+strideq*4]
+    lea       r4q, [dstVq+strideq*4]
+    WFILTER 0, 0, 1
+    RET
