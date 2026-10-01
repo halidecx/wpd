@@ -2,18 +2,6 @@
 
 A safe, fast Rust and assembly WebP decoder with a C ABI.
 
-Measured on 2026-09-30 on an Intel Core i7-13700K, Linux x86-64, with a release
-build, assembly enabled, and `trim_dsp=false`. wpd is `59a1c12` with the
-working-tree AVX2 changes; libwebp is the pinned `94d3c4a` revision, and
-image-webp is 0.2.4. Times are median wall-clock milliseconds for 48 decodes,
-with 3 warmups and 20 measured runs. Each decoder uses one decoding thread, and
-benchmark commands are pinned to CPU 0.
-
-Decoders request the same output format within each row. Lossy stills use planar
-YUV/YUVA to exclude YUV-to-RGB conversion. Lossless stills and composited
-animations use RGBA; libwebp's animation API only exposes packed RGB output.
-image-webp has no planar YUV output, so it appears only in the RGBA rows.
-
 | Image               | Output   | image-webp (ms) | libwebp (ms) | wpd (ms) | libwebp / wpd |
 | ------------------- | -------- | --------------: | -----------: | -------: | ------------: |
 | lossy.webp          | YUV420P  |               — |       180.40 |   173.56 |         1.04x |
@@ -23,10 +11,6 @@ image-webp has no planar YUV output, so it appears only in the RGBA rows.
 | anim_rgb.webp       | RGBA     |          206.09 |       104.47 |    62.56 |         1.67x |
 | a_lossy.webp        | YUVA420P |               — |        50.70 |    36.38 |         1.39x |
 | anim_yuva.webp      | RGBA     |          776.54 |       494.37 |   374.46 |         1.32x |
-
-The [AVX2 sweep measurements](AVX2_BENCHMARKS.md) compare the previous x86
-kernels with the new ones and preserve the historical ARM measurements, which
-used different output formats between decoders.
 
 ## Build
 
