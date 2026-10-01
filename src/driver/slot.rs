@@ -481,9 +481,14 @@ impl Ahead {
              * started once the one before it has been collected. */
             self.pool = Some(Pool::new(workers, beside, env));
         }
-        /* Copies kept from a longer run were sized to a smaller share. */
         self.inputs.truncate(entries.len());
         self.inputs.resize_with(entries.len(), Input::default);
+        /* More slots, or larger decoded frames, can lower each copy's share. */
+        for input in &mut self.inputs {
+            if input.capacity() > payload_cap {
+                *input = Input::default();
+            }
+        }
         self.payload_cap = payload_cap;
         self.entries = entries;
         self.pos = 0;
@@ -990,6 +995,80 @@ impl Drop for Pool {
         self.shared.work.notify_all();
         for starter in self.starters.drain(..) {
             let _ = starter.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn more_slots_release_copies_over_the_new_share() {
+        const BUDGET: usize = 96 << 10;
+        const FRAME_BYTES: usize = 6 << 10;
+        const SLOTS: usize = 9;
+        const CAP: usize = BUDGET / SLOTS - FRAME_BYTES;
+
+        let payload = vec![7; 40 << 10];
+        let mut input = Input::new();
+        input.borrow(&payload);
+        let ldsp = Vp8lDsp::default();
+        let fdsp = FilterDsp::default();
+        let ydsp = YuvDsp::default();
+        let env = FrameEnv {
+            input: &input,
+            ldsp: &ldsp,
+            fdsp: &fdsp,
+            ydsp: &ydsp,
+            settings: FrameSettings::default(),
+            threads: 1,
+        };
+        let entries = |n, size| {
+            vec![
+                AheadEntry {
+                    base: 0,
+                    size,
+                    out: Ok(Source::None),
+                    pending: false,
+                };
+                n
+            ]
+        };
+
+        /* Scale the MiB reproducer down to KiB. Check the unused first
+         * slot too, and retain buffers exactly at the new allowance. */
+        for first_size in [payload.len(), CAP - FILE_PADDING] {
+            let mut ahead = Ahead::default();
+            ahead.slots.resize_with(2, FrameSlot::default);
+            /* Keep jobs queued: this test concerns their copies, not decode. */
+            ahead.start(
+                &env,
+                entries(2, payload.len()),
+                None,
+                0,
+                0,
+                BUDGET / 2 - FRAME_BYTES,
+            );
+            ahead.clear();
+            ahead.inputs[0].own_exact(&payload[..first_size]).unwrap();
+            let first = ahead.inputs[0].bytes().as_ptr();
+            assert!(ahead.inputs[1].capacity() > CAP);
+
+            ahead.slots.resize_with(SLOTS, FrameSlot::default);
+            ahead.start(&env, entries(SLOTS, 64), None, 0, 0, CAP);
+            if first_size + FILE_PADDING == CAP {
+                assert_eq!(ahead.inputs[0].bytes().as_ptr(), first);
+                assert_eq!(ahead.inputs[0].capacity(), CAP);
+            } else {
+                assert_eq!(ahead.inputs[0].capacity(), 0);
+            }
+            ahead.clear();
+
+            assert_eq!(ahead.inputs.len(), SLOTS);
+            assert!(ahead.inputs.iter().all(|input| input.capacity() <= CAP));
+            let held: usize = ahead.inputs.iter().map(Input::capacity).sum();
+            assert!(held + SLOTS * FRAME_BYTES <= BUDGET);
         }
     }
 }

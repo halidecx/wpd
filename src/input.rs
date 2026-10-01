@@ -81,6 +81,10 @@ impl<'a> Input<'a> {
         self.window.size
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.owned.capacity()
+    }
+
     pub fn discarded(&self) -> usize {
         self.window.discarded
     }
