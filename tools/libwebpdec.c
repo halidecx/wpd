@@ -9,12 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-static const char short_options[] = "hr:f:";
+static const char short_options[] = "hr:f:t:";
 
 static const struct option long_options[] = {
     {"help", no_argument, NULL, 'h'},
     {"repeat", required_argument, NULL, 'r'},
     {"fmt", required_argument, NULL, 'f'},
+    {"threads", required_argument, NULL, 't'},
     {NULL, 0, NULL, 0},
 };
 
@@ -90,7 +91,9 @@ static void usage(const char *app, const char *reason) {
             " -f, --fmt str\n"
             "    output pixel format; default auto. one of\n"
             "    auto, yuv420p, yuva420p,\n"
-            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n",
+            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
+            " -t, --threads 1|2\n"
+            "    1 disables threading; 2 enables libwebp's worker; default 1\n",
             app);
 }
 
@@ -234,7 +237,8 @@ static const char *status_name(VP8StatusCode status) {
 
 static int decode_still(const char *input_name, const uint8_t *data,
                         size_t size, const WebPBitstreamFeatures *features,
-                        FILE *sink, const char *pixel_format, int *frames) {
+                        FILE *sink, const char *pixel_format, int threads,
+                        int *frames) {
     WebPDecoderConfig config;
     VP8StatusCode     status;
     Frame             frame = {0};
@@ -243,7 +247,8 @@ static int decode_still(const char *input_name, const uint8_t *data,
         fprintf(stderr, "libwebp decoder ABI mismatch\n");
         return -1;
     }
-    config.input = *features;
+    config.input               = *features;
+    config.options.use_threads = threads > 1;
     if (pixel_format && find_layout(pixel_format)) {
         frame.layout             = find_layout(pixel_format);
         config.output.colorspace = frame.layout->still_mode;
@@ -294,7 +299,7 @@ static int decode_still(const char *input_name, const uint8_t *data,
 
 static int decode_animation(const char *input_name, const uint8_t *data,
                             size_t size, FILE *sink, const char *pixel_format,
-                            int *frames) {
+                            int threads, int *frames) {
     WebPData               webp_data = {data, size};
     WebPAnimDecoderOptions options;
     WebPAnimDecoder       *decoder = NULL;
@@ -315,8 +320,9 @@ static int decode_animation(const char *input_name, const uint8_t *data,
                 pixel_format);
         return -1;
     }
-    options.color_mode = layout->anim_mode;
-    decoder            = WebPAnimDecoderNew(&webp_data, &options);
+    options.color_mode  = layout->anim_mode;
+    options.use_threads = threads > 1;
+    decoder             = WebPAnimDecoderNew(&webp_data, &options);
     if (!decoder) {
         fprintf(stderr, "%s: cannot create animation decoder\n", input_name);
         return -1;
@@ -392,6 +398,7 @@ int main(int argc, char **argv) {
     const char *pixel_format = NULL;
     const char *input_name, *output_name;
     int         discard_output, frames = 0, repeat = 1, status = 1;
+    int         threads = 1;
 
     print_banner();
     opterr = 0;
@@ -410,6 +417,12 @@ int main(int argc, char **argv) {
         case 'f':
             if (parse_format(optarg, &pixel_format) < 0) {
                 usage(argv[0], "invalid output pixel format");
+                return 2;
+            }
+            break;
+        case 't':
+            if (parse_repeat(optarg, &threads) < 0 || threads > 2) {
+                usage(argv[0], "invalid thread count; expected 1 or 2");
                 return 2;
             }
             break;
@@ -452,8 +465,13 @@ int main(int argc, char **argv) {
             goto done;
         }
         if (features.has_animation) {
-            if (decode_animation(
-                    input_name, data, size, sink, pixel_format, &frames) < 0)
+            if (decode_animation(input_name,
+                                 data,
+                                 size,
+                                 sink,
+                                 pixel_format,
+                                 threads,
+                                 &frames) < 0)
                 goto done;
         } else if (decode_still(input_name,
                                 data,
@@ -461,6 +479,7 @@ int main(int argc, char **argv) {
                                 &features,
                                 sink,
                                 pixel_format,
+                                threads,
                                 &frames) < 0) {
             goto done;
         }
