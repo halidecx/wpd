@@ -293,23 +293,49 @@ static void check_premultiply_row(WPDYUVDSP *dsp) {
     declare_func(void, uint8_t *, int, int);
 
     if (check_func(dsp->premultiply_row, "premultiply_row")) {
-        for (int alpha_first = 0; alpha_first < 2; alpha_first++)
-            for (size_t i = 0; i < sizeof(row_lengths) / sizeof(*row_lengths);
-                 i++) {
-                const int n   = row_lengths[i];
-                const int off = alpha_first ? 0 : 3;
+        for (int mode = 0; mode < 5; mode++)
+            for (int alpha_first = 0; alpha_first < 2; alpha_first++)
+                for (size_t i = 0;
+                     i < sizeof(row_lengths) / sizeof(*row_lengths);
+                     i++) {
+                    const int n   = row_lengths[i];
+                    const int off = alpha_first ? 0 : 3;
+                    int       run = 0;
 
-                for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
-                    argb0[x] = argb1[x] = (uint8_t)rnd();
-                argb0[off] = argb1[off] = 0xff;
-                if (n > 1)
-                    argb0[4 + off] = argb1[4 + off] = 0;
+                    for (int x = 0; x < 4 * (MAX_PIXELS + GUARD_PIXELS); x++)
+                        argb0[x] = argb1[x] = (uint8_t)rnd();
+                    for (int x = off; x < 4 * (MAX_PIXELS + GUARD_PIXELS);
+                         x += 4) {
+                        if (mode == 1 && (rnd() & 7))
+                            argb0[x] = 255;
+                        else if (mode == 2 && (rnd() & 7))
+                            argb0[x] = 0;
+                        else if (mode == 3)
+                            argb0[x] = rnd() & 1 ? 255 : 0;
+                        else if (mode == 4) {
+                            /* runs of opaque and clear, now and then an edge */
+                            if (!(rnd() % 23))
+                                run = rnd() % 3;
+                            if (run < 2 && rnd() % 97)
+                                argb0[x] = run ? 255 : 0;
+                        }
+                        argb1[x] = argb0[x];
+                    }
+                    argb0[off] = argb1[off] = 0xff;
+                    if (n > 1)
+                        argb0[4 + off] = argb1[4 + off] = 0;
 
-                call_ref(argb0, alpha_first, n);
-                call_new(argb1, alpha_first, n);
-                if (memcmp(argb0, argb1, sizeof(argb0)))
-                    fail();
-            }
+                    call_ref(argb0, alpha_first, n);
+                    call_new(argb1, alpha_first, n);
+                    if (memcmp(argb0, argb1, sizeof(argb0)))
+                        fail();
+                }
+
+        for (int x = 0; x < 4 * MAX_PIXELS; x += 4) {
+            WPD_WN32A(argb1 + x, rnd());
+            /* mostly binary alpha in runs, as animations tend to have */
+            argb1[x] = x == 4 * 100 ? 128 : (x / (4 * 24)) & 1 ? 255 : 0;
+        }
         bench_new(argb1, 1, MAX_PIXELS);
     }
 }
@@ -584,6 +610,68 @@ static void check_yuv420_to_packed(WPDYUVDSP *dsp, int layout,
         }
 }
 
+static void check_premultiply_regimes(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, row0, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [4 * MAX_PIXELS]);
+    static const char *names[] = {"random", "opaque", "clear", "binary"};
+    declare_func(void, uint8_t *, int, int);
+
+    for (int first = 0; first <= 1; first++) {
+        for (int regime = 0; regime < 4; regime++) {
+            if (check_func(dsp->premultiply_row,
+                           "premultiply_row_%s_%s",
+                           first ? "argb" : "rgba",
+                           names[regime])) {
+                for (int x = 0; x < 4 * MAX_PIXELS; x++)
+                    row0[x] = (uint8_t)rnd();
+                for (int x = first ? 0 : 3; x < 4 * MAX_PIXELS; x += 4) {
+                    if (regime == 1)
+                        row0[x] = 255;
+                    if (regime == 2)
+                        row0[x] = 0;
+                    if (regime == 3)
+                        row0[x] = rnd() & 1 ? 255 : 0;
+                }
+                memcpy(row1, row0, sizeof(row0));
+                call_ref(row0, first, MAX_PIXELS);
+                call_new(row1, first, MAX_PIXELS);
+                if (memcmp(row0, row1, sizeof(row0)))
+                    fail();
+                bench_new(row1, first, MAX_PIXELS);
+            }
+        }
+    }
+}
+
+static void check_premultiply_argb_regimes(WPDYUVDSP *dsp) {
+    LOCAL_ALIGNED_16(uint8_t, row0, [4 * MAX_PIXELS]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [4 * MAX_PIXELS]);
+    static const char *names[] = {"random", "opaque", "clear", "binary"};
+    declare_func(void, uint8_t *, int);
+
+    for (int regime = 0; regime < 4; regime++) {
+        if (check_func(dsp->premultiply_argb_row,
+                       "premultiply_argb_row_%s",
+                       names[regime])) {
+            for (int x = 0; x < 4 * MAX_PIXELS; x++) row0[x] = (uint8_t)rnd();
+            for (int x = 0; x < 4 * MAX_PIXELS; x += 4) {
+                if (regime == 1)
+                    row0[x] = 255;
+                if (regime == 2)
+                    row0[x] = 0;
+                if (regime == 3)
+                    row0[x] = rnd() & 1 ? 255 : 0;
+            }
+            memcpy(row1, row0, sizeof(row0));
+            call_ref(row0, MAX_PIXELS);
+            call_new(row1, MAX_PIXELS);
+            if (memcmp(row0, row1, sizeof(row0)))
+                fail();
+            bench_new(row1, MAX_PIXELS);
+        }
+    }
+}
+
 void checkasm_check_yuvdsp(void) {
     WPDYUVDSP dsp;
 
@@ -618,6 +706,7 @@ void checkasm_check_yuvdsp(void) {
     check_yuv_row(dsp.yuv420_row[WPD_LAYOUT_BGR], "yuv420_row_bgr");
     report("yuv_row");
     check_premultiply_row(&dsp);
+    check_premultiply_regimes(&dsp);
     check_premultiply_row_4444(
         dsp.premultiply_row_4444, "premultiply_row_4444", 1);
     check_premultiply_row_4444(
@@ -625,6 +714,7 @@ void checkasm_check_yuvdsp(void) {
     report("premultiply_row");
     check_multiply_row(&dsp);
     check_premultiply_argb_row(&dsp);
+    check_premultiply_argb_regimes(&dsp);
     report("multiply_row");
     check_argb_to_y(&dsp);
     report("argb_to_y");

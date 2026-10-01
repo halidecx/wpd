@@ -4,6 +4,10 @@ const WBITS: i32 = 32;
 
 pub const TAIL_MARGIN: usize = 64;
 
+/// Bytes `Fast` needs past its position at the start of a pixel: two refills
+/// of a whole word each, and a whole word more to hand the stream back.
+pub const FAST_MARGIN: usize = 24;
+
 const BIT_MASK: [u32; MAX_BITS as usize + 1] = [
     0, 0x000001, 0x000003, 0x000007, 0x00000f, 0x00001f, 0x00003f, 0x00007f, 0x0000ff,
     0x0001ff, 0x0003ff, 0x0007ff, 0x000fff, 0x001fff, 0x003fff, 0x007fff, 0x00ffff,
@@ -111,6 +115,101 @@ impl BitReader {
     pub fn bit(&mut self, buf: &[u8]) -> u32 {
         self.bits(buf, 1)
     }
+
+    /// Hands the stream to a `Fast` reader, if it is far enough from the end
+    /// of `buf` for one pixel.
+    #[inline(always)]
+    pub fn fast(&self, buf: &[u8]) -> Option<Fast> {
+        if self.eos || self.pos < 8 {
+            return None;
+        }
+        // Positions stay in bytes: one in bits would overflow a 32-bit usize
+        // past 512 MiB of stream.
+        let bit_pos = self.bit_pos as usize;
+        let mut fast = Fast {
+            val: 0,
+            avail: 0,
+            pos: self.pos - 8 + (bit_pos >> 3),
+        };
+
+        if fast.pos + FAST_MARGIN > buf.len() {
+            return None;
+        }
+        fast.refill(buf);
+        fast.consume((bit_pos & 7) as u32);
+        Some(fast)
+    }
+
+    /// Takes the stream back from a `Fast` reader, as if it had read the same
+    /// bits itself.
+    #[inline(always)]
+    pub fn resume(&mut self, fast: &Fast, buf: &[u8]) {
+        // The byte that holds the next unread bit, and how many of its bits
+        // are read already.
+        let avail = fast.avail as usize;
+        let pos = fast.pos - avail.div_ceil(8);
+
+        self.val = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        self.pos = pos + 8;
+        self.bit_pos = ((8 - avail % 8) % 8) as i32;
+    }
+}
+
+/// The reader for the bulk of a chunk. It runs only while every load it makes
+/// lies inside the buffer, so it never looks for the end of the stream, and a
+/// refill tops it up to at least `FAST_BITS` without a branch.
+#[derive(Clone, Copy)]
+pub struct Fast {
+    val: u64,
+    avail: u32,
+    pos: usize,
+}
+
+pub const FAST_BITS: u32 = 56;
+
+impl Fast {
+    #[inline(always)]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    #[inline(always)]
+    pub fn refill(&mut self, buf: &[u8]) {
+        let word = u64::from_le_bytes(buf[self.pos..self.pos + 8].try_into().unwrap());
+
+        self.val |= word << (self.avail & 63);
+        self.pos += 7 - ((self.avail >> 3) & 7) as usize;
+        self.avail |= FAST_BITS;
+    }
+
+    #[inline(always)]
+    pub fn peek(&self) -> u64 {
+        self.val
+    }
+
+    #[inline(always)]
+    pub fn consume(&mut self, n: u32) {
+        self.val >>= n;
+        self.avail -= n;
+    }
+
+    /// Consumes as many bits as the low byte of a table entry says, of at
+    /// most 63. The shift looks at only the low six bits of its amount, so
+    /// it takes the entry as it is, with no mask between the load of the
+    /// entry and the bits that index the next one.
+    #[inline(always)]
+    pub fn consume_entry(&mut self, entry: u32) {
+        self.val = self.val.wrapping_shr(entry);
+        self.avail -= entry & 0xFF;
+    }
+
+    #[inline(always)]
+    pub fn bits(&mut self, n: u32) -> u32 {
+        let v = self.val as u32 & ((1u32 << n) - 1);
+
+        self.consume(n);
+        v
+    }
 }
 
 #[cfg(test)]
@@ -150,5 +249,47 @@ mod tests {
 
         assert_eq!(br.bits(&buf, MAX_BITS + 1), 0);
         assert!(br.is_eos(&buf));
+    }
+
+    #[test]
+    fn the_fast_reader_reads_and_hands_back_the_same_bits() {
+        let buf: Vec<u8> = (0..256u32).map(|i| (i * 167 + 13) as u8).collect();
+
+        for skip in 0..24 {
+            let mut want = BitReader::new(&buf);
+            let mut got = BitReader::new(&buf);
+
+            want.bits(&buf, skip);
+            got.bits(&buf, skip);
+
+            let mut f = got.fast(&buf).unwrap();
+
+            for i in 0..100u32 {
+                let n = (i * 7 + skip) % 16;
+
+                if i % 3 == 0 {
+                    f.refill(&buf);
+                }
+                assert_eq!(f.bits(n), want.bits(&buf, n), "skip {skip}, read {i}");
+                if f.pos() + FAST_MARGIN > buf.len() {
+                    break;
+                }
+            }
+            got.resume(&f, &buf);
+            for n in [1, 9, 17, 24, 3] {
+                assert_eq!(got.bits(&buf, n), want.bits(&buf, n), "skip {skip}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fast_reader_is_refused_near_the_end() {
+        let buf = [0xA5u8; FAST_MARGIN + 1];
+        let mut br = BitReader::new(&buf);
+
+        br.bits(&buf, 15);
+        assert!(br.fast(&buf).is_some());
+        br.bits(&buf, 1);
+        assert!(br.fast(&buf).is_none());
     }
 }

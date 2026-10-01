@@ -103,11 +103,13 @@ endfunc
         strb            w3,  [x1], #1
 .endm
 
-// Without the clip and the byte wrap the recurrence telescopes into a plain
-// prefix sum, which vectorises. Run that closed form on eight-pixel blocks in
-// 16-bit lanes, and keep it only when every intermediate stays inside 0..255,
-// so neither the clip nor the wrap could have fired; a dirty block falls back
-// to the serial loop above.
+// Without the clip the recurrence telescopes into a plain prefix sum, which
+// vectorises, and the byte wrap rides along in 8-bit lanes. Run that closed
+// form on sixteen-pixel blocks, then make each pixel's predictor again from its
+// speculative left: once with the plain adds, once with saturating ones that
+// clip just as the serial loop does. Where the two agree nothing clipped, so a
+// block whose pixels all agree is exact; a dirty one falls back to the serial
+// loop above.
 //
 // Speculating costs a data-dependent branch per block, which on a noisy plane
 // mispredicts about as often as it lands. Once GIVE_UP blocks in a row come
@@ -135,39 +137,40 @@ function wpd_gradient_unfilter_neon, export=1
         mov             w8,  #0                  // dirty blocks in a row
         mov             w9,  #GRADIENT_SERIAL_RUN
         movi            v4.16b,  #0
-        uxtb            w3,  w3                  // the seed wrapped, and every
-        dup             v0.8h,   w3              // lane carries the running left
-        cmp             w2,  #8
+        dup             v0.16b,  w3              // every lane carries the left
+        cmp             w2,  #16
         b.lt            3f
-1:      ld1             {v1.8b}, [x0]
-        ldur            d2,  [x0, #-1]
-        ld1             {v3.8b}, [x1]
-        uxtl            v1.8h,   v1.8b
-        uxtl            v2.8h,   v2.8b
-        sxtl            v3.8h,   v3.8b           // residuals sign-extend: byte
-        sub             v1.8h,   v1.8h,  v2.8h   // 255 is -1, and mod 256 the
-        add             v1.8h,   v1.8h,  v3.8h   // check makes them equal
-.irp    shift, 14, 12, 8
-        ext             v2.16b,  v4.16b, v1.16b, #\shift
-        add             v1.8h,   v1.8h,  v2.8h
+1:      ldr             q1,  [x0]                // T
+        ldur            q2,  [x0, #-1]           // TL
+        ldr             q3,  [x1]
+        sub             v5.16b,  v1.16b,  v2.16b
+        uqsub           v6.16b,  v1.16b,  v2.16b // T - TL, or 0
+        uqsub           v7.16b,  v2.16b,  v1.16b // TL - T, or 0
+        add             v1.16b,  v3.16b,  v5.16b
+.irp    shift, 15, 14, 12, 8
+        ext             v2.16b,  v4.16b,  v1.16b, #\shift
+        add             v1.16b,  v1.16b,  v2.16b
 .endr
-        add             v1.8h,   v1.8h,  v0.8h   // speculative out, unclipped
-        sub             v2.8h,   v1.8h,  v3.8h   // the predictor each pixel
-        orr             v2.16b,  v2.16b, v1.16b  // would clip; nothing outside
-        shrn            v2.8b,   v2.8h,  #8      // 0..255 leaves a high byte
-        fmov            x4,  d2                  // clear, in either of them
-        cbnz            x4,  5f
-        xtn             v2.8b,   v1.8h
-        dup             v0.8h,   v1.h[7]         // out[7] seeds the next block
+        add             v1.16b,  v1.16b,  v0.16b // out, had nothing clipped
+        ext             v2.16b,  v0.16b,  v1.16b, #15
+        sub             v3.16b,  v1.16b,  v3.16b // L + T - TL
+        uqadd           v2.16b,  v2.16b,  v6.16b
+        uqsub           v2.16b,  v2.16b,  v7.16b // clip(L + T - TL)
+        cmeq            v2.16b,  v2.16b,  v3.16b
+        shrn            v2.8b,   v2.8h,   #4
+        fmov            x4,  d2
+        cmn             x4,  #1
+        b.ne            5f
+        dup             v0.16b,  v1.b[15]        // out[15] seeds the next block
         mov             w8,  #0
-        add             x0,  x0,  #8
-        st1             {v2.8b}, [x1], #8
-2:      sub             w2,  w2,  #8
-        cmp             w2,  #8
+        add             x0,  x0,  #16
+        st1             {v1.16b}, [x1], #16
+2:      sub             w2,  w2,  #16
+        cmp             w2,  #16
         b.ge            1b
 3:      cmp             w2,  #0
         b.le            9f
-        umov            w3,  v0.h[0]
+        umov            w3,  v0.b[0]
         ldurb           w5,  [x0, #-1]
 4:      gradient_pixel
         subs            w2,  w2,  #1
@@ -175,21 +178,20 @@ function wpd_gradient_unfilter_neon, export=1
 9:      ret
 
         // A dirty block, reconstructed one pixel at a time.
-5:      umov            w3,  v0.h[0]
+5:      umov            w3,  v0.b[0]
         ldurb           w5,  [x0, #-1]
-        mov             w6,  #8
+        mov             w6,  #16
 6:      gradient_pixel
         subs            w6,  w6,  #1
         b.gt            6b
-        uxtb            w3,  w3
         add             w8,  w8,  #1
         cmp             w8,  #GRADIENT_GIVE_UP
         b.ge            7f
-        dup             v0.8h,   w3
+        dup             v0.16b,  w3
         b               2b
 
         // Enough of them in a row: stop speculating for a while.
-7:      sub             w2,  w2,  #8
+7:      sub             w2,  w2,  #16
         mov             w6,  w9
         lsl             w9,  w9,  #1
 10:     cmp             w2,  #0
@@ -200,11 +202,10 @@ function wpd_gradient_unfilter_neon, export=1
         b.gt            10b
         cmp             w2,  #0                  // the run can land on the end
         b.le            9b
-        cmp             w2,  #8
+        cmp             w2,  #16
         b.lt            4b
-        uxtb            w3,  w3
         mov             w8,  #0
-        dup             v0.8h,   w3
+        dup             v0.16b,  w3
         b               1b
 
 8:      b               X(wpd_horizontal_unfilter_neon)

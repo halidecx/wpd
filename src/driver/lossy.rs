@@ -3,7 +3,7 @@ use crate::dsp::vp8l::Vp8lDsp;
 use crate::error::{Error, Result, Status};
 use crate::input::Input;
 use crate::picture::PlaneMut;
-use crate::vp8l::{AlphaDst, Target};
+use crate::vp8l::{AlphaDst, Target, Unfilter};
 
 use super::convert::scaled_size;
 use super::slot::{FrameEnv, FrameSlot};
@@ -61,6 +61,7 @@ struct Alpha<'p, 'i> {
     height: i32,
     compression: i32,
     filter: i32,
+    threads: usize,
 }
 
 fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
@@ -76,6 +77,7 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         height,
         compression,
         filter,
+        threads,
     } = a;
     let extent = width
         .checked_mul(height.max(0) as usize)
@@ -95,13 +97,28 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         plane[..extent].copy_from_slice(&raw[..extent]);
     } else if compression == ALPHA_COMPRESSION_VP8L {
         vp8l.set_canvas(width as i32, height);
+        vp8l.threads = threads;
 
+        let rest = match filter {
+            ALPHA_FILTER_HORIZONTAL => Some(fdsp.horizontal_unfilter),
+            ALPHA_FILTER_VERTICAL => Some(fdsp.vertical_unfilter),
+            ALPHA_FILTER_GRADIENT => Some(fdsp.gradient_unfilter),
+            _ => None,
+        };
         let dst = AlphaDst {
             data: &mut plane[..extent],
             stride: width,
+            unfilter: rest.map(|rest| Unfilter {
+                first: fdsp.horizontal_unfilter,
+                rest,
+            }),
         };
 
         vp8l.decode_frame(Target::Alpha, input.chunk(offset, size), true, Some(dst))?;
+        if vp8l.alpha_unfiltered() {
+            vp8l.release_alpha_canvas();
+            return Ok(());
+        }
 
         if !vp8l.alpha_dst_used() {
             let argb = vp8l.picture(Target::Alpha).frame();
@@ -181,6 +198,7 @@ impl FrameSlot {
                 height: (*height).max(0),
                 compression: *alpha_compression,
                 filter: *alpha_filter,
+                threads: env.threads,
             },
             vp8.first_mut(),
         )
@@ -217,7 +235,7 @@ impl FrameSlot {
         if !self.has_alpha {
             let chunk = env.input.chunk(offset, size);
 
-            return self.vp8_decoder()?.decode_rows_whole(chunk);
+            return self.vp8_decoder()?.decode_rows_whole(chunk, env.threads);
         }
 
         self.alpha_plane_reserve()?;
@@ -228,14 +246,36 @@ impl FrameSlot {
         let big_enough = (w as usize) * (h as usize) >= ALPHA_THREAD_PIXELS;
         let threads = if big_enough { env.threads } else { 1 };
         let chunk = env.input.chunk(offset, size);
-        let (alpha, vp8) = self.alpha_work(env);
+        let (mut alpha, vp8) = self.alpha_work(env);
         let Some(vp8) = vp8 else {
             return Err(Error::InvalidData);
         };
+
+        /* The two share the threads. Alpha's decode uses two at most, one for
+         * its entropy decoder and one for its transforms, and the colour
+         * planes' row relay three, so from five threads on each has all it
+         * can use. Below that, alpha's second thread is worth more than the
+         * relay's last only where alpha is most of the work. At three threads
+         * it made a_tall.webp (1024x6000, its ALPH chunk 17 times the size of
+         * its VP8 one) 1.12x faster, but alpha4k.webp (4096x4096, 5.6 times)
+         * 0.73x as fast, and a 600x600 photo whose alpha is half its colour
+         * 0.79x. */
+        let mut colour = threads;
+
+        if threads > 1 {
+            let heavy = alpha.size / 8 >= size;
+
+            alpha.threads = if threads >= 5 || heavy {
+                2.min(threads - 1)
+            } else {
+                1
+            };
+            colour = threads - alpha.threads;
+        }
         let (alpha_ret, rows_ret) = crate::task::join(
             threads,
             || decode_alpha(alpha),
-            || vp8.decode_rows_whole(chunk),
+            |_| vp8.decode_rows_whole(chunk, colour),
         );
 
         /* The colour planes still decide the frame, as they did when alpha

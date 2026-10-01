@@ -8,8 +8,8 @@
 
 /* Besides the usual boundaries, 161 lands a row end exactly where a kernel
  * that falls back to a fixed-length serial burst finishes one. */
-static const int widths[] = {0,   1,   2,   3,   7,   8,        9,
-                             15,  16,  17,  24,  31,  63,       127,
+static const int widths[] = {0,   1,   2,   3,   7,   8,        9,  15,
+                             16,  17,  24,  31,  32,  33,       63, 127,
                              128, 161, 255, 256, 509, MAX_WIDTH};
 
 static void check_unfilter(unfilter_func func, const char *name) {
@@ -21,7 +21,7 @@ static void check_unfilter(unfilter_func func, const char *name) {
     if (check_func(func, "%s", name)) {
         for (size_t i = 0; i < sizeof(widths) / sizeof(*widths); i++)
             for (int with_prev = 0; with_prev < 2; with_prev++)
-                for (int mode = 0; mode < 3; mode++) {
+                for (int mode = 0; mode < 5; mode++) {
                     const int w = widths[i];
 
                     for (int x = 0; x < MAX_WIDTH; x++)
@@ -29,7 +29,10 @@ static void check_unfilter(unfilter_func func, const char *name) {
                     for (int x = 0; x < MAX_WIDTH + GUARD; x++)
                         row0[x] = row1[x] = (uint8_t)rnd();
                     /* Smooth rows keep the gradient fast path honest; the
-                     * random ones drive it through clip and wrap. */
+                     * random ones drive it through clip and wrap. A ramp
+                     * above with the odd residual clips now and then in
+                     * rows that are otherwise clean, and bands of noise
+                     * make a kernel give up and come back. */
                     if (mode == 1) {
                         for (int x = 0; x < MAX_WIDTH; x++) prev[x] = 128;
                         for (int x = 0; x < MAX_WIDTH + GUARD; x++)
@@ -37,6 +40,19 @@ static void check_unfilter(unfilter_func func, const char *name) {
                     } else if (mode == 2) {
                         for (int x = 0; x < MAX_WIDTH; x++)
                             prev[x] = (x & 1) ? 255 : 0;
+                    } else if (mode == 3) {
+                        for (int x = 0; x < MAX_WIDTH; x++)
+                            prev[x] = (uint8_t)(x * 3);
+                        for (int x = 0; x < MAX_WIDTH + GUARD; x++)
+                            if (rnd() & 31)
+                                row0[x] = row1[x] = 0;
+                    } else if (mode == 4) {
+                        for (int x = 0; x < MAX_WIDTH; x++)
+                            if (x / 96 % 3)
+                                prev[x] = 100;
+                        for (int x = 0; x < MAX_WIDTH + GUARD; x++)
+                            if (x / 96 % 3)
+                                row0[x] = row1[x] = 0;
                     }
 
                     call_ref(with_prev ? prev : NULL, row0, w);
@@ -52,6 +68,29 @@ static void check_unfilter(unfilter_func func, const char *name) {
     }
 }
 
+static void check_gradient_regimes(unfilter_func func) {
+    LOCAL_ALIGNED_16(uint8_t, prev, [MAX_WIDTH]);
+    LOCAL_ALIGNED_16(uint8_t, row0, [MAX_WIDTH]);
+    LOCAL_ALIGNED_16(uint8_t, row1, [MAX_WIDTH]);
+    static const char *names[] = {"random", "flat", "wrap"};
+    declare_func(void, const uint8_t *, uint8_t *, int);
+
+    for (int regime = 0; regime < 3; regime++) {
+        if (check_func(func, "gradient_unfilter_%s", names[regime])) {
+            for (int x = 0; x < MAX_WIDTH; x++) {
+                prev[x] = regime ? 128 : (uint8_t)rnd();
+                row0[x] = regime == 1 ? 0 : regime == 2 ? 1 : (uint8_t)rnd();
+            }
+            memcpy(row1, row0, sizeof(row0));
+            call_ref(prev, row0, MAX_WIDTH);
+            call_new(prev, row1, MAX_WIDTH);
+            if (memcmp(row0, row1, sizeof(row0)))
+                fail();
+            bench_new(prev, row1, MAX_WIDTH);
+        }
+    }
+}
+
 void checkasm_check_filters(void) {
     WPDFILTERSDSP dsp;
 
@@ -59,5 +98,6 @@ void checkasm_check_filters(void) {
     check_unfilter(dsp.horizontal_unfilter, "horizontal_unfilter");
     check_unfilter(dsp.vertical_unfilter, "vertical_unfilter");
     check_unfilter(dsp.gradient_unfilter, "gradient_unfilter");
+    check_gradient_regimes(dsp.gradient_unfilter);
     report("unfilter");
 }

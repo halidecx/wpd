@@ -4,8 +4,10 @@
 SECTION_RODATA 32
 
 eg_perm: dd 0, 4, 1, 5, 2, 6, 3, 7
+pb_15: times 32 db 15
 
 pw_256: times 16 dw 256
+bcast_255: times 32 db 255
 bcast_alpha: db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
              db 0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12
 
@@ -569,15 +571,116 @@ cglobal extract_green, 3, 4, 6, dst, src, n
     RET
 
 INIT_YMM avx2
-cglobal map_color32, 4, 5, 5, dst, src, pal, n
+cglobal map_color32, 4, 5, 7, dst, src, pal, n
     pcmpeqd    m3, m3
     psrld      m3, 24
     cmp        nd, 8
     jl .tail1
+    movu       m0, [srcq]
+    psrld      m0, 16
+    pand       m0, m0, m3
+    psrld      m4, m0, 4
+    ptest      m4, m4
+    jnz .large
+    ; Prefer a broadcast to permutations when a small palette begins
+    ; with a long constant run too.
+    cmp        nd, 80
+    jl .small_palette
+    movzx      r4d, byte [srcq+2]
+    cmp        r4b, [srcq+258]
+    jne .small_palette
+    cmp        r4b, [srcq+290]
+    jne .small_palette
+    vpbroadcastd m2, xm0
+    pxor       m4, m0, m2
+    ptest      m4, m4
+    jnz .small_palette
+    vpbroadcastd m1, [palq+r4q*4]
+    jmp .uniform
+.small_palette:
+    ; Two register palettes replace eight independent memory lookups.
+    ; VPERMD selects within each half; bit 3 selects the half itself.
+    movu       m5, [palq]
+    movu       m6, [palq+32]
+.small:
+    vpermd     m1, m0, m5
+    vpermd     m2, m0, m6
+    pslld      m4, m0, 28
+    vblendvps  m1, m1, m2, m4
+    movu       [dstq], m1
+    add        srcq, 32
+    add        dstq, 32
+    sub        nd, 8
+    cmp        nd, 8
+    jl .tail1
+    movu       m0, [srcq]
+    psrld      m0, 16
+    pand       m0, m0, m3
+    psrld      m4, m0, 4
+    ptest      m4, m4
+    jz .small
+    jmp .large
 .loop8:
     movu       m0, [srcq]
     psrld      m0, 16
     pand       m0, m0, m3
+.large:
+    ; Follow a uniform run only when matching indices well ahead suggest
+    ; it will last. Short palette runs otherwise pay for mispredictions.
+    cmp        nd, 80
+    jl .gather
+    movzx      r4d, byte [srcq+2]
+    cmp        r4b, [srcq+258]
+    jne .gather
+    cmp        r4b, [srcq+290]
+    jne .gather
+    vpbroadcastd m2, xm0
+    pxor       m4, m0, m2
+    ptest      m4, m4
+    jnz .gather
+    vpbroadcastd m1, [palq+r4q*4]
+.uniform:
+    movu       [dstq], m1
+    add        srcq, 32
+    add        dstq, 32
+    sub        nd, 8
+    cmp        nd, 8
+    jl .tail1
+    movu       m0, [srcq]
+    psrld      m0, 16
+    pand       m0, m0, m3
+    pxor       m4, m0, m2
+    ptest      m4, m4
+    jz .uniform
+.gather:
+    cmp        nd, 64
+    jl .gather8
+    ; Separate destinations and zero idioms break the gather's merge
+    ; dependency. Batch 64 indices to amortize run probes and loop control.
+%assign mi 0
+%rep 8
+%assign mg 1+(mi & 3)
+%if mg >= 3
+%assign mg mg+2
+%endif
+%if mi
+    movu       m0, [srcq+mi*32]
+    psrld      m0, 16
+    pand       m0, m0, m3
+%endif
+    pcmpeqd    m4, m4
+    pxor       m %+ mg, m %+ mg, m %+ mg
+    vpgatherdd m %+ mg, [palq+m0*4], m4
+    movu       [dstq+mi*32], m %+ mg
+%assign mi mi+1
+%endrep
+    add        srcq, 256
+    add        dstq, 256
+    sub        nd, 64
+    cmp        nd, 8
+    jge .loop8
+    jmp .tail1
+.gather8:
     pcmpeqd    m4, m4
     vpgatherdd m1, [palq+m0*4], m4
     movu       [dstq], m1
@@ -634,16 +737,21 @@ cglobal blend_row_argb, 3, 5, 16, dst, src, n
     lea        r4q, [blend_scale]
     cmp        nd, 8
     jl .tail1
+    align 16
 .loop8:
     movu       m0, [srcq]
     pand       m2, m0, m7              ; src alpha
-    pcmpeqd    m14, m2, m7
-    movmskps   r3d, m14
-    cmp        r3d, 0xff
-    je .opaque                         ; whole vector opaque: copy src
-    ptest      m2, m2
+    ; VPTEST supplies both classifications: CF means every alpha bit
+    ; is set, ZF means none is set. No mask extraction is needed.
+    ptest      m2, m7
+    jc .opaque                         ; whole vector opaque: copy src
     jz .next8                          ; whole vector transparent: keep dst
+    pcmpeqd    m14, m2, m7
     movu       m1, [dstq]
+    psubb      m9, m2, m7             ; a + 1 wraps only at opaque alpha
+    pminub     m9, m9, m2
+    ptest      m9, m9
+    jz .binary
     pand       m3, m1, m7              ; dst alpha
     psubd      m4, m8, m2
     pmullw     m4, m4, m3              ; 256 * 255 still fits a word
@@ -661,6 +769,10 @@ cglobal blend_row_argb, 3, 5, 16, dst, src, n
     pcmpeqd    m9, m2, m11
     pblendvb   m13, m13, m1, m9        ; transparent lanes keep dst
     movu       [dstq], m13
+    jmp .next8
+.binary:
+    pblendvb   m1, m1, m0, m14
+    movu       [dstq], m1
     jmp .next8
 .opaque:
     movu       [dstq], m0
@@ -716,16 +828,44 @@ cglobal blend_row_argb, 3, 5, 16, dst, src, n
     RET
 
 %macro BLEND_ROW_ARGB_PREMULT 0
+%if cpuflag(avx2)
+cglobal blend_row_argb_premult, 3, 5, 12, dst, src, n
+%else
 cglobal blend_row_argb_premult, 3, 3, 10, dst, src, n
+%endif
     mova      m5, [bcast_alpha]
     mova      m6, [pw_256]
     pxor      m7, m7
+%if cpuflag(avx2)
+    xor       r4d, r4d
+%endif
     sub       nd, mmsize / 4
     jl        .tail
 .loop:
     movu      m0, [srcq]
+%if !cpuflag(avx2)
     movu      m1, [dstq]
+%endif
     pshufb    m2, m0, m5
+%if cpuflag(avx2)
+    test      r4d, r4d
+    jnz .arithmetic
+    pcmpeqd   m10, m0, m7
+    pcmpeqb   m11, m2, [bcast_255]
+    por       m10, m10, m11
+    pmovmskb  r3d, m10
+    cmp       r3d, -1
+    jne .partial
+    ; A masked store copies opaque pixels and leaves zero pixels alone,
+    ; with no canvas load. Alpha-zero colour must still use arithmetic.
+    vpmaskmovd [dstq], m11, m0
+    jmp .next
+.partial:
+    mov       r4d, 16                ; amortize probes over partial-alpha runs
+.arithmetic:
+    dec       r4d
+    movu      m1, [dstq]
+%endif
     punpcklbw m3, m1, m7
     punpckhbw m4, m1, m7
     punpcklbw m1, m2, m7
@@ -741,6 +881,9 @@ cglobal blend_row_argb_premult, 3, 3, 10, dst, src, n
     packuswb  m3, m4
     paddb     m3, m0
     movu      [dstq], m3
+%if cpuflag(avx2)
+.next:
+%endif
     add       srcq, mmsize
     add       dstq, mmsize
     sub       nd, mmsize / 4
@@ -864,3 +1007,480 @@ INIT_XMM ssse3
 COLOR_ROW
 INIT_YMM avx2
 COLOR_ROW
+
+; Two packed indices per byte become 32 palette lookups. Broadcast the
+; palette into both lanes so vpshufb never crosses a 128-bit boundary.
+INIT_YMM avx2
+cglobal expand_alpha_nibbles, 4, 4, 5, dst, src, pal, blocks
+    vbroadcasti128 m4, [palq]
+    mova       m3, [pb_15]
+    cmp        blocksd, 2
+    jl .tail
+.loop:
+    movu       xm0, [srcq]
+    psrlw      xm1, xm0, 4
+    punpcklbw  xm2, xm0, xm1
+    punpckhbw  xm0, xm0, xm1
+    vinserti128 m2, m2, xm0, 1
+    pand       m2, m2, m3
+    pshufb     m2, m4, m2
+    movu       [dstq], m2
+    add        srcq, 16
+    add        dstq, 32
+    sub        blocksd, 2
+    cmp        blocksd, 2
+    jge .loop
+.tail:
+    test       blocksd, blocksd
+    jz .ret
+    movq       xm0, [srcq]
+    psrlw      xm1, xm0, 4
+    punpcklbw  xm0, xm0, xm1
+    pand       xm0, xm0, xm3
+    pshufb     xm0, xm4, xm0
+    movu       [dstq], xm0
+.ret:
+    RET
+
+; Gather the green bytes from 32 residual pixels in their picture order.
+%macro GREEN32 0
+    movu       m0, [srcq]
+    movu       m1, [srcq+32]
+    movu       m2, [srcq+64]
+    movu       m3, [srcq+96]
+    psrld      m0, 16
+    psrld      m1, 16
+    psrld      m2, 16
+    psrld      m3, 16
+    pand       m0, m0, m4
+    pand       m1, m1, m4
+    pand       m2, m2, m4
+    pand       m3, m3, m4
+    packusdw   m0, m0, m1
+    packusdw   m2, m2, m3
+    packuswb   m0, m0, m2
+    vpermd     m0, m5, m0
+%endmacro
+
+INIT_YMM avx2
+cglobal pred_green_1, 4, 5, 9, src, upper, n, dst, left
+    movzx      leftd, byte [dstq-1]
+    pcmpeqd    m4, m4
+    psrld      m4, 24
+    mova       m5, [eg_perm]
+    vpbroadcastb m6, [dstq-1]
+    cmp        nd, 32
+    jl .tail
+.loop:
+    GREEN32
+    pslldq     m1, m0, 1
+    paddb      m0, m0, m1
+    pslldq     m1, m0, 2
+    paddb      m0, m0, m1
+    pslldq     m1, m0, 4
+    paddb      m0, m0, m1
+    pslldq     m1, m0, 8
+    paddb      m0, m0, m1
+    ; Carry the low lane's total into the high lane, then the previous block.
+    vperm2i128 m1, m0, m0, 0x08
+    pshufb     m1, m1, [pb_15]
+    paddb      m0, m0, m1
+    vperm2i128 m7, m0, m0, 0x11
+    pshufb     m7, m7, [pb_15]
+    paddb      m0, m0, m6
+    paddb      m6, m6, m7
+    movu       [dstq], m0
+    add        srcq, 128
+    add        dstq, 32
+    sub        nd, 32
+    cmp        nd, 32
+    jge .loop
+    movd       leftd, xm6
+.tail:
+    test       nd, nd
+    jz .ret
+.loop1:
+    add        leftb, [srcq+2]
+    mov        [dstq], leftb
+    add        srcq, 4
+    inc        dstq
+    dec        nd
+    jg .loop1
+.ret:
+    RET
+
+; Speculate that each pixel picks top. Validate all 32 decisions together;
+; a failed block is reconstructed serially. After four failures, amortize
+; the probe over 128 serial pixels before trying again.
+INIT_YMM avx2
+cglobal pred_green_11, 4, 11, 10, 192, src, upper, n, dst, left, top, idx, a, b, failures, count
+    movzx      leftd, byte [dstq-1]
+    pcmpeqd    m4, m4
+    psrld      m4, 24
+    mova       m5, [eg_perm]
+    xor        failuresd, failuresd
+    mov        countd, 3
+    cmp        nd, 32
+    jl .tail
+.probe:
+    GREEN32
+    movu       [rsp+160], m0          ; residuals for the serial chain
+    movu       m1, [upperq]
+    movu       m2, [upperq-1]
+    paddb      m0, m0, m1
+    movu       [rsp+128], m0          ; candidates when top is chosen
+    test       failuresd, failuresd
+    js .prepare
+    vperm2i128 m3, m0, m0, 0x08
+    palignr    m3, m0, m3, 15
+    mova       xm9, xm3
+    pinsrb     xm9, leftd, 0
+    vinserti128 m3, m3, xm9, 0
+    psubusb    m6, m1, m2
+    psubusb    m7, m2, m1
+    por        m6, m6, m7
+    psubusb    m7, m3, m2
+    psubusb    m8, m2, m3
+    por        m7, m7, m8
+    psubusb    m7, m7, m6
+    ptest      m7, m7
+    jnz .prepare
+    movu       [dstq], m0
+    vextracti128 xm0, m0, 1
+    pextrb     leftd, xm0, 15
+    xor        failuresd, failuresd
+    jmp .next
+.prepare:
+    ; A flat upper row often leaves an off-flat left carried all along.
+    ; Check the other closed form too: prefix sums of residuals are exact
+    ; when none of the speculative lefts ever equals that upper value.
+    vpbroadcastb m3, [upperq-1]
+    pxor       m6, m1, m3
+    ptest      m6, m6
+    jnz .intervals
+    movu       m0, [rsp+160]
+    pslldq     m6, m0, 1
+    paddb      m0, m0, m6
+    pslldq     m6, m0, 2
+    paddb      m0, m0, m6
+    pslldq     m6, m0, 4
+    paddb      m0, m0, m6
+    pslldq     m6, m0, 8
+    paddb      m0, m0, m6
+    vperm2i128 m6, m0, m0, 0x08
+    pshufb     m6, m6, [pb_15]
+    paddb      m0, m0, m6
+    vpbroadcastb m7, [dstq-1]
+    paddb      m0, m0, m7
+    vperm2i128 m6, m0, m0, 0x08
+    palignr    m6, m0, m6, 15
+    mova       xm9, xm6
+    pinsrb     xm9, leftd, 0
+    vinserti128 m6, m6, xm9, 0
+    pcmpeqb    m6, m6, m1
+    ptest      m6, m6
+    jnz .intervals
+    movu       [dstq], m0
+    vextracti128 xm0, m0, 1
+    pextrb     leftd, xm0, 15
+    xor        failuresd, failuresd
+    jmp .next
+.intervals:
+    ; Prepare signed bounds off the carry chain. The lower-bound branch
+    ; lets left runs advance without a dependent conditional move.
+    pmovzxbw   m6, xm1
+    pmovzxbw   m7, xm2
+    psubw      m8, m6, m7
+    pabsw      m8, m8
+    psubw      m6, m7, m8
+    paddw      m8, m8, m7
+    mova       m7, m6
+    movu       [rsp], m7
+    movu       [rsp+64], m8
+    vextracti128 xm6, m1, 1
+    vextracti128 xm7, m2, 1
+    pmovzxbw   m6, xm6
+    pmovzxbw   m7, xm7
+    psubw      m8, m6, m7
+    pabsw      m8, m8
+    psubw      m6, m7, m8
+    paddw      m8, m8, m7
+    mova       m7, m6
+    movu       [rsp+32], m7
+    movu       [rsp+96], m8
+    xor        idxd, idxd
+.loop32:
+    movzx      bd, byte [rsp+160+idxq]
+    add        bb, leftb
+    cmp        leftw, [rsp+idxq*2]
+    jl .left32
+    movzx      ad, byte [rsp+128+idxq]
+    cmp        leftw, [rsp+64+idxq*2]
+    movzx      bd, bb
+    cmovle     bd, ad
+.left32:
+    movzx      leftd, bb
+    mov        [dstq+idxq], leftb
+    inc        idxd
+    cmp        idxd, 32
+    jl .loop32
+    inc        failuresd
+    cmp        failuresd, 4
+    jne .next
+    mov        failuresd, countd
+    neg        failuresd
+    lea        countd, [countq*2+1]
+    mov        idxd, 31
+    cmp        countd, idxd
+    cmovg      countd, idxd          ; progressively amortize probes on noise
+.next:
+    add        srcq, 128
+    add        upperq, 32
+    add        dstq, 32
+    sub        nd, 32
+    cmp        nd, 32
+    jge .probe
+.tail:
+    test       nd, nd
+    jz .ret
+.loop1:
+    movzx      topd, byte [upperq]
+    movzx      idxd, byte [upperq-1]
+    mov        ad, topd
+    sub        ad, idxd
+    mov        bd, ad
+    neg        bd
+    cmovs      bd, ad
+    mov        ad, leftd
+    sub        ad, idxd
+    mov        idxd, ad
+    neg        idxd
+    cmovs      idxd, ad
+    cmp        idxd, bd
+    cmovle     leftd, topd
+    add        leftb, [srcq+2]
+    mov        [dstq], leftb
+    add        srcq, 4
+    inc        upperq
+    inc        dstq
+    dec        nd
+    jg .loop1
+.ret:
+    RET
+
+; The upper row is one pixel ahead of the lower. Each 128-bit lane carries
+; one row's four channels; the two left dependencies advance together.
+; The upper output feeds the next iteration's lower top through a lane
+; permute, without reloading the pixel just stored.
+%macro PAIR_PIXEL 1
+%if %1 == 11
+    psadbw     m6, m0, m2
+    psadbw     m7, m1, m2
+    pcmpgtd    m6, m6, m7
+    pblendvb   m0, m1, m0, m6
+%elif %1 == 12
+    psubusb    m6, m1, m2
+    psubusb    m7, m2, m1
+    paddusb    m0, m0, m6
+    psubusb    m0, m0, m7
+%else
+    ; Keep the carried left in complemented word lanes, as averaging two
+    ; complements with round-up is the complement of a rounded-down mean.
+    punpcklbw  m6, m1, m9
+    punpcklbw  m7, m2, m9
+    pxor       m6, m6, m8
+    pxor       m7, m7, m8
+    pavgb      m11, m11, m6
+    psubusb    m6, m7, m11
+    psubusb    m7, m11, m7
+    psrlw      m6, m6, 1
+    psrlw      m7, m7, 1
+    psubusb    m11, m11, m6
+    paddusb    m11, m11, m7
+    punpcklbw  m6, m4, m9
+    psubb      m11, m11, m6
+    pxor       m6, m11, m8
+    packuswb   m0, m6, m6
+%endif
+%if %1 != 13
+    paddb      m0, m0, m4
+%endif
+%endmacro
+
+; Batch four upper pixels before the lower row needs them. This removes
+; the cross-lane top dependency from the per-pixel carry: both rows now
+; run independently until the next block, with packed loads and stores.
+%macro PRED_PAIR 1
+INIT_YMM avx2
+cglobal pred_add_ %+ %1 %+ _pair, 6, 8, 16, src, upper, n, dst, src_b, dst_b, saved, tail
+    test       nd, nd
+    jz .ret
+    pxor       m9, m9
+%if %1 == 13
+    pcmpeqw    m8, m8
+    psrlw      m8, m8, 8
+%endif
+    cmp        nd, 4
+    jl .short
+    movd       xm0, [dstq-4]
+%if %1 == 13
+    punpcklbw  m11, m0, m9
+    pxor       m11, m11, m8
+%endif
+    movd       xm2, [upperq-4]
+    pxor       m10, m10
+%assign pi 0
+%rep 4
+    movd       xm1, [upperq+4*pi]
+    movd       xm4, [srcq+4*pi]
+    PAIR_PIXEL %1
+    psrldq     m10, m10, 4
+    pslldq     m15, m0, 12
+    por        m10, m10, m15
+    mova       m2, m1
+%assign pi pi+1
+%endrep
+    movu       [dstq], xm10
+    movd       xm5, [dstq-4]
+    vinserti128 m2, m2, xm5, 1
+    movd       xm5, [dst_bq-4]
+    vinserti128 m0, m0, xm5, 1
+%if %1 == 13
+    punpcklbw  xm5, xm5, xm9
+    pxor       xm5, xm5, xm8
+    vinserti128 m11, m11, xm5, 1
+%endif
+    add        srcq, 16
+    add        upperq, 16
+    add        dstq, 16
+    sub        nd, 4
+    cmp        nd, 4
+    jl .pending
+.loop4:
+%if %1 == 11
+    movu       xm12, [upperq]
+    vinserti128 m12, m12, xm10, 1
+    movu       xm13, [srcq]
+    vinserti128 m13, m13, [src_bq], 1
+%else
+    movu       xm1, [upperq]
+    vinserti128 m1, m1, xm10, 1
+    movu       xm4, [srcq]
+    vinserti128 m4, m4, [src_bq], 1
+%endif
+    pxor       m10, m10
+%assign pi 0
+%rep 4
+%if %1 == 11
+    vpblendd   m1, m9, m12, 0x11
+    vpblendd   m4, m9, m13, 0x11
+%endif
+    PAIR_PIXEL %1
+%if pi == 0
+    vpblendd   m10, m10, m0, 0x11
+%else
+    pslldq     m15, m0, 4*pi
+    vpblendd   m10, m10, m15, (1 << pi) | (1 << (pi+4))
+%endif
+    mova       m2, m1
+%if %1 == 11
+    psrldq     m12, m12, 4
+    psrldq     m13, m13, 4
+%else
+    psrldq     m1, m1, 4
+    psrldq     m4, m4, 4
+%endif
+%assign pi pi+1
+%endrep
+    movu       [dstq], xm10
+    vextracti128 [dst_bq], m10, 1
+    add        srcq, 16
+    add        upperq, 16
+    add        dstq, 16
+    add        src_bq, 16
+    add        dst_bq, 16
+    sub        nd, 4
+    cmp        nd, 4
+    jge .loop4
+.pending:
+    lea        savedq, [dstq-16]
+    mov        taild, nd
+%if %1 == 13
+    vextracti128 xm14, m11, 1
+%else
+    vextracti128 xm14, m0, 1
+%endif
+    vextracti128 xm15, m2, 1
+    test       nd, nd
+    jz .lower
+.upper_tail:
+    movd       xm1, [upperq]
+    movd       xm4, [srcq]
+    PAIR_PIXEL %1
+    movd       [dstq], xm0
+    mova       m2, m1
+    add        srcq, 4
+    add        upperq, 4
+    add        dstq, 4
+    dec        nd
+    jg .upper_tail
+.lower:
+%if %1 == 13
+    mova       xm11, xm14
+%else
+    mova       xm0, xm14
+%endif
+    mova       xm2, xm15
+    mov        upperq, savedq
+    lea        nd, [tailq+4]
+    mov        srcq, src_bq
+    mov        dstq, dst_bq
+    jmp .single
+.short:
+    mov        savedq, dstq
+    mov        taild, nd
+    movd       xm0, [dstq-4]
+%if %1 == 13
+    punpcklbw  m11, m0, m9
+    pxor       m11, m11, m8
+%endif
+    movd       xm2, [upperq-4]
+.short_upper:
+    movd       xm1, [upperq]
+    movd       xm4, [srcq]
+    PAIR_PIXEL %1
+    movd       [dstq], xm0
+    mova       m2, m1
+    add        srcq, 4
+    add        upperq, 4
+    add        dstq, 4
+    dec        nd
+    jg .short_upper
+    mov        upperq, savedq
+    mov        nd, taild
+    mov        srcq, src_bq
+    mov        dstq, dst_bq
+    movd       xm0, [dstq-4]
+%if %1 == 13
+    punpcklbw  m11, m0, m9
+    pxor       m11, m11, m8
+%endif
+    movd       xm2, [upperq-4]
+.single:
+    movd       xm1, [upperq]
+    movd       xm4, [srcq]
+    PAIR_PIXEL %1
+    movd       [dstq], xm0
+    mova       m2, m1
+    add        srcq, 4
+    add        upperq, 4
+    add        dstq, 4
+    dec        nd
+    jg .single
+.ret:
+    RET
+%endmacro
+
+PRED_PAIR 11
+PRED_PAIR 12
+PRED_PAIR 13

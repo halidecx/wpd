@@ -260,85 +260,98 @@ cglobal gradient_unfilter, 3, 6, 8, prev, row, w
     jmp       .next
     TOP_ROW_UNFILTER
 
-; The same speculative closed form, sixteen pixels per block: the prefix
-; sums run inside each 128-bit lane, then the low lane's total carries
-; into the high one with one cross-lane permute.
+; Keep the speculative recurrence in bytes: wrapping residual sums are
+; valid even when they cross 255. Compare its predictors with the two
+; saturating steps of the serial recurrence before accepting 32 pixels.
 INIT_YMM avx2
-cglobal gradient_unfilter, 3, 6, 8, prev, row, w
+cglobal gradient_unfilter, 3, 8, 10, prev, row, w
     test      wd, wd
-    jle       .end
+    jle .end
     test      prevq, prevq
-    jz        .top
+    jz .top
     movzx     r3d, byte [prevq]
     add       r3b, [rowq]
     mov       [rowq], r3b
-    movzx     r3d, r3b
-    sub       wd, 1
-    jz        .end
-    add       rowq, 1
-    add       prevq, 1
-    pxor      m7, m7
-    mova      m6, [pw_255f]
-    movd      xm0, r3d
-    vpbroadcastw m0, xm0             ; running left, in every word
-    sub       wd, 16
-    jl        .tail
+    vpbroadcastb m0, [rowq]
+    xor       r6d, r6d
+    inc       prevq
+    inc       rowq
+    dec       wd
+    cmp       wd, 32
+    jl .tail
 .loop:
-    pmovzxbw  m1, [prevq]
-    pmovzxbw  m2, [prevq - 1]
-    pmovsxbw  m3, [rowq]             ; the residuals, sign-extended
-    psubw     m1, m2
-    paddw     m1, m3                 ; in + top - top_left
+    movu      m1, [prevq]
+    movu      m2, [prevq-1]
+    movu      m3, [rowq]
+    psubusb   m6, m1, m2
+    psubusb   m7, m2, m1
+    psubb     m1, m1, m2
+    paddb     m1, m1, m3
+    pslldq    m2, m1, 1
+    paddb     m1, m1, m2
     pslldq    m2, m1, 2
-    paddw     m1, m2
+    paddb     m1, m1, m2
     pslldq    m2, m1, 4
-    paddw     m1, m2
+    paddb     m1, m1, m2
     pslldq    m2, m1, 8
-    paddw     m1, m2                 ; prefix sums, per lane
-    vpermq    m2, m1, q1111
-    pshufb    m2, [grad_w7]          ; the low lane's total, everywhere
-    pand      m2, [grad_lane1]
-    paddw     m1, m2                 ; carried into the high lane
-    paddw     m1, m0                 ; speculative out, unclipped
-    psubw     m2, m1, m3             ; the predictor each pixel would clip
-    pminsw    m4, m2, m1
-    pmaxsw    m5, m2, m1
-    pcmpgtw   m5, m6                 ; anything above 255
-    pcmpgtw   m4, m7, m4             ; anything below 0
-    por       m4, m5
-    pmovmskb  r4d, m4
-    test      r4d, r4d
-    jnz       .slow
-    packuswb  m1, m1
-    vpermq    m1, m1, q3120
-    movu      [rowq], xm1
-    psrldq    xm1, 15
-    vpbroadcastw m0, xm1             ; out[15] seeds the next block
-    add       rowq, 16
-    add       prevq, 16
-.next:
-    sub       wd, 16
-    jge       .loop
-.tail:
-    add       wd, 16
-    jz        .end
+    paddb     m1, m1, m2
+    vperm2i128 m2, m1, m1, 0x08
+    pcmpeqb   m8, m8
+    psrlw     m8, 12                  ; each byte selects byte 15
+    packuswb  m8, m8, m8
+    pshufb    m2, m2, m8
+    paddb     m1, m1, m2
+    paddb     m1, m1, m0
+    vperm2i128 m2, m1, m1, 0x08
+    palignr   m2, m1, m2, 15          ; speculative lefts
+    mova      xm9, xm2
+    pinsrb    xm9, r3d, 0
+    vinserti128 m2, m2, xm9, 0
+    paddusb   m2, m2, m6
+    psubusb   m2, m2, m7              ; clip(L + T - TL)
+    psubb     m3, m1, m3              ; unbounded predictor, modulo 256
+    pcmpeqb   m2, m2, m3
+    pmovmskb  r4d, m2
+    cmp       r4d, -1
+    jne .slow
+    movu      [rowq], m1
+    xor       r6d, r6d
+    vperm2i128 m0, m1, m1, 0x11
+    pshufb    m0, m0, m8
     movd      r3d, xm0
-    movzx     r3d, r3w               ; every word holds the running left
+    movzx     r3d, r3b
+    add       prevq, 32
+    add       rowq, 32
+    sub       wd, 32
+    cmp       wd, 32
+    jge .loop
+.tail:
+    test      wd, wd
+    jz .end
 .tail_loop:
     GRADIENT_PIXEL
-    sub       wd, 1
-    jnz       .tail_loop
+    dec       wd
+    jnz .tail_loop
 .end:
     RET
 .slow:
-    movd      r3d, xm0
-    movzx     r3d, r3w
-    mov       r5d, 16
+    mov       r5d, 32
+    inc       r6d
+    cmp       r6d, 4
+    jl .serial
+    mov       r5d, 128
+    cmp       r5d, wd
+    cmovg     r5d, wd
+    xor       r6d, r6d
+.serial:
+    mov       r7d, r5d
 .slow_loop:
     GRADIENT_PIXEL
-    sub       r5d, 1
-    jnz       .slow_loop
-    movd      xm0, r3d
-    vpbroadcastw m0, xm0
-    jmp       .next
+    dec       r5d
+    jnz .slow_loop
+    vpbroadcastb m0, [rowq-1]
+    sub       wd, r7d
+    cmp       wd, 32
+    jge .loop
+    jmp .tail
     TOP_ROW_UNFILTER

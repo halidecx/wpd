@@ -49,7 +49,8 @@ mod imp {
         }
 
         #[cold]
-        fn load_final_bytes(&mut self, buf: &[u8]) {
+        #[inline(never)]
+        fn load_final_bytes(mut self, buf: &[u8]) -> Self {
             if self.pos < self.end {
                 self.value = (self.value << 8) | u64::from(buf[self.pos]);
                 self.pos += 1;
@@ -61,6 +62,7 @@ mod imp {
             } else {
                 self.bits = 0;
             }
+            self
         }
 
         #[inline(always)]
@@ -73,7 +75,7 @@ mod imp {
                 self.pos += 7;
                 self.bits += 56;
             } else {
-                self.load_final_bytes(buf);
+                *self = self.load_final_bytes(buf);
             }
         }
 
@@ -148,6 +150,134 @@ mod imp {
             self.range = (self.range.wrapping_add(mask as u32)) | 1;
             self.value -= u64::from((split + 1) & mask as u32) << pos;
             (v ^ mask) - mask
+        }
+
+        pub fn tokens(self) -> TokenCoder {
+            TokenCoder {
+                c: Self {
+                    range: self.range + 1,
+                    ..self
+                },
+                shift: 0,
+            }
+        }
+    }
+
+    /* The coefficient loop's coder keeps its range as the width the last
+     * decision left and the shift that renormalizes it; RangeCoder's range
+     * is (range << shift) - 1. The next split multiplies before it shifts,
+     * so finding the shift overlaps the multiply instead of preceding it:
+     * seven or eight cycles from one range to the next instead of nine. */
+    #[derive(Clone, Copy)]
+    pub struct TokenCoder {
+        c: RangeCoder,
+        shift: u32,
+    }
+
+    impl TokenCoder {
+        pub fn finish(self) -> RangeCoder {
+            RangeCoder {
+                range: (self.c.range << self.shift) - 1,
+                ..self.c
+            }
+        }
+
+        /* One past RangeCoder's split. */
+        #[inline(always)]
+        fn split(&self, prob: u8) -> u32 {
+            let p = u32::from(prob);
+
+            (((self.c.range * p) << self.shift) + 256 - p) >> 8
+        }
+
+        #[inline(always)]
+        fn set_range(&mut self, range: u32, pos: i32) {
+            let shift = range.leading_zeros() ^ 24;
+
+            self.c.range = range;
+            self.shift = shift;
+            self.c.bits = pos - shift as i32;
+        }
+
+        #[inline(always)]
+        pub fn get_prob(&mut self, buf: &[u8], prob: u8) -> u32 {
+            if self.c.bits < 0 {
+                self.c.refill(buf);
+            }
+
+            let pos = self.c.bits;
+            let split = self.split(prob);
+            let value = (self.c.value >> pos) as u32;
+            let bit = u32::from(value >= split);
+            let range = if bit != 0 {
+                self.c.value -= u64::from(split) << pos;
+                (self.c.range << self.shift) - split
+            } else {
+                split
+            };
+
+            self.set_range(range, pos);
+            bit
+        }
+
+        #[inline(always)]
+        pub fn get_prob_branchy(&mut self, buf: &[u8], prob: u8) -> bool {
+            if self.c.bits < 0 {
+                self.c.refill(buf);
+            }
+
+            let pos = self.c.bits;
+            let p = u32::from(prob);
+            let a = (self.c.range * p) << self.shift;
+            let value = (self.c.value >> pos) as u32;
+
+            /* value >= split, decided before the split's final add and
+             * shift: the branch resolves as early as RangeCoder's does.
+             * In 64 bits, since value is not bounded by the range: a
+             * partition that opens with 0xff starts above it, the gap
+             * doubles with every shift, and value << 8 would wrap. */
+            if (u64::from(value) << 8) + u64::from(p) > u64::from(a) {
+                let split = (a + 256 - p) >> 8;
+
+                self.c.value -= u64::from(split) << pos;
+                self.set_range((self.c.range << self.shift) - split, pos);
+                true
+            } else {
+                self.set_range((a + 256 - p) >> 8, pos);
+                false
+            }
+        }
+
+        #[inline(always)]
+        pub fn get_signed(&mut self, buf: &[u8], v: i32) -> i32 {
+            if self.c.bits < 0 {
+                self.c.refill(buf);
+            }
+
+            let pos = self.c.bits;
+            let full = self.c.range << self.shift;
+            let split = (full + 1) >> 1;
+            let value = (self.c.value >> pos) as u32;
+            let mask = ((split - 1).wrapping_sub(value) as i32) >> 31;
+
+            self.c.value -= u64::from(split & mask as u32) << pos;
+            self.c.range = if mask != 0 { full - split } else { split };
+            self.shift = 1;
+            self.c.bits = pos - 1;
+            (v ^ mask) - mask
+        }
+
+        #[inline(always)]
+        pub fn get_coeff(&mut self, buf: &[u8], probs: &[u8]) -> i32 {
+            let mut v = 0;
+
+            for &p in probs {
+                if p == 0 {
+                    break;
+                }
+                v = (v << 1) + self.get_prob(buf, p) as i32;
+            }
+            v
         }
     }
 }
@@ -301,10 +431,20 @@ mod imp {
                 v
             }
         }
+
+        pub fn tokens(self) -> Self {
+            self
+        }
+
+        pub fn finish(self) -> Self {
+            self
+        }
     }
+
+    pub type TokenCoder = RangeCoder;
 }
 
-pub use imp::RangeCoder;
+pub use imp::{RangeCoder, TokenCoder};
 
 impl RangeCoder {
     pub fn start(buf: &[u8], start: usize, size: usize) -> Self {
@@ -432,5 +572,67 @@ mod tests {
         let mut c = RangeCoder::start(&buf, 0, buf.len());
 
         assert_eq!(c.get_tree(&buf, &tree, &probs), 1);
+    }
+
+    #[test]
+    fn the_token_coder_decides_like_the_range_coder() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        // Short enough that the decisions run past its end.
+        let buf: Vec<u8> = (0..300).map(|_| next() as u8).collect();
+        let mut a = RangeCoder::start(&buf, 0, buf.len());
+        let mut t = a.tokens();
+
+        for k in 0..6000 {
+            let r = next();
+            let p = r as u8;
+
+            match (r >> 8) % 3 {
+                0 => assert_eq!(a.get_prob(&buf, p), t.get_prob(&buf, p)),
+                1 => {
+                    assert_eq!(a.get_prob_branchy(&buf, p), t.get_prob_branchy(&buf, p))
+                }
+                _ => assert_eq!(a.get_signed(&buf, 5), t.get_signed(&buf, 5)),
+            }
+            if k % 97 == 0 {
+                t = t.finish().tokens();
+            }
+        }
+        assert!(a.overran());
+        assert!(t.finish().overran());
+    }
+
+    #[test]
+    fn the_token_coder_follows_a_value_that_outgrew_its_range() {
+        // A partition opening with 0xff starts with its value above the
+        // range, and the gap doubles with every shift, so value >> bits
+        // soon passes 2^24.
+        let mut x = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+
+        for n in 0..400 {
+            let mut buf: Vec<u8> = (0..64).map(|_| next() as u8).collect();
+
+            buf[..1 + n % 6].fill(0xff);
+
+            let mut a = RangeCoder::start(&buf, 0, buf.len());
+            let mut t = a.tokens();
+
+            for _ in 0..200 {
+                let p = next() as u8;
+
+                assert_eq!(a.get_prob_branchy(&buf, p), t.get_prob_branchy(&buf, p));
+            }
+        }
     }
 }

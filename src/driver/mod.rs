@@ -310,7 +310,7 @@ impl<'a> Decoder<'a> {
                 self.frame.has_alpha || self.frame.lossless_has_alpha
             },
             timestamp: self.frame_timestamp - self.frame_duration as i64,
-            threads: self.threads.0,
+            threads: self.ahead.walk_threads(self.threads.0),
         }
     }
 
@@ -889,6 +889,7 @@ impl<'a> Decoder<'a> {
         complete: bool,
     ) -> Result<bool, Error> {
         self.frame.lossless_canvas_in();
+        self.frame.vp8l.threads = self.threads.0;
 
         let Self { frame, input, .. } = self;
         let ret = frame
@@ -1756,6 +1757,7 @@ mod tests {
         assert!(decoder.next_picture(&mut Handout::default()).unwrap());
         assert!(!decoder.ahead.slots.is_empty());
         assert!(!decoder.ahead.spent());
+        decoder.ahead.settle();
         let count = decoder.ahead.slots.len();
         let allocated: Vec<_> =
             decoder.ahead.slots.iter().map(|s| s.vp8.as_ptr()).collect();
@@ -1778,6 +1780,207 @@ mod tests {
         assert!(decoder.ahead.spent());
         assert!(decoder.next_picture(&mut Handout::default()).unwrap());
         assert!(!decoder.ahead.spent());
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn dropping_a_decoder_joins_its_frame_threads() {
+        /* Fourteen frames, so the run is still going after the first. */
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(Options {
+                n_threads: 4,
+                ..Options::default()
+            })
+            .unwrap();
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+
+        let holders = decoder.ahead.pool_holders();
+
+        assert!(holders() > 1);
+        drop(decoder);
+        assert_eq!(holders(), 0);
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn frames_decoded_ahead_keep_to_the_thread_budget() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+
+        for n_threads in [2, 3, 4] {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            while decoder.next_picture(&mut Handout::default()).unwrap() {}
+
+            let peak = decoder.ahead.peak();
+
+            assert!((1..=n_threads as usize).contains(&peak), "{peak}");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn a_new_thread_count_ends_the_run_decoded_ahead() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        let mut decoder = Decoder::new();
+        let threads = |n_threads| Options {
+            n_threads,
+            ..Options::default()
+        };
+
+        decoder.set_core_options(threads(4)).unwrap();
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.ahead.spent());
+
+        decoder.set_core_options(threads(1)).unwrap();
+        while decoder.next_picture(&mut Handout::default()).unwrap() {
+            assert!(decoder.ahead.spent());
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn frames_decoded_ahead_log_from_the_call_that_reaches_them() {
+        const LATE: &str = "ALPHA chunk after the image it belongs to";
+        static LOGGED: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+            std::sync::Mutex::new(Vec::new());
+
+        fn record(_: crate::log::Level, message: &str) {
+            if message == LATE {
+                LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(std::thread::current().id());
+            }
+        }
+
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        /* Every frame after the first gets an ALPH chunk after its image,
+         * which fails it with LATE. */
+        let mut damaged = data[..12].to_vec();
+        let mut at = 12;
+        let mut frames = 0;
+
+        while at + 8 <= data.len() {
+            let size = crate::bits::rl32(&data[at + 4..]) as usize;
+            let chunk = &data[at..at + 8 + size + (size & 1)];
+
+            at += chunk.len();
+            if &chunk[..4] == b"ANMF" && {
+                frames += 1;
+                frames > 1
+            } {
+                damaged.extend_from_slice(b"ANMF");
+                damaged.extend_from_slice(&(chunk.len() as u32 + 2).to_le_bytes());
+                damaged.extend_from_slice(&chunk[8..]);
+                damaged.extend_from_slice(b"ALPH\x02\0\0\0\0\0");
+            } else {
+                damaged.extend_from_slice(chunk);
+            }
+        }
+        let riff = damaged.len() as u32 - 8;
+
+        damaged[4..8].copy_from_slice(&riff.to_le_bytes());
+        crate::log::set_sink(record);
+
+        /* The frames after the second are decoded ahead and fail too, but the
+         * walk never reaches them, so a serial decode says nothing of them. */
+        for n_threads in [1, 4] {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&damaged).unwrap();
+            assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+            assert!(decoder.next_picture(&mut Handout::default()).is_err());
+            drop(decoder);
+
+            let logged = std::mem::take(
+                &mut *LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+
+            assert_eq!(logged, [std::thread::current().id()], "{n_threads}");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "threads", not(miri)))]
+    fn a_run_longer_than_its_slots_composites_as_a_serial_decode_does() {
+        let data = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/wpd-test-data/anim_yuva.webp"
+        ))
+        .unwrap();
+        let canvas = |decoder: &Decoder| {
+            let frame = decoder.canvas.frame();
+            let mut bytes = Vec::new();
+
+            for p in 0..4 {
+                for y in 0..frame.rows(p) {
+                    bytes.extend_from_slice(frame.row(p, y));
+                }
+            }
+            bytes
+        };
+        let mut decoders = [1, 3].map(|n_threads| {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_core_options(Options {
+                    n_threads,
+                    ..Options::default()
+                })
+                .unwrap();
+            decoder.open(&data).unwrap();
+            decoder
+        });
+        let mut frames = 0;
+
+        while decoders[0].next_picture(&mut Handout::default()).unwrap() {
+            assert!(decoders[1].next_picture(&mut Handout::default()).unwrap());
+            let serial = canvas(&decoders[0]);
+
+            assert!(!serial.is_empty() && serial == canvas(&decoders[1]));
+            frames += 1;
+        }
+        assert!(!decoders[1].next_picture(&mut Handout::default()).unwrap());
+
+        /* Three slots carried every frame after the first. */
+        assert_eq!(decoders[1].ahead.slots.len(), 3);
+        assert_eq!(decoders[1].ahead.end, frames);
     }
 
     struct NeverFits;

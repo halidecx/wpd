@@ -1,11 +1,13 @@
-use super::bitreader::{BitReader, TAIL_MARGIN};
-use super::huffman::Tree;
+use super::bitreader::{BitReader, Fast, FAST_MARGIN, TAIL_MARGIN};
+use super::huffman::{Tree, PACKED_BITS};
 use super::{
     HTreeGroup, Picture, Resume, HUFFMAN_CODES_PER_META_CODE, HUFF_IDX_ALPHA,
     HUFF_IDX_BLUE, HUFF_IDX_DIST, HUFF_IDX_GREEN, HUFF_IDX_RED, NUM_LENGTH_CODES,
     NUM_LITERAL_CODES, NUM_SHORT_DISTANCES,
 };
 use crate::error::{Error, Result, Status};
+
+const PACKED_MASK: usize = (1 << PACKED_BITS) - 1;
 
 pub struct Entropy<'a> {
     pub data: &'a [u32],
@@ -251,20 +253,94 @@ fn backward_reference(
     Ok((distance, length))
 }
 
+/// Copies between slices of the same length in 32-byte pieces, the last of
+/// which ends at the end and may copy some of the one before it again. A
+/// copy shorter than a piece takes two overlapping halves, or quarters, and
+/// so on. Most copies are a few dozen pixels or fewer, which a call to
+/// `memcpy` takes longer to set up than to do.
+#[inline(always)]
+fn copy_disjoint<T: Copy>(dst: &mut [T], src: &[T]) {
+    let n = dst.len();
+    let piece = (32 / std::mem::size_of::<T>()).max(1);
+
+    if n >= piece {
+        for (d, s) in dst.chunks_exact_mut(piece).zip(src.chunks_exact(piece)) {
+            d.copy_from_slice(s);
+        }
+        dst[n - piece..].copy_from_slice(&src[n - piece..]);
+        return;
+    }
+
+    let mut part = piece / 2;
+
+    while part >= 4 {
+        if n >= part {
+            dst[..part].copy_from_slice(&src[..part]);
+            dst[n - part..].copy_from_slice(&src[n - part..]);
+            return;
+        }
+        part /= 2;
+    }
+    if n != 0 {
+        dst[0] = src[0];
+        dst[n / 2] = src[n / 2];
+        dst[n - 1] = src[n - 1];
+    }
+}
+
+/// `copy_disjoint`, for a run of one value.
+#[inline(always)]
+fn fill_pieces<T: Copy>(dst: &mut [T], v: T) {
+    let n = dst.len();
+    let piece = (32 / std::mem::size_of::<T>()).max(1);
+
+    if n >= piece {
+        for d in dst.chunks_exact_mut(piece) {
+            d.fill(v);
+        }
+        dst[n - piece..].fill(v);
+        return;
+    }
+
+    let mut part = piece / 2;
+
+    while part >= 4 {
+        if n >= part {
+            dst[..part].fill(v);
+            dst[n - part..].fill(v);
+            return;
+        }
+        part /= 2;
+    }
+    if n != 0 {
+        dst[0] = v;
+        dst[n / 2] = v;
+        dst[n - 1] = v;
+    }
+}
+
+#[inline(always)]
 fn copy_block<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     if dist >= length {
         let (done, rest) = pixels.split_at_mut(pos);
 
-        rest[..length].copy_from_slice(&done[pos - dist..][..length]);
+        copy_disjoint(&mut rest[..length], &done[pos - dist..][..length]);
         return;
     }
     if dist == 1 {
         let v = pixels[pos - 1];
 
-        pixels[pos..][..length].fill(v);
+        fill_pieces(&mut pixels[pos..][..length], v);
         return;
     }
+    copy_repeating(pixels, pos, dist, length);
+}
 
+/// A reference that overlaps its source further back than one pixel. Out of
+/// line, so that its calls to `memcpy` stay out of the loops that inline
+/// `copy_block`.
+#[inline(never)]
+fn copy_repeating<T: Copy>(pixels: &mut [T], pos: usize, dist: usize, length: usize) {
     let mut i = 0;
 
     // The source grows with the output, so short patterns take logarithmically
@@ -293,14 +369,19 @@ fn resolve<'a>(
 }
 
 pub fn decode_pixels(args: Args<'_, '_>) -> Result<Status> {
-    if args.resumable {
-        run::<true>(args)
-    } else {
-        run::<false>(args)
+    // Most images have no fused tables, and their bulk loop does not look
+    // for one at every pixel.
+    let fused = args.groups.iter().any(|hg| hg.fused.is_some());
+
+    match (args.resumable, fused) {
+        (true, true) => run::<true, true>(args),
+        (true, false) => run::<true, false>(args),
+        (false, true) => run::<false, true>(args),
+        (false, false) => run::<false, false>(args),
     }
 }
 
-fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
+fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<Status> {
     let Args {
         gb,
         buf,
@@ -350,6 +431,170 @@ fn run<const RESUMABLE: bool>(args: Args<'_, '_>) -> Result<Status> {
 
     let mut hg = &groups[hgi];
     let mut trees = resolve(hg, arena);
+
+    // The bulk of the stream cannot run out mid-pixel, so it needs none of
+    // the end-of-stream checks or snapshots below.
+    if let Some(mut f) = gb.fast(buf) {
+        let limit = buf.len() - FAST_MARGIN;
+
+        // The cache takes each pixel as it is made, rather than in a batch
+        // before the next lookup: the pixel is still in a register, and a
+        // lookup does not wait on the stores of a batch just before it.
+        if cache_bits != 0 {
+            cached = cache_fill(cache, cache_bits, pixels, cached, pos);
+        }
+        while pos < total && f.pos() <= limit {
+            if x & huff_mask == 0 {
+                hgi = map.at(x, y);
+                hg = &groups[hgi];
+            }
+            if let Some(at) = hg.fused.filter(|_| FUSED) {
+                let fused = arena[at as usize + (f.peek() as usize & PACKED_MASK)];
+
+                if fused != 0 {
+                    f.refill(buf);
+                    f.consume_entry(fused);
+
+                    let px = u32::from_ne_bytes([
+                        hg.literal[0],
+                        (fused >> 8) as u8,
+                        (fused >> 16) as u8,
+                        (fused >> 24) as u8,
+                    ]);
+
+                    pixels[pos] = px;
+                    if cache_bits != 0 {
+                        let argb = cache_value(px);
+
+                        cache[cache_slot(argb, cache_bits)] = argb;
+                    }
+                    pos += 1;
+                    x += 1;
+                    if x == width as i32 {
+                        x = 0;
+                        y += 1;
+                    }
+                    continue;
+                }
+            }
+            let v = hg.trees[HUFF_IDX_GREEN].read_fast::<true>(arena, &mut f, buf);
+
+            if v < NUM_LITERAL_CODES {
+                let mut px;
+
+                if hg.trivial_literal {
+                    px = hg.literal;
+                } else {
+                    let packed = match hg.packed {
+                        Some(at) => {
+                            arena[at as usize + (f.peek() as usize & PACKED_MASK)]
+                        }
+                        None => 0,
+                    };
+
+                    if packed != 0 {
+                        f.consume_entry(packed);
+                        px = [
+                            (packed >> 16) as u8,
+                            (packed >> 8) as u8,
+                            0,
+                            (packed >> 24) as u8,
+                        ];
+                    } else {
+                        let r = hg.trees[HUFF_IDX_RED]
+                            .read_fast::<false>(arena, &mut f, buf);
+                        let b = hg.trees[HUFF_IDX_BLUE]
+                            .read_fast::<true>(arena, &mut f, buf);
+                        let a = hg.trees[HUFF_IDX_ALPHA]
+                            .read_fast::<false>(arena, &mut f, buf);
+
+                        px = [a as u8, r as u8, 0, b as u8];
+                    }
+                }
+                px[2] = v as u8;
+                pixels[pos] = u32::from_ne_bytes(px);
+                if cache_bits != 0 {
+                    let argb = u32::from_be_bytes(px);
+
+                    cache[cache_slot(argb, cache_bits)] = argb;
+                }
+                pos += 1;
+                x += 1;
+                if x == width as i32 {
+                    x = 0;
+                    y += 1;
+                }
+            } else if v < NUM_LITERAL_CODES + NUM_LENGTH_CODES {
+                let length = extend_fast(&mut f, v - NUM_LITERAL_CODES);
+                let prefix =
+                    hg.trees[HUFF_IDX_DIST].read_fast::<true>(arena, &mut f, buf);
+
+                if prefix > 39 {
+                    crate::log::error_args(format_args!(
+                        "distance prefix code too large: {prefix}"
+                    ));
+                    return Err(Error::InvalidData);
+                }
+
+                let coded = extend_fast(&mut f, prefix);
+                let (distance, length) =
+                    backward_reference(coded, length, width, pos, total)?;
+
+                copy_block(pixels, pos, distance, length);
+                if cache_bits != 0 {
+                    // A copy longer than its distance repeats its last
+                    // `distance` pixels, which leave the cache as the whole
+                    // copy would.
+                    let end = pos + length;
+
+                    cache_fill(
+                        cache,
+                        cache_bits,
+                        pixels,
+                        end - length.min(distance),
+                        end,
+                    );
+                }
+                pos += length;
+                x += length as i32;
+                while x >= width as i32 {
+                    x -= width as i32;
+                    y += 1;
+                }
+                if multi_group && x & huff_mask != 0 {
+                    hgi = map.at(x, y);
+                    hg = &groups[hgi];
+                }
+            } else {
+                let slot = (v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES)) as usize;
+
+                if cache_bits == 0 {
+                    crate::log::error("color cache not found");
+                    return Err(Error::InvalidData);
+                }
+                if slot >= 1 << cache_bits {
+                    crate::log::error("color cache index out-of-bounds");
+                    return Err(Error::InvalidData);
+                }
+                let argb = cache[slot];
+
+                pixels[pos] = u32::from_ne_bytes(argb.to_be_bytes());
+                cache[cache_slot(argb, cache_bits)] = argb;
+                pos += 1;
+                x += 1;
+                if x == width as i32 {
+                    x = 0;
+                    y += 1;
+                }
+            }
+        }
+        if cache_bits != 0 {
+            cached = pos;
+        }
+        gb.resume(&f, buf);
+        trees = resolve(hg, arena);
+    }
+
     let mut snap = *gb;
     let mut near = false;
 
@@ -588,6 +833,17 @@ fn extend(gb: &mut BitReader, buf: &[u8], prefix: u32) -> u32 {
     offset + gb.bits(buf, extra_bits) + 1
 }
 
+#[inline(always)]
+fn extend_fast(f: &mut Fast, prefix: u32) -> u32 {
+    if prefix < 4 {
+        return prefix + 1;
+    }
+    let extra_bits = (prefix - 2) >> 1;
+    let offset = (2 + (prefix & 1)) << extra_bits;
+
+    offset + f.bits(extra_bits) + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,5 +892,35 @@ mod tests {
 
         copy_block(&mut px, 3, 3, 5);
         assert_eq!(px, [1, 2, 3, 1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn the_last_period_of_a_copy_leaves_the_cache_as_the_whole_copy_does() {
+        let seed: [u32; 16] =
+            std::array::from_fn(|i| (i as u32).wrapping_mul(0x9E37_79B9));
+
+        for bits in [1, 2, 4] {
+            for dist in 1..=seed.len() {
+                for length in 1..40 {
+                    let mut px = vec![0u32; seed.len() + length];
+                    let pos = seed.len();
+
+                    px[..pos].copy_from_slice(&seed);
+                    copy_block(&mut px, pos, dist, length);
+
+                    let mut want = vec![0u32; 1 << bits];
+                    let mut got = want.clone();
+                    let end = pos + length;
+
+                    cache_fill(&mut want, bits, &px, 0, end);
+                    cache_fill(&mut got, bits, &px, 0, pos);
+                    cache_fill(&mut got, bits, &px, end - length.min(dist), end);
+                    assert_eq!(
+                        got, want,
+                        "bits {bits}, distance {dist}, length {length}"
+                    );
+                }
+            }
+        }
     }
 }

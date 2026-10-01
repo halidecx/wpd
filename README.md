@@ -2,15 +2,15 @@
 
 A safe, fast Rust and assembly WebP decoder with a C ABI.
 
-| Image               | [image-webp](https://crates.io/crates/image-webp) (0.2.4) | libwebp (523e304) | wpd (latest)        |
-| ------------------- | --------------------------------------------------------- | ----------------- | ------------------- |
-| lossy.webp          | 401.7ms (1.00x)                                           | 156.1ms (2.57x)   | **137.8ms (2.92x)** |
-| simplelf-lossy.webp | 310.6ms (1.00x)                                           | 152.2ms (2.04x)   | **130.6ms (2.38x)** |
-| anim_yuv.webp       | 260.5ms (1.00x)                                           | 131.8ms (1.98x)   | **119.8ms (2.17x)** |
-| lossless.webp       | 226.1ms (1.00x)                                           | 177.3ms (1.28x)   | **140.5ms (1.61x)** |
-| anim_rgb.webp       | 97.0ms (1.00x)                                            | 78.6ms (1.23x)    | **42.4ms (2.29x)**  |
-| a_lossy.webp        | 116.4ms (1.00x)                                           | 36.6ms (3.18x)    | **25.5ms (4.56x)**  |
-| anim_yuva.webp      | 575.7ms (1.00x)                                           | 308.0ms (1.87x)   | **263.8ms (2.18x)** |
+| Image               | Output   | image-webp (ms) | libwebp (ms) | wpd (ms) | libwebp / wpd |
+| ------------------- | -------- | --------------: | -----------: | -------: | ------------: |
+| lossy.webp          | YUV420P  |               — |       180.40 |   173.56 |         1.04x |
+| simplelf-lossy.webp | YUV420P  |               — |       174.43 |   162.07 |         1.08x |
+| anim_yuv.webp       | RGBA     |          359.85 |       190.90 |   169.18 |         1.13x |
+| lossless.webp       | RGBA     |          231.50 |       195.75 |   111.27 |         1.76x |
+| anim_rgb.webp       | RGBA     |          206.09 |       104.47 |    62.56 |         1.67x |
+| a_lossy.webp        | YUVA420P |               — |        50.70 |    36.38 |         1.39x |
+| anim_yuva.webp      | RGBA     |          776.54 |       494.37 |   374.46 |         1.32x |
 
 ## Build
 
@@ -94,10 +94,16 @@ For libwebp parity testing and benchmarking against alternative WebP decoders,
 build the optional third-party test binaries:
 
 ```sh
-meson compile -C build libwebpdec
-meson compile -C build imagewebpdec
+meson configure build -Dbuildtype=release -Dtrim_dsp=false
+meson compile -C build
+meson compile -C build libwebpdec imagewebpdec
 ./scripts/bench.sh
 ```
+
+On Linux, use `taskset -c 0 ./scripts/bench.sh` to reproduce the CPU affinity
+above. The harness exports raw Hyperfine timings to `build/bench/`; set
+`BENCH_DIR` to select another directory. Output is discarded, but requested
+format conversion still runs on every decode.
 
 The default libwebp is the pinned Meson subproject. `-Dlibwebp=system` or
 `-Dlibwebpdecoder=/path/to/libwebpdecoder.a` overrides it. `imagewebpdec` is the

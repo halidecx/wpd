@@ -626,7 +626,16 @@ done:
  * This runs in a child because a host that never delivers the fault (see
  * above) leaves the overrunning instruction spinning. Any end other than a
  * clean exit, the alarm included, is an overrun. */
-enum { LF_Y, LF_UV, LF_Y_MB, LF_UV_MB, LF_SIMPLE, LF_SIMPLE_MB };
+enum {
+    LF_Y,
+    LF_UV,
+    LF_Y_MB,
+    LF_UV_MB,
+    LF_SIMPLE,
+    LF_SIMPLE_MB,
+    LF_Y_ALL,
+    LF_UV_ALL
+};
 
 typedef struct {
     const char *name;
@@ -636,12 +645,29 @@ typedef struct {
     int         before; /* rows above, or columns to the left */
     int         after; /* rows below, or columns from the edge rightwards */
     int         n; /* length of the edge */
+    int         edges; /* full filters: left and top edge bits */
 } LfWindow;
 
 #define LF(field, sig, horiz, before, after, n) \
-    {#field, offsetof(VP8DSPContext, field), sig, horiz, before, after, n}
+    {#field, offsetof(VP8DSPContext, field), sig, horiz, before, after, n, 0}
 
 static const LfWindow lf_windows[] = {
+    {"vp8_loop_filter16y",
+     offsetof(VP8DSPContext, vp8_loop_filter16y),
+     LF_Y_ALL,
+     0,
+     0,
+     0,
+     16,
+     0},
+    {"vp8_loop_filter8uv",
+     offsetof(VP8DSPContext, vp8_loop_filter8uv),
+     LF_UV_ALL,
+     0,
+     0,
+     0,
+     8,
+     0},
     LF(vp8_v_loop_filter16y, LF_Y, 0, 4, 3, 16),
     LF(vp8_h_loop_filter16y, LF_Y, 1, 4, 4, 16),
     LF(vp8_v_loop_filter8uv, LF_UV, 0, 4, 3, 8),
@@ -667,11 +693,15 @@ static const LfWindow lf_windows[] = {
 static uint8_t *lf_window(const LfWindow *w, int at_front, uint8_t **map,
                           size_t *map_size) {
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    const size_t lead = w->horiz ? (size_t)w->before
-                                 : (size_t)w->before * LF_STRIDE;
+    const int    all  = w->sig == LF_Y_ALL || w->sig == LF_UV_ALL;
+    const size_t lead = all
+        ? (w->edges & 2 ? 4 * LF_STRIDE : 0) + (w->edges & 1 ? 8 : 0)
+        : w->horiz ? (size_t)w->before
+                   : (size_t)w->before * LF_STRIDE;
     const size_t size = lead +
-        (w->horiz ? (size_t)(w->n - 1) * LF_STRIDE + (size_t)w->after
-                  : (size_t)w->after * LF_STRIDE + (size_t)w->n);
+        (all || w->horiz ? (size_t)(w->n - 1) * LF_STRIDE +
+                 (all ? (size_t)w->n : (size_t)w->after)
+                         : (size_t)w->after * LF_STRIDE + (size_t)w->n);
     const size_t body = (size + page - 1) / page * page;
     uint8_t     *start;
 
@@ -699,6 +729,15 @@ static void lf_call(const VP8DSPContext *d, const LfWindow *w, uint8_t *u,
     const void *slot = (const char *)d + w->slot;
 
     switch (w->sig) {
+    case LF_Y_ALL:
+        (*(void (*const *)(uint8_t *, ptrdiff_t, int, int, int, int, int))slot)(
+            u, LF_STRIDE, 40, 36, 20, 2, w->edges);
+        break;
+    case LF_UV_ALL:
+        (*(void (*const *)(
+            uint8_t *, uint8_t *, ptrdiff_t, int, int, int, int, int))slot)(
+            u, v, LF_STRIDE, 40, 36, 20, 2, w->edges);
+        break;
     case LF_Y:
         (*(void (*const *)(uint8_t *, ptrdiff_t, int, int, int))slot)(
             u, LF_STRIDE, 40, 20, 2);
@@ -773,9 +812,18 @@ static int check_loopfilter(void) {
     int           failed = 0;
 
     ff_vp8dsp_init(&d);
-    for (size_t i = 0; i < sizeof(lf_windows) / sizeof(*lf_windows); i++)
-        for (int at_front = 0; at_front < 2; at_front++)
-            failed |= probe_loopfilter(&d, &lf_windows[i], at_front);
+    for (size_t i = 0; i < sizeof(lf_windows) / sizeof(*lf_windows); i++) {
+        LfWindow w = lf_windows[i];
+        if ((w.sig == LF_Y_ALL && !d.vp8_loop_filter16y) ||
+            (w.sig == LF_UV_ALL && !d.vp8_loop_filter8uv))
+            continue;
+        const int all = w.sig == LF_Y_ALL || w.sig == LF_UV_ALL;
+        for (int edges = 0; edges < (all ? 4 : 1); edges++) {
+            w.edges = edges;
+            for (int at_front = 0; at_front < 2; at_front++)
+                failed |= probe_loopfilter(&d, &w, at_front);
+        }
+    }
     return failed;
 }
 

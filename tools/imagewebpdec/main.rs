@@ -198,6 +198,20 @@ fn write_frame(
     Ok(())
 }
 
+/* Discard output without letting the optimizer discard format conversion. */
+struct Discard;
+
+impl Write for Discard {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::hint::black_box(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /* The other harnesses print bare strerror() text; drop rust's suffix. */
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
@@ -309,11 +323,12 @@ fn main() -> ExitCode {
         }
     };
     let mut frames = 0;
+    let mut discard = Discard;
 
     for iter in 0..opts.repeat {
         let sink: Option<&mut dyn Write> = match output.as_mut() {
             Some(w) if iter == 0 => Some(w),
-            _ => None,
+            _ => Some(&mut discard),
         };
 
         frames = match decode(&data, sink, opts.want) {

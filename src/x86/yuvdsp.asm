@@ -1009,15 +1009,35 @@ cglobal multiply_row, 3, 5, 7, row, alpha, n
 ; The colour channels of each pixel scale by its own leading alpha byte,
 ; which itself survives: (255 * a + 128) * 257 >> 16 is a again.
 %macro PREMULTIPLY_ARGB_ROW 0
+%if cpuflag(avx2)
+cglobal premultiply_argb_row, 2, 5, 11, argb, n
+%else
 cglobal premultiply_argb_row, 2, 5, 8, argb, n
+%endif
     pxor      m4, m4
     mova      m5, [pw_128]
     mova      m6, [pw_257]
     mova      m7, [pw_amask]
+%if cpuflag(avx2)
+    pcmpeqd   m9, m9
+    pslld     m9, m9, 24
+%endif
     sub       nd, mmsize / 4
     jl        .tail
 .loop:
     movu      m0, [argbq]
+%if cpuflag(avx2)
+    pslld     m8, m0, 24
+    psubb     m10, m8, m9
+    pminub    m10, m10, m8
+    ptest     m10, m10
+    jz .binary
+    ; After partial alpha appears, finish the row without more probes.
+    jmp .arithmetic
+.arithmetic_loop:
+    movu      m0, [argbq]
+.arithmetic:
+%endif
     mova      m1, m0
     punpcklbw m1, m4
     mova      m2, m0
@@ -1036,6 +1056,17 @@ cglobal premultiply_argb_row, 2, 5, 8, argb, n
     pmulhuw   m2, m6
     packuswb  m1, m2
     movu      [argbq], m1
+%if cpuflag(avx2)
+    add       argbq, mmsize
+    sub       nd, mmsize / 4
+    jge .arithmetic_loop
+    jmp .tail
+.binary:
+    pcmpeqd   m10, m8, m9
+    pand      m0, m0, m10
+    movu      [argbq], m0
+.next:
+%endif
     add       argbq, mmsize
     sub       nd, mmsize / 4
     jge       .loop
@@ -1059,7 +1090,11 @@ cglobal premultiply_argb_row, 2, 5, 8, argb, n
 %endmacro
 
 %macro PREMULTIPLY_ROW 0
+%if cpuflag(avx2)
+cglobal premultiply_row, 3, 6, 11, argb, alpha_first, n
+%else
 cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
+%endif
     test      alpha_firstd, alpha_firstd
     jz        .alpha_last
     mova      m4, [shuf_bcasta]
@@ -1075,11 +1110,25 @@ cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
 .start:
     mova      m6, [pw_1]
     pxor      m7, m7
+%if cpuflag(avx2)
+    pcmpeqd   m8, m8
+%endif
     sub       nd, mmsize / 4
     jl        .tail
 .loop:
     movu      m0, [argbq]
     pshufb    m1, m0, m4
+%if cpuflag(avx2)
+    psubb     m10, m1, m8
+    pminub    m10, m10, m1
+    ptest     m10, m10
+    jz .binary
+    jmp .arithmetic
+.arithmetic_loop:
+    movu      m0, [argbq]
+    pshufb    m1, m0, m4
+.arithmetic:
+%endif
     por       m1, m5
     punpcklbw m2, m0, m7
     punpckhbw m3, m0, m7
@@ -1097,6 +1146,17 @@ cglobal premultiply_row, 3, 6, 8, argb, alpha_first, n
     psrlw     m3, 8
     packuswb  m2, m3
     movu      [argbq], m2
+%if cpuflag(avx2)
+    add       argbq, mmsize
+    sub       nd, mmsize / 4
+    jge .arithmetic_loop
+    jmp .tail
+.binary:
+    pcmpeqd   m9, m1, m8
+    pand      m0, m0, m9
+    movu      [argbq], m0
+.next:
+%endif
     add       argbq, mmsize
     sub       nd, mmsize / 4
     jge       .loop

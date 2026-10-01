@@ -591,8 +591,12 @@ fn upsample_block<const L: usize>(
     );
 }
 
+#[derive(Clone)]
 pub struct YuvDsp {
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
+    /// Whether a layout's block is fast enough that a row's last few pairs
+    /// are better redone as a whole block than finished one pair at a time.
+    pub upsample_overlap: [bool; LAYOUT_NB],
     pub yuv444_row: [YuvRowFn; LAYOUT_NB],
     pub yuv420_row: [YuvRowFn; LAYOUT_NB],
     pub dispatch_alpha_first: RowFn,
@@ -633,6 +637,7 @@ impl YuvDsp {
                 upsample_block::<LAYOUT_RGB>,
                 upsample_block::<LAYOUT_BGR>,
             ],
+            upsample_overlap: [false; LAYOUT_NB],
             yuv444_row: [
                 yuv444_row::<LAYOUT_ARGB>,
                 yuv444_row::<LAYOUT_RGBA>,
@@ -714,6 +719,33 @@ impl Default for YuvDsp {
     }
 }
 
+/// Runs `blocks` blocks from chroma pair `first`, which writes pixels
+/// `2 * first - 1` onwards.
+fn upsample_blocks<const L: usize>(
+    dsp: &YuvDsp,
+    src: &UpsampleSrc<'_>,
+    dst: &mut UpsampleDst<'_>,
+    first: usize,
+    blocks: usize,
+) {
+    let (c, p) = (first - 1, 2 * first - 1);
+    let bpp = bpp(L);
+    let shifted = UpsampleSrc {
+        top_y: &src.top_y[p..],
+        bottom_y: src.bottom_y.map(|b| &b[p..]),
+        top_u: &src.top_u[c..],
+        top_v: &src.top_v[c..],
+        cur_u: &src.cur_u[c..],
+        cur_v: &src.cur_v[c..],
+    };
+    let mut shifted_dst = UpsampleDst {
+        top: &mut dst.top[bpp * p..],
+        bottom: dst.bottom.as_deref_mut().map(|b| &mut b[bpp * p..]),
+    };
+
+    (dsp.upsample_block[L])(&shifted, &mut shifted_dst, blocks);
+}
+
 pub fn upsample_row<const L: usize>(
     dsp: &YuvDsp,
     src: &UpsampleSrc<'_>,
@@ -730,7 +762,7 @@ pub fn upsample_row<const L: usize>(
     } else {
         0
     };
-    let done = blocks * (UPSAMPLE_BLOCK / 2);
+    let mut done = blocks * (UPSAMPLE_BLOCK / 2);
 
     upsample_edge::<L>(
         src.top_y[0],
@@ -744,20 +776,14 @@ pub fn upsample_row<const L: usize>(
     );
 
     if blocks != 0 {
-        let shifted = UpsampleSrc {
-            top_y: &src.top_y[1..],
-            bottom_y: src.bottom_y.map(|b| &b[1..]),
-            top_u: src.top_u,
-            top_v: src.top_v,
-            cur_u: src.cur_u,
-            cur_v: src.cur_v,
-        };
-        let mut shifted_dst = UpsampleDst {
-            top: &mut dst.top[bpp..],
-            bottom: dst.bottom.as_deref_mut().map(|b| &mut b[bpp..]),
-        };
+        upsample_blocks::<L>(dsp, src, dst, 1, blocks);
 
-        (dsp.upsample_block[L])(&shifted, &mut shifted_dst, blocks);
+        /* A block that ends on the last pair recomputes up to fifteen pairs
+         * the ones before it already wrote, and writes the same values. */
+        if done < last_pair && dsp.upsample_overlap[L] {
+            upsample_blocks::<L>(dsp, src, dst, last_pair + 1 - UPSAMPLE_BLOCK / 2, 1);
+            done = last_pair;
+        }
     }
 
     upsample_pairs::<L>(
@@ -844,6 +870,64 @@ mod tests {
 
         for px in dst[..28].chunks_exact(4) {
             assert_eq!(px, first);
+        }
+    }
+
+    fn upsampled<const L: usize>(
+        dsp: &YuvDsp,
+        planes: &[Vec<u8>; 6],
+        len: usize,
+    ) -> Vec<u8> {
+        let [top_y, bottom_y, top_u, top_v, cur_u, cur_v] = planes;
+        let mut top = vec![0u8; bpp(L) * len];
+        let mut bottom = vec![0u8; bpp(L) * len];
+        let src = UpsampleSrc {
+            top_y: &top_y[..len],
+            bottom_y: Some(&bottom_y[..len]),
+            top_u: &top_u[..len.div_ceil(2)],
+            top_v: &top_v[..len.div_ceil(2)],
+            cur_u: &cur_u[..len.div_ceil(2)],
+            cur_v: &cur_v[..len.div_ceil(2)],
+        };
+
+        upsample_row::<L>(
+            dsp,
+            &src,
+            &mut UpsampleDst {
+                top: &mut top,
+                bottom: Some(&mut bottom),
+            },
+            len,
+        );
+        top.extend(bottom);
+        top
+    }
+
+    #[test]
+    fn a_row_ending_mid_block_upsamples_as_the_scalar_row_does() {
+        let mut seed = 0x1234_5678u32;
+        let planes = [(); 6].map(|_| {
+            (0..160)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 24) as u8
+                })
+                .collect::<Vec<u8>>()
+        });
+        crate::cpu::init();
+        let (dsp, scalar) = (YuvDsp::new(), YuvDsp::scalar());
+
+        for len in 1..160 {
+            assert_eq!(
+                upsampled::<LAYOUT_RGBA>(&dsp, &planes, len),
+                upsampled::<LAYOUT_RGBA>(&scalar, &planes, len),
+                "{len}"
+            );
+            assert_eq!(
+                upsampled::<LAYOUT_BGR>(&dsp, &planes, len),
+                upsampled::<LAYOUT_BGR>(&scalar, &planes, len),
+                "{len}"
+            );
         }
     }
 

@@ -10,6 +10,10 @@ pub type LfUvMbRaw =
     unsafe extern "C" fn(*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int);
 pub type LfSimpleRaw = unsafe extern "C" fn(*mut u8, isize, c_int);
 pub type LfSimpleMbRaw = unsafe extern "C" fn(*mut u8, isize, c_int, c_int);
+pub type LfAllRaw =
+    unsafe extern "C" fn(*mut u8, isize, c_int, c_int, c_int, c_int, c_int);
+pub type LfUvAllRaw =
+    unsafe extern "C" fn(*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int, c_int);
 /* The transform scatters one DC into each of the macroblock's sixteen blocks,
  * so the pointer spans all of them. */
 pub type WhtRaw = unsafe extern "C" fn(*mut [[i16; 16]; 16], *mut i16);
@@ -131,6 +135,24 @@ macro_rules! raw_vp8 {
     };
     ($m:ident, $i:ident, lf_simple_mb, $sym:literal) => {
         raw!($m, $i, LfSimpleMbRaw, $sym, (*mut u8, isize, c_int, c_int));
+    };
+    ($m:ident, $i:ident, lf_all, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            LfAllRaw,
+            $sym,
+            (*mut u8, isize, c_int, c_int, c_int, c_int, c_int)
+        );
+    };
+    ($m:ident, $i:ident, lf_uv_all, $sym:literal) => {
+        raw!(
+            $m,
+            $i,
+            LfUvAllRaw,
+            $sym,
+            (*mut u8, *mut u8, isize, c_int, c_int, c_int, c_int, c_int)
+        );
     };
     ($m:ident, $i:ident, wht, $sym:literal) => {
         raw!($m, $i, WhtRaw, $sym, (*mut [[i16; 16]; 16], *mut i16));
@@ -404,6 +426,58 @@ fn checked_lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
     lf_h_simple_mb::<T>(check_h(p, o, s, 2, 14, 16), s, e, be)
 }
 
+/* The left edge reaches 8 bytes back from each row, the top edge 4 rows up. */
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+fn checked_lf16y<T: Raw<Sig = LfAllRaw>>(
+    p: &mut [u8],
+    o: usize,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+    edges: u32,
+) {
+    let up = if edges & 2 != 0 { 4 } else { 0 };
+    let w = check_v(p, o, s, up, 15, 16);
+
+    assert!(edges & 1 == 0 || o >= 8, "plane too small");
+    unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev, edges as c_int) }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))]
+#[allow(clippy::too_many_arguments)]
+fn checked_lf8uv<T: Raw<Sig = LfUvAllRaw>>(
+    u: &mut [u8],
+    ou: usize,
+    v: &mut [u8],
+    ov: usize,
+    s: usize,
+    e: i32,
+    be: i32,
+    i: i32,
+    hev: i32,
+    edges: u32,
+) {
+    let up = if edges & 2 != 0 { 4 } else { 0 };
+    let (u, v) = (check_v(u, ou, s, up, 7, 8), check_v(v, ov, s, up, 7, 8));
+
+    assert!(edges & 1 == 0 || (ou >= 8 && ov >= 8), "plane too small");
+    unsafe {
+        (T::F)(
+            u.as_mut_ptr(),
+            v.as_mut_ptr(),
+            s as isize,
+            e,
+            be,
+            i,
+            hev,
+            edges as c_int,
+        )
+    }
+}
+
 fn mb_from<E, I, const VERT: bool>(
     p: &mut [u8],
     o: usize,
@@ -644,6 +718,8 @@ pub struct RawTable {
     pub h_loop_filter16y_mb: Option<LfMbRaw>,
     pub v_loop_filter8uv_mb: Option<LfUvMbRaw>,
     pub h_loop_filter8uv_mb: Option<LfUvMbRaw>,
+    pub loop_filter16y: Option<LfAllRaw>,
+    pub loop_filter8uv: Option<LfUvAllRaw>,
 }
 
 macro_rules! install_lf {
@@ -687,6 +763,7 @@ macro_rules! ladder {
         $flag:ident {
             $( @lf $lf:ident, $lf_mb:ident; )?
             $( @idct $idct:ident; )?
+            $( @opt $ofield:ident = $owrap:ident::<$omarker:path>; )*
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -696,6 +773,7 @@ macro_rules! ladder {
                 if flags.contains(CpuFlags::$flag) {
                     $( install_lf!(c, $lf); )?
                     $( install_idct!(c, $idct); )?
+                    $( c.$ofield = Some($owrap::<$omarker>); )*
                     $( c.$field = $wrap::<$marker>; )*
                 }
             )*
@@ -709,6 +787,7 @@ macro_rules! ladder {
                 if flags.contains(CpuFlags::$flag) {
                     $( raw_install_lf!(t, $lf, $lf_mb); )?
                     $( raw_install_idct!(t, $idct); )?
+                    $( t.$ofield = Some(<$omarker as Raw>::F); )*
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
             )*
@@ -785,6 +864,9 @@ mod arch {
 
     pub mod avx2 {
         use super::*;
+
+        raw_vp8!(Lf16y, lf16y, lf_all, "wpd_vp8_loop_filter16y_avx2");
+        raw_vp8!(Lf8uv, lf8uv, lf_uv_all, "wpd_vp8_loop_filter8uv_avx2");
 
         raw_vp8!(
             VSimpleMb,
@@ -896,6 +978,8 @@ mod arch {
             idct_dc_add = idct::<sse4::DcAdd>;
         }
         AVX2 {
+            @opt loop_filter16y = checked_lf16y::<avx2::Lf16y>;
+            @opt loop_filter8uv = checked_lf8uv::<avx2::Lf8uv>;
             v_loop_filter_simple_mb = checked_lf_v_simple_mb::<avx2::VSimpleMb>;
             h_loop_filter_simple_mb = checked_lf_h_simple_mb::<avx2::HSimpleMb>;
             h_loop_filter16y_mb = checked_lf_h_mb::<H16MbAvx2>;
@@ -932,12 +1016,16 @@ mod arch {
             lf_uv_mb,
             "wpd_vp8_h_loop_filter8uv_mb_neon"
         );
+        raw_vp8!(Lf16y, lf16y, lf_all, "wpd_vp8_loop_filter16y_neon");
+        raw_vp8!(Lf8uv, lf8uv, lf_uv_all, "wpd_vp8_loop_filter8uv_neon");
     }
 
     ladder! {
         NEON {
             @lf neon, neon_mb;
             @idct neon_idct;
+            @opt loop_filter16y = checked_lf16y::<fused::Lf16y>;
+            @opt loop_filter8uv = checked_lf8uv::<fused::Lf8uv>;
 
             luma_dc_wht_dc = wht::<neon_wht_dc::WhtDc>;
             h_loop_filter_simple_mb = checked_lf_h_simple_mb::<fused::HSimpleMb>;
