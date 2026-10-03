@@ -192,7 +192,7 @@ mod imp {
 
         #[inline(always)]
         fn set_range(&mut self, range: u32, pos: i32) {
-            let shift = range.leading_zeros() ^ 24;
+            let shift = range.leading_zeros() ^ 0b1_1000;
 
             self.c.range = range;
             self.shift = shift;
