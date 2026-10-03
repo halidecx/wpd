@@ -151,7 +151,7 @@ fn next_key(key: u32, len: u32) -> u32 {
     if inv == 0 {
         return key;
     }
-    let inv = 1u32 << (31 - inv.leading_zeros());
+    let inv = 1u32 << inv.ilog2();
     (key & (inv - 1)) + inv
 }
 
