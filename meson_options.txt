@@ -14,6 +14,11 @@ option('libwebpdecoder',
     value: '',
     description: 'Path to a static libwebpdecoder.a for libwebpdec')
 
+option('wuffs',
+    type: 'feature',
+    value: 'auto',
+    description: 'Build wuffsdec against the pinned Wuffs subproject')
+
 option('testdata_tests',
     type: 'boolean',
     value: false,

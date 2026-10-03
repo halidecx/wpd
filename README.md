@@ -96,8 +96,9 @@ build the optional third-party test binaries:
 ```sh
 meson configure build -Dbuildtype=release -Dtrim_dsp=false
 meson compile -C build
-meson compile -C build libwebpdec imagewebpdec
+meson compile -C build libwebpdec imagewebpdec wuffsdec
 ./scripts/bench.sh
+THREADS=0 ./scripts/bench.sh
 ```
 
 On Linux, use `taskset -c 0 ./scripts/bench.sh` to reproduce the CPU affinity
@@ -107,8 +108,15 @@ format conversion still runs on every decode.
 
 The default libwebp is the pinned Meson subproject. `-Dlibwebp=system` or
 `-Dlibwebpdecoder=/path/to/libwebpdecoder.a` overrides it. `imagewebpdec` is the
-same harness over the pure-Rust `image-webp` crate, which `bench.sh` includes
-whenever it has been built.
+same harness over the pure-Rust `image-webp` crate, and `wuffsdec` the same over
+[Wuffs](https://github.com/google/wuffs) from a pinned Meson subproject;
+`bench.sh` includes each whenever it has been built. Neither has planar YUV
+output, so `bench.sh` also times lossy stills to RGBA, and Wuffs cannot decode
+animations.
+
+`bench.sh` times wpd on one thread. `THREADS` passes another count to wpd's
+`--threads`, 0 meaning every processor, and any count above 1 turns on libwebp's
+worker thread; image-webp and Wuffs are single-threaded.
 
 ## Credits
 

@@ -503,6 +503,26 @@ custom_target(
 )
 message('imagewebpdec: enabled (build explicitly with target imagewebpdec)')
 
+wuffs_dep = dependency(
+  '',
+  fallback: ['wuffs', 'wuffs_dep'],
+  required: get_option('wuffs'),
+)
+if wuffs_dep.found()
+  executable(
+    'wuffsdec',
+    'tools/wuffsdec.c',
+    getopt_sources,
+    dependencies: wuffs_dep,
+    include_directories: getopt_inc_dirs,
+    build_by_default: false,
+    install: false,
+  )
+  message('wuffsdec: enabled (build explicitly with target wuffsdec)')
+else
+  message('wuffsdec: disabled (wuffs not found)')
+endif
+
 checkasm_dep = dependency(
   'checkasm',
   fallback: ['checkasm', 'checkasm_dep'],

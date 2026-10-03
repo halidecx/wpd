@@ -39,6 +39,13 @@ workspace, so nothing else in the tree resolves image-webp:
 meson compile -C build imagewebpdec
 ```
 
+Compile the Wuffs test harness. Wuffs comes from a pinned Meson subproject and
+cannot decode animations; `-Dwuffs=disabled` skips fetching it:
+
+```sh
+meson compile -C build wuffsdec
+```
+
 Testdata:
 
 ```sh
@@ -49,7 +56,7 @@ meson test -C build --suite testdata
 Test scripts:
 
 ```sh
-./scripts/bench.sh      # performance, wpd vs libwebpdec vs image-webp
+./scripts/bench.sh      # performance, wpd vs libwebp vs image-webp vs Wuffs
 ./scripts/cmpbench.sh   # performance, old vs new wpd
 ./scripts/md5check.sh   # correctness, old vs new wpd
 ./scripts/testdata.sh   # asm vs fallback E2E correctness
