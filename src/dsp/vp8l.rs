@@ -359,7 +359,7 @@ fn pred_green_window(
 
         for (j, ((&r, &t), &tl)) in res
             .iter()
-            .zip(&above[x + 1..x + m + 1])
+            .zip(&above[(x + 1)..=(x + m)])
             .zip(&above[x..x + m])
             .enumerate()
         {

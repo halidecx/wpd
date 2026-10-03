@@ -254,7 +254,7 @@ pub fn export_packed<'a>(
     )?;
     let target = Format::from_raw(format);
 
-    if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
+    if matches!(target, Some(Format::Yuv420p | Format::Yuva420p)) {
         let want_alpha = target == Some(Format::Yuva420p);
         let native = img.format;
         let mut planar = if !img.chroma_full
@@ -559,7 +559,7 @@ pub fn export_still_lossless<'a>(
         *converted_format = format;
     };
 
-    if matches!(target, Some(Format::Yuv420p) | Some(Format::Yuva420p)) {
+    if matches!(target, Some(Format::Yuv420p | Format::Yuva420p)) {
         let want_alpha = target == Some(Format::Yuva420p);
 
         ensure_yuva_rows(dsp, output, img, want_alpha, first, upto)?;
