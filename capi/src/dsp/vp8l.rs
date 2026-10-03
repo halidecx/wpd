@@ -88,7 +88,18 @@ macro_rules! pred_tramp {
 
 pred_tramp!(pred_add_2_c, pred_add_2, false, false, false);
 pred_tramp!(pred_add_3_c, pred_add_3, false, false, true);
-pred_tramp!(pred_add_4_c, pred_add_4, false, true, false);
+unsafe extern "C" fn pred_add_4_c(
+    inp: *const u32,
+    upper: *const u32,
+    n: c_int,
+    out: *mut u32,
+) {
+    debug_assert_eq!(inp, out.cast_const());
+    if count(n).is_none_or(|n| n == 0) {
+        return;
+    }
+    unsafe { pred_add_2_c(inp, upper.sub(1), n, out) }
+}
 pred_tramp!(pred_add_5_c, pred_add_5, true, false, true);
 pred_tramp!(pred_add_6_c, pred_add_6, true, true, false);
 pred_tramp!(pred_add_7_c, pred_add_7, true, false, false);

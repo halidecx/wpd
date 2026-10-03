@@ -239,14 +239,15 @@ pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
     }
 }
 
+#[inline]
 pub fn idct_dc_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
-    let dc = (i32::from(block[0]) + 4) >> 3;
+    let dc = ((i32::from(block[0]) + 4) >> 3) as i16;
 
     block[0] = 0;
+    // The shifted DC lies in -4096..=4096; adding a byte fits in i16.
     for i in 0..4 {
-        let row = &mut dst[i * stride..i * stride + 4];
-        for p in row.iter_mut() {
-            *p = clip_uint8(i32::from(*p) + dc);
+        for p in &mut dst[i * stride..i * stride + 4] {
+            *p = (i16::from(*p) + dc).clamp(0, 255) as u8;
         }
     }
 }
@@ -254,6 +255,33 @@ pub fn idct_dc_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dc_add_matches_clipping_for_every_coefficient() {
+        const PIXELS: [u8; 16] = [
+            0, 1, 2, 15, 16, 63, 64, 127, 128, 191, 192, 239, 240, 253, 254, 255,
+        ];
+        for dc in i16::MIN..=i16::MAX {
+            let mut dst = [77u8; 4 * 9];
+            let mut block = [123i16; 16];
+            block[0] = dc;
+            for y in 0..4 {
+                dst[y * 9..y * 9 + 4].copy_from_slice(&PIXELS[y * 4..y * 4 + 4]);
+            }
+            idct_dc_add(&mut dst, 9, &mut block);
+            for y in 0..4 {
+                for x in 0..4 {
+                    let want = (i32::from(PIXELS[y * 4 + x])
+                        + ((i32::from(dc) + 4) >> 3))
+                        .clamp(0, 255) as u8;
+                    assert_eq!(dst[y * 9 + x], want);
+                }
+                assert_eq!(&dst[y * 9 + 4..(y + 1) * 9], &[77; 5]);
+            }
+            assert_eq!(block[0], 0);
+            assert_eq!(&block[1..], &[123; 15]);
+        }
+    }
 
     #[test]
     fn a_flat_edge_is_left_alone() {

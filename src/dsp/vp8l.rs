@@ -1,3 +1,5 @@
+use zerocopy::IntoBytes;
+
 use super::clip_uint8;
 
 const fn avg2(a: u32, b: u32) -> u32 {
@@ -67,6 +69,44 @@ pub fn pred_add_0(out: &mut [u32]) {
     }
 }
 
+// Keep channel addition in byte lanes; packed u32 masks obscure it from LLVM.
+#[inline]
+fn add_bytes(out: &mut [u8], upper: &[u8]) {
+    let mut blocks = out.chunks_exact_mut(32);
+    for (o, t) in blocks.by_ref().zip(upper.chunks_exact(32)) {
+        for i in 0..32 {
+            o[i] = o[i].wrapping_add(t[i]);
+        }
+    }
+    let n = upper.len() / 32 * 32;
+    let mut out = blocks.into_remainder();
+    let mut upper = &upper[n..];
+    if out.len() >= 16 {
+        for i in 0..16 {
+            out[i] = out[i].wrapping_add(upper[i]);
+        }
+        out = &mut out[16..];
+        upper = &upper[16..];
+    }
+    for (o, t) in out.chunks_exact_mut(4).zip(upper.chunks_exact(4)) {
+        for i in 0..4 {
+            o[i] = o[i].wrapping_add(t[i]);
+        }
+    }
+}
+
+#[inline]
+pub fn pred_add_2(out: &mut [u32], upper: &[u32], _left: u32, _top_left: u32) {
+    let n = out.len().min(upper.len());
+    add_bytes(out[..n].as_mut_bytes(), upper[..n].as_bytes());
+}
+
+#[inline]
+pub fn pred_add_3(out: &mut [u32], upper: &[u32], left: u32, top_left: u32) {
+    assert!(upper.len() > out.len());
+    pred_add_2(out, &upper[1..], left, top_left);
+}
+
 pub fn pred_add_1(out: &mut [u32], left: u32) {
     let mut l = left;
     for o in out.iter_mut() {
@@ -122,8 +162,6 @@ macro_rules! pred_add_tr {
     };
 }
 
-pred_add!(pred_add_2, |l, t, tl| t);
-pred_add_tr!(pred_add_3, |l, t, tl, tr| tr);
 pred_add!(pred_add_4, |l, t, tl| tl);
 pred_add_tr!(pred_add_5, |l, t, tl, tr| avg3(l, t, tr));
 pred_add!(pred_add_6, |l, t, tl| avg2(l, tl));
@@ -513,9 +551,28 @@ macro_rules! plane_pred {
     };
 }
 
-plane_pred!(plane_pred_2, pred_add_2, false, false);
-plane_pred!(plane_pred_3, pred_add_3, false, false);
-plane_pred!(plane_pred_4, pred_add_4, false, true);
+fn plane_pred_top<const SHIFT: usize>(
+    plane: &mut [u32],
+    out: usize,
+    up: usize,
+    n: usize,
+) {
+    if n == 0 {
+        return;
+    }
+    let (head, tail) = plane.split_at_mut(out);
+    let upper = &head[up..];
+    pred_add_2(&mut tail[..n], &upper[SHIFT..SHIFT + n], 0, 0);
+}
+
+fn plane_pred_4(plane: &mut [u32], out: usize, up: usize, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let (head, tail) = plane.split_at_mut(out);
+    pred_add_2(&mut tail[..n], &head[up - 1..up - 1 + n], 0, 0);
+}
+
 plane_pred!(plane_pred_5, pred_add_5, true, false);
 plane_pred!(plane_pred_6, pred_add_6, true, true);
 plane_pred!(plane_pred_7, pred_add_7, true, false);
@@ -532,8 +589,8 @@ impl Vp8lDsp {
             pred_add: [
                 plane_pred_0,
                 plane_pred_1,
-                plane_pred_2,
-                plane_pred_3,
+                plane_pred_top::<0>,
+                plane_pred_top::<1>,
                 plane_pred_4,
                 plane_pred_5,
                 plane_pred_6,
@@ -595,6 +652,41 @@ mod tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    #[test]
+    fn top_predictors_match_packed_pixel_addition() {
+        let dsp = Vp8lDsp::scalar();
+        let mut state = 1;
+        for n in (0..=128).chain([161, 255, 256, 509, 512, 1024]) {
+            for up in 1..=4 {
+                let out = up + n + 8;
+                let plane: Vec<_> = (0..out + n + 4).map(|_| lcg(&mut state)).collect();
+                for mode in [2, 3, 4] {
+                    let mut got = plane.clone();
+                    let mut want = plane.clone();
+                    for i in 0..n {
+                        let index = match mode {
+                            3 => up + i + 1,
+                            4 => up + i - 1,
+                            _ => up + i,
+                        };
+                        want[out + i] = add_pixels(plane[out + i], plane[index]);
+                    }
+                    (dsp.pred_add[mode])(&mut got, out, up, n);
+                    assert_eq!(got, want, "mode={mode} n={n} up={up}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn top_addition_preserves_pixels_past_a_short_upper_row() {
+        let mut out = [0x1234_5678; 13];
+        let upper = [0xffff_ffff; 7];
+        pred_add_2(&mut out, &upper, 0, 0);
+        assert_eq!(&out[..7], &[0x1133_5577; 7]);
+        assert_eq!(&out[7..], &[0x1234_5678; 6]);
     }
 
     #[test]
