@@ -457,7 +457,7 @@ pub fn predict_green_row(
 
         (dsp.pred_green[usize::from(mode)])(
             &mut row[x - 1..end],
-            &above[x - 1..end + 1],
+            &above[(x - 1)..=end],
             &res[x..end],
         );
         x = end;
