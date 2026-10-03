@@ -5,7 +5,7 @@
 // The -32768 DC case supplies changing signed coefficients.
 use std::hint::black_box;
 use std::time::Instant;
-use wpd::dsp::{filters::FilterDsp, vp8::Vp8Dsp, vp8l::Vp8lDsp};
+use wpd::dsp::{filters::FilterDsp, vp8::Vp8Dsp, vp8l::Vp8lDsp, yuv::YuvDsp};
 
 fn bench(mut f: impl FnMut()) -> f64 {
     for _ in 0..1000 {
@@ -41,6 +41,7 @@ fn main() {
     let vp = Vp8Dsp::new();
     let loss = Vp8lDsp::new();
     let filter = FilterDsp::new();
+    let yuv = YuvDsp::new();
     let mut plane = vec![100u8; 65536];
     let mut block = [0i16; 16];
     if "idct_dc".starts_with(&prefix) {
@@ -90,6 +91,57 @@ fn main() {
             let f = black_box(loss.pred_add[k]);
             let ns = bench(|| f(black_box(&mut pixels), 8192, 1, black_box(n)));
             println!("pred_{k},{n},0,{ns:.4}");
+        }
+        for (name, f) in [("pack_rgba", yuv.pack_rgba), ("pack_bgra", yuv.pack_bgra)] {
+            if name.starts_with(&prefix) {
+                let source: Vec<_> =
+                    (0..4 * n).map(|i| i.wrapping_mul(123) as u8).collect();
+                let f = black_box(f);
+                let ns =
+                    bench(|| f(black_box(&mut plane[..4 * n]), black_box(&source)));
+                println!("{name},{n},0,{ns:.4}");
+            }
+        }
+        for pattern in 0..4 {
+            let mut state = 1u32;
+            let alpha: Vec<_> = (0..n)
+                .map(|i| {
+                    state = state.wrapping_mul(1103515245).wrapping_add(12345);
+                    match pattern {
+                        1 => 0,
+                        2 => 255,
+                        3 => {
+                            if i % 2 == 0 {
+                                0
+                            } else {
+                                255
+                            }
+                        }
+                        _ => (state >> 24) as u8,
+                    }
+                })
+                .collect();
+            if "blend_argb".starts_with(&prefix) {
+                let source: Vec<_> =
+                    alpha.iter().flat_map(|&a| [a, 87, 123, 200]).collect();
+                let f = black_box(loss.blend_row_argb);
+                let ns =
+                    bench(|| f(black_box(&mut plane[..4 * n]), black_box(&source)));
+                println!("blend_argb,{n},{pattern},{ns:.4}");
+            }
+            if "multiply".starts_with(&prefix) {
+                let f = black_box(yuv.multiply_row);
+                let ns =
+                    bench(|| f(black_box(&mut plane[..n]), black_box(&alpha), false));
+                println!("multiply,{n},{pattern},{ns:.4}");
+            }
+            if "premultiply_argb".starts_with(&prefix) {
+                let mut argb: Vec<_> =
+                    alpha.iter().flat_map(|&a| [a, 87, 123, 200]).collect();
+                let f = black_box(yuv.premultiply_argb_row);
+                let ns = bench(|| f(black_box(&mut argb), false));
+                println!("premultiply_argb,{n},{pattern},{ns:.4}");
+            }
         }
         if !"vertical".starts_with(&prefix) {
             continue;

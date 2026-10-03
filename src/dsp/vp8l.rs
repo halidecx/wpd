@@ -206,6 +206,26 @@ pub fn map_color32(dst: &mut [u8], src: &[u8], palette: &[u32]) {
 }
 
 pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
+    let bytes = dst.len().min(src.len()) & !3;
+    let mut offset = 0;
+    // Leave short rows and partial-alpha arithmetic to the scalar path.
+    // Whole opaque or transparent blocks avoid per-pixel branch overhead.
+    if bytes >= 128 {
+        while offset + 16 <= bytes {
+            let s = &src[offset..offset + 16];
+            let alpha = [s[0], s[4], s[8], s[12]];
+            if alpha == [255; 4] {
+                dst[offset..offset + 16].copy_from_slice(s);
+            } else if alpha != [0; 4] {
+                break;
+            }
+            offset += 16;
+        }
+    }
+    blend_row_argb_scalar(&mut dst[offset..], &src[offset..]);
+}
+
+fn blend_row_argb_scalar(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
         let src_alpha = u32::from(s[0]);
 
@@ -652,6 +672,36 @@ mod tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    #[test]
+    fn binary_alpha_blocks_and_partial_alpha_tails_match_scalar_blending() {
+        let mut seed = 1u32;
+        for n in 0..=65 {
+            for partial in 0..=n {
+                for mask in 0..16 {
+                    let mut source = vec![0; 4 * n + 3];
+                    let mut dest = vec![0; 4 * n + 5];
+                    for v in source.iter_mut().chain(&mut dest) {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        *v = (seed >> 24) as u8;
+                    }
+                    for (i, pixel) in source.chunks_exact_mut(4).enumerate() {
+                        pixel[0] = if i == partial {
+                            1 + (seed % 254) as u8
+                        } else if mask & (1 << (i % 4)) != 0 {
+                            255
+                        } else {
+                            0
+                        };
+                    }
+                    let mut expected = dest.clone();
+                    blend_row_argb_scalar(&mut expected, &source);
+                    blend_row_argb(&mut dest, &source);
+                    assert_eq!(dest, expected, "{n}, {partial}, {mask}");
+                }
+            }
+        }
     }
 
     #[test]
