@@ -137,6 +137,26 @@ fn main() {
         1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 161, 255, 256,
         509, 512, 1024, 4096,
     ] {
+        if "palette".starts_with(&prefix) {
+            // Green advances through all 256 entries rather than converging
+            // to one index as the in-place benchmark repeats.
+            let palette: Vec<_> = (0u8..=255)
+                .map(|i| {
+                    u32::from_ne_bytes([
+                        255,
+                        i.wrapping_mul(7),
+                        i.wrapping_add(1),
+                        i.wrapping_mul(31),
+                    ])
+                })
+                .collect();
+            for (i, p) in pixels[..n].iter_mut().enumerate() {
+                *p = u32::from_ne_bytes([255, 87, i as u8, 123]);
+            }
+            let f = black_box(wpd::dsp::vp8l::map_color32_pixels);
+            let ns = bench(|| f(black_box(&mut pixels[..n]), black_box(&palette)));
+            println!("palette,{n},0,{ns:.4}");
+        }
         for k in [0, 1, 2, 3, 4, 8, 9, 11, 12, 13] {
             if !format!("pred_{k}").starts_with(&prefix) {
                 continue;

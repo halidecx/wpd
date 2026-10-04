@@ -293,7 +293,14 @@ pub fn color_row(row: &mut [u32], mult: u32) {
 pub fn map_color32_pixels(row: &mut [u32], palette: &[u32]) {
     let palette = &palette[..256];
 
-    for p in row.iter_mut() {
+    // Gather before writing to expose independent lookups and contiguous stores.
+    let mut blocks = row.chunks_exact_mut(8);
+    for block in blocks.by_ref() {
+        let colors: [u32; 8] =
+            std::array::from_fn(|i| palette[usize::from(block[i].to_ne_bytes()[2])]);
+        block.copy_from_slice(&colors);
+    }
+    for p in blocks.into_remainder() {
         *p = palette[usize::from(p.to_ne_bytes()[2])];
     }
 }
@@ -675,6 +682,26 @@ mod tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    #[test]
+    fn batched_palette_mapping_preserves_padding_and_uses_only_green() {
+        let mut state = 1;
+        let palette: [u32; 256] = std::array::from_fn(|_| lcg(&mut state));
+        for n in (0..=65).chain([161, 256, 512, 4096]) {
+            let mut row: Vec<_> = (0..n + 7).map(|_| lcg(&mut state)).collect();
+            for (i, p) in row[3..3 + n].iter_mut().enumerate() {
+                let mut b = p.to_ne_bytes();
+                b[2] = i as u8;
+                *p = u32::from_ne_bytes(b);
+            }
+            let mut expected = row.clone();
+            for p in &mut expected[3..3 + n] {
+                *p = palette[usize::from(p.to_ne_bytes()[2])];
+            }
+            map_color32_pixels(&mut row[3..3 + n], &palette);
+            assert_eq!(row, expected, "len={n}");
+        }
     }
 
     #[test]
