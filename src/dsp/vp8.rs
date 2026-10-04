@@ -161,20 +161,32 @@ pub fn loop_filter_simple<const VERT: bool>(buf: &mut [u8], stride: usize, flim:
     }
 }
 
-pub fn luma_dc_wht(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+fn transform_intermediate<const LIBWEBP: bool>(value: i32) -> i32 {
+    if LIBWEBP {
+        value
+    } else {
+        i32::from(value as i16)
+    }
+}
+
+fn luma_dc_wht_tmpl<const LIBWEBP: bool>(
+    block: &mut [[i16; 16]; 16],
+    dc: &mut [i16; 16],
+) {
+    let mut tmp = [0i32; 16];
     for i in 0..4 {
         let d = |k: usize| i32::from(dc[k * 4 + i]);
         let (t0, t1) = (d(0) + d(3), d(1) + d(2));
         let (t2, t3) = (d(1) - d(2), d(0) - d(3));
 
-        dc[i] = (t0 + t1) as i16;
-        dc[4 + i] = (t3 + t2) as i16;
-        dc[8 + i] = (t0 - t1) as i16;
-        dc[12 + i] = (t3 - t2) as i16;
+        tmp[i] = transform_intermediate::<LIBWEBP>(t0 + t1);
+        tmp[4 + i] = transform_intermediate::<LIBWEBP>(t3 + t2);
+        tmp[8 + i] = transform_intermediate::<LIBWEBP>(t0 - t1);
+        tmp[12 + i] = transform_intermediate::<LIBWEBP>(t3 - t2);
     }
 
     for i in 0..4 {
-        let d = |k: usize| i32::from(dc[i * 4 + k]);
+        let d = |k: usize| tmp[i * 4 + k];
         let (t0, t1) = (d(0) + d(3) + 3, d(1) + d(2));
         let (t2, t3) = (d(1) - d(2), d(0) - d(3) + 3);
 
@@ -187,6 +199,10 @@ pub fn luma_dc_wht(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
     }
 }
 
+pub fn luma_dc_wht(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+    luma_dc_wht_tmpl::<false>(block, dc);
+}
+
 pub fn luma_dc_wht_dc(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
     let val = ((i32::from(dc[0]) + 3) >> 3) as i16;
 
@@ -197,15 +213,19 @@ pub fn luma_dc_wht_dc(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
 }
 
 fn mul_20091(a: i32) -> i32 {
-    ((a * 20091) >> 16) + a
+    ((a.wrapping_mul(20091)) >> 16) + a
 }
 
 fn mul_35468(a: i32) -> i32 {
-    (a * 35468) >> 16
+    (a.wrapping_mul(35468)) >> 16
 }
 
-pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
-    let mut tmp = [0i16; 16];
+fn idct_add_tmpl<const LIBWEBP: bool>(
+    dst: &mut [u8],
+    stride: usize,
+    block: &mut [i16; 16],
+) {
+    let mut tmp = [0i32; 16];
 
     for i in 0..4 {
         let b = |k: usize| i32::from(block[k * 4 + i]);
@@ -218,14 +238,14 @@ pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
             block[k * 4 + i] = 0;
         }
 
-        tmp[i * 4] = (t0 + t3) as i16;
-        tmp[i * 4 + 1] = (t1 + t2) as i16;
-        tmp[i * 4 + 2] = (t1 - t2) as i16;
-        tmp[i * 4 + 3] = (t0 - t3) as i16;
+        tmp[i * 4] = transform_intermediate::<LIBWEBP>(t0 + t3);
+        tmp[i * 4 + 1] = transform_intermediate::<LIBWEBP>(t1 + t2);
+        tmp[i * 4 + 2] = transform_intermediate::<LIBWEBP>(t1 - t2);
+        tmp[i * 4 + 3] = transform_intermediate::<LIBWEBP>(t0 - t3);
     }
 
     for i in 0..4 {
-        let t = |k: usize| i32::from(tmp[k * 4 + i]);
+        let t = |k: usize| tmp[k * 4 + i];
         let t0 = t(0) + t(2);
         let t1 = t(0) - t(2);
         let t2 = mul_35468(t(1)) - mul_20091(t(3));
@@ -237,6 +257,10 @@ pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
         row[2] = clip_uint8(i32::from(row[2]) + ((t1 - t2 + 4) >> 3));
         row[3] = clip_uint8(i32::from(row[3]) + ((t0 - t3 + 4) >> 3));
     }
+}
+
+pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
+    idct_add_tmpl::<false>(dst, stride, block);
 }
 
 // LLVM 19 recognizes a saturating pack when the upper bound is clipped
@@ -332,6 +356,32 @@ mod tests {
     }
 
     #[test]
+    fn full_width_transforms_handle_extreme_coefficients() {
+        for value in [i16::MIN, i16::MAX] {
+            let mut block = [value; 16];
+            let mut dst = [128u8; 16];
+
+            idct_add_tmpl::<true>(&mut dst, 4, &mut block);
+            assert_eq!(block, [0; 16]);
+        }
+    }
+
+    #[test]
+    fn compatibility_dc_rounding_does_not_narrow_before_shifting() {
+        let mut dsp = Vp8Dsp::new();
+        let mut blocks = [[0i16; 16]; 16];
+        let mut dc = [0i16; 16];
+
+        dsp.libwebp_transforms();
+        dc[0] = i16::MAX;
+        (dsp.luma_dc_wht_dc)(&mut blocks, &mut dc);
+        for block in &blocks {
+            assert_eq!(block[0], 4096);
+        }
+        assert_eq!(dc, [0; 16]);
+    }
+
+    #[test]
     fn the_transform_clears_its_coefficients() {
         let mut block = [7i16; 16];
         let mut dst = [128u8; 16];
@@ -354,6 +404,7 @@ pub type LfAllFn = fn(&mut [u8], usize, usize, i32, i32, i32, i32, u32);
 pub type LfUvAllFn =
     fn(&mut [u8], usize, &mut [u8], usize, usize, i32, i32, i32, i32, u32);
 
+#[derive(Clone, Copy)]
 pub struct Vp8Dsp {
     pub luma_dc_wht: WhtFn,
     pub luma_dc_wht_dc: WhtFn,
@@ -400,6 +451,14 @@ fn wht_dc_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
 
 fn idct_add_c(p: &mut [u8], o: usize, s: usize, block: &mut [i16; 16]) {
     idct_add(&mut p[o..], s, block);
+}
+
+fn wht_libwebp_c(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+    luma_dc_wht_tmpl::<true>(block, dc);
+}
+
+fn idct_add_libwebp_c(p: &mut [u8], o: usize, s: usize, block: &mut [i16; 16]) {
+    idct_add_tmpl::<true>(&mut p[o..], s, block);
 }
 
 fn idct_dc_add_c(p: &mut [u8], o: usize, s: usize, block: &mut [i16; 16]) {
@@ -556,6 +615,19 @@ impl Vp8Dsp {
             loop_filter16y: None,
             loop_filter8uv: None,
         }
+    }
+
+    /// libwebp's portable C transforms keep the first pass in 32-bit
+    /// integers. RFC 6386 describes 16-bit intermediates; damaged
+    /// coefficients can make the two produce different pixels. Select the
+    /// same arithmetic with and without assembly.
+    pub(crate) fn libwebp_transforms(&mut self) {
+        self.luma_dc_wht = wht_libwebp_c;
+        self.luma_dc_wht_dc = wht_dc_c;
+        self.idct_add = idct_add_libwebp_c;
+        self.idct_dc_add = idct_dc_add_c;
+        self.idct_dc_add4y = idct_dc_add4y_c;
+        self.idct_dc_add4uv = idct_dc_add4uv_c;
     }
 
     pub fn new() -> Self {

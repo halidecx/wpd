@@ -219,10 +219,12 @@ impl FrameSlot {
     ) -> Result<()> {
         {
             let bypass = env.bypass_filtering;
+            let compat = env.libwebp_compat;
             let chunk = env.input.chunk(offset, size);
             let vp8 = self.vp8_decoder()?;
 
             vp8.bypass_filtering = bypass;
+            vp8.libwebp_compat = compat;
             if vp8.frame_init(chunk, size, size)? == Status::NeedMore {
                 return Err(Error::InvalidData);
             }
@@ -310,6 +312,7 @@ impl<'a> Decoder<'a> {
     pub(crate) fn frame_settings(&self) -> super::slot::FrameSettings {
         super::slot::FrameSettings {
             bypass_filtering: self.filter_bypass(),
+            libwebp_compat: self.options.libwebp_compat,
             no_fancy_upsampling: self.options.no_fancy_upsampling,
             to_argb: self.frame_to_argb(),
             premultiply: self.frame_premultiply(),
@@ -355,10 +358,12 @@ impl<'a> Decoder<'a> {
     ) -> Result<bool> {
         if !self.vp8_active {
             let bypass = self.filter_bypass();
+            let compat = self.options.libwebp_compat;
             let Self { frame, input, .. } = self;
             let vp8 = frame.vp8_decoder()?;
 
             vp8.bypass_filtering = bypass;
+            vp8.libwebp_compat = compat;
 
             match vp8.frame_init(input.chunk(offset, avail), avail, size)? {
                 Status::NeedMore => return Ok(false),

@@ -33,6 +33,7 @@ impl std::ops::Deref for FrameEnv<'_, '_> {
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct FrameSettings {
     pub(crate) bypass_filtering: bool,
+    pub(crate) libwebp_compat: bool,
     pub(crate) no_fancy_upsampling: bool,
     /// The output format alone decides the frame must become ARGB, whatever
     /// the frames before it did, so the conversion can happen off the walk.

@@ -291,6 +291,9 @@ pub struct Decoder {
     pub width: i32,
     pub height: i32,
     pub bypass_filtering: bool,
+    /// Match the full-width intermediates of libwebp's portable C transforms.
+    pub libwebp_compat: bool,
+    strict_dsp: Option<(Vp8Dsp, Vp8Dsp)>,
 
     mb_width: usize,
     mb_height: usize,
@@ -1521,6 +1524,19 @@ impl Decoder {
             self.picture
                 .alloc(self.width as usize, self.height as usize)
                 .inspect_err(|_| crate::log::error("Frame allocation failed"))?;
+        }
+
+        if self.libwebp_compat {
+            if self.strict_dsp.is_none() {
+                // CPU detection or its global mask may have changed since
+                // this decoder was created. Restore its own tables later.
+                self.strict_dsp = Some((self.recon.dsp, self.coeffs.dsp));
+                self.recon.dsp.libwebp_transforms();
+                self.coeffs.dsp.libwebp_transforms();
+            }
+        } else if let Some((recon, coeffs)) = self.strict_dsp.take() {
+            self.recon.dsp = recon;
+            self.coeffs.dsp = coeffs;
         }
 
         self.recon.deblock_filter =
