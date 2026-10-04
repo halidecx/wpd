@@ -289,6 +289,8 @@ pub struct Decoder {
 
     /// The threads a decode may use, counting the calling one.
     pub threads: usize,
+    /// Allow libwebp's final paletted-alpha symbol to finish at EOF.
+    pub libwebp_compat: bool,
 }
 
 impl Decoder {
@@ -925,7 +927,11 @@ impl Decoder {
 
         {
             let Decoder {
-                gb, image, indices, ..
+                gb,
+                image,
+                indices,
+                libwebp_compat,
+                ..
             } = self;
             let (head, tail) = image.split_at_mut(ROLE_ENTROPY);
             let ent = &tail[0];
@@ -934,6 +940,7 @@ impl Decoder {
                 gb,
                 buf,
                 pixels: &mut indices[..total],
+                allow_final_overrun: *libwebp_compat,
                 width,
                 groups: &head[ROLE_ARGB].groups,
                 arena: &head[ROLE_ARGB].arena,

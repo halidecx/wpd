@@ -62,6 +62,7 @@ struct Alpha<'p, 'i> {
     compression: i32,
     filter: i32,
     threads: usize,
+    libwebp_compat: bool,
 }
 
 fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
@@ -78,6 +79,7 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
         compression,
         filter,
         threads,
+        libwebp_compat,
     } = a;
     let extent = width
         .checked_mul(height.max(0) as usize)
@@ -98,6 +100,7 @@ fn decode_alpha(a: Alpha<'_, '_>) -> Result<()> {
     } else if compression == ALPHA_COMPRESSION_VP8L {
         vp8l.set_canvas(width as i32, height);
         vp8l.threads = threads;
+        vp8l.libwebp_compat = libwebp_compat;
 
         let rest = match filter {
             ALPHA_FILTER_HORIZONTAL => Some(fdsp.horizontal_unfilter),
@@ -199,6 +202,7 @@ impl FrameSlot {
                 compression: *alpha_compression,
                 filter: *alpha_filter,
                 threads: env.threads,
+                libwebp_compat: env.libwebp_compat,
             },
             vp8.first_mut(),
         )

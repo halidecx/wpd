@@ -734,6 +734,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
 }
 
 pub struct AlphaArgs<'a, 'e> {
+    pub allow_final_overrun: bool,
     pub gb: &'a mut BitReader,
     pub buf: &'a [u8],
     pub pixels: &'a mut [u8],
@@ -745,6 +746,7 @@ pub struct AlphaArgs<'a, 'e> {
 
 pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
     let AlphaArgs {
+        allow_final_overrun,
         gb,
         buf,
         pixels,
@@ -815,7 +817,10 @@ pub fn decode_alpha_pixels(args: AlphaArgs<'_, '_>) -> Result<()> {
             return Err(Error::InvalidData);
         }
     }
-    if gb.is_eos(buf) {
+    // libwebp's paletted-alpha decoder accepts EOF at the final symbol
+    // once every pixel is written. The checks inside the loop still refuse
+    // an overrun before the plane is complete and invalid references.
+    if gb.is_eos(buf) && !allow_final_overrun {
         crate::log::error("alpha data runs past the end of the chunk");
         return Err(Error::InvalidData);
     }
@@ -860,6 +865,51 @@ mod tests {
                 }
                 copy_block(&mut actual, seed.len(), dist, length);
                 assert_eq!(actual, expected, "distance {dist}, length {length}");
+            }
+        }
+    }
+
+    #[test]
+    fn compatibility_allows_only_a_final_alpha_symbol_at_eof() {
+        let mut arena = Vec::new();
+        let mut plan = super::super::huffman::Plan::default();
+        let lengths = [1u8, 1];
+        let mut sorted = [0u16; 2];
+
+        super::super::huffman::count_lengths(&mut plan, &lengths);
+        let reader =
+            super::super::huffman::build(&mut arena, &mut plan, &lengths, &mut sorted)
+                .unwrap();
+        let group = HTreeGroup {
+            trees: [reader; HUFFMAN_CODES_PER_META_CODE],
+            ..HTreeGroup::default()
+        };
+        // Sixty-four one-bit literals fit; the sixty-fifth uses the
+        // zero-padded end of the bit window. A sixty-sixth is still invalid.
+        let buf = [0u8; 8];
+        for (allow, count, expected) in [
+            (false, 64, Ok(())),
+            (false, 65, Err(Error::InvalidData)),
+            (true, 65, Ok(())),
+            (true, 66, Err(Error::InvalidData)),
+        ] {
+            let mut gb = BitReader::new(&buf);
+            let mut pixels = vec![0xff; count];
+            assert_eq!(
+                decode_alpha_pixels(AlphaArgs {
+                    allow_final_overrun: allow,
+                    gb: &mut gb,
+                    buf: &buf,
+                    pixels: &mut pixels,
+                    width: count,
+                    groups: &[group],
+                    arena: &arena,
+                    entropy: None,
+                }),
+                expected
+            );
+            if expected.is_ok() {
+                assert!(pixels.iter().all(|&p| p == 0));
             }
         }
     }
