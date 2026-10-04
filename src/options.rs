@@ -14,6 +14,12 @@ pub struct Options {
     /// decoded, so a caller facing untrusted input can bound the memory and
     /// time a few bytes of header may ask for; dav1d's `frame_size_limit`.
     pub frame_size_limit: u32,
+    /// Match libwebp's still-container acceptance and portable lossy decoding
+    /// on damaged input. Set before opening the input; animations retain
+    /// their container validation. The default keeps strict decoding.
+    /// Compatible still streams retain bytes past the declared RIFF end and
+    /// produce their picture after `end_of_stream`.
+    pub libwebp_compat: bool,
 }
 
 impl Options {

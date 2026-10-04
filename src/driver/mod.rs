@@ -503,6 +503,7 @@ impl<'a> Decoder<'a> {
 
     fn rescan_headers(&mut self) -> Result<(), Error> {
         let base = self.input.discarded();
+        self.scan.set_libwebp_compat(self.options.libwebp_compat);
         let walked = self
             .scan
             .headers(self.input.bytes(), base, self.streaming, true);
@@ -621,6 +622,11 @@ impl<'a> Decoder<'a> {
     /// buffered, and a caller appending forever holds at most the file the
     /// header describes. A header split across appends is read from both.
     fn riff_room(&self, data: &[u8]) -> usize {
+        // The still codec in libwebp can consume bytes past RIFF's declared
+        // end. This mode retains them, subject to Input's byte limit.
+        if self.options.libwebp_compat && !self.scan.is_animation_container() {
+            return usize::MAX;
+        }
         let size = self.input.size();
         let end = self.scan.riff_end().or_else(|| {
             if size >= 12 {
@@ -715,6 +721,12 @@ impl Decoder<'_> {
 
         if bad_crop || bad_scale || options.n_threads < 0 {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
+        }
+        if self.opened && options.libwebp_compat != self.options.libwebp_compat {
+            return Err(self.fail(
+                "compatibility must be set before opening input",
+                Error::InvalidArgument,
+            ));
         }
         if self.anim_mode == ANIM_SUBFRAME && options.transforms() {
             return Err(self.fail(
@@ -1044,6 +1056,14 @@ impl Decoder<'_> {
                 _ => {}
             }
         }
+        if decoder.options.libwebp_compat && decoder.still_done && !decoder.animation {
+            return Ok(false);
+        }
+        // A compatible still can need bytes outside its declared image or
+        // RIFF extent. Its final partition size is only known at EOF.
+        if decoder.options.libwebp_compat && !decoder.animation && !decoder.eos {
+            return Ok(false);
+        }
         if decoder.scanned().raw != Raw::No {
             return if decoder.still_done {
                 Ok(false)
@@ -1067,7 +1087,12 @@ impl Decoder<'_> {
             let size = size as usize;
             let padded_size = size + (size & 1);
 
-            if decoder.end - payload_pos < padded_size {
+            let missing_still_pad = decoder.options.libwebp_compat
+                && !decoder.animation
+                && decoder.end - payload_pos == size
+                && matches!(chunk_type, TAG_VP8 | TAG_VP8L);
+
+            if decoder.end - payload_pos < padded_size && !missing_still_pad {
                 if !decoder.eos {
                     let avail = decoder.end - payload_pos;
 
@@ -1106,7 +1131,7 @@ impl Decoder<'_> {
                             Error::InvalidData,
                         ));
                     }
-                    if decoder.alpha_pending {
+                    if decoder.alpha_pending && !decoder.options.libwebp_compat {
                         return Err(("duplicate ALPHA chunk", Error::InvalidData));
                     }
                     decoder.alpha_pending = true;
@@ -1123,6 +1148,13 @@ impl Decoder<'_> {
                     if decoder.animation || decoder.still_done {
                         continue;
                     }
+                    // libwebp uses all remaining bytes for the still codec,
+                    // even when the image chunk declares a shorter payload.
+                    let size = if decoder.options.libwebp_compat {
+                        decoder.input.size() - payload_pos
+                    } else {
+                        size
+                    };
                     let ret = if decoder.vp8_active {
                         decoder.vp8_lossy_step(payload_pos, size, size).and_then(
                             |done| done.then_some(()).ok_or(Error::InvalidData),
@@ -1140,6 +1172,11 @@ impl Decoder<'_> {
                     if decoder.animation || decoder.still_done {
                         continue;
                     }
+                    let size = if decoder.options.libwebp_compat {
+                        decoder.input.size() - payload_pos
+                    } else {
+                        size
+                    };
                     if decoder.frame.vp8l.still_active() {
                         decoder
                             .lossless_step(payload_pos, size, size, true)
@@ -1157,6 +1194,9 @@ impl Decoder<'_> {
                     return decoder.emit_still_lossless(out);
                 }
                 TAG_ANMF => {
+                    if decoder.options.libwebp_compat && !decoder.animation {
+                        continue;
+                    }
                     if !decoder.animation
                         || decoder.canvas_width == 0
                         || decoder.canvas_height == 0
@@ -1373,6 +1413,183 @@ mod tests {
         out.extend_from_slice(&(RAW_LOSSLESS.len() as u32).to_le_bytes());
         out.extend_from_slice(RAW_LOSSLESS);
         out
+    }
+
+    fn compat() -> Decoder<'static> {
+        let mut decoder = Decoder::new();
+
+        decoder
+            .set_core_options(Options {
+                libwebp_compat: true,
+                ..Options::default()
+            })
+            .unwrap();
+        decoder
+    }
+
+    #[test]
+    fn still_compatibility_ignores_a_broken_tail_and_uses_available_image_bytes() {
+        let mut broken_tail = riff_lossless();
+
+        broken_tail.extend_from_slice(b"JUNK\xff\xff\xff\xff");
+        let len = broken_tail.len() as u32 - 8;
+
+        broken_tail[4..8].copy_from_slice(&len.to_le_bytes());
+
+        let mut short_chunk = riff_lossless();
+
+        short_chunk[16..20].copy_from_slice(&6u32.to_le_bytes());
+
+        let mut strict = Decoder::new();
+
+        assert_eq!(strict.open(&broken_tail), Err(Error::Truncated));
+        strict.open(&short_chunk).unwrap();
+        assert!(strict.next_picture(&mut Handout::default()).is_err());
+
+        let mut short_riff = riff_lossless();
+
+        short_riff[4..8].copy_from_slice(&18u32.to_le_bytes());
+        short_riff[16..20].copy_from_slice(&6u32.to_le_bytes());
+
+        for data in [broken_tail, short_chunk, short_riff] {
+            for mode in 0..3 {
+                let mut decoder = compat();
+                let mut frames = 0;
+
+                if mode == 0 {
+                    decoder.open(&data).unwrap();
+                } else {
+                    decoder.open_stream().unwrap();
+                    for i in 1..=data.len() {
+                        if mode == 1 {
+                            decoder.append(&data[i - 1..i]).unwrap();
+                        } else {
+                            decoder.update(&data[..i]).unwrap();
+                        }
+                        frames += usize::from(
+                            decoder.next_picture(&mut Handout::default()).unwrap(),
+                        );
+                    }
+                    decoder.end_of_stream().unwrap();
+                }
+                frames +=
+                    usize::from(decoder.next_picture(&mut Handout::default()).unwrap());
+                assert_eq!(frames, 1, "mode {mode}");
+                assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+                assert_eq!((decoder.canvas_width, decoder.canvas_height), (2, 2));
+            }
+        }
+    }
+
+    #[test]
+    fn still_compatibility_keeps_the_first_vp8x_and_the_riff_size_check() {
+        let mut payload = chunk(b"VP8X", &[0, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
+
+        payload.extend(chunk(b"VP8X", &[0xff; 10]));
+        payload.extend(chunk(b"VP8L", RAW_LOSSLESS));
+
+        let mut data = b"RIFF".to_vec();
+
+        data.extend_from_slice(&(payload.len() as u32 + 4).to_le_bytes());
+        data.extend_from_slice(b"WEBP");
+        data.extend(payload);
+        assert_eq!(Decoder::new().open(&data), Err(Error::InvalidData));
+
+        let mut decoder = compat();
+
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        let len = data.len() as u32;
+
+        data[4..8].copy_from_slice(&len.to_le_bytes());
+        assert_eq!(decoder.open(&data), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn container_compatibility_cannot_change_after_opening_input() {
+        let mut decoder = Decoder::new();
+
+        decoder.open(&riff_lossless()).unwrap();
+        assert_eq!(
+            decoder.set_core_options(Options {
+                libwebp_compat: true,
+                ..Options::default()
+            }),
+            Err(Error::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn still_compatibility_waits_for_the_actual_header_of_an_empty_chunk() {
+        for size in [0u32, 1, 4] {
+            let mut data = riff_lossless();
+
+            data[16..20].copy_from_slice(&size.to_le_bytes());
+
+            for update in [false, true] {
+                let mut decoder = compat();
+
+                decoder.open_stream().unwrap();
+                for i in 1..=data.len() {
+                    if update {
+                        decoder.update(&data[..i]).unwrap();
+                    } else {
+                        decoder.append(&data[i - 1..i]).unwrap();
+                    }
+                    assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+                }
+                decoder.end_of_stream().unwrap();
+                assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+                assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn still_compatibility_accepts_a_simple_images_missing_final_pad() {
+        let mut data = riff_lossless();
+
+        data.push(0);
+        let len = data.len() as u32 - 8;
+
+        data[4..8].copy_from_slice(&len.to_le_bytes());
+        data[16..20].copy_from_slice(&13u32.to_le_bytes());
+        assert_eq!(Decoder::new().open(&data), Err(Error::Truncated));
+        let mut decoder = compat();
+
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        decoder.open_stream().unwrap();
+        for byte in &data {
+            decoder.append(std::slice::from_ref(byte)).unwrap();
+        }
+        decoder.end_of_stream().unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+    }
+
+    #[test]
+    fn still_compatibility_skips_optional_anmf_and_keeps_animation_validation() {
+        let mut data = riff_lossless();
+        let mut payload = chunk(b"VP8X", &[0, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
+
+        payload.extend(chunk(b"ANMF", &[0; 16]));
+        payload.extend_from_slice(&data[12..]);
+        data.truncate(12);
+        data[4..8].copy_from_slice(&(payload.len() as u32 + 4).to_le_bytes());
+        data.extend(payload);
+
+        let mut decoder = compat();
+
+        decoder.open(&data).unwrap();
+        assert!(decoder.next_picture(&mut Handout::default()).unwrap());
+        assert!(!decoder.next_picture(&mut Handout::default()).unwrap());
+        for flags in [3, 0x42, 0x82] {
+            let mut data = animation(&chunk(b"VP8L", RAW_LOSSLESS), 2, 2);
+
+            data[20] = flags;
+            assert_eq!(compat().open(&data), Err(Error::InvalidData));
+        }
     }
 
     #[test]

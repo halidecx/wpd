@@ -234,6 +234,7 @@ fn set_options(
         || !flag(options.use_cropping)
         || !flag(options.use_scaling)
         || !flag(options.flip)
+        || !flag(options.libwebp_compat)
     {
         return Err(decoder.fail("invalid decoder options", Error::InvalidArgument));
     }
@@ -298,6 +299,9 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
     if size >= WPDDecoderOptions::v3() {
         local.frame_size_limit =
             unsafe { ptr::addr_of!((*options).frame_size_limit).read() };
+    }
+    if size >= WPDDecoderOptions::v4() {
+        local.libwebp_compat = unsafe { ptr::addr_of!((*options).libwebp_compat).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });

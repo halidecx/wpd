@@ -260,10 +260,38 @@ typedef struct WPDDecoderOptions {
      * no such field, gets no limit.
      */
     unsigned frame_size_limit;
+    /** Must be zero. Takes the tail padding after frame_size_limit. */
+    int reserved3;
+    /**
+     * Match libwebp's still-container acceptance and portable lossy decoding
+     * on damaged input. 0 keeps strict decoding; 1 enables compatibility.
+     * Set before opening input. Animation containers retain their validation.
+     * Older callers retain strict decoding.
+     * Compatible still streams retain bytes after RIFF's declared end and
+     * produce their picture only after wpd_decoder_end_of_stream().
+     */
+    int libwebp_compat;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {sizeof(WPDDecoderOptions),  \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0}
 
 /**
  * Set processing options. Cropping precedes scaling.

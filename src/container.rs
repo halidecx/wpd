@@ -120,6 +120,7 @@ pub struct Info {
 
 #[derive(Default)]
 pub struct Scan {
+    libwebp_compat: bool,
     pos: usize,
     riff_end: u64,
     info: Info,
@@ -220,6 +221,18 @@ impl Scan {
         };
     }
 
+    pub(crate) fn set_libwebp_compat(&mut self, enabled: bool) {
+        self.libwebp_compat = enabled;
+    }
+
+    fn compat_still(&self) -> bool {
+        self.libwebp_compat && self.vp8x_flags & VP8X_FLAG_ANIM == 0
+    }
+
+    pub(crate) fn is_animation_container(&self) -> bool {
+        self.vp8x_flags & VP8X_FLAG_ANIM != 0
+    }
+
     pub fn info(&self) -> &Info {
         &self.info
     }
@@ -244,6 +257,13 @@ impl Scan {
             }
         } else {
             self.info.coding = Coding::Lossy;
+            // libwebp's header check compares the first partition length
+            // with the declared chunk size without subtracting the header.
+            let size = if self.compat_still() {
+                size.saturating_add(9)
+            } else {
+                size
+            };
             if let Some((width, height)) = bitstream_size(tag, p, size) {
                 self.info.width = width;
                 self.info.height = height;
@@ -529,6 +549,9 @@ impl Scan {
                 return self.raw_headers(buf, partial);
             }
             self.riff_end = u64::from(rl32(buf, 4)) + 8;
+            if self.libwebp_compat && !(20..=0xffff_fffe).contains(&self.riff_end) {
+                return Err(Error::InvalidData);
+            }
             self.pos = 12;
         }
 
@@ -549,15 +572,24 @@ impl Scan {
                 return Err(Error::InvalidData);
             }
             if size == u32::MAX {
-                self.info.truncated = true;
+                self.info.truncated |= !self.compat_still() || self.info.images == 0;
                 break;
             }
-            let padded = size as usize + (size & 1) as usize;
+            let mut padded = size as usize + (size & 1) as usize;
+
+            if self.compat_still()
+                && !self.vp8x
+                && matches!(tag, TAG_VP8 | TAG_VP8L)
+                && self.info.end - (self.pos + 8) == size as usize
+            {
+                // The simple still parser checks the payload, not its pad.
+                padded = size as usize;
+            }
 
             if self.info.end - (self.pos + 8) < padded {
                 let avail = self.info.end - (self.pos + 8);
 
-                self.info.truncated = true;
+                self.info.truncated |= !self.compat_still() || self.info.images == 0;
                 if self.collect_frames && tag == TAG_ANMF {
                     self.anmf(window(buf, at + 8, avail), false)?;
                 }
@@ -574,6 +606,15 @@ impl Scan {
 
             match tag {
                 TAG_VP8X => {
+                    // The still decoder treats later VP8X chunks as optional
+                    // chunks; the demuxer validates them instead.
+                    if self.compat_still() && self.vp8x {
+                        self.pos += 8 + padded;
+                        continue;
+                    }
+                    if self.compat_still() && self.info.images != 0 {
+                        break;
+                    }
                     if self.vp8x || size != VP8X_CHUNK_SIZE {
                         log::error("invalid VP8X chunk");
                         return Err(Error::InvalidData);
@@ -582,7 +623,9 @@ impl Scan {
 
                     let flags = byte(buf, at + 8);
 
-                    if flags & !VP8X_FLAGS_VALID != 0 {
+                    if (!self.libwebp_compat || flags & VP8X_FLAG_ANIM != 0)
+                        && flags & !VP8X_FLAGS_VALID != 0
+                    {
                         log::error_args(format_args!(
                             "VP8X sets reserved flag bits (0x{flags:02x})"
                         ));
@@ -600,6 +643,10 @@ impl Scan {
                     crate::error::check_image_size(self.info.width, self.info.height)?;
                 }
                 TAG_ALPH => {
+                    if self.compat_still() && self.info.images != 0 {
+                        self.pos += 8 + padded;
+                        continue;
+                    }
                     self.still_chunk_allowed()?;
                     if self.still_alpha_allowed() {
                         self.info.has_alpha = true;
@@ -607,6 +654,10 @@ impl Scan {
                     }
                 }
                 TAG_ANIM => {
+                    if self.compat_still() {
+                        self.pos += 8 + padded;
+                        continue;
+                    }
                     if size < ANIM_CHUNK_SIZE {
                         log::error("ANIM chunk is too short");
                         return Err(Error::InvalidData);
@@ -624,6 +675,10 @@ impl Scan {
                     }
                 }
                 TAG_ANMF => {
+                    if self.compat_still() {
+                        self.pos += 8 + padded;
+                        continue;
+                    }
                     if !self.anim_chunk {
                         log::error("ANMF chunk before the ANIM header");
                         return Err(Error::InvalidData);
@@ -645,14 +700,26 @@ impl Scan {
                     self.still_chunk_allowed()?;
 
                     let first = self.info.images == 0;
+                    let have = if self.compat_still() {
+                        base + buf.len() - (self.pos + 8)
+                    } else {
+                        size as usize
+                    };
+
+                    if first
+                        && self.compat_still()
+                        && have < if tag == TAG_VP8L { 5 } else { 10 }
+                    {
+                        // A shortened chunk can be complete before its actual
+                        // codec header has arrived. Revisit it on append.
+                        self.info.truncated = true;
+                        partial_still = partial;
+                        break;
+                    }
 
                     self.info.images = self.info.images.saturating_add(1);
                     if first {
-                        self.still_size(
-                            tag,
-                            window(buf, at + 8, size as usize),
-                            size as usize,
-                        )?;
+                        self.still_size(tag, window(buf, at + 8, have), size as usize)?;
                     }
                 }
                 _ => {

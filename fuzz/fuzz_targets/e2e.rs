@@ -129,6 +129,8 @@ fn decode_external(data: &[u8], options: Options) {
         n_threads: options.n_threads,
         reserved2: 0,
         frame_size_limit: options.frame_size_limit,
+        reserved3: 0,
+        libwebp_compat: i32::from(options.libwebp_compat),
     };
     let mut frame = WPDFrame {
         struct_size: mem::size_of::<WPDFrame>(),

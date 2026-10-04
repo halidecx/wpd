@@ -24,6 +24,9 @@ pub struct WPDDecoderOptions {
     /// Takes the v2 struct's tail padding, for the reason `reserved` took v1's.
     pub reserved2: c_int,
     pub frame_size_limit: c_uint,
+    /// Takes the v3 struct's tail padding.
+    pub reserved3: c_int,
+    pub libwebp_compat: c_int,
 }
 
 /// What `sizeof` gave the v1 struct: it ended at `flip`, and padded out to the
@@ -42,6 +45,11 @@ const V2_SIZE: usize =
 
 const _: () = assert!(V2_SIZE < WPDDecoderOptions::v3());
 
+const V3_SIZE: usize =
+    WPDDecoderOptions::v3().next_multiple_of(mem::align_of::<WPDDecoderOptions>());
+
+const _: () = assert!(V3_SIZE < WPDDecoderOptions::v4());
+
 impl WPDDecoderOptions {
     pub(crate) const fn v1() -> usize {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
@@ -53,6 +61,10 @@ impl WPDDecoderOptions {
 
     pub(crate) const fn v3() -> usize {
         mem::offset_of!(WPDDecoderOptions, frame_size_limit) + mem::size_of::<c_uint>()
+    }
+
+    pub(crate) const fn v4() -> usize {
+        mem::offset_of!(WPDDecoderOptions, libwebp_compat) + mem::size_of::<c_int>()
     }
 
     /// Legacy callers retain serial decoding and serial log callbacks.
@@ -79,6 +91,7 @@ impl WPDDecoderOptions {
             } else {
                 0
             },
+            libwebp_compat: self.struct_size >= Self::v4() && self.libwebp_compat != 0,
         }
     }
 }
@@ -109,5 +122,18 @@ mod tests {
         }
         options.struct_size = mem::size_of::<WPDDecoderOptions>();
         assert_eq!(options.to_core().frame_size_limit, 64);
+    }
+
+    #[test]
+    fn older_options_keep_strict_decoding() {
+        let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
+
+        options.libwebp_compat = 1;
+        for size in [V1_SIZE, V2_SIZE, V3_SIZE] {
+            options.struct_size = size;
+            assert!(!options.to_core().libwebp_compat);
+        }
+        options.struct_size = mem::size_of::<WPDDecoderOptions>();
+        assert!(options.to_core().libwebp_compat);
     }
 }
