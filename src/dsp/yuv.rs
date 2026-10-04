@@ -88,6 +88,34 @@ fn corner<const L: usize>(y: u8, near: u32, far: u32, out: &mut [u8]) {
     yuv_to_out::<L>(y.into(), (uv & 0xff) as i32, (uv >> 16) as i32, out);
 }
 
+// Shifting bytes into the high half of a u16 exposes unsigned high-word
+// multiplication. Red and green fit i16; blue may reach 34237, so saturate
+// that sum before clipping. Saturation preserves its final value of 255.
+#[inline]
+#[allow(clippy::manual_clamp)]
+fn yuv_to_out8<const L: usize>(ys: &[u8; 8], uv: &[u32; 8], dst: &mut [u8]) {
+    let dst = &mut dst[..8 * bpp(L)];
+    let c = channels(L);
+    for j in 0..8 {
+        let high =
+            |v: u8, coeff: u32| ((u32::from(u16::from(v) << 8) * coeff) >> 16) as i16;
+        let y = high(ys[j], 19077);
+        let u = uv[j] as u8;
+        let v = (uv[j] >> 16) as u8;
+        let r = y + (high(v, 26149) - 14234);
+        let g = y + (8708 - high(u, 6419) - high(v, 13320));
+        // Rebias the unsigned blue product before interpreting it as signed.
+        let blue = high(u, 33050).wrapping_sub(17685);
+        let b = y.saturating_add(blue);
+        if bpp(L) == 4 {
+            dst[j * bpp(L) + c[0]] = 255;
+        }
+        dst[j * bpp(L) + c[1]] = (r.min(YUV_MASK2 as i16).max(0) >> YUV_FIX2) as u8;
+        dst[j * bpp(L) + c[2]] = (g.min(YUV_MASK2 as i16).max(0) >> YUV_FIX2) as u8;
+        dst[j * bpp(L) + c[3]] = (b.min(YUV_MASK2 as i16).max(0) >> YUV_FIX2) as u8;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn upsample_pairs<const L: usize>(
     top_y: &[u8],
@@ -97,17 +125,104 @@ pub fn upsample_pairs<const L: usize>(
     cur_u: &[u8],
     cur_v: &[u8],
     top_dst: &mut [u8],
-    mut bottom_dst: Option<&mut [u8]>,
+    bottom_dst: Option<&mut [u8]>,
     first: usize,
     last: usize,
     pix: usize,
 ) {
-    let bpp = bpp(L);
-    let mut tl_uv = load_uv(top_u[first - 1], top_v[first - 1]);
-    let mut l_uv = load_uv(cur_u[first - 1], cur_v[first - 1]);
-    let mut p = pix;
+    if let (Some(by), Some(bd)) = (bottom_y, bottom_dst) {
+        upsample_pairs_inner::<L, true>(
+            top_y, by, top_u, top_v, cur_u, cur_v, top_dst, bd, first, last, pix,
+        );
+    } else {
+        upsample_pairs_inner::<L, false>(
+            top_y,
+            &[],
+            top_u,
+            top_v,
+            cur_u,
+            cur_v,
+            top_dst,
+            &mut [],
+            first,
+            last,
+            pix,
+        );
+    }
+}
 
-    for x in first..=last {
+#[allow(clippy::too_many_arguments)]
+fn upsample_pairs_inner<const L: usize, const BOTTOM: bool>(
+    top_y: &[u8],
+    bottom_y: &[u8],
+    top_u: &[u8],
+    top_v: &[u8],
+    cur_u: &[u8],
+    cur_v: &[u8],
+    top_dst: &mut [u8],
+    bottom_dst: &mut [u8],
+    first: usize,
+    last: usize,
+    pix: usize,
+) {
+    if first > last {
+        return;
+    }
+    // Slice the complete run once, and specialize the optional second row.
+    let n = last + 1 - first;
+    let top_y = &top_y[pix..pix + 2 * n];
+    let top_u = &top_u[first - 1..=last];
+    let top_v = &top_v[first - 1..=last];
+    let cur_u = &cur_u[first - 1..=last];
+    let cur_v = &cur_v[first - 1..=last];
+    let bpp = bpp(L);
+    let top_dst = &mut top_dst[bpp * pix..bpp * (pix + 2 * n)];
+    let (bottom_y, bottom_dst) = if BOTTOM {
+        (
+            &bottom_y[pix..pix + 2 * n],
+            &mut bottom_dst[bpp * pix..bpp * (pix + 2 * n)],
+        )
+    } else {
+        (bottom_y, bottom_dst)
+    };
+    let batch = n / 4 * 4;
+    for base in (0..batch).step_by(4) {
+        let mut top_uv = [0u32; 8];
+        let mut bottom_uv = [0u32; 8];
+        for j in 0..4 {
+            let x = base + j;
+            let tl_uv = load_uv(top_u[x], top_v[x]);
+            let l_uv = load_uv(cur_u[x], cur_v[x]);
+            let t_uv = load_uv(top_u[x + 1], top_v[x + 1]);
+            let uv = load_uv(cur_u[x + 1], cur_v[x + 1]);
+            let avg = tl_uv + t_uv + l_uv + uv + 0x0008_0008;
+            let diag_12 = (avg + 2 * (t_uv + l_uv)) >> 3;
+            let diag_03 = (avg + 2 * (tl_uv + uv)) >> 3;
+            top_uv[2 * j] = (diag_12 + tl_uv) >> 1;
+            top_uv[2 * j + 1] = (diag_03 + t_uv) >> 1;
+            if BOTTOM {
+                bottom_uv[2 * j] = (diag_03 + l_uv) >> 1;
+                bottom_uv[2 * j + 1] = (diag_12 + uv) >> 1;
+            }
+        }
+        let p = 2 * base;
+        yuv_to_out8::<L>(
+            top_y[p..p + 8].try_into().unwrap(),
+            &top_uv,
+            &mut top_dst[bpp * p..bpp * (p + 8)],
+        );
+        if BOTTOM {
+            yuv_to_out8::<L>(
+                bottom_y[p..p + 8].try_into().unwrap(),
+                &bottom_uv,
+                &mut bottom_dst[bpp * p..bpp * (p + 8)],
+            );
+        }
+    }
+    let mut tl_uv = load_uv(top_u[batch], top_v[batch]);
+    let mut l_uv = load_uv(cur_u[batch], cur_v[batch]);
+    for x in batch + 1..=n {
+        let p = 2 * (x - 1);
         let t_uv = load_uv(top_u[x], top_v[x]);
         let uv = load_uv(cur_u[x], cur_v[x]);
         let avg = tl_uv + t_uv + l_uv + uv + 0x0008_0008;
@@ -128,7 +243,8 @@ pub fn upsample_pairs<const L: usize>(
             (uv1 >> 16) as i32,
             &mut top_dst[bpp * (p + 1)..],
         );
-        if let (Some(by), Some(bd)) = (bottom_y, bottom_dst.as_deref_mut()) {
+        if BOTTOM {
+            let (by, bd) = (bottom_y, &mut *bottom_dst);
             let b0 = (diag_03 + l_uv) >> 1;
             let b1 = (diag_12 + uv) >> 1;
 
@@ -147,7 +263,6 @@ pub fn upsample_pairs<const L: usize>(
         }
         tl_uv = t_uv;
         l_uv = uv;
-        p += 2;
     }
 }
 
@@ -867,6 +982,134 @@ mod tests {
         for px in dst[..28].chunks_exact(4) {
             assert_eq!(px, first);
         }
+    }
+
+    #[test]
+    fn eight_pixel_conversion_matches_scalar_chroma_extremes() {
+        let ys = [0, 1, 16, 127, 128, 235, 254, 255];
+        let chroma: Vec<u8> = if cfg!(miri) {
+            vec![0, 128, 255]
+        } else {
+            (0..=255).collect()
+        };
+        for &u in &chroma {
+            for &v in &chroma {
+                let uv = [load_uv(u, v); 8];
+                let mut out = [0xa5; 40];
+                let mut expected = out;
+                for j in 0..8 {
+                    yuv_to_out::<LAYOUT_RGBA>(
+                        ys[j].into(),
+                        u.into(),
+                        v.into(),
+                        &mut expected[3 + 4 * j..],
+                    );
+                }
+                yuv_to_out8::<LAYOUT_RGBA>(&ys, &uv, &mut out[3..]);
+                assert_eq!(out, expected, "u={u} v={v}");
+            }
+        }
+    }
+
+    fn check_upsample_reference<const L: usize>() {
+        let mut seed = 0x1234_5678u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        let lengths: Vec<usize> = if cfg!(miri) {
+            vec![1, 9, 17]
+        } else {
+            (1..=80).chain([161, 512]).collect()
+        };
+        for len in lengths {
+            let planes =
+                [(); 6].map(|_| (0..len).map(|_| random()).collect::<Vec<_>>());
+            let [ty, by, tu, tv, cu, cv] = &planes;
+            for options in 0..4 {
+                let mut top = vec![0xa5; bpp(L) * len + 16];
+                let mut bottom = top.clone();
+                let mut expected_top = top.clone();
+                let mut expected_bottom = bottom.clone();
+                for row in 0..if options == 3 { 2 } else { 1 } {
+                    let (ys, near_u, near_v, far_u, far_v, dst) = if row == 0 {
+                        (ty, tu, tv, cu, cv, &mut expected_top)
+                    } else {
+                        (by, cu, cv, tu, tv, &mut expected_bottom)
+                    };
+                    let mut store = |p: usize, u: u32, v: u32| {
+                        yuv_to_out::<L>(
+                            ys[p].into(),
+                            u as i32,
+                            v as i32,
+                            &mut dst[7 + bpp(L) * p..],
+                        );
+                    };
+                    store(
+                        0,
+                        (3 * u32::from(near_u[0]) + u32::from(far_u[0]) + 2) >> 2,
+                        (3 * u32::from(near_v[0]) + u32::from(far_v[0]) + 2) >> 2,
+                    );
+                    for x in 1..=(len - 1) / 2 {
+                        let pair = |near: &[u8], far: &[u8]| {
+                            let (a, b, c, d) = (
+                                u32::from(near[x - 1]),
+                                u32::from(near[x]),
+                                u32::from(far[x - 1]),
+                                u32::from(far[x]),
+                            );
+                            let avg = a + b + c + d + 8;
+                            [
+                                (((avg + 2 * (b + c)) >> 3) + a) >> 1,
+                                (((avg + 2 * (a + d)) >> 3) + b) >> 1,
+                            ]
+                        };
+                        let (u, v) = (pair(near_u, far_u), pair(near_v, far_v));
+                        store(2 * x - 1, u[0], v[0]);
+                        store(2 * x, u[1], v[1]);
+                    }
+                    if len % 2 == 0 {
+                        let x = (len - 1) / 2;
+                        store(
+                            len - 1,
+                            (3 * u32::from(near_u[x]) + u32::from(far_u[x]) + 2) >> 2,
+                            (3 * u32::from(near_v[x]) + u32::from(far_v[x]) + 2) >> 2,
+                        );
+                    }
+                }
+                let src = UpsampleSrc {
+                    top_y: ty,
+                    bottom_y: (options & 1 != 0).then_some(by.as_slice()),
+                    top_u: tu,
+                    top_v: tv,
+                    cur_u: cu,
+                    cur_v: cv,
+                };
+                let mut dst = UpsampleDst {
+                    top: &mut top[7..],
+                    bottom: if options & 2 != 0 {
+                        Some(&mut bottom[7..])
+                    } else {
+                        None
+                    },
+                };
+                upsample_row::<L>(&YuvDsp::scalar(), &src, &mut dst, len);
+                assert_eq!(top, expected_top, "layout={L} len={len} options={options}");
+                assert_eq!(
+                    bottom, expected_bottom,
+                    "layout={L} len={len} options={options}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batched_upsampling_matches_separate_chroma_arithmetic() {
+        check_upsample_reference::<LAYOUT_ARGB>();
+        check_upsample_reference::<LAYOUT_RGBA>();
+        check_upsample_reference::<LAYOUT_BGRA>();
+        check_upsample_reference::<LAYOUT_RGB>();
+        check_upsample_reference::<LAYOUT_BGR>();
     }
 
     fn upsampled<const L: usize>(

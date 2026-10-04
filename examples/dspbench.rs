@@ -5,6 +5,7 @@
 // The -32768 DC case supplies changing signed coefficients.
 use std::hint::black_box;
 use std::time::Instant;
+use wpd::dsp::yuv::{self, UpsampleDst, UpsampleSrc};
 use wpd::dsp::{filters::FilterDsp, vp8::Vp8Dsp, vp8l::Vp8lDsp, yuv::YuvDsp};
 
 fn bench(mut f: impl FnMut()) -> f64 {
@@ -78,13 +79,65 @@ fn main() {
         });
         println!("wht_dc,0,0,{ns:.4}");
     }
+    for (name, f) in [
+        ("loop_v16", vp.v_loop_filter16y),
+        ("loop_h16", vp.h_loop_filter16y),
+        ("loop_v16_inner", vp.v_loop_filter16y_inner),
+        ("loop_h16_inner", vp.h_loop_filter16y_inner),
+    ] {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        for stride in [32, 128, 1024] {
+            for pattern in 0..4 {
+                let mut state = 1u32;
+                let source: Vec<_> = (0..16 * stride + 32)
+                    .map(|i| {
+                        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                        match pattern {
+                            0 => 128,
+                            1 => 120 + ((state >> 24) & 15) as u8,
+                            2 => (state >> 24) as u8,
+                            _ => {
+                                if i / stride < 8 {
+                                    120
+                                } else {
+                                    130
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                let f = black_box(f);
+                let ns = bench(|| {
+                    plane[..source.len()].copy_from_slice(&source);
+                    f(
+                        black_box(&mut plane),
+                        4 * stride + 4,
+                        black_box(stride),
+                        black_box(40),
+                        black_box(15),
+                        black_box(1),
+                    );
+                });
+                println!("{name},{stride},{pattern},{ns:.4}");
+            }
+        }
+    }
+    if "upsample".starts_with(&prefix) {
+        bench_upsample::<{ yuv::LAYOUT_ARGB }>(&yuv);
+        bench_upsample::<{ yuv::LAYOUT_RGBA }>(&yuv);
+        bench_upsample::<{ yuv::LAYOUT_BGRA }>(&yuv);
+        bench_upsample::<{ yuv::LAYOUT_RGB }>(&yuv);
+        bench_upsample::<{ yuv::LAYOUT_BGR }>(&yuv);
+    }
     let mut pixels = vec![0u32; 16384];
     let above = vec![17u8; 8192];
     for n in [
         1, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 161, 255, 256,
         509, 512, 1024, 4096,
     ] {
-        for k in [0, 1, 2, 3, 4, 8, 9] {
+        for k in [0, 1, 2, 3, 4, 8, 9, 11, 12, 13] {
             if !format!("pred_{k}").starts_with(&prefix) {
                 continue;
             }
@@ -149,5 +202,46 @@ fn main() {
         let f = black_box(filter.vertical_unfilter);
         let ns = bench(|| f(Some(black_box(&above[..n])), black_box(&mut plane[..n])));
         println!("vertical,{n},0,{ns:.4}");
+    }
+}
+
+fn bench_upsample<const L: usize>(dsp: &YuvDsp) {
+    for n in [1usize, 3, 16, 31, 32, 33, 64, 161, 512, 4096] {
+        let mut state = 1u32;
+        let planes = [(); 6].map(|_| {
+            (0..n)
+                .map(|_| {
+                    state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (state >> 24) as u8
+                })
+                .collect::<Vec<_>>()
+        });
+        let [ty, by, tu, tv, cu, cv] = &planes;
+        let mut top = vec![0u8; yuv::bpp(L) * n];
+        let mut bottom = top.clone();
+        for both in [false, true] {
+            let src = UpsampleSrc {
+                top_y: ty,
+                bottom_y: both.then_some(by.as_slice()),
+                top_u: tu,
+                top_v: tv,
+                cur_u: cu,
+                cur_v: cv,
+            };
+            let f = black_box(yuv::upsample_row::<L>);
+            let ns = bench(|| {
+                let mut dst = UpsampleDst {
+                    top: &mut top,
+                    bottom: if both { Some(&mut bottom) } else { None },
+                };
+                f(
+                    black_box(dsp),
+                    black_box(&src),
+                    black_box(&mut dst),
+                    black_box(n),
+                );
+            });
+            println!("upsample_{L},{n},{},{ns:.4}", u8::from(both));
+        }
     }
 }
