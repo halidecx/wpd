@@ -182,18 +182,25 @@ fn main() {
                     bench(|| f(black_box(&mut plane[..4 * n]), black_box(&source)));
                 println!("blend_argb,{n},{pattern},{ns:.4}");
             }
-            if "multiply".starts_with(&prefix) {
-                let f = black_box(yuv.multiply_row);
-                let ns =
-                    bench(|| f(black_box(&mut plane[..n]), black_box(&alpha), false));
-                println!("multiply,{n},{pattern},{ns:.4}");
+            for (name, inverse) in [("multiply", false), ("unmultiply", true)] {
+                if name.starts_with(&prefix) {
+                    let f = black_box(yuv.multiply_row);
+                    let ns = bench(|| {
+                        f(black_box(&mut plane[..n]), black_box(&alpha), inverse)
+                    });
+                    println!("{name},{n},{pattern},{ns:.4}");
+                }
             }
-            if "premultiply_argb".starts_with(&prefix) {
-                let mut argb: Vec<_> =
-                    alpha.iter().flat_map(|&a| [a, 87, 123, 200]).collect();
-                let f = black_box(yuv.premultiply_argb_row);
-                let ns = bench(|| f(black_box(&mut argb), false));
-                println!("premultiply_argb,{n},{pattern},{ns:.4}");
+            for (name, inverse) in
+                [("premultiply_argb", false), ("unpremultiply_argb", true)]
+            {
+                if name.starts_with(&prefix) {
+                    let mut argb: Vec<_> =
+                        alpha.iter().flat_map(|&a| [a, 87, 123, 200]).collect();
+                    let f = black_box(yuv.premultiply_argb_row);
+                    let ns = bench(|| f(black_box(&mut argb), inverse));
+                    println!("{name},{n},{pattern},{ns:.4}");
+                }
             }
         }
         if !"vertical".starts_with(&prefix) {

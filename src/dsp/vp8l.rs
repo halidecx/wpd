@@ -225,6 +225,8 @@ pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
     blend_row_argb_scalar(&mut dst[offset..], &src[offset..]);
 }
 
+const BLEND_SCALE: [u32; 256] = super::reciprocal_table(1 << 24);
+
 fn blend_row_argb_scalar(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
         let src_alpha = u32::from(s[0]);
@@ -239,7 +241,8 @@ fn blend_row_argb_scalar(dst: &mut [u8], src: &[u8]) {
 
         let tmp_alpha = (u32::from(d[0]) * (256 - src_alpha)) >> 8;
         let blend_alpha = src_alpha + tmp_alpha;
-        let scale = (1 << 24) / blend_alpha;
+        // Nonzero source alpha makes blend_alpha lie in 1..=255.
+        let scale = BLEND_SCALE[usize::from(blend_alpha as u8)];
 
         for i in 1..4 {
             let v = u32::from(s[i]) * src_alpha + u32::from(d[i]) * tmp_alpha;
@@ -672,6 +675,38 @@ mod tests {
     fn lcg(state: &mut u32) -> u32 {
         *state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         *state
+    }
+
+    #[test]
+    fn reciprocal_blending_matches_division_for_every_alpha_pair() {
+        let alphas: Vec<u8> = if cfg!(miri) {
+            vec![0, 1, 127, 128, 254, 255]
+        } else {
+            (0..=255).collect()
+        };
+        for &sa in &alphas {
+            for &da in &alphas {
+                let src = [sa, 255, 83, 1];
+                let mut dst = [0xa5; 12];
+                dst[3..7].copy_from_slice(&[da, 31, 191, 255]);
+                let mut expected = dst;
+                if sa == 255 {
+                    expected[3..7].copy_from_slice(&src);
+                } else if sa != 0 {
+                    let sa = u32::from(sa);
+                    let tmp = (u32::from(da) * (256 - sa)) >> 8;
+                    let alpha = sa + tmp;
+                    for i in 1..4 {
+                        let value =
+                            u32::from(src[i]) * sa + u32::from(expected[3 + i]) * tmp;
+                        expected[3 + i] = ((value * ((1 << 24) / alpha)) >> 24) as u8;
+                    }
+                    expected[3] = alpha as u8;
+                }
+                blend_row_argb(&mut dst[3..7], &src);
+                assert_eq!(dst, expected, "source={sa} destination={da}");
+            }
+        }
     }
 
     #[test]

@@ -397,10 +397,11 @@ pub fn premultiply_row_4444(rgba4444: &mut [u8], swap: bool) {
 
 /* libwebp's WebPMultRow and WebPMultARGBRow: multiply a plane row by its
  * alpha row, or an ARGB row's colour channels by its own alpha. The inverse
- * undoes it with a division per pixel, which no lane arithmetic reaches. */
+ * undoes it using the exact reciprocal for each nonzero alpha. */
 const MFIX: u32 = 24;
 const MHALF: u32 = 1 << (MFIX - 1);
 const KINV_255: u32 = (1 << MFIX) / 255;
+const UNMULTIPLY_SCALE: [u32; 256] = super::reciprocal_table(255 << MFIX);
 
 fn alpha_mult(x: u8, scale: u32) -> u8 {
     ((u32::from(x).wrapping_mul(scale).wrapping_add(MHALF)) >> MFIX) as u8
@@ -408,7 +409,7 @@ fn alpha_mult(x: u8, scale: u32) -> u8 {
 
 fn alpha_scale(a: u8, inverse: bool) -> u32 {
     if inverse {
-        (255 << MFIX) / u32::from(a)
+        UNMULTIPLY_SCALE[usize::from(a)]
     } else {
         u32::from(a) * KINV_255
     }
@@ -1167,6 +1168,35 @@ mod tests {
                 upsampled::<LAYOUT_BGR>(&scalar, &planes, len),
                 "{len}"
             );
+        }
+    }
+
+    #[test]
+    fn reciprocal_unmultiplication_matches_division_for_every_byte_pair() {
+        let values: Vec<u8> = if cfg!(miri) {
+            vec![0, 1, 127, 128, 254, 255]
+        } else {
+            (0..=255).collect()
+        };
+        for &a in &values {
+            for &v in &values {
+                let expected = match a {
+                    0 => 0,
+                    255 => v,
+                    _ => {
+                        ((u32::from(v)
+                            .wrapping_mul((255 << MFIX) / u32::from(a))
+                            .wrapping_add(MHALF))
+                            >> MFIX) as u8
+                    }
+                };
+                let mut row = [0xa5, v, 0xa5];
+                multiply_row(&mut row[1..2], &[a], true);
+                assert_eq!(row, [0xa5, expected, 0xa5], "alpha={a} value={v}");
+                let mut argb = [a, v, v, v, 0xa5];
+                premultiply_argb_row(&mut argb, true);
+                assert_eq!(argb, [a, expected, expected, expected, 0xa5]);
+            }
         }
     }
 
