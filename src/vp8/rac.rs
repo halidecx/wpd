@@ -222,30 +222,7 @@ mod imp {
 
         #[inline(always)]
         pub fn get_prob_branchy(&mut self, buf: &[u8], prob: u8) -> bool {
-            if self.c.bits < 0 {
-                self.c.refill(buf);
-            }
-
-            let pos = self.c.bits;
-            let p = u32::from(prob);
-            let a = (self.c.range * p) << self.shift;
-            let value = (self.c.value >> pos) as u32;
-
-            /* value >= split, decided before the split's final add and
-             * shift: the branch resolves as early as RangeCoder's does.
-             * In 64 bits, since value is not bounded by the range: a
-             * partition that opens with 0xff starts above it, the gap
-             * doubles with every shift, and value << 8 would wrap. */
-            if (u64::from(value) << 8) + u64::from(p) > u64::from(a) {
-                let split = (a + 256 - p) >> 8;
-
-                self.c.value -= u64::from(split) << pos;
-                self.set_range((self.c.range << self.shift) - split, pos);
-                true
-            } else {
-                self.set_range((a + 256 - p) >> 8, pos);
-                false
-            }
+            self.get_prob(buf, prob) != 0
         }
 
         #[inline(always)]
