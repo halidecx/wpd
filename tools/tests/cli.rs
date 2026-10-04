@@ -341,6 +341,18 @@ fn sequence_byte_limit_covers_the_manifest_and_every_pam_file() {
     ] {
         assert_eq!(run(&args, &[]).status.code(), Some(2));
     }
+    for alias in ["-", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"] {
+        for args in [
+            vec!["--info=json", "--muxer", "pam", "-", alias],
+            vec!["--info=json", "--icc-out", alias, "-"],
+            vec!["--muxer", "frames", "-", alias],
+        ] {
+            let output = run(&args, &[]);
+
+            assert_eq!(output.status.code(), Some(2));
+            assert!(output.stdout.is_empty());
+        }
+    }
 }
 
 #[test]

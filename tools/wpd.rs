@@ -278,6 +278,12 @@ fn parse_size(value: &str) -> Option<u64> {
     digits.parse::<u64>().ok()?.checked_mul(unit)
 }
 
+fn is_stdout(path: &OsStr) -> bool {
+    ["-", "/dev/stdout", "/dev/fd/1", "/proc/self/fd/1"]
+        .iter()
+        .any(|alias| path == OsStr::new(alias))
+}
+
 #[derive(Default)]
 struct Options {
     repeat: i32,
@@ -401,7 +407,7 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
             _ => return Err(BAD_INFO),
         },
         "icc-out" | "exif-out" | "xmp-out" => {
-            if value.is_empty() || value == "-" {
+            if value.is_empty() || is_stdout(OsStr::new(&value)) {
                 return Err(BAD_METADATA_OUT);
             }
             let index = match name {
@@ -855,7 +861,7 @@ fn main() -> ExitCode {
         Some(opts.positional[1].as_os_str())
     };
 
-    if opts.info_json && output_name == Some(OsStr::new("-")) {
+    if opts.info_json && output_name.is_some_and(is_stdout) {
         usage(
             &app,
             Some("JSON info and decoded output cannot both use stdout"),
@@ -863,9 +869,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if opts.muxer.as_deref() == Some("frames")
-        && output_name.is_none_or(|name| {
-            name == OsStr::new("-") || name == OsStr::new("/dev/null")
-        })
+        && output_name
+            .is_none_or(|name| is_stdout(name) || name == OsStr::new("/dev/null"))
     {
         usage(&app, Some("frames requires an output directory"));
         return ExitCode::from(2);

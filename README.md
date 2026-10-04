@@ -78,7 +78,9 @@ padding. Missing metadata produces an empty file. Extraction alone needs no
 pixel output. It does not interpret EXIF orientation or apply colour profiles.
 These options also work with `--stream`, `--loops`, and `--repeat`; JSON and
 metadata are written once. JSON can accompany a pixel output file, but the pixel
-output cannot also use stdout. Metadata paths must name files.
+output cannot also use stdout. Metadata paths must name files. `-`,
+`/dev/stdout`, `/dev/fd/1`, and `/proc/self/fd/1` are recognized as stdout;
+custom links to stdout must not be used as output paths with JSON info.
 
 The existing input and frame size limits apply. `--max-output` limits decoded
 pixel output; metadata is bounded by `--max-input`. Exit codes are 0 for
