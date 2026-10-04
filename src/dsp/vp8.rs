@@ -185,13 +185,19 @@ fn loop_filter_block<const SIZE: usize, const VERT: bool, const INNER: bool>(
         }
     }
     if VERT {
-        for (r, row) in out.iter().enumerate() {
-            buf[(r + 1) * stride..(r + 1) * stride + SIZE].copy_from_slice(row);
+        let rows = if INNER { 1..5 } else { 0..6 };
+        for r in rows {
+            buf[(r + 1) * stride..(r + 1) * stride + SIZE].copy_from_slice(&out[r]);
         }
     } else {
         for j in 0..SIZE {
-            let row: [u8; 6] = std::array::from_fn(|r| out[r][j]);
-            buf[j * stride + 1..j * stride + 7].copy_from_slice(&row);
+            if INNER {
+                let row: [u8; 4] = std::array::from_fn(|r| out[r + 1][j]);
+                buf[j * stride + 2..j * stride + 6].copy_from_slice(&row);
+            } else {
+                let row: [u8; 6] = std::array::from_fn(|r| out[r][j]);
+                buf[j * stride + 1..j * stride + 7].copy_from_slice(&row);
+            }
         }
     }
 }
@@ -228,7 +234,58 @@ pub fn loop_filter<const SIZE: usize, const VERT: bool, const INNER: bool>(
     }
 }
 
+// The simple filter uses four independent taps per lane and writes only
+// its two center pixels. Overlapping windows retain sequential filtering.
+#[allow(clippy::manual_clamp)]
+fn loop_filter_simple_block<const VERT: bool>(
+    buf: &mut [u8],
+    stride: usize,
+    flim: i32,
+) {
+    let limit = flim.clamp(-1, i16::MAX as i32) as i16;
+    let mut w = [[0i16; 16]; 4];
+    if VERT {
+        for (r, row) in w.iter_mut().enumerate() {
+            for (v, &p) in row.iter_mut().zip(&buf[r * stride..r * stride + 16]) {
+                *v = p.into();
+            }
+        }
+    } else {
+        for j in 0..16 {
+            let row = &buf[j * stride..j * stride + 4];
+            for (r, &v) in row.iter().enumerate() {
+                w[r][j] = v.into();
+            }
+        }
+    }
+    let mut out = [[0u8; 16]; 2];
+    for j in 0..16 {
+        let mask = -i16::from(
+            2 * (w[1][j] - w[2][j]).abs() + ((w[0][j] - w[3][j]).abs() >> 1) <= limit,
+        );
+        let a = (3 * (w[2][j] - w[1][j]) + (w[0][j] - w[3][j]).clamp(-128, 127))
+            .clamp(-128, 127);
+        let f1 = ((a + 4).min(127) >> 3) & mask;
+        let f2 = ((a + 3).min(127) >> 3) & mask;
+        out[0][j] = (w[1][j] + f2).min(255).max(0) as u8;
+        out[1][j] = (w[2][j] - f1).min(255).max(0) as u8;
+    }
+    if VERT {
+        buf[stride..stride + 16].copy_from_slice(&out[0]);
+        buf[2 * stride..2 * stride + 16].copy_from_slice(&out[1]);
+    } else {
+        for j in 0..16 {
+            buf[j * stride + 1..j * stride + 3]
+                .copy_from_slice(&[out[0][j], out[1][j]]);
+        }
+    }
+}
+
 pub fn loop_filter_simple<const VERT: bool>(buf: &mut [u8], stride: usize, flim: i32) {
+    if stride >= if VERT { 16 } else { 4 } {
+        loop_filter_simple_block::<VERT>(buf, stride, flim);
+        return;
+    }
     let (sa, sb) = strides::<VERT>(stride);
 
     for j in 0..16 {
@@ -459,6 +516,62 @@ mod tests {
         check_block_filter::<8, false, true>();
         check_block_filter::<16, false, false>();
         check_block_filter::<16, false, true>();
+    }
+
+    fn check_simple_filter<const VERT: bool>() {
+        let min_stride = if VERT { 16 } else { 4 };
+        let mut seed = 1u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        for stride in [min_stride - 1, min_stride, 32, 127] {
+            for sample in 0..if cfg!(miri) { 8 } else { 2000 } {
+                let len = if VERT {
+                    3 * stride + 16
+                } else {
+                    15 * stride + 4
+                };
+                let mut buf = vec![0xa5; len + 13];
+                for r in 0..4 {
+                    for j in 0..16 {
+                        let p = if VERT { r * stride + j } else { j * stride + r };
+                        let v = random();
+                        buf[5 + p] = match sample % 3 {
+                            0 => v,
+                            1 => 120 + (v & 15),
+                            _ => (v & 7) + if r < 2 { 0 } else { 8 },
+                        };
+                    }
+                }
+                let limit = match sample % 5 {
+                    0 => i32::MIN,
+                    1 => i32::MAX,
+                    2 => 0,
+                    _ => i32::from(random()),
+                };
+                let mut expected = buf.clone();
+                let (sa, sb) = strides::<VERT>(stride);
+                for j in 0..16 {
+                    let q = 5 + j * sa;
+                    let w = load4::<VERT>(&expected, q, sb);
+                    if simple_limit(w, limit) {
+                        filter_common(&mut expected, w, q, sb, true);
+                    }
+                }
+                loop_filter_simple::<VERT>(&mut buf[5..], stride, limit);
+                assert_eq!(
+                    buf, expected,
+                    "vert={VERT} stride={stride} sample={sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_simple_filters_match_sequential_filtering() {
+        check_simple_filter::<true>();
+        check_simple_filter::<false>();
     }
 
     #[test]

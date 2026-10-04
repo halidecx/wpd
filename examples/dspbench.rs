@@ -91,7 +91,7 @@ fn main() {
         for stride in [32, 128, 1024] {
             for pattern in 0..4 {
                 let mut state = 1u32;
-                let source: Vec<_> = (0..16 * stride + 32)
+                let source: Vec<_> = (0..20 * stride + 32)
                     .map(|i| {
                         state = state.wrapping_mul(1664525).wrapping_add(1013904223);
                         match pattern {
@@ -118,6 +118,40 @@ fn main() {
                         black_box(40),
                         black_box(15),
                         black_box(1),
+                    );
+                });
+                println!("{name},{stride},{pattern},{ns:.4}");
+            }
+        }
+    }
+    for (name, f) in [
+        ("simple_v16", vp.v_loop_filter_simple),
+        ("simple_h16", vp.h_loop_filter_simple),
+    ] {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        for stride in [32, 128, 1024] {
+            for pattern in 0..3 {
+                let mut state = 1u32;
+                let source: Vec<_> = (0..20 * stride + 32)
+                    .map(|_| {
+                        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                        match pattern {
+                            0 => 128,
+                            1 => 120 + ((state >> 24) & 15) as u8,
+                            _ => (state >> 24) as u8,
+                        }
+                    })
+                    .collect();
+                let f = black_box(f);
+                let ns = bench(|| {
+                    plane[..source.len()].copy_from_slice(&source);
+                    f(
+                        black_box(&mut plane),
+                        4 * stride + 4,
+                        black_box(stride),
+                        black_box(40),
                     );
                 });
                 println!("{name},{stride},{pattern},{ns:.4}");
