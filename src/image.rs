@@ -197,12 +197,14 @@ pub fn external_plane_fits(
 ) -> bool {
     let advance = stride_magnitude(stride);
 
-    if advance < row {
+    if height <= 0 || advance < row || size < row {
         return false;
     }
     match advance {
-        0 => height <= 1,
-        _ => (height as usize) <= size / advance,
+        0 => height == 1,
+        // Only the used bytes of the last row need storage. Divide instead
+        // of multiplying so even an unaddressable stride cannot overflow.
+        _ => (height - 1) as usize <= (size - row) / advance,
     }
 }
 
@@ -689,6 +691,21 @@ mod tests {
         assert_eq!(stride_magnitude(10), 10);
         assert_eq!(stride_magnitude(0), 0);
         assert!(external_plane_fits(40, -10, 10, 4));
+    }
+
+    #[test]
+    fn external_planes_need_no_padding_after_the_last_row() {
+        for stride in [16, -16] {
+            assert!(external_plane_fits(40, stride, 8, 3));
+            assert!(!external_plane_fits(39, stride, 8, 3));
+            assert!(external_plane_fits(8, stride, 8, 1));
+            assert!(!external_plane_fits(7, stride, 8, 1));
+        }
+        assert!(!external_plane_fits(40, 16, 8, 0));
+        assert!(!external_plane_fits(40, 16, 8, -1));
+        assert!(external_plane_fits(1, isize::MIN, 1, 1));
+        assert!(!external_plane_fits(isize::MAX as usize, isize::MIN, 1, 2));
+        assert!(!external_plane_fits(usize::MAX, isize::MAX, 8, 4));
     }
 
     #[test]

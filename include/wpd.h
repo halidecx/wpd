@@ -311,6 +311,9 @@ WPD_API WPDStatus wpd_decoder_set_animation_mode(WPDDecoder      *decoder,
  * size is the number of bytes reachable from the first row, in the direction
  * stride points. It must describe real storage: it may not exceed PTRDIFF_MAX,
  * and the decoder trusts it as the bound on everything it writes.
+ * For a plane with height rows of row_bytes used bytes each, the minimum is
+ * (height - 1) * abs(stride) + row_bytes; no padding is needed after the last
+ * row. data points to the first logical row, also when stride is negative.
  */
 typedef struct WPDOutputPlane {
     uint8_t  *data;
