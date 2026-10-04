@@ -1,14 +1,19 @@
-
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 use wpd::vp8l::{AlphaDst, Decoder, Target};
+
+#[path = "../budget.rs"]
+mod budget;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
         return;
     }
     let (head, payload) = data.split_at(2);
+    if !budget::fits(payload) {
+        return;
+    }
     let mut decoder = Decoder::new();
     let alpha_chunk = head[0] & 1 != 0;
 

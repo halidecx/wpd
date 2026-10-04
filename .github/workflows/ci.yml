@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 3
+  CARGO_TERM_COLOR: always
+
+jobs:
+  style:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm pipx
+          pipx install clang-format==23.1.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Format and lint
+        run: |
+          ./scripts/stylecheck.sh
+          git diff --exit-code
+
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        asm: ['true', 'false']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: halidecx/wpd-test-data
+          ref: f8c31341db3ab4400f048a96e7b3736fed303b34
+          path: wpd-test-data
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: stable
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx ninja-build nasm cmake
+          pipx install meson==1.12.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Tests, C API, parity and checkasm
+        env:
+          ASM: ${{ matrix.asm }}
+        run: |
+          meson setup build -Denable_asm="$ASM" -Dtrim_dsp=false \
+            -Dtestdata_tests=true -Dlibwebp=subproject -Dwuffs=disabled
+          if [ "$ASM" = true ]; then
+            meson test -C build --list | grep -q checkasm
+          fi
+          meson test -C build --print-errorlogs --num-processes 3
+
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: halidecx/wpd-test-data
+          ref: f8c31341db3ab4400f048a96e7b3736fed303b34
+          path: wpd-test-data
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: stable
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx ninja-build nasm cmake webp
+          pipx install meson==1.12.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build assembly and fallback tools
+        run: |
+          meson setup build -Dtrim_dsp=false -Dtestdata_tests=true \
+            -Dlibwebp=subproject -Dwuffs=disabled
+          meson compile -C build -j 3 libwebpdec
+          meson setup build-noasm -Denable_asm=false \
+            -Dlibwebp=disabled -Dwuffs=disabled
+          meson compile -C build-noasm -j 3
+      - name: Existing correctness checks
+        run: |
+          ./scripts/testdata.sh
+          ./scripts/animcheck.sh
+          ./scripts/threadcheck.sh
+          ./scripts/md5check.sh ./build-noasm/wpd ./build/wpd
+          ./scripts/clicheck.sh ./build-noasm/wpd ./build/wpd
+          ./scripts/rac32.sh --print-errorlogs --num-processes 3
+
+  c-sanitizers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: halidecx/wpd-test-data
+          ref: f8c31341db3ab4400f048a96e7b3736fed303b34
+          path: wpd-test-data
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: stable
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx ninja-build nasm cmake
+          pipx install meson==1.12.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: C harnesses and damaged-input smoke
+        run: |
+          ./scripts/sanitize.sh --print-errorlogs --num-processes 3
+          ./scripts/fuzz.sh 8 wpd-test-data/odd_lossy.webp \
+            wpd-test-data/odd_a_lossy.webp wpd-test-data/palette_rgb.webp \
+            wpd-test-data/mixed_codecs.webp
+
+  nightly:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [rustsan, tsan, miri, fuzz]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: halidecx/wpd-test-data
+          ref: f8c31341db3ab4400f048a96e7b3736fed303b34
+          path: wpd-test-data
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
+        with:
+          toolchain: nightly
+          components: rust-src,miri
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx ninja-build nasm cmake clang
+          pipx install meson==1.12.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Nightly check
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          case "$CHECK" in
+            rustsan)
+              meson setup build -Dlibwebp=disabled -Dwuffs=disabled
+              meson compile -C build -j 3
+              ./scripts/rustsan.sh
+              ;;
+            tsan) ./scripts/tsan.sh ;;
+            miri) ./scripts/miri.sh --lib container::tests ;;
+            fuzz)
+              cargo install cargo-fuzz --version 0.13.2 --locked
+              ./scripts/fuzz-smoke.sh
+              ;;
+          esac
+      - name: Save fuzz failures
+        if: failure() && matrix.check == 'fuzz'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-failures
+          path: fuzz/artifacts
+          if-no-files-found: ignore

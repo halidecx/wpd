@@ -11,6 +11,9 @@ use wpd_capi::decoder::{wpd_decode_into, WPDOutputBuffer};
 use wpd_capi::frame::{WPDFrame, WPDOutputPlane};
 use wpd_capi::options::WPDDecoderOptions;
 
+#[path = "../budget.rs"]
+mod budget;
+
 const FORMATS: [Format; 16] = [
     Format::Yuv420p,
     Format::Yuva420p,
@@ -40,6 +43,7 @@ fn decode_options(data: &[u8]) -> (Options, bool) {
     let flags = byte(data, 1);
     let subframe = flags & 4 != 0;
     let mut options = Options {
+        frame_size_limit: budget::MAX_PIXELS,
         n_threads: [1, 2, 3, 8][usize::from(flags >> 6)],
         bypass_filtering: flags & 8 != 0,
         no_fancy_upsampling: flags & 16 != 0,
@@ -156,6 +160,9 @@ fn decode_external(data: &[u8], options: Options) {
 }
 
 fuzz_target!(|data: &[u8]| {
+    if !budget::fits(data) {
+        return;
+    }
     let Some(&first) = data.first() else {
         return;
     };

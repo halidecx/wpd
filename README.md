@@ -90,6 +90,24 @@ Test data is maintained at
 into the `wpd/` root. `./scripts/testdata.sh` runs end-to-end assembly and
 fallback checks.
 
+GitHub Actions runs assembly and fallback tests, checkasm, format/lint checks,
+the correctness scripts, C and Rust sanitizers, and a container Miri smoke
+check. The corpus revision is pinned in `.github/workflows/ci.yml`. CI compares
+the assembly and fallback tools with `md5check.sh` and `clicheck.sh`; comparing
+an older release still needs an explicit baseline binary. Timing scripts
+(`bench.sh` and `cmpbench.sh`) remain manual because shared CI runners do not
+provide stable performance measurements.
+
+`./scripts/fuzz-smoke.sh [seconds-per-target] [corpus-directory]` builds every
+fuzz target and runs each for 15 seconds by default. It requires nightly Rust,
+Python 3 and cargo-fuzz 0.13.2. It derives container and raw VP8/VP8L seeds from
+the test corpus without changing its WebP files, and leaves generated seeds and
+failure artifacts under `fuzz/`. Longer fuzzing and the full safe-core Miri
+suite (`./scripts/miri.sh`) are useful local checks before releases. The
+decoding harnesses bound pictures to 1,048,576 pixels so mutated dimensions fit
+the smoke run's memory budget; larger pictures remain in ordinary corpus tests.
+This is a harness limit, not a decoder limit.
+
 For libwebp parity testing and benchmarking against alternative WebP decoders,
 build the optional third-party test binaries:
 
