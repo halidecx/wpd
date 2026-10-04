@@ -40,6 +40,52 @@ produces `libwpd-sealed.a` alongside `libwpd.a`. The sealed static lib aborts
 instead of unwinding on an internal panic. The build merges every object into
 one monolithic object for downstream consumers.
 
+## CLI metadata
+
+```sh
+build/wpd --info=json input.webp
+build/wpd --icc-out profile.icc --exif-out exif.bin --xmp-out xmp.bin input.webp
+```
+
+`--info` retains its text output. `--info=json` writes one JSON object to stdout
+after the complete image has decoded successfully:
+
+```json
+{
+  "width": 2,
+  "height": 1,
+  "frame_count": 1,
+  "loop_count": 0,
+  "has_alpha": false,
+  "has_icc": false,
+  "durations_ms": [0],
+  "chunks": [
+    { "fourcc": "VP8L", "offset": 12, "size": 17, "complete": true }
+  ]
+}
+```
+
+Dimensions describe the original canvas, including with `--scale`. Durations are
+the original milliseconds, without a minimum playback delay; a still has one
+duration of 0. An animation loop count of 0 means infinite repetition. The
+ordered chunk list describes top-level RIFF chunks; offsets point to their
+FourCC, sizes exclude the header and padding, and `complete` includes padding.
+Raw VP8/VP8L input has an empty chunk list. Arbitrary FourCC bytes outside
+printable ASCII are escaped as `\u00XX`.
+
+Metadata outputs contain the original chunk payload, without its header or
+padding. Missing metadata produces an empty file. Extraction alone needs no
+pixel output. It does not interpret EXIF orientation or apply colour profiles.
+These options also work with `--stream`, `--loops`, and `--repeat`; JSON and
+metadata are written once. JSON can accompany a pixel output file, but the pixel
+output cannot also use stdout. Metadata paths must name files.
+
+The existing input and frame size limits apply. `--max-output` limits decoded
+pixel output; metadata is bounded by `--max-input`. Exit codes are 0 for
+success, 1 for input, decoding, limits or output errors, and 2 for invalid
+arguments. Failed decodes write no JSON or metadata, and leave existing metadata
+output files untouched.
+
 ## Library
 
 `meson install -C build` installs the static/shared libraries, `wpd.h`, and

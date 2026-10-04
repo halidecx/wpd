@@ -2,6 +2,7 @@
 
 mod md5;
 mod output;
+mod report;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -99,6 +100,12 @@ const USAGE_TAIL: &str = concat!(
     " --info\n",
     "    print canvas, animation, the frame table and per-frame\n",
     "    timing to stdout\n",
+    " --info=json\n",
+    "    write one JSON object to stdout after successful decoding;\n",
+    "    includes dimensions, durations, loops, alpha and chunks\n",
+    " --icc-out path, --exif-out path, --xmp-out path\n",
+    "    write the original metadata bytes; absent metadata writes\n",
+    "    an empty file. these paths cannot be stdout\n",
     " --stream u32\n",
     "    decode incrementally, appending this many bytes at a time,\n",
     "    instead of opening the file whole\n",
@@ -280,6 +287,8 @@ struct Options {
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
+    info_json: bool,
+    metadata_out: [Option<String>; 3],
     subframe: bool,
     muxer: Option<String>,
     verify: Option<String>,
@@ -303,6 +312,9 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("muxer", None, true),
     ("verify", None, true),
     ("info", None, false),
+    ("icc-out", None, true),
+    ("exif-out", None, true),
+    ("xmp-out", None, true),
     ("loops", None, true),
     ("cpumask", None, true),
     ("subframe", None, false),
@@ -372,7 +384,29 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
             warn_baseline_cpumask(mask);
             api::set_cpu_flags_mask(mask);
         }
-        "info" => o.info = true,
+        "info" => match value.as_str() {
+            "" => {
+                o.info = true;
+                o.info_json = false;
+            }
+            "json" => {
+                o.info_json = true;
+                o.info = false;
+            }
+            _ => return Err(BAD_INFO),
+        },
+        "icc-out" | "exif-out" | "xmp-out" => {
+            if value.is_empty() || value == "-" {
+                return Err(BAD_METADATA_OUT);
+            }
+            let index = match name {
+                "icc-out" => 0,
+                "exif-out" => 1,
+                _ => 2,
+            };
+
+            o.metadata_out[index] = Some(value);
+        }
         "subframe" => o.subframe = true,
         _ => return Err(MISSING),
     }
@@ -425,7 +459,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                 return Parsed::Bad(MISSING);
             };
 
-            if !takes_value && attached.is_some() {
+            if !takes_value && attached.is_some() && name != "info" {
                 return Parsed::Bad(MISSING);
             }
             if name == "help" {
@@ -438,7 +472,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                     None => return Parsed::Bad(MISSING),
                 }
             } else {
-                String::new()
+                attached.unwrap_or_default()
             };
 
             if let Err(e) = set(&mut o, name, value) {
@@ -497,6 +531,8 @@ const BAD_PIXELS: &str = "invalid frame size limit; expected a pixel count or Wx
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 const BAD_SIZE: &str = "invalid byte count; expected digits with an optional K, M or G";
+const BAD_INFO: &str = "invalid info format; expected --info or --info=json";
+const BAD_METADATA_OUT: &str = "metadata output requires a file path, not stdout";
 
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
@@ -786,7 +822,10 @@ fn main() -> ExitCode {
     let operands = opts.positional.len();
     let max = if verifying { 1 } else { 2 };
 
-    if operands < 1 || operands > max || (!verifying && !opts.info && operands != 2) {
+    let reporting =
+        opts.info || opts.info_json || opts.metadata_out.iter().any(Option::is_some);
+
+    if operands < 1 || operands > max || (!verifying && !reporting && operands != 2) {
         let reason = if verifying {
             if operands < 1 {
                 "input is required"
@@ -809,6 +848,14 @@ fn main() -> ExitCode {
     } else {
         Some(opts.positional[1].as_os_str())
     };
+
+    if opts.info_json && output_name == Some(OsStr::new("-")) {
+        usage(
+            &app,
+            Some("JSON info and decoded output cannot both use stdout"),
+        );
+        return ExitCode::from(2);
+    }
 
     run(&opts, input_name, output_name, expected_md5)
 }
@@ -869,6 +916,7 @@ fn run(
 
     let writes = opened && !output.is_null();
     let mut frames = 0;
+    let mut last_decoder = None;
 
     for iter in 0..opts.repeat {
         let mut info_printed = false;
@@ -954,6 +1002,9 @@ fn run(
         if ret < 0 {
             return ExitCode::FAILURE;
         }
+        if iter + 1 == opts.repeat {
+            last_decoder = Some(decoder);
+        }
     }
 
     if frames == 0 {
@@ -961,27 +1012,71 @@ fn run(
         return ExitCode::FAILURE;
     }
     if let Some(expected) = expected_md5 {
-        return if output.verify(&expected) {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        if !output.verify(&expected) {
+            return ExitCode::FAILURE;
+        }
+    } else if let Err(e) = output.close() {
+        let _ = writeln!(std::io::stderr(), "write: {}", errmsg(&e));
+        return ExitCode::FAILURE;
     }
-    if !opened {
-        return ExitCode::SUCCESS;
-    }
-    match output.close() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            let _ = writeln!(std::io::stderr(), "write: {}", errmsg(&e));
-            ExitCode::FAILURE
+    let mut decoder = last_decoder.unwrap();
+
+    for (which, path) in [Metadata::Iccp, Metadata::Exif, Metadata::Xmp]
+        .into_iter()
+        .zip(&opts.metadata_out)
+    {
+        if let Some(path) = path {
+            if let Err(e) =
+                std::fs::write(path, decoder.metadata(which).unwrap_or_default())
+            {
+                eprintln!("{path}: {}", errmsg(&e));
+                return ExitCode::FAILURE;
+            }
         }
     }
+    if opts.info_json {
+        let Ok(image) = decoder.info() else {
+            eprintln!("{}: {}", input_name.to_string_lossy(), decoder.error());
+            return ExitCode::FAILURE;
+        };
+        let has_icc = decoder.metadata(Metadata::Iccp).is_some();
+
+        if let Err(e) =
+            report::write_json(std::io::stdout().lock(), &image, &data, has_icc)
+        {
+            eprintln!("write: {}", errmsg(&e));
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_keeps_its_flag_form_and_takes_json_only_after_equals() {
+        for (args, text, json) in [
+            (vec!["wpd", "--info"], true, false),
+            (vec!["wpd", "--info=json"], false, true),
+            (vec!["wpd", "--info", "--info=json"], false, true),
+        ] {
+            let argv: Vec<_> = args.into_iter().map(OsString::from).collect();
+            let Parsed::Ok(o) = parse_args(&argv) else {
+                panic!("info options must parse");
+            };
+
+            assert_eq!(o.info, text);
+            assert_eq!(o.info_json, json);
+        }
+        let argv: Vec<_> = ["wpd", "--info=xml"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+
+        assert!(matches!(parse_args(&argv), Parsed::Bad(BAD_INFO)));
+    }
 
     #[test]
     fn a_size_takes_a_binary_suffix_and_rejects_overflow() {
