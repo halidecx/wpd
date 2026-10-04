@@ -87,8 +87,10 @@ const USAGE_HEAD: &str = concat!(
     "    letter marks the channels alpha is multiplied into, and\n",
     "    the bgr 16-bit ones swap the two bytes of every pixel\n",
     " --muxer str\n",
-    "    output muxer (raw, md5, ppm, pam, y4m); default is selected\n",
+    "    output muxer (raw, md5, ppm, pam, y4m, frames); default is selected\n",
     "    from a .ppm, .pam or .y4m output extension, or raw\n",
+    "    frames creates a new output directory of RGBA PAM files\n",
+    "    and a JSON manifest with original per-frame durations\n",
     " --verify md5\n",
     "    verify decoded md5; implies --muxer md5 and no output\n",
     " --cpumask str\n",
@@ -372,7 +374,10 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
             o.out_format = out_format;
         }
         "muxer" => {
-            if !matches!(value.as_str(), "raw" | "md5" | "ppm" | "pam" | "y4m") {
+            if !matches!(
+                value.as_str(),
+                "raw" | "md5" | "ppm" | "pam" | "y4m" | "frames"
+            ) {
                 return Err(BAD_MUXER);
             }
             o.muxer = Some(value);
@@ -529,7 +534,8 @@ const BAD_THREADS: &str = "invalid thread count; expected 0..INT_MAX";
 const BAD_SCALE: &str = "invalid scale; expected WxH, either 0 to keep the ratio";
 const BAD_PIXELS: &str = "invalid frame size limit; expected a pixel count or WxH";
 const BAD_FORMAT: &str = "invalid output pixel format";
-const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
+const BAD_MUXER: &str =
+    "invalid output muxer; expected raw, md5, ppm, pam, y4m or frames";
 const BAD_SIZE: &str = "invalid byte count; expected digits with an optional K, M or G";
 const BAD_INFO: &str = "invalid info format; expected --info or --info=json";
 const BAD_METADATA_OUT: &str = "metadata output requires a file path, not stdout";
@@ -856,6 +862,14 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    if opts.muxer.as_deref() == Some("frames")
+        && output_name.is_none_or(|name| {
+            name == OsStr::new("-") || name == OsStr::new("/dev/null")
+        })
+    {
+        usage(&app, Some("frames requires an output directory"));
+        return ExitCode::from(2);
+    }
 
     run(&opts, input_name, output_name, expected_md5)
 }
@@ -911,6 +925,12 @@ fn run(
             .is_err()
         {
             return ExitCode::FAILURE;
+        }
+        if output.muxer == Muxer::Frames {
+            if let Err(e) = output.begin_sequence(&image, opts.subframe) {
+                eprintln!("write: {}", errmsg(&e));
+                return ExitCode::FAILURE;
+            }
         }
     }
 

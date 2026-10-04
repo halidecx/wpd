@@ -86,6 +86,35 @@ success, 1 for input, decoding, limits or output errors, and 2 for invalid
 arguments. Failed decodes write no JSON or metadata, and leave existing metadata
 output files untouched.
 
+## CLI frame sequences
+
+```sh
+build/wpd --muxer frames input.webp output-frames
+```
+
+The `frames` muxer creates a new directory, writes `frame-000000.pam`,
+`frame-000001.pam`, and so on, and publishes `manifest.json` after successful
+decoding and output flushing. Every PAM file has straight RGBA pixels and its
+own header. An existing output directory is refused.
+
+The manifest has `canvas_width`, `canvas_height`, `loop_count`, `composited`,
+`frame_count`, and an ordered `frames` array. Each frame has `file`, `width`,
+`height`, `duration_ms`, `timestamp_ms`, `x`, and `y`. Durations are the
+original milliseconds, including 0; timestamps are the start of each frame in
+the first pass, starting at 0. A still has one frame with duration and
+timestamp 0.
+
+Frames are composited canvases by default. `--subframe` keeps raw frame sizes
+and canvas offsets, and sets `composited` to false. `--scale` changes the frame
+dimensions while the manifest's canvas dimensions describe the original file.
+`--stream` is supported; only the first pass of `--loops` or `--repeat` is
+written. The muxer requires RGBA output and a directory path, and `--max-output`
+covers all PAM bytes and the complete manifest together.
+
+A failed decode or write leaves partial output with `manifest.json.part`,
+without a final `manifest.json`. Consumers should require the final manifest
+before using a sequence.
+
 ## Library
 
 `meson install -C build` installs the static/shared libraries, `wpd.h`, and

@@ -215,3 +215,163 @@ fn metadata_io_errors_and_stdout_collisions_fail_cleanly() {
         assert!(output.stdout.is_empty());
     }
 }
+
+#[test]
+fn a_frame_sequence_keeps_durations_and_matches_the_pam_stream() {
+    let dir = Scratch::new();
+    let data = animation();
+    let reference = run(&["--muxer", "pam", "-", "-"], &data);
+
+    assert!(
+        reference.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let mut expected_manifest = None;
+
+    for (name, stream) in [("whole", "997"), ("stream", "1")] {
+        let path = dir.path(name);
+        let output = run(
+            &[
+                "--muxer", "frames", "--stream", stream, "--loops", "2", "--repeat",
+                "2", "-", &path,
+            ],
+            &data,
+        );
+
+        assert!(success(&output).is_empty());
+        let manifest =
+            fs::read_to_string(dir.0.join(name).join("manifest.json")).unwrap();
+
+        assert!(manifest.contains("\"loop_count\":3,\"composited\":true"));
+        assert!(manifest.contains("\"duration_ms\":0,"));
+        assert!(manifest.contains("\"duration_ms\":1,"));
+        assert!(manifest.contains("\"duration_ms\":16777215,"));
+        assert!(manifest.ends_with("],\"frame_count\":3}\n"));
+        assert!(!dir.0.join(name).join("manifest.json.part").exists());
+        if let Some(expected) = &expected_manifest {
+            assert_eq!(&manifest, expected);
+        } else {
+            expected_manifest = Some(manifest);
+        }
+        let mut pixels = Vec::new();
+
+        for i in 0..3 {
+            pixels.extend(
+                fs::read(dir.0.join(name).join(format!("frame-{i:06}.pam"))).unwrap(),
+            );
+        }
+        assert_eq!(pixels, reference.stdout);
+        assert_eq!(fs::read_dir(dir.0.join(name)).unwrap().count(), 4);
+    }
+}
+
+#[test]
+fn sequence_failure_has_no_final_manifest_and_never_overwrites_a_directory() {
+    let dir = Scratch::new();
+    let path = dir.path("frames");
+    let output = run(
+        &["--muxer", "frames", "--max-output", "1", "-", &path],
+        &animation(),
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!dir.0.join("frames/manifest.json").exists());
+    let sentinel = dir.0.join("frames/owner-file");
+
+    fs::write(&sentinel, b"preserve this").unwrap();
+    let output = run(&["--muxer", "frames", "-", &path], STILL);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(fs::read(sentinel).unwrap(), b"preserve this");
+    let data = animation();
+    let truncated = dir.path("truncated");
+    let output = run(
+        &["--muxer", "frames", "--stream", "1", "-", &truncated],
+        &data[..data.len() - 2],
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!dir.0.join("truncated/manifest.json").exists());
+}
+
+#[test]
+fn sequence_byte_limit_covers_the_manifest_and_every_pam_file() {
+    let dir = Scratch::new();
+    let path = dir.path("reference");
+
+    success(&run(&["--muxer", "frames", "-", &path], STILL));
+    let size: u64 = fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .sum();
+    let exact = dir.path("exact");
+    let exact_limit = size.to_string();
+
+    success(&run(
+        &[
+            "--muxer",
+            "frames",
+            "--max-output",
+            &exact_limit,
+            "-",
+            &exact,
+        ],
+        STILL,
+    ));
+    let short = dir.path("short");
+    let short_limit = (size - 1).to_string();
+    let output = run(
+        &[
+            "--muxer",
+            "frames",
+            "--max-output",
+            &short_limit,
+            "-",
+            &short,
+        ],
+        STILL,
+    );
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!dir.0.join("short/manifest.json").exists());
+    for args in [
+        vec!["--muxer", "frames", "-", "-"],
+        vec!["--muxer", "frames", "--info", "-"],
+    ] {
+        assert_eq!(run(&args, &[]).status.code(), Some(2));
+    }
+}
+
+#[test]
+fn sequence_subframes_and_scaling_describe_the_actual_output_geometry() {
+    let dir = Scratch::new();
+
+    for (name, options, geometry, composited) in [
+        (
+            "scaled",
+            vec!["--scale", "4x2"],
+            "\"width\":4,\"height\":2",
+            true,
+        ),
+        (
+            "subframes",
+            vec!["--subframe"],
+            "\"width\":2,\"height\":1",
+            false,
+        ),
+    ] {
+        let path = dir.path(name);
+        let mut args = vec!["--muxer", "frames"];
+
+        args.extend(options);
+        args.extend(["-", &path]);
+        success(&run(&args, &animation()));
+        let manifest =
+            fs::read_to_string(dir.0.join(name).join("manifest.json")).unwrap();
+
+        assert!(manifest.contains("\"canvas_width\":2,\"canvas_height\":1"));
+        assert!(manifest.contains(&format!("\"composited\":{composited}")));
+        assert_eq!(manifest.matches(geometry).count(), 3);
+    }
+}

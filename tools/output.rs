@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::path::PathBuf;
 
 use wpd::api::{Coding, ImageInfo, Picture};
 use wpd::dsp::yuv::{extract_alpha, YuvDsp};
@@ -13,6 +14,7 @@ pub enum Muxer {
     Raw,
     Ppm,
     Pam,
+    Frames,
     Y4m,
 }
 
@@ -22,6 +24,7 @@ impl Muxer {
             Muxer::Raw => "raw",
             Muxer::Ppm => "ppm",
             Muxer::Pam => "pam",
+            Muxer::Frames => "frames",
             Muxer::Y4m => "y4m",
         }
     }
@@ -29,7 +32,7 @@ impl Muxer {
     fn required(self) -> Option<(&'static str, Format)> {
         match self {
             Muxer::Ppm => Some(("rgb", Format::Rgb)),
-            Muxer::Pam => Some(("rgba", Format::Rgba)),
+            Muxer::Pam | Muxer::Frames => Some(("rgba", Format::Rgba)),
             Muxer::Raw | Muxer::Y4m => None,
         }
     }
@@ -46,6 +49,7 @@ pub struct Output {
     kind: Kind,
     pub muxer: Muxer,
     file: Option<Box<dyn Write>>,
+    directory: Option<PathBuf>,
     /* Bytes written to a file or stdout so far, and the most a decode may
      * write in total; 0 lifts the limit. A hashed or discarded decode costs
      * nothing downstream, so only Kind::File is budgeted. */
@@ -138,15 +142,35 @@ impl Output {
             out.muxer = match chosen.as_str() {
                 "ppm" => Muxer::Ppm,
                 "pam" => Muxer::Pam,
+                "frames" => Muxer::Frames,
                 "y4m" => Muxer::Y4m,
                 _ => Muxer::Raw,
             };
             if out.kind == Kind::Null {
+                if out.muxer == Muxer::Frames {
+                    return Err(io::Error::other(
+                        "frames requires an output directory",
+                    ));
+                }
                 return Ok(out);
             }
         }
 
         let name = filename.unwrap_or(OsStr::new(""));
+
+        if out.muxer == Muxer::Frames {
+            if name.is_empty() || name == OsStr::new("-") {
+                return Err(io::Error::other("frames requires an output directory"));
+            }
+            let directory = PathBuf::from(name);
+
+            std::fs::create_dir(&directory)?;
+            out.file = Some(Box::new(BufWriter::new(File::create_new(
+                directory.join("manifest.json.part"),
+            )?)));
+            out.directory = Some(directory);
+            return Ok(out);
+        }
 
         out.file = Some(if name == OsStr::new("-") {
             Box::new(io::stdout())
@@ -161,6 +185,7 @@ impl Output {
             kind: Kind::Null,
             muxer: Muxer::Raw,
             file: None,
+            directory: None,
             written: 0,
             limit: 0,
             y4m_stash: Y4M_STASH,
@@ -200,6 +225,9 @@ impl Output {
     }
 
     pub fn close(mut self) -> io::Result<()> {
+        if self.muxer == Muxer::Frames {
+            self.write(format!("],\"frame_count\":{}}}\n", self.frames).as_bytes())?;
+        }
         if self.kind == Kind::Md5 {
             let digest = hex(&std::mem::take(&mut self.md5).finish());
 
@@ -210,6 +238,53 @@ impl Output {
         if let Some(mut f) = self.file.take() {
             f.flush()?;
         }
+        if let Some(directory) = self.directory.take() {
+            std::fs::rename(
+                directory.join("manifest.json.part"),
+                directory.join("manifest.json"),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn begin_sequence(
+        &mut self,
+        image: &ImageInfo,
+        subframe: bool,
+    ) -> io::Result<()> {
+        let header = format!(
+            "{{\"canvas_width\":{},\"canvas_height\":{},\"loop_count\":{},\"composited\":{},\"frames\":[",
+            image.width, image.height, image.loop_count, !subframe
+        );
+
+        self.write(header.as_bytes())
+    }
+
+    fn write_sequence_frame(
+        &mut self,
+        frame: &Picture<'_>,
+        header: &[u8],
+    ) -> io::Result<()> {
+        let name = format!("frame-{:06}.pam", self.frames);
+        let path = self.directory.as_ref().unwrap().join(&name);
+        let file = File::create_new(path)?;
+        let manifest = self.file.take();
+
+        self.file = Some(Box::new(BufWriter::new(file)));
+        self.write(header)?;
+        self.write_plane(frame, 0)?;
+        self.file.take().unwrap().flush()?;
+        self.file = manifest;
+
+        let (x, y) = frame.position();
+        let entry = format!(
+            "{}{{\"file\":\"{name}\",\"width\":{},\"height\":{},\"duration_ms\":{},\"timestamp_ms\":{},\"x\":{x},\"y\":{y}}}",
+            if self.frames == 0 { "" } else { "," },
+            frame.width(), frame.height(), frame.duration(), frame.timestamp()
+        );
+
+        self.write(entry.as_bytes())?;
+        self.frames += 1;
         Ok(())
     }
 
@@ -370,8 +445,12 @@ impl Output {
                     )
                 };
 
-                self.write(header.as_bytes())?;
-                self.write_plane(frame, 0)
+                if self.muxer == Muxer::Frames {
+                    self.write_sequence_frame(frame, header.as_bytes())
+                } else {
+                    self.write(header.as_bytes())?;
+                    self.write_plane(frame, 0)
+                }
             }
             (None, Muxer::Y4m) => self.write_y4m(frame),
             (None, _) => self.write_raw(frame, pixel_format),
