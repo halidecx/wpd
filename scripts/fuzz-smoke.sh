@@ -51,6 +51,17 @@ for path in files:
                 (out / "vp8l" / f"{name}-{threads}").write_bytes(
                     bytes((0, threads)) + payload)
 
+# Exercise the damaged transform regressions through raw and driver targets.
+for path in sorted(Path("tests/data/vp8-compat").glob("*.vp8")):
+    payload = path.read_bytes()
+    name = f"compat-{path.stem}"
+    (out / "vp8" / name).write_bytes(payload)
+    chunk = b"VP8 " + len(payload).to_bytes(4, "little") + payload
+    chunk += bytes(len(payload) & 1)
+    data = b"RIFF" + (len(chunk) + 4).to_bytes(4, "little") + b"WEBP" + chunk
+    for target in ("container", "e2e"):
+        (out / target / name).write_bytes(data)
+
 for target in ("container", "e2e", "vp8", "vp8l"):
     if not any((out / target).iterdir()):
         sys.exit(f"no seeds prepared for {target}")

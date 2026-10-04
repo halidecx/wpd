@@ -161,15 +161,14 @@ fn decode_external(data: &[u8], options: Options) {
     }
 }
 
-fuzz_target!(|data: &[u8]| {
-    if !budget::fits(data) {
-        return;
-    }
+fn exercise(data: &[u8], libwebp_compat: bool) {
     let Some(&first) = data.first() else {
         return;
     };
     let format = FORMATS[first as usize % FORMATS.len()];
-    let (options, subframe) = decode_options(data);
+    let (mut options, subframe) = decode_options(data);
+
+    options.libwebp_compat = libwebp_compat;
 
     let mut serial = Decoder::new();
     configure(
@@ -251,4 +250,12 @@ fuzz_target!(|data: &[u8]| {
             break;
         }
     }
+}
+
+fuzz_target!(|data: &[u8]| {
+    if !budget::fits(data) {
+        return;
+    }
+    exercise(data, false);
+    exercise(data, true);
 });
