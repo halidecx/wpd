@@ -243,6 +243,12 @@ else
   strip_args = []
 endif
 
+native_dependencies = [
+  cc.find_library('m', required: false),
+  dependency('threads', required: false),
+  cc.find_library('dl', required: false),
+]
+
 libwpd_shared = shared_library(
   'wpd',
   files('src/shared_stub.c'),
@@ -251,11 +257,7 @@ libwpd_shared = shared_library(
     meson.current_build_dir() / 'libwpd.a',
   ],
   link_depends: [libwpd_artifacts, wpd_exports],
-  dependencies: [
-    cc.find_library('m', required: false),
-    dependency('threads', required: false),
-    cc.find_library('dl', required: false),
-  ],
+  dependencies: native_dependencies,
   version: soversion,
   soversion: soversion.split('.')[0],
   install: true,
@@ -269,17 +271,14 @@ import('pkgconfig').generate(
   filebase: 'wpd',
   description: 'A fast WebP decoder',
   version: meson.project_version(),
+  libraries_private: native_dependencies,
 )
 
 wpd_dep = declare_dependency(
   link_with: libwpd,
   include_directories: inc_dirs,
   compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
-  dependencies: [
-    cc.find_library('m', required: false),
-    dependency('threads', required: false),
-    cc.find_library('dl', required: false),
-  ],
+  dependencies: native_dependencies,
 )
 
 if get_option('nightly_size')
@@ -287,11 +286,7 @@ if get_option('nightly_size')
     link_with: libwpd_sealed,
     include_directories: inc_dirs,
     compile_args: asm_c_args + cpu_baseline_c_args + trim_c_args + ['-DWPD_STATIC'],
-    dependencies: [
-      cc.find_library('m', required: false),
-      dependency('threads', required: false),
-      cc.find_library('dl', required: false),
-    ],
+    dependencies: native_dependencies,
   )
 endif
 
@@ -319,6 +314,28 @@ api_test = executable(
   install: false,
 )
 test('api', api_test, suite: 'api')
+
+if host_machine.system() in ['linux', 'darwin'] and not meson.is_cross_build()
+  pkg_config = find_program('pkg-config', required: false)
+  if pkg_config.found()
+    pkgconfig_c_args = cc.cmd_array() + get_option('c_args') + get_option('c_link_args')
+    if get_option('b_sanitize') != 'none'
+      pkgconfig_c_args += '-fsanitize=' + get_option('b_sanitize')
+    endif
+    test(
+      'pkgconfig-static',
+      find_program('sh'),
+      args: [
+        files('tests/pkgconfig-static.sh'),
+        source_root,
+        meson.current_build_dir(),
+        pkg_config.full_path(),
+      ] + pkgconfig_c_args,
+      depends: libwpd_artifacts,
+      suite: 'api',
+    )
+  endif
+endif
 
 test(
   'cargo',
@@ -381,11 +398,7 @@ libwpd_checkasm = custom_target(
 wpd_checkasm_dep = declare_dependency(
   link_with: libwpd_checkasm,
   include_directories: inc_dirs,
-  dependencies: [
-    cc.find_library('m', required: false),
-    dependency('threads', required: false),
-    cc.find_library('dl', required: false),
-  ],
+  dependencies: native_dependencies,
 )
 
 if cc.has_header('sys/mman.h')

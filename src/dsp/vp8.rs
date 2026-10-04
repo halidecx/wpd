@@ -239,14 +239,17 @@ pub fn idct_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
     }
 }
 
+// LLVM 19 recognizes a saturating pack when the upper bound is clipped
+// first, whereas i16::clamp produces extra vector clamps.
+#[allow(clippy::manual_clamp)]
 pub fn idct_dc_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
-    let dc = (i32::from(block[0]) + 4) >> 3;
+    let dc = ((i32::from(block[0]) + 4) >> 3) as i16;
 
     block[0] = 0;
+    // The shifted DC lies in -4096..=4096; adding a byte fits in i16.
     for i in 0..4 {
-        let row = &mut dst[i * stride..i * stride + 4];
-        for p in row.iter_mut() {
-            *p = clip_uint8(i32::from(*p) + dc);
+        for p in &mut dst[i * stride..i * stride + 4] {
+            *p = (i16::from(*p) + dc).min(255).max(0) as u8;
         }
     }
 }
@@ -254,6 +257,50 @@ pub fn idct_dc_add(dst: &mut [u8], stride: usize, block: &mut [i16; 16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dc_wht_preserves_ac_coefficients_for_every_dc_value() {
+        for coefficient in i16::MIN..=i16::MAX {
+            let mut blocks = [[123i16; 16]; 16];
+            let mut dc = [77i16; 16];
+            dc[0] = coefficient;
+            luma_dc_wht_dc(&mut blocks, &mut dc);
+            let expected = (i32::from(coefficient) + 3).div_euclid(8) as i16;
+            for block in blocks {
+                assert_eq!(block[0], expected);
+                assert_eq!(&block[1..], &[123; 15]);
+            }
+            assert_eq!(dc[0], 0);
+            assert_eq!(&dc[1..], &[77; 15]);
+        }
+    }
+
+    #[test]
+    fn dc_add_matches_clipping_for_every_coefficient() {
+        const PIXELS: [u8; 16] = [
+            0, 1, 2, 15, 16, 63, 64, 127, 128, 191, 192, 239, 240, 253, 254, 255,
+        ];
+        for dc in i16::MIN..=i16::MAX {
+            let mut dst = [77u8; 4 * 9];
+            let mut block = [123i16; 16];
+            block[0] = dc;
+            for y in 0..4 {
+                dst[y * 9..y * 9 + 4].copy_from_slice(&PIXELS[y * 4..y * 4 + 4]);
+            }
+            idct_dc_add(&mut dst, 9, &mut block);
+            for y in 0..4 {
+                for x in 0..4 {
+                    let want = (i32::from(PIXELS[y * 4 + x])
+                        + ((i32::from(dc) + 4) >> 3))
+                        .clamp(0, 255) as u8;
+                    assert_eq!(dst[y * 9 + x], want);
+                }
+                assert_eq!(&dst[y * 9 + 4..(y + 1) * 9], &[77; 5]);
+            }
+            assert_eq!(block[0], 0);
+            assert_eq!(&block[1..], &[123; 15]);
+        }
+    }
 
     #[test]
     fn a_flat_edge_is_left_alone() {

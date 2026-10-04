@@ -667,11 +667,13 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
         return;
     }
 
-    for (int variant = 0; variant < 3; variant++) {
-        const size_t    pad     = variant == 1 ? 37 : 0;
-        const size_t    advance = row + pad;
-        const int       flip    = variant == 2;
-        uint8_t        *buffer  = malloc(advance * (size_t)height);
+    for (int variant = 0; variant < 5; variant++) {
+        const size_t pad     = variant == 1 || variant >= 3 ? 37 : 0;
+        const size_t advance = row + pad;
+        const size_t extent  = advance * (size_t)(height - 1) + row +
+            (variant < 3 ? pad : 0);
+        const int       flip    = variant == 2 || variant == 4;
+        uint8_t        *buffer  = malloc(extent + 16);
         WPDOutputBuffer out     = WPD_OUTPUT_BUFFER_INIT;
         WPDDecoder     *decoder = wpd_decoder_create();
         WPDFrame        frame   = WPD_FRAME_INIT;
@@ -683,7 +685,8 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
             wpd_decoder_free(decoder);
             break;
         }
-        out.plane[0].size   = advance * (size_t)height;
+        memset(buffer, 0xa5, extent + 16);
+        out.plane[0].size   = extent;
         out.plane[0].stride = flip ? -(ptrdiff_t)advance : (ptrdiff_t)advance;
         out.plane[0].data   = flip ? buffer + advance * (size_t)(height - 1)
                                    : buffer;
@@ -714,10 +717,19 @@ static void test_output_buffer(const char *path, WPDPixelFormat format) {
                     break;
                 }
             }
+            for (size_t i = extent; i < extent + 16; i++)
+                CHECK(buffer[i] == 0xa5);
             seen++;
         }
         CHECK(ret == 0);
         CHECK(seen == frames);
+        if (variant >= 3) {
+            out.plane[0].size = extent - 1;
+            CHECK(wpd_decoder_set_output_buffer(decoder, &out) == WPD_OK);
+            CHECK(wpd_decoder_open(decoder, data, size) == WPD_OK);
+            CHECK(wpd_decoder_next_frame(decoder, &frame) ==
+                  WPD_ERR_BUFFER_TOO_SMALL);
+        }
         free(buffer);
         wpd_decoder_free(decoder);
     }
@@ -1979,22 +1991,40 @@ static void test_planar(const uint8_t *data, size_t size) {
 
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_YUVA420P, NULL, &reference) ==
           WPD_OK);
-    for (int p = 0; p < 4; p++) {
-        int shift  = p == 1 || p == 2;
-        int width  = (reference.width + shift) >> shift;
-        int height = (reference.height + shift) >> shift;
+    for (int variant = 0; variant < 3; variant++) {
+        for (int p = 0; p < 4; p++) {
+            const int    shift   = p == 1 || p == 2;
+            const int    width   = (reference.width + shift) >> shift;
+            const int    height  = (reference.height + shift) >> shift;
+            const size_t advance = (size_t)width + (variant ? 37 : 0);
+            const size_t extent  = advance * (size_t)(height - 1) + width;
 
-        planes[p] = malloc((size_t)width * height);
-        CHECK(planes[p] != NULL);
-        output.plane[p].data   = planes[p];
-        output.plane[p].size   = (size_t)width * height;
-        output.plane[p].stride = width;
+            planes[p] = malloc(extent + 16);
+            CHECK(planes[p] != NULL);
+            if (!planes[p]) {
+                for (int i = 0; i < p; i++) free(planes[i]);
+                wpd_frame_free(&reference);
+                return;
+            }
+            memset(planes[p], 0xa5, extent + 16);
+            output.plane[p].data   = variant == 2
+                ? planes[p] + advance * (size_t)(height - 1)
+                : planes[p];
+            output.plane[p].size   = extent;
+            output.plane[p].stride = variant == 2 ? -(ptrdiff_t)advance
+                                                  : (ptrdiff_t)advance;
+        }
+        CHECK(wpd_decode_into(
+                  data, size, WPD_PIX_FMT_YUVA420P, NULL, &output, &frame) ==
+              WPD_OK);
+        CHECK(frame_equal(&frame, &reference));
+        for (int p = 0; p < 4; p++) {
+            for (size_t i = output.plane[p].size; i < output.plane[p].size + 16;
+                 i++)
+                CHECK(planes[p][i] == 0xa5);
+            free(planes[p]);
+        }
     }
-    CHECK(wpd_decode_into(
-              data, size, WPD_PIX_FMT_YUVA420P, NULL, &output, &frame) ==
-          WPD_OK);
-    CHECK(frame_equal(&frame, &reference));
-    for (int p = 0; p < 4; p++) free(planes[p]);
     wpd_frame_free(&reference);
 }
 
