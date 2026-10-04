@@ -40,6 +40,14 @@ produces `libwpd-sealed.a` alongside `libwpd.a`. The sealed static lib aborts
 instead of unwinding on an internal panic. The build merges every object into
 one monolithic object for downstream consumers.
 
+## Release status
+
+[CHANGELOG.md](CHANGELOG.md) is a draft for the first release. The workspace is
+already version 0.2.0; `v0.2.0` is the proposed first tag after the maintainer
+merges these changes and completes the checks. No release date or crates.io
+publication is claimed. This series has been tested with Rust 1.98 and 1.99;
+that does not establish compatibility with the declared Rust 1.82 minimum.
+
 ## CLI metadata
 
 ```sh
