@@ -120,6 +120,66 @@ const fn strides<const VERT: bool>(stride: usize) -> (usize, usize) {
     }
 }
 
+// Independent columns expose the filter's i16 lanes to the vectorizer. All
+// differences and weighted corrections fit i16; thresholds outside that range
+// can be saturated without changing any comparison. Explicit masks avoid
+// turning the eligibility and HEV choices back into per-column branches.
+#[allow(clippy::manual_clamp)]
+fn loop_filter_vertical<const SIZE: usize, const INNER: bool>(
+    buf: &mut [u8],
+    stride: usize,
+    flim_e: i32,
+    flim_i: i32,
+    hev_thresh: i32,
+) {
+    let e = flim_e.clamp(-1, i16::MAX as i32) as i16;
+    let i = flim_i.clamp(-1, i16::MAX as i32) as i16;
+    let h = hev_thresh.clamp(-1, i16::MAX as i32) as i16;
+    let mut w = [[0i16; SIZE]; 8];
+    for (r, row) in w.iter_mut().enumerate() {
+        for (v, &p) in row.iter_mut().zip(&buf[r * stride..r * stride + SIZE]) {
+            *v = p.into();
+        }
+    }
+    let mut out = [[0u8; SIZE]; 6];
+    for j in 0..SIZE {
+        let d = |a: usize, b: usize| (w[a][j] - w[b][j]).abs();
+        let limit = (2 * d(3, 4) + (d(2, 5) >> 1) <= e)
+            & (d(0, 1)
+                .max(d(1, 2))
+                .max(d(2, 3))
+                .max(d(7, 6))
+                .max(d(6, 5))
+                .max(d(5, 4))
+                <= i);
+        let hev = -i16::from(d(2, 3).max(d(5, 4)) > h);
+        let limit = -i16::from(limit);
+        let clip = |v: i16| v.clamp(-128, 127);
+        let a = clip(3 * (w[4][j] - w[3][j]) + (clip(w[2][j] - w[5][j]) & hev));
+        let f1 = (a + 4).min(127) >> 3;
+        let f2 = (a + 3).min(127) >> 3;
+        let half = ((f1 + 1) >> 1) & !hev;
+        let mut delta = [0, half, f2, -f1, -half, 0];
+        if !INNER {
+            let a = clip(clip(w[2][j] - w[5][j]) + 3 * (w[4][j] - w[3][j]));
+            let a0 = (27 * a + 63) >> 7;
+            let a1 = (18 * a + 63) >> 7;
+            let a2 = (9 * a + 63) >> 7;
+            let mb_delta = [a2, a1, a0, -a0, -a1, -a2];
+            for r in 0..6 {
+                delta[r] = (delta[r] & hev) | (mb_delta[r] & !hev);
+            }
+        }
+        for r in 0..6 {
+            let v = w[r + 1][j] + (delta[r] & limit);
+            out[r][j] = v.min(255).max(0) as u8;
+        }
+    }
+    for (r, row) in out.iter().enumerate() {
+        buf[(r + 1) * stride..(r + 1) * stride + SIZE].copy_from_slice(row);
+    }
+}
+
 pub fn loop_filter<const SIZE: usize, const VERT: bool, const INNER: bool>(
     buf: &mut [u8],
     stride: usize,
@@ -127,6 +187,10 @@ pub fn loop_filter<const SIZE: usize, const VERT: bool, const INNER: bool>(
     flim_i: i32,
     hev_thresh: i32,
 ) {
+    if VERT && stride >= SIZE && (SIZE == 8 || SIZE == 16) {
+        loop_filter_vertical::<SIZE, INNER>(buf, stride, flim_e, flim_i, hev_thresh);
+        return;
+    }
     let (sa, sb) = strides::<VERT>(stride);
 
     for j in 0..SIZE {
@@ -300,6 +364,73 @@ mod tests {
             assert_eq!(block[0], 0);
             assert_eq!(&block[1..], &[123; 15]);
         }
+    }
+
+    fn check_block_filter<const SIZE: usize, const INNER: bool>() {
+        let mut seed = 0x1234_5678u32;
+        let mut random = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 24) as u8
+        };
+        for stride in [SIZE, SIZE + 1, 32, 127] {
+            for sample in 0..if cfg!(miri) { 8 } else { 2000 } {
+                let mut buf = vec![0xa5; 7 * stride + SIZE + 13];
+                for r in 0..8 {
+                    for j in 0..SIZE {
+                        let v = random();
+                        buf[5 + r * stride + j] = match sample % 4 {
+                            0 => v,
+                            1 => 120 + (v & 15),
+                            2 => (v & 7) + if r < 4 { 0 } else { 8 },
+                            _ => 248 + (v & 7),
+                        };
+                    }
+                }
+                let (e, i, h) = match sample % 8 {
+                    0 => (i32::MAX, i32::MAX, i32::MAX),
+                    1 => (i32::MIN, 0, 0),
+                    2 => (637, -1, 0),
+                    3 => (637, 255, -1),
+                    _ => (
+                        i32::from(random()),
+                        i32::from(random() & 63),
+                        i32::from(random() & 3),
+                    ),
+                };
+                let mut expected = buf.clone();
+                for j in 0..SIZE {
+                    let q = 5 + j;
+                    let w = load8::<true>(&expected, q, stride);
+                    if normal_limit(&w, e, i) {
+                        let is4tap = hev(&w, h);
+                        if is4tap || INNER {
+                            filter_common(
+                                &mut expected,
+                                [w[2], w[3], w[4], w[5]],
+                                q + 2 * stride,
+                                stride,
+                                is4tap,
+                            );
+                        } else {
+                            filter_mbedge(&mut expected, &w, q + stride, stride);
+                        }
+                    }
+                }
+                loop_filter::<SIZE, true, INNER>(&mut buf[5..], stride, e, i, h);
+                assert_eq!(
+                    buf, expected,
+                    "size={SIZE} inner={INNER} stride={stride} sample={sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_loop_filters_match_the_per_column_filter() {
+        check_block_filter::<8, false>();
+        check_block_filter::<8, true>();
+        check_block_filter::<16, false>();
+        check_block_filter::<16, true>();
     }
 
     #[test]
