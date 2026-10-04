@@ -99,6 +99,9 @@ const USAGE_TAIL: &str = concat!(
     " --info\n",
     "    print canvas, animation, the frame table and per-frame\n",
     "    timing to stdout\n",
+    " --libwebp-compat\n",
+    "    match libwebp's acceptance and lossy decoding of damaged\n",
+    "    still images; default is strict decoding\n",
     " --stream u32\n",
     "    decode incrementally, appending this many bytes at a time,\n",
     "    instead of opening the file whole\n",
@@ -280,6 +283,7 @@ struct Options {
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
+    libwebp_compat: bool,
     subframe: bool,
     muxer: Option<String>,
     verify: Option<String>,
@@ -303,6 +307,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("muxer", None, true),
     ("verify", None, true),
     ("info", None, false),
+    ("libwebp-compat", None, false),
     ("loops", None, true),
     ("cpumask", None, true),
     ("subframe", None, false),
@@ -374,6 +379,7 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
         }
         "info" => o.info = true,
         "subframe" => o.subframe = true,
+        "libwebp-compat" => o.libwebp_compat = true,
         _ => return Err(MISSING),
     }
     Ok(())
@@ -657,6 +663,7 @@ fn new_decoder(
     n_threads: i32,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
+    libwebp_compat: bool,
 ) -> Option<Decoder<'static>> {
     let mut decoder = Decoder::new();
 
@@ -665,6 +672,7 @@ fn new_decoder(
             n_threads,
             scale,
             frame_size_limit,
+            libwebp_compat,
             ..api::Options::default()
         })
         .is_err()
@@ -854,7 +862,20 @@ fn run(
     let mut out_format = opts.out_format;
 
     if opened && output.muxer != Muxer::Raw {
-        let Ok(image) = api::info(&data) else {
+        let info = if opts.libwebp_compat {
+            let mut decoder = Decoder::new();
+
+            decoder
+                .set_options(api::Options {
+                    libwebp_compat: true,
+                    ..Default::default()
+                })
+                .and_then(|()| decoder.open(&data))
+                .and_then(|()| decoder.info())
+        } else {
+            api::info(&data)
+        };
+        let Ok(image) = info else {
             eprintln!("{}: cannot read image header", input_name.to_string_lossy());
             return ExitCode::FAILURE;
         };
@@ -890,6 +911,7 @@ fn run(
             opts.n_threads,
             opts.scale,
             opts.frame_size_limit,
+            opts.libwebp_compat,
         ) else {
             return ExitCode::FAILURE;
         };
@@ -905,6 +927,7 @@ fn run(
                         opts.n_threads,
                         opts.scale,
                         opts.frame_size_limit,
+                        opts.libwebp_compat,
                     ) else {
                         return ExitCode::FAILURE;
                     };

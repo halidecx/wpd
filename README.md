@@ -145,3 +145,35 @@ This project would not be possible without:
 - [dav1d](https://www.videolan.org/projects/dav1d.html), the fastest open-source
   AV1 decoder
 - [rav1d](https://github.com/memorysafety/rav1d), a Rust rewrite of dav1d
+
+## libwebp compatibility
+
+Strict decoding remains the default. `--libwebp-compat` accepts damaged still
+containers that libwebp's still decoder accepts, including shortened image
+chunks, duplicate VP8X chunks, and damaged trailing chunks. It also selects
+libwebp's portable C VP8 transform behaviour for non-conforming lossy streams.
+It applies to pixel output and text info. Animation containers retain their
+validation.
+
+Set Rust's `Options.libwebp_compat` before opening input. C callers set
+`WPDDecoderOptions.libwebp_compat` to 1 and initialize `struct_size` with
+`sizeof(WPDDecoderOptions)`; older options structs retain strict decoding.
+
+Compatible still streams produce pixels after `end_of_stream`, retaining
+physical input bytes past RIFF's declared end when the codec needs them. Default
+still decoding and animation decoding remain incremental. Library callers should
+bound incoming bytes; the CLI's `--max-input` and the normal frame and output
+limits still apply.
+
+Compare a directory with libwebp 1.6.0's `dwebp` and `anim_dump`:
+
+```sh
+python3 scripts/webpcompare.py path/to/corpus --wpd build/wpd \
+  --libwebp-compat --noasm
+```
+
+`--noasm` selects portable C for stills through `dwebp`; `anim_dump` remains
+native. Libwebp's CPU-specific code can render malformed lossy streams
+differently from its portable code, so this mode does not promise identical
+pixels from every native libwebp build on non-conforming input. The comparison
+reports visible differences separately from RGB differences under zero alpha.
