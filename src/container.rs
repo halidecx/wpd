@@ -544,6 +544,10 @@ impl Scan {
             let tag = rl32(buf, at);
             let size = rl32(buf, at + 4);
 
+            if self.pos == 12 && !matches!(tag, TAG_VP8X | TAG_VP8 | TAG_VP8L) {
+                log::error("RIFF must start with VP8, VP8L or VP8X");
+                return Err(Error::InvalidData);
+            }
             if size == u32::MAX {
                 self.info.truncated = true;
                 break;
@@ -749,6 +753,25 @@ mod tests {
     #[test]
     fn something_that_is_not_a_webp_says_so() {
         assert_eq!(get_info(b"not a webp file at all"), Err(Error::NotWebp));
+    }
+
+    #[test]
+    fn a_damaged_vp8x_tag_cannot_turn_an_extended_file_into_a_simple_one() {
+        let mut payload = chunk(b"VP9X", &[0x10, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        payload.extend(chunk(b"VP8L", &vp8l_header(1, 1, true)));
+
+        let file = riff(&payload);
+
+        assert_eq!(get_info(&file), Err(Error::InvalidData));
+
+        let mut scan = Scan::new();
+
+        assert_eq!(
+            scan.headers(&file[..19], 0, true, true),
+            Err(Error::Truncated)
+        );
+        assert_eq!(scan.headers(&file, 0, true, true), Err(Error::InvalidData));
     }
 
     #[test]
