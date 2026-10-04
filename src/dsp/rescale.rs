@@ -112,6 +112,38 @@ pub fn import_row_expand(frow: &mut [u32], src: &[u8], p: Import) {
 }
 
 pub fn import_row_shrink(frow: &mut [u32], src: &[u8], p: Import) {
+    match p.num_channels {
+        1 => import_row_shrink_channels::<1>(frow, src, p),
+        4 => import_row_shrink_channels::<4>(frow, src, p),
+        _ => import_row_shrink_generic(frow, src, p),
+    }
+}
+
+fn import_row_shrink_channels<const C: usize>(frow: &mut [u32], src: &[u8], p: Import) {
+    let mut x_in = 0;
+    let mut sum = [0u32; C];
+    let mut accum = 0i32;
+    for out in frow[..p.dst_width * C].chunks_exact_mut(C) {
+        let mut base = [0u32; C];
+        accum += p.x_add as i32;
+        while accum > 0 {
+            accum -= p.x_sub as i32;
+            let pixel = &src[x_in..x_in + C];
+            for c in 0..C {
+                base[c] = u32::from(pixel[c]);
+                sum[c] = sum[c].wrapping_add(base[c]);
+            }
+            x_in += C;
+        }
+        for c in 0..C {
+            let fract = base[c].wrapping_mul((-accum) as u32);
+            out[c] = sum[c].wrapping_mul(p.x_sub).wrapping_sub(fract);
+            sum[c] = mult_fix(fract, p.fx_scale);
+        }
+    }
+}
+
+fn import_row_shrink_generic(frow: &mut [u32], src: &[u8], p: Import) {
     let stride = p.num_channels;
     let x_out_max = p.dst_width * stride;
 
@@ -215,5 +247,54 @@ impl RescaleDsp {
 impl Default for RescaleDsp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn specialized_import_matches_channel_at_a_time_scaling() {
+        let mut seed = 17u32;
+        for channels in [1, 4] {
+            for width in [
+                1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 127, 128, 129, 511,
+            ] {
+                if cfg!(miri) && ![1, 2, 7, 16].contains(&width) {
+                    continue;
+                }
+                let src: Vec<_> = (0..width * channels)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (seed >> 24) as u8
+                    })
+                    .collect();
+                for dst_width in 0..=width {
+                    for scale in [
+                        if dst_width == 0 {
+                            0
+                        } else {
+                            frac(1, dst_width as u32)
+                        },
+                        u32::MAX,
+                    ] {
+                        let p = Import {
+                            num_channels: channels,
+                            src_width: width,
+                            dst_width,
+                            x_add: width as u32,
+                            x_sub: dst_width as u32,
+                            fx_scale: scale,
+                        };
+                        let mut actual = vec![0x1234_5678; channels * dst_width + 7];
+                        let mut expected = actual.clone();
+                        import_row_shrink_generic(&mut expected[3..], &src, p);
+                        import_row_shrink(&mut actual[3..], &src, p);
+                        assert_eq!(actual, expected, "channels={channels}, width={width}, dst_width={dst_width}, scale={scale}");
+                    }
+                }
+            }
+        }
     }
 }
