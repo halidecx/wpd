@@ -2148,6 +2148,79 @@ fn predict_batch(
 mod tests {
     use super::*;
 
+    #[test]
+    fn cached_and_uncached_literals_match_in_bulk_tail_and_streaming() {
+        fn put(bits: &mut Vec<u8>, value: u32, count: u32) {
+            for i in 0..count {
+                bits.push(((value >> i) & 1) as u8);
+            }
+        }
+        for cache in [false, true] {
+            let mut bits = Vec::new();
+            put(&mut bits, 0x2f, 8);
+            put(&mut bits, 31, 14);
+            put(&mut bits, 3, 14);
+            put(&mut bits, 0, 4);
+            put(&mut bits, 0, 1);
+            put(&mut bits, u32::from(cache), 1);
+            if cache {
+                put(&mut bits, 1, 4);
+            }
+            put(&mut bits, 0, 1);
+            for (i, symbol) in [5, 7, 11, 255, 0].into_iter().enumerate() {
+                put(&mut bits, 1, 1);
+                put(&mut bits, u32::from(i == 0), 1);
+                put(&mut bits, u32::from(symbol > 1), 1);
+                put(&mut bits, symbol, if symbol > 1 { 8 } else { 1 });
+                if i == 0 {
+                    put(&mut bits, 9, 8);
+                }
+            }
+            for i in 0..128 {
+                put(&mut bits, i & 1, 1);
+            }
+            let mut data = vec![0; bits.len().div_ceil(8)];
+            for (i, bit) in bits.into_iter().enumerate() {
+                data[i / 8] |= bit << (i % 8);
+            }
+            let expected: Vec<_> = (0..128)
+                .map(|i| {
+                    u32::from_ne_bytes([255, 7, if i & 1 == 0 { 5 } else { 9 }, 11])
+                })
+                .collect();
+            for padding in [8, 48] {
+                let mut payload = data.clone();
+                payload.resize(payload.len() + padding, 0);
+                let mut whole = Decoder::new();
+                whole.read_frame_header(&payload, false).unwrap();
+                assert_eq!(whole.image[ROLE_ARGB].color_cache_bits, u32::from(cache));
+                whole
+                    .decode_frame(Target::Argb, &payload, false, None)
+                    .unwrap();
+                assert_eq!(&whole.picture(Target::Argb).data[..128], expected);
+                let mut streamed = Decoder::new();
+                streamed.set_canvas(32, 4);
+                let mut done = false;
+                for avail in 1..=payload.len() {
+                    if streamed
+                        .still_step(
+                            &payload[..avail],
+                            payload.len(),
+                            avail == payload.len(),
+                        )
+                        .unwrap()
+                        == Status::Done
+                    {
+                        done = true;
+                        break;
+                    }
+                }
+                assert!(done);
+                assert_eq!(&streamed.picture(Target::Argb).data[..128], expected);
+            }
+        }
+    }
+
     #[cfg(not(miri))]
     fn sparse_huffman_image(group: Option<u32>) -> Vec<u8> {
         fn put(bits: &mut Vec<u8>, value: u32, count: u32) {

@@ -374,14 +374,28 @@ pub fn decode_pixels(args: Args<'_, '_>) -> Result<Status> {
     let fused = args.groups.iter().any(|hg| hg.fused.is_some());
 
     match (args.resumable, fused) {
-        (true, true) => run::<true, true>(args),
-        (true, false) => run::<true, false>(args),
-        (false, true) => run::<false, true>(args),
-        (false, false) => run::<false, false>(args),
+        (true, true) => dispatch_cache::<true, true>(args),
+        (true, false) => dispatch_cache::<true, false>(args),
+        (false, true) => dispatch_cache::<false, true>(args),
+        (false, false) => dispatch_cache::<false, false>(args),
     }
 }
 
-fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<Status> {
+// Cache presence is fixed for the stream; specialize before entering the
+// pixel loop rather than rechecking it for each literal and reference.
+fn dispatch_cache<const RESUMABLE: bool, const FUSED: bool>(
+    args: Args<'_, '_>,
+) -> Result<Status> {
+    if args.cache_bits != 0 {
+        run::<RESUMABLE, FUSED, true>(args)
+    } else {
+        run::<RESUMABLE, FUSED, false>(args)
+    }
+}
+
+fn run<const RESUMABLE: bool, const FUSED: bool, const CACHE: bool>(
+    args: Args<'_, '_>,
+) -> Result<Status> {
     let Args {
         gb,
         buf,
@@ -440,7 +454,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
         // The cache takes each pixel as it is made, rather than in a batch
         // before the next lookup: the pixel is still in a register, and a
         // lookup does not wait on the stores of a batch just before it.
-        if cache_bits != 0 {
+        if CACHE {
             cached = cache_fill(cache, cache_bits, pixels, cached, pos);
         }
         while pos < total && f.pos() <= limit {
@@ -463,7 +477,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
                     ]);
 
                     pixels[pos] = px;
-                    if cache_bits != 0 {
+                    if CACHE {
                         let argb = cache_value(px);
 
                         cache[cache_slot(argb, cache_bits)] = argb;
@@ -513,7 +527,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
                 }
                 px[2] = v as u8;
                 pixels[pos] = u32::from_ne_bytes(px);
-                if cache_bits != 0 {
+                if CACHE {
                     let argb = u32::from_be_bytes(px);
 
                     cache[cache_slot(argb, cache_bits)] = argb;
@@ -541,7 +555,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
                     backward_reference(coded, length, width, pos, total)?;
 
                 copy_block(pixels, pos, distance, length);
-                if cache_bits != 0 {
+                if CACHE {
                     // A copy longer than its distance repeats its last
                     // `distance` pixels, which leave the cache as the whole
                     // copy would.
@@ -568,7 +582,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
             } else {
                 let slot = (v - (NUM_LITERAL_CODES + NUM_LENGTH_CODES)) as usize;
 
-                if cache_bits == 0 {
+                if !CACHE {
                     crate::log::error("color cache not found");
                     return Err(Error::InvalidData);
                 }
@@ -588,7 +602,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
                 }
             }
         }
-        if cache_bits != 0 {
+        if CACHE {
             cached = pos;
         }
         gb.resume(&f, buf);
@@ -659,7 +673,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
             if x == width as i32 {
                 x = 0;
                 y += 1;
-                if cache_bits != 0 {
+                if CACHE {
                     cached = cache_fill(cache, cache_bits, pixels, cached, pos);
                 }
             }
@@ -697,7 +711,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
                 hg = &groups[hgi];
                 trees = resolve(hg, arena);
             }
-            if cache_bits != 0 {
+            if CACHE {
                 cached = cache_fill(cache, cache_bits, pixels, cached, pos);
             }
         } else {
@@ -706,7 +720,7 @@ fn run<const RESUMABLE: bool, const FUSED: bool>(args: Args<'_, '_>) -> Result<S
             if RESUMABLE && near && gb.is_eos(buf) {
                 suspend!();
             }
-            if cache_bits == 0 {
+            if !CACHE {
                 crate::log::error("color cache not found");
                 return Err(Error::InvalidData);
             }
