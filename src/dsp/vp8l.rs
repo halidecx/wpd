@@ -208,8 +208,8 @@ pub fn map_color32(dst: &mut [u8], src: &[u8], palette: &[u32]) {
 pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
     let bytes = dst.len().min(src.len()) & !3;
     let mut offset = 0;
-    // Leave short rows and partial-alpha arithmetic to the scalar path.
-    // Whole opaque or transparent blocks avoid per-pixel branch overhead.
+    // Binary-alpha blocks can select whole pixels, including blocks that mix
+    // opaque and transparent pixels. Partial alpha retains scalar arithmetic.
     if bytes >= 128 {
         while offset + 16 <= bytes {
             let s = &src[offset..offset + 16];
@@ -217,7 +217,19 @@ pub fn blend_row_argb(dst: &mut [u8], src: &[u8]) {
             if alpha == [255; 4] {
                 dst[offset..offset + 16].copy_from_slice(s);
             } else if alpha != [0; 4] {
-                break;
+                if !alpha.iter().all(|&a| a == 0 || a == 255) {
+                    break;
+                }
+                let d = &mut dst[offset..offset + 16];
+                for (i, &a) in alpha.iter().enumerate() {
+                    let mask = 0u32.wrapping_sub(u32::from(a == 255));
+                    let at = 4 * i;
+                    let from = u32::from_ne_bytes(s[at..at + 4].try_into().unwrap());
+                    let old = u32::from_ne_bytes(d[at..at + 4].try_into().unwrap());
+                    d[at..at + 4].copy_from_slice(
+                        &((from & mask) | (old & !mask)).to_ne_bytes(),
+                    );
+                }
             }
             offset += 16;
         }
@@ -274,13 +286,31 @@ fn color_delta(pred: i16, color: u8) -> u8 {
 
 pub fn color_row(row: &mut [u32], mult: u32) {
     let cp = mult.to_ne_bytes();
+    if cp[1..] == [0; 3] {
+        return;
+    }
     let green_to_red = i16::from(cp[3] as i8);
     let green_to_blue = i16::from(cp[2] as i8);
     let red_to_blue = i16::from(cp[1] as i8);
-
-    for px in row {
+    // Independent channel lanes expose signed multiplication to the vectorizer.
+    let mut blocks = row.chunks_exact_mut(16);
+    for block in blocks.by_ref() {
+        let bytes: [[u8; 4]; 16] = std::array::from_fn(|i| block[i].to_ne_bytes());
+        let mut red = [0u8; 16];
+        let mut blue = [0u8; 16];
+        for i in 0..16 {
+            red[i] = bytes[i][1].wrapping_add(color_delta(green_to_red, bytes[i][2]));
+            blue[i] = bytes[i][3].wrapping_add(
+                color_delta(green_to_blue, bytes[i][2])
+                    .wrapping_add(color_delta(red_to_blue, red[i])),
+            );
+        }
+        for i in 0..16 {
+            block[i] = u32::from_ne_bytes([bytes[i][0], red[i], bytes[i][2], blue[i]]);
+        }
+    }
+    for px in blocks.into_remainder() {
         let mut b = px.to_ne_bytes();
-
         b[1] = b[1].wrapping_add(color_delta(green_to_red, b[2]));
         b[3] = b[3].wrapping_add(
             color_delta(green_to_blue, b[2])
@@ -739,9 +769,15 @@ mod tests {
     #[test]
     fn binary_alpha_blocks_and_partial_alpha_tails_match_scalar_blending() {
         let mut seed = 1u32;
-        for n in 0..=65 {
+        for n in 0..=if cfg!(miri) { 33 } else { 65 } {
             for partial in 0..=n {
+                if cfg!(miri) && partial != n / 2 && partial != n {
+                    continue;
+                }
                 for mask in 0..16 {
+                    if cfg!(miri) && ![0, 1, 6, 15].contains(&mask) {
+                        continue;
+                    }
                     let mut source = vec![0; 4 * n + 3];
                     let mut dest = vec![0; 4 * n + 5];
                     for v in source.iter_mut().chain(&mut dest) {
@@ -762,6 +798,47 @@ mod tests {
                     blend_row_argb(&mut dest, &source);
                     assert_eq!(dest, expected, "{n}, {partial}, {mask}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn batched_color_transform_matches_signed_channel_arithmetic() {
+        let mut seed = 17u32;
+        let mults = if cfg!(miri) { 8 } else { 256 };
+        for index in 0..mults {
+            let mult = u32::from_ne_bytes([
+                index as u8,
+                index as u8,
+                (index as u8).wrapping_mul(127),
+                (index as u8).wrapping_mul(31),
+            ]);
+            let c = mult.to_ne_bytes();
+            for n in (0..=65).chain([127, 128, 129, 256, 257, 4096]) {
+                if cfg!(miri) && n > 33 {
+                    continue;
+                }
+                let mut got: Vec<_> = (0..n + 7)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        seed
+                    })
+                    .collect();
+                let mut expected = got.clone();
+                for pixel in &mut expected[3..3 + n] {
+                    let mut b = pixel.to_ne_bytes();
+                    let delta = |coeff: u8, channel: u8| {
+                        (i32::from(coeff as i8) * i32::from(channel as i8)) >> 5
+                    };
+                    let red = (i32::from(b[1]) + delta(c[3], b[2])) as u8;
+                    let blue =
+                        (i32::from(b[3]) + delta(c[2], b[2]) + delta(c[1], red)) as u8;
+                    b[1] = red;
+                    b[3] = blue;
+                    *pixel = u32::from_ne_bytes(b);
+                }
+                color_row(&mut got[3..3 + n], mult);
+                assert_eq!(got, expected, "mult={mult:08x}, length={n}");
             }
         }
     }

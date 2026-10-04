@@ -191,6 +191,21 @@ fn main() {
             let ns = bench(|| f(black_box(&mut pixels[..n]), black_box(&palette)));
             println!("palette,{n},0,{ns:.4}");
         }
+        if "color".starts_with(&prefix) {
+            let f = black_box(loss.color_row);
+            for mult in [0, 0x7f80_ff00, 0x8080_8000, 0x7f7f_7f00, 0x1234_5600] {
+                for (i, p) in pixels[..n].iter_mut().enumerate() {
+                    *p = u32::from_ne_bytes([
+                        255,
+                        i.wrapping_mul(7) as u8,
+                        i as u8,
+                        i.wrapping_mul(31) as u8,
+                    ]);
+                }
+                let ns = bench(|| f(black_box(&mut pixels[..n]), black_box(mult)));
+                println!("color,{n},{mult},{ns:.4}");
+            }
+        }
         for k in [0, 1, 2, 3, 4, 8, 9, 11, 12, 13] {
             if !format!("pred_{k}").starts_with(&prefix) {
                 continue;
