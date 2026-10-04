@@ -113,7 +113,6 @@ pub fn import_row_expand(frow: &mut [u32], src: &[u8], p: Import) {
 
 pub fn import_row_shrink(frow: &mut [u32], src: &[u8], p: Import) {
     match p.num_channels {
-        1 => import_row_shrink_channels::<1>(frow, src, p),
         4 => import_row_shrink_channels::<4>(frow, src, p),
         _ => import_row_shrink_generic(frow, src, p),
     }
