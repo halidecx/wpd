@@ -16,6 +16,7 @@ static const struct option long_options[] = {
     {"repeat", required_argument, NULL, 'r'},
     {"fmt", required_argument, NULL, 'f'},
     {"threads", required_argument, NULL, 't'},
+    {"muxer", required_argument, NULL, 'm'},
     {NULL, 0, NULL, 0},
 };
 
@@ -81,20 +82,23 @@ static void print_banner(void) {
 static void usage(const char *app, const char *reason) {
     if (reason)
         fprintf(stderr, "\n%s\n", reason);
-    fprintf(stderr,
-            "\nusage:  %s [options] input output\n"
-            "\noptions:\n"
-            " -h, --help\n"
-            "    view help menu\n"
-            " -r, --repeat u32\n"
-            "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
-            " -f, --fmt str\n"
-            "    output pixel format; default auto. one of\n"
-            "    auto, yuv420p, yuva420p,\n"
-            "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
-            " -t, --threads 1|2\n"
-            "    1 disables threading; 2 enables libwebp's worker; default 1\n",
-            app);
+    fprintf(
+        stderr,
+        "\nusage:  %s [options] input output\n"
+        "\noptions:\n"
+        " -h, --help\n"
+        "    view help menu\n"
+        " -r, --repeat u32\n"
+        "    repeat decode for benchmarking (1..INT_MAX); default 1\n"
+        " -f, --fmt str\n"
+        "    output pixel format; default auto. one of\n"
+        "    auto, yuv420p, yuva420p,\n"
+        "    argb, rgba, bgra, rgb, bgr, Argb, rgbA, bgrA\n"
+        " -t, --threads 1|2\n"
+        "    1 disables threading; 2 enables libwebp's worker; default 1\n"
+        " --muxer raw|pam\n"
+        "    default raw; pam requires rgba and preserves frame dimensions\n",
+        app);
 }
 
 static int parse_repeat(const char *value, int *repeat) {
@@ -170,9 +174,16 @@ static const char *format_name(const Frame *frame) {
 }
 
 static int write_frame(FILE *output, const Frame *frame,
-                       const char *pixel_format) {
+                       const char *pixel_format, int pam) {
     int planes;
 
+    if (pam &&
+        fprintf(output,
+                "P7\nWIDTH %d\nHEIGHT %d\nDEPTH 4\nMAXVAL 255\n"
+                "TUPLTYPE RGB_ALPHA\nENDHDR\n",
+                frame->width,
+                frame->height) < 0)
+        return -1;
     if (!pixel_format)
         pixel_format = format_name(frame);
 
@@ -238,7 +249,7 @@ static const char *status_name(VP8StatusCode status) {
 static int decode_still(const char *input_name, const uint8_t *data,
                         size_t size, const WebPBitstreamFeatures *features,
                         FILE *sink, const char *pixel_format, int threads,
-                        int *frames) {
+                        int pam, int *frames) {
     WebPDecoderConfig config;
     VP8StatusCode     status;
     Frame             frame = {0};
@@ -288,7 +299,7 @@ static int decode_still(const char *input_name, const uint8_t *data,
         frame.stride[3] = config.output.u.YUVA.a_stride;
     }
 
-    if (sink && write_frame(sink, &frame, pixel_format) < 0) {
+    if (sink && write_frame(sink, &frame, pixel_format, pam) < 0) {
         WebPFreeDecBuffer(&config.output);
         return -1;
     }
@@ -299,7 +310,7 @@ static int decode_still(const char *input_name, const uint8_t *data,
 
 static int decode_animation(const char *input_name, const uint8_t *data,
                             size_t size, FILE *sink, const char *pixel_format,
-                            int threads, int *frames) {
+                            int threads, int pam, int *frames) {
     WebPData               webp_data = {data, size};
     WebPAnimDecoderOptions options;
     WebPAnimDecoder       *decoder = NULL;
@@ -350,7 +361,7 @@ static int decode_animation(const char *input_name, const uint8_t *data,
             goto done;
         }
         frame.data[0] = rgba;
-        if (sink && write_frame(sink, &frame, pixel_format) < 0)
+        if (sink && write_frame(sink, &frame, pixel_format, pam) < 0)
             goto done;
         (*frames)++;
     }
@@ -399,6 +410,7 @@ int main(int argc, char **argv) {
     const char *input_name, *output_name;
     int         discard_output, frames = 0, repeat = 1, status = 1;
     int         threads = 1;
+    int         pam     = 0;
 
     print_banner();
     opterr = 0;
@@ -426,6 +438,13 @@ int main(int argc, char **argv) {
                 return 2;
             }
             break;
+        case 'm':
+            if (strcmp(optarg, "raw") && strcmp(optarg, "pam")) {
+                usage(argv[0], "invalid output muxer; expected raw or pam");
+                return 2;
+            }
+            pam = !strcmp(optarg, "pam");
+            break;
         default:
             usage(argv[0], "unknown option or missing option value");
             return 2;
@@ -436,6 +455,13 @@ int main(int argc, char **argv) {
               argc - optind < 2 ? "input and output are required"
                                 : "unexpected argument");
         return 2;
+    }
+    if (pam) {
+        if (pixel_format && strcmp(pixel_format, "rgba")) {
+            usage(argv[0], "pam requires rgba output");
+            return 2;
+        }
+        pixel_format = "rgba";
     }
 
     input_name     = argv[optind];
@@ -471,6 +497,7 @@ int main(int argc, char **argv) {
                                  sink,
                                  pixel_format,
                                  threads,
+                                 pam,
                                  &frames) < 0)
                 goto done;
         } else if (decode_still(input_name,
@@ -480,6 +507,7 @@ int main(int argc, char **argv) {
                                 sink,
                                 pixel_format,
                                 threads,
+                                pam,
                                 &frames) < 0) {
             goto done;
         }
