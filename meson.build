@@ -517,7 +517,7 @@ custom_target(
 message('imagewebpdec: enabled (build explicitly with target imagewebpdec)')
 
 wuffs_dep = dependency(
-  '',
+  'wuffs',
   fallback: ['wuffs', 'wuffs_dep'],
   required: get_option('wuffs'),
 )
