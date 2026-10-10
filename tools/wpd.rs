@@ -2,9 +2,11 @@
 
 mod md5;
 mod output;
+mod report;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use wpd::api::{self, Animation, Decoder, Metadata};
@@ -99,6 +101,12 @@ const USAGE_TAIL: &str = concat!(
     " --info\n",
     "    print canvas, animation, the frame table and per-frame\n",
     "    timing to stdout\n",
+    " --info=json\n",
+    "    print one JSON object after successful decoding and output;\n",
+    "    includes canvas, coding, frames, loops, metadata and durations\n",
+    " --icc-out path, --exif-out path, --xmp-out path\n",
+    "    extract original metadata bytes to distinct files after success;\n",
+    "    absent metadata writes an empty file. paths cannot be stdout\n",
     " --stream u32\n",
     "    decode incrementally, appending this many bytes at a time,\n",
     "    instead of opening the file whole\n",
@@ -280,6 +288,8 @@ struct Options {
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
+    info_json: bool,
+    metadata_out: [Option<PathBuf>; 3],
     subframe: bool,
     muxer: Option<String>,
     verify: Option<String>,
@@ -303,6 +313,9 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("muxer", None, true),
     ("verify", None, true),
     ("info", None, false),
+    ("icc-out", None, true),
+    ("exif-out", None, true),
+    ("xmp-out", None, true),
     ("loops", None, true),
     ("cpumask", None, true),
     ("subframe", None, false),
@@ -335,17 +348,29 @@ fn by_letter(letter: char) -> Option<(&'static str, bool)> {
         .map(|&(name, _, takes_value)| (name, takes_value))
 }
 
-fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
-    match name {
-        "repeat" => o.repeat = parse_repeat(&value).ok_or(BAD_REPEAT)?,
-        "loops" => o.loops = parse_repeat(&value).ok_or(BAD_LOOPS)?,
-        "stream" => o.stream = parse_repeat(&value).ok_or(BAD_STREAM)? as usize,
-        "scale" => o.scale = Some(parse_scale(&value).ok_or(BAD_SCALE)?),
-        "frame-size-limit" => {
-            o.frame_size_limit = parse_pixels(&value).ok_or(BAD_PIXELS)?;
+fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str> {
+    if let Some(i) = ["icc-out", "exif-out", "xmp-out"]
+        .iter()
+        .position(|&n| n == name)
+    {
+        if value.is_empty() || report::is_stdout(&value) {
+            return Err(BAD_METADATA_OUT);
         }
-        "max-input" => o.max_input = parse_size(&value).ok_or(BAD_SIZE)?,
-        "max-output" => o.max_output = parse_size(&value).ok_or(BAD_SIZE)?,
+        o.metadata_out[i] = Some(PathBuf::from(value));
+        return Ok(());
+    }
+    let value = value.to_str().ok_or(MISSING)?;
+
+    match name {
+        "repeat" => o.repeat = parse_repeat(value).ok_or(BAD_REPEAT)?,
+        "loops" => o.loops = parse_repeat(value).ok_or(BAD_LOOPS)?,
+        "stream" => o.stream = parse_repeat(value).ok_or(BAD_STREAM)? as usize,
+        "scale" => o.scale = Some(parse_scale(value).ok_or(BAD_SCALE)?),
+        "frame-size-limit" => {
+            o.frame_size_limit = parse_pixels(value).ok_or(BAD_PIXELS)?;
+        }
+        "max-input" => o.max_input = parse_size(value).ok_or(BAD_SIZE)?,
+        "max-output" => o.max_output = parse_size(value).ok_or(BAD_SIZE)?,
         "threads" => {
             o.n_threads = value
                 .parse::<i32>()
@@ -354,25 +379,35 @@ fn set(o: &mut Options, name: &str, value: String) -> Result<(), &'static str> {
                 .ok_or(BAD_THREADS)?
         }
         "fmt" => {
-            let (pixel_format, out_format) = parse_format(&value).ok_or(BAD_FORMAT)?;
+            let (pixel_format, out_format) = parse_format(value).ok_or(BAD_FORMAT)?;
 
             o.pixel_format = pixel_format;
             o.out_format = out_format;
         }
         "muxer" => {
-            if !matches!(value.as_str(), "raw" | "md5" | "ppm" | "pam" | "y4m") {
+            if !matches!(value, "raw" | "md5" | "ppm" | "pam" | "y4m") {
                 return Err(BAD_MUXER);
             }
-            o.muxer = Some(value);
+            o.muxer = Some(value.to_owned());
         }
-        "verify" => o.verify = Some(value),
+        "verify" => o.verify = Some(value.to_owned()),
         "cpumask" => {
-            let mask = parse_cpumask(&value).ok_or(BAD_CPUMASK)?;
+            let mask = parse_cpumask(value).ok_or(BAD_CPUMASK)?;
 
             warn_baseline_cpumask(mask);
             api::set_cpu_flags_mask(mask);
         }
-        "info" => o.info = true,
+        "info" => match value {
+            "" => {
+                o.info = true;
+                o.info_json = false;
+            }
+            "json" => {
+                o.info = false;
+                o.info_json = true;
+            }
+            _ => return Err(BAD_INFO),
+        },
         "subframe" => o.subframe = true,
         _ => return Err(MISSING),
     }
@@ -408,7 +443,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
         /* A long option carries its value after '=', a short one in the rest
          * of its cluster; either may instead take the next argument. */
         let next = |i: &mut usize| {
-            let v = argv.get(*i).map(|v| v.to_string_lossy().into_owned());
+            let v = argv.get(*i).cloned();
 
             if v.is_some() {
                 *i += 1;
@@ -417,15 +452,18 @@ fn parse_args(argv: &[OsString]) -> Parsed {
         };
 
         if let Some(long) = arg.strip_prefix("--") {
+            if arg_os.to_str().is_none() {
+                return Parsed::Bad(MISSING);
+            }
             let (prefix, attached) = match long.split_once('=') {
-                Some((n, v)) => (n, Some(v.to_owned())),
+                Some((n, v)) => (n, Some(OsString::from(v))),
                 None => (long, None),
             };
             let Some((name, takes_value)) = by_prefix(prefix) else {
                 return Parsed::Bad(MISSING);
             };
 
-            if !takes_value && attached.is_some() {
+            if !takes_value && attached.is_some() && name != "info" {
                 return Parsed::Bad(MISSING);
             }
             if name == "help" {
@@ -438,7 +476,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                     None => return Parsed::Bad(MISSING),
                 }
             } else {
-                String::new()
+                attached.unwrap_or_default()
             };
 
             if let Err(e) = set(&mut o, name, value) {
@@ -467,7 +505,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                 let v: String = cluster[c..].iter().collect();
 
                 c = cluster.len();
-                v
+                OsString::from(v)
             });
             let value = if takes_value {
                 match rest.or_else(|| next(&mut i)) {
@@ -475,7 +513,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
                     None => return Parsed::Bad(MISSING),
                 }
             } else {
-                String::new()
+                OsString::new()
             };
 
             if let Err(e) = set(&mut o, name, value) {
@@ -497,6 +535,8 @@ const BAD_PIXELS: &str = "invalid frame size limit; expected a pixel count or Wx
 const BAD_FORMAT: &str = "invalid output pixel format";
 const BAD_MUXER: &str = "invalid output muxer; expected raw, md5, ppm, pam or y4m";
 const BAD_SIZE: &str = "invalid byte count; expected digits with an optional K, M or G";
+const BAD_INFO: &str = "invalid info format; expected --info or --info=json";
+const BAD_METADATA_OUT: &str = "metadata output requires a file path, not stdout";
 
 fn errmsg(e: &std::io::Error) -> String {
     let text = e.to_string();
@@ -746,7 +786,7 @@ fn main() -> ExitCode {
 
     print_banner();
 
-    let opts = match parse_args(&argv) {
+    let mut opts = match parse_args(&argv) {
         Parsed::Ok(o) => o,
         Parsed::Help => {
             usage(&app, None);
@@ -786,7 +826,12 @@ fn main() -> ExitCode {
     let operands = opts.positional.len();
     let max = if verifying { 1 } else { 2 };
 
-    if operands < 1 || operands > max || (!verifying && !opts.info && operands != 2) {
+    let reporting = opts.info_json || opts.metadata_out.iter().any(Option::is_some);
+
+    if operands < 1
+        || operands > max
+        || (!verifying && !opts.info && !reporting && operands != 2)
+    {
         let reason = if verifying {
             if operands < 1 {
                 "input is required"
@@ -810,10 +855,27 @@ fn main() -> ExitCode {
         Some(opts.positional[1].as_os_str())
     };
 
-    run(&opts, input_name, output_name, expected_md5)
+    if reporting {
+        if let Err(e) = report::validate_paths(
+            input_name,
+            output_name,
+            opts.info_json,
+            &mut opts.metadata_out,
+        ) {
+            eprintln!("{}", errmsg(&e));
+            return if e.kind() == std::io::ErrorKind::InvalidInput {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        run::<true>(&opts, input_name, output_name, expected_md5)
+    } else {
+        run::<false>(&opts, input_name, output_name, expected_md5)
+    }
 }
 
-fn run(
+fn run<const REPORT: bool>(
     opts: &Options,
     input_name: &OsStr,
     output_name: Option<&OsStr>,
@@ -954,12 +1016,46 @@ fn run(
         if ret < 0 {
             return ExitCode::FAILURE;
         }
+        // The ordinary decode loop specializes this away. Reporting keeps
+        // only the final successful decoder alive until the pixel sink closes.
+        if REPORT && iter + 1 == opts.repeat {
+            if frames == 0 {
+                eprintln!("{}: no image data found", input_name.to_string_lossy());
+                return ExitCode::FAILURE;
+            }
+            let status = finish_output(output, opened, expected_md5);
+
+            if status != ExitCode::SUCCESS {
+                return status;
+            }
+            return match report::write(
+                &mut decoder,
+                opts.info_json,
+                &opts.metadata_out,
+                input_name,
+                output_name,
+            ) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("report: {}", errmsg(&e));
+                    ExitCode::FAILURE
+                }
+            };
+        }
     }
 
     if frames == 0 {
         eprintln!("{}: no image data found", input_name.to_string_lossy());
         return ExitCode::FAILURE;
     }
+    finish_output(output, opened, expected_md5)
+}
+
+fn finish_output(
+    output: Output,
+    opened: bool,
+    expected_md5: Option<[u8; 16]>,
+) -> ExitCode {
     if let Some(expected) = expected_md5 {
         return if output.verify(&expected) {
             ExitCode::SUCCESS
