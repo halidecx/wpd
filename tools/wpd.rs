@@ -772,12 +772,19 @@ fn read_limited<R: Read>(reader: R, limit: u64, hint: u64) -> std::io::Result<Ve
     Ok(data)
 }
 
-fn read_file(name: &OsStr, limit: u64) -> std::io::Result<Vec<u8>> {
+fn read_file(
+    name: &OsStr,
+    limit: u64,
+    validate: impl FnOnce(Option<&std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<Vec<u8>> {
     if name == OsStr::new("-") {
+        validate(None)?;
         return read_limited(std::io::stdin().lock(), limit, 0);
     }
 
     let file = std::fs::File::open(name)?;
+
+    validate(Some(&file))?;
     let hint = file.metadata().map_or(0, |m| m.len());
 
     read_limited(file, limit, hint)
@@ -809,7 +816,7 @@ fn main() -> ExitCode {
 
     print_banner();
 
-    let mut opts = match parse_args(&argv) {
+    let opts = match parse_args(&argv) {
         Parsed::Ok(o) => o,
         Parsed::Help => {
             usage(&app, None);
@@ -879,19 +886,6 @@ fn main() -> ExitCode {
     };
 
     if reporting {
-        if let Err(e) = report::validate_paths(
-            input_name,
-            output_name,
-            opts.info_json,
-            &mut opts.metadata_out,
-        ) {
-            eprintln!("{}", errmsg(&e));
-            return if e.kind() == std::io::ErrorKind::InvalidInput {
-                ExitCode::from(2)
-            } else {
-                ExitCode::FAILURE
-            };
-        }
         run::<true>(&opts, input_name, output_name, expected_md5)
     } else {
         run::<false>(&opts, input_name, output_name, expected_md5)
@@ -904,11 +898,39 @@ fn run<const REPORT: bool>(
     output_name: Option<&OsStr>,
     expected_md5: Option<[u8; 16]>,
 ) -> ExitCode {
-    let data = match read_file(input_name, opts.max_input) {
+    let mut metadata_out = if REPORT {
+        opts.metadata_out.clone()
+    } else {
+        Default::default()
+    };
+    let mut input_identity = None;
+    let mut invalid_paths = false;
+    let data = match read_file(input_name, opts.max_input, |file| {
+        if REPORT {
+            // Capture the identity of the actual reader before any output
+            // opens. Descriptor paths can describe fdesc nodes on macOS.
+            input_identity = report::input_metadata(file)?;
+            if let Err(e) = report::validate_paths(
+                input_name,
+                input_identity.as_ref(),
+                output_name,
+                opts.info_json,
+                &mut metadata_out,
+            ) {
+                invalid_paths = e.kind() == std::io::ErrorKind::InvalidInput;
+                return Err(e);
+            }
+        }
+        Ok(())
+    }) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("{}: {}", input_name.to_string_lossy(), errmsg(&e));
-            return ExitCode::FAILURE;
+            return if invalid_paths {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            };
         }
     };
 
@@ -1054,8 +1076,9 @@ fn run<const REPORT: bool>(
             return match report::write(
                 &mut decoder,
                 opts.info_json,
-                &opts.metadata_out,
+                &metadata_out,
                 input_name,
+                input_identity.as_ref(),
                 output_name,
             ) {
                 Ok(()) => ExitCode::SUCCESS,

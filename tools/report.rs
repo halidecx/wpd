@@ -12,6 +12,23 @@ pub fn is_stdout(path: &OsStr) -> bool {
         .any(|alias| path == OsStr::new(alias))
 }
 
+fn path_metadata(path: &Path) -> io::Result<fs::Metadata> {
+    #[cfg(target_os = "macos")]
+    if let Ok(resolved) = path.canonicalize() {
+        if resolved.parent() == Some(Path::new("/dev/fd")) {
+            // fdesc path metadata has a synthetic device number. Open the
+            // descriptor without truncation and stat the handle it duplicates.
+            // realpath can replace the descriptor number with the underlying
+            // basename, so use the original path to duplicate the descriptor.
+            let file = File::open(path)
+                .or_else(|_| OpenOptions::new().write(true).open(path))?;
+
+            return file.metadata();
+        }
+    }
+    fs::metadata(path)
+}
+
 fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -36,12 +53,17 @@ fn same_file(a: &Path, b: &Path) -> bool {
         }
     }
     #[cfg(unix)]
-    if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
-        use std::os::unix::fs::MetadataExt;
-
-        return a.dev() == b.dev() && a.ino() == b.ino();
+    if let (Ok(a), Ok(b)) = (path_metadata(a), path_metadata(b)) {
+        return same_metadata(&a, &b);
     }
     false
+}
+
+#[cfg(unix)]
+fn same_metadata(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 
 #[cfg(unix)]
@@ -51,10 +73,8 @@ fn handle_metadata(handle: &impl std::os::fd::AsFd) -> io::Result<fs::Metadata> 
 
 #[cfg(unix)]
 fn same_handle(path: &Path, handle: &impl std::os::fd::AsFd) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    if let (Ok(a), Ok(b)) = (fs::metadata(path), handle_metadata(handle)) {
-        a.dev() == b.dev() && a.ino() == b.ino()
+    if let (Ok(a), Ok(b)) = (path_metadata(path), handle_metadata(handle)) {
+        same_metadata(&a, &b)
     } else {
         false
     }
@@ -71,43 +91,52 @@ fn stdout_alias(path: &Path) -> bool {
     false
 }
 
-#[cfg(unix)]
-fn stdin_alias(path: &Path) -> bool {
-    ["-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]
-        .iter()
-        .any(|alias| path == Path::new(alias))
-        || same_file(path, Path::new("/dev/stdin"))
+pub fn input_metadata(file: Option<&File>) -> io::Result<Option<fs::Metadata>> {
+    if let Some(file) = file {
+        return file.metadata().map(Some);
+    }
+    #[cfg(unix)]
+    {
+        handle_metadata(&io::stdin()).map(Some)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(None)
+    }
 }
 
-fn input_alias(path: &Path, input: &Path) -> bool {
+fn input_alias(
+    path: &Path,
+    input: &Path,
+    identity: Option<&fs::Metadata>,
+) -> io::Result<bool> {
     if same_file(path, input) {
-        return true;
+        return Ok(true);
     }
     #[cfg(unix)]
-    if stdin_alias(input) && same_handle(path, &io::stdin()) {
-        return true;
+    if let Some(input) = identity {
+        return match path_metadata(path) {
+            Ok(dest) => Ok(same_metadata(input, &dest)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        };
     }
-    false
+    #[cfg(not(unix))]
+    let _ = identity;
+    Ok(false)
 }
 
-fn input_is_stdout(input: &Path) -> bool {
+fn input_is_stdout(input: &Path, identity: Option<&fs::Metadata>) -> io::Result<bool> {
     if stdout_alias(input) {
-        return true;
+        return Ok(true);
     }
     #[cfg(unix)]
-    if stdin_alias(input) {
-        use std::os::unix::fs::MetadataExt;
-
-        // Descriptor paths on macOS identify fdesc nodes. Compare the actual
-        // handles when both input and JSON use redirected standard streams.
-        if let (Ok(a), Ok(b)) = (
-            handle_metadata(&io::stdin()),
-            handle_metadata(&io::stdout()),
-        ) {
-            return a.dev() == b.dev() && a.ino() == b.ino();
-        }
+    if let Some(input) = identity {
+        return Ok(same_metadata(input, &handle_metadata(&io::stdout())?));
     }
-    false
+    #[cfg(not(unix))]
+    let _ = identity;
+    Ok(false)
 }
 
 fn destination(path: &Path) -> io::Result<PathBuf> {
@@ -144,6 +173,7 @@ fn destination(path: &Path) -> io::Result<PathBuf> {
 
 pub fn validate_paths(
     input: &OsStr,
+    identity: Option<&fs::Metadata>,
     output: Option<&OsStr>,
     json: bool,
     metadata: &mut [Option<PathBuf>; 3],
@@ -154,9 +184,16 @@ pub fn validate_paths(
     } else {
         Path::new(input)
     };
-    let output = output.map(|p| if is_stdout(p) { stdout } else { Path::new(p) });
+    // Output::open treats this exact path as a discard sink.
+    let output = output.filter(|p| *p != OsStr::new("/dev/null")).map(|p| {
+        if is_stdout(p) {
+            stdout
+        } else {
+            Path::new(p)
+        }
+    });
 
-    if json && input_is_stdout(input) {
+    if json && input_is_stdout(input, identity)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "JSON info output collides with input",
@@ -168,11 +205,13 @@ pub fn validate_paths(
             "JSON info and decoded output cannot both use stdout",
         ));
     }
-    if output.is_some_and(|p| input_alias(p, input)) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "decoded output collides with input",
-        ));
+    if let Some(output) = output {
+        if input_alias(output, input, identity)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "decoded output collides with input",
+            ));
+        }
     }
     let mut destinations: [Option<PathBuf>; 3] = Default::default();
 
@@ -180,7 +219,7 @@ pub fn validate_paths(
         let Some(path) = path else { continue };
         let dest = destination(path)?;
 
-        if input_alias(&dest, input)
+        if input_alias(&dest, input, identity)?
             || output.is_some_and(|p| same_file(&dest, p))
             || stdout_alias(&dest)
             || same_file(&dest, Path::new("/dev/stderr"))
@@ -302,13 +341,14 @@ pub fn write(
     json: bool,
     metadata: &[Option<PathBuf>; 3],
     input: &OsStr,
+    identity: Option<&fs::Metadata>,
     output: Option<&OsStr>,
 ) -> io::Result<()> {
     // A newly created pixel file can reveal aliases that did not exist at
     // argument validation, including case-insensitive filesystem names.
     let mut metadata = metadata.clone();
 
-    validate_paths(input, output, json, &mut metadata)?;
+    validate_paths(input, identity, output, json, &mut metadata)?;
     let json = if json {
         Some(json_info(decoder)?)
     } else {

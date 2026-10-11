@@ -222,6 +222,98 @@ class Cli(unittest.TestCase):
                     self.assertEqual(self.input.read_bytes(), original)
 
     @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
+    def test_descriptor_input_is_not_a_metadata_or_pixel_destination(self):
+        original = self.input.read_bytes()
+        link = self.work / "descriptor-link"
+        metadata = self.work / "profile.icc"
+        for linked in [False, True]:
+            for flag in ["--icc-out", "--exif-out", "--xmp-out", None]:
+                with self.subTest(linked=linked, flag=flag):
+                    self.input.write_bytes(original)
+                    with self.input.open("rb") as source:
+                        descriptor = f"/dev/fd/{source.fileno()}"
+                        link.unlink(missing_ok=True)
+                        link.symlink_to(descriptor)
+                        name = str(link) if linked else descriptor
+                        args = [flag, str(self.input), name] if flag else ["--info=json", name, str(self.input)]
+                        result = subprocess.run([str(WPD), *args], stdin=subprocess.DEVNULL,
+                                                pass_fds=(source.fileno(),), capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(self.input.read_bytes(), original)
+                    self.assertEqual(list(self.work.glob("*.part")), [])
+            with self.input.open("rb") as source:
+                descriptor = f"/dev/fd/{source.fileno()}"
+                link.unlink(missing_ok=True)
+                link.symlink_to(descriptor)
+                name = str(link) if linked else descriptor
+                result = subprocess.run([str(WPD), "--icc-out", str(metadata), "--stream", "1", name],
+                                        stdin=subprocess.DEVNULL, pass_fds=(source.fileno(),),
+                                        capture_output=True, timeout=30)
+            self.success(result)
+            self.assertEqual(metadata.read_bytes(), b"ICC\0\xffprofile")
+            self.assertEqual(self.input.read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
+    def test_descriptor_input_cannot_alias_json_stdout(self):
+        original = self.input.read_bytes()
+        metadata = self.work / "profile.icc"
+        link = self.work / "descriptor-link"
+        for linked in [False, True]:
+            with self.subTest(linked=linked):
+                self.input.write_bytes(original)
+                metadata.write_bytes(b"preserve metadata")
+                with self.input.open("rb") as source, self.input.open("ab") as stdout:
+                    descriptor = f"/dev/fd/{source.fileno()}"
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(descriptor)
+                    name = str(link) if linked else descriptor
+                    result = subprocess.run([str(WPD), "--info=json", "--icc-out", str(metadata), name],
+                                            stdin=subprocess.DEVNULL, stdout=stdout, stderr=subprocess.PIPE,
+                                            pass_fds=(source.fileno(),), timeout=30)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(self.input.read_bytes(), original)
+                self.assertEqual(metadata.read_bytes(), b"preserve metadata")
+
+    @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
+    def test_descriptor_pixel_output_cannot_modify_the_input(self):
+        original = self.input.read_bytes()
+        metadata = self.work / "profile.icc"
+        link = self.work / "output-descriptor-link"
+        for input_kind in ["path", "descriptor", "stdin"]:
+            for mode in [os.O_RDWR, os.O_WRONLY]:
+                for linked in [False, True]:
+                    with self.subTest(input_kind=input_kind, mode=mode, linked=linked):
+                        self.input.write_bytes(original)
+                        metadata.write_bytes(b"preserve metadata")
+                        with self.input.open("rb") as source, os.fdopen(os.open(self.input, mode), "wb") as target:
+                            name = (str(self.input) if input_kind == "path" else "-" if input_kind == "stdin"
+                                    else f"/dev/fd/{source.fileno()}")
+                            descriptor = f"/dev/fd/{target.fileno()}"
+                            link.unlink(missing_ok=True)
+                            link.symlink_to(descriptor)
+                            output = str(link) if linked else descriptor
+                            result = subprocess.run([str(WPD), "--info=json", "--icc-out", str(metadata), name, output],
+                                                    stdin=source if input_kind == "stdin" else subprocess.DEVNULL,
+                                                    pass_fds=(source.fileno(), target.fileno()),
+                                                    capture_output=True, timeout=30)
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertEqual(self.input.read_bytes(), original)
+                        self.assertEqual(metadata.read_bytes(), b"preserve metadata")
+
+    @unittest.skipUnless(os.name == "posix", "Unix discard sink")
+    def test_json_and_discard_output_can_share_dev_null(self):
+        result = self.command("--info=json", self.input, "/dev/null")
+        self.success(result)
+        self.assertEqual(json.loads(result.stdout)["width"], 1)
+        metadata = self.work / "profile.icc"
+        with open(os.devnull, "wb") as stdout:
+            result = self.command("--info=json", "--icc-out", metadata, self.input, "/dev/null", stdout=stdout)
+            self.success(result)
+            result = self.command("--info=json", self.input, "-", stdout=stdout)
+            self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(metadata.read_bytes(), b"ICC\0\xffprofile")
+
+    @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
     def test_json_stdout_cannot_alias_the_input(self):
         original = self.input.read_bytes()
         metadata = self.work / "profile.icc"
