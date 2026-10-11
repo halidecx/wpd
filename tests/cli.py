@@ -205,13 +205,64 @@ class Cli(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
     def test_redirected_stdin_is_not_a_metadata_or_pixel_destination(self):
         original = self.input.read_bytes()
-        for flags in [["--icc-out", str(self.input), "-"],
-                      ["--info=json", "-", str(self.input)]]:
-            with self.input.open("rb") as stdin:
-                result = subprocess.run([str(WPD), *flags], stdin=stdin,
-                                        capture_output=True, timeout=30)
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertEqual(self.input.read_bytes(), original)
+        link = self.work / "stdin-link"
+        link.symlink_to("/dev/fd/0")
+        aliases = ["-", "/dev/stdin", "/dev/fd/0", str(link)]
+        if Path("/proc/self/fd").is_dir():
+            aliases.append("/proc/self/fd/0")
+        for alias in aliases:
+            for flags in [["--icc-out", str(self.input), alias],
+                          ["--info=json", alias, str(self.input)]]:
+                with self.subTest(flags=flags):
+                    self.input.write_bytes(original)
+                    with self.input.open("rb") as stdin:
+                        result = subprocess.run([str(WPD), *flags], stdin=stdin,
+                                                capture_output=True, timeout=30)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(self.input.read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "posix", "Unix file descriptors")
+    def test_json_stdout_cannot_alias_the_input(self):
+        original = self.input.read_bytes()
+        metadata = self.work / "profile.icc"
+        symlink = self.work / "input-link"
+        symlink.symlink_to(self.input)
+        hardlink = self.work / "input-hardlink"
+        os.link(self.input, hardlink)
+        stdin_link = self.work / "stdin-link"
+        stdin_link.symlink_to("/dev/fd/0")
+        inputs = [self.input, "-", "/dev/stdin", "/dev/fd/0", stdin_link]
+        if Path("/proc/self/fd").is_dir():
+            inputs.append("/proc/self/fd/0")
+        for source in inputs:
+            for target in [self.input, symlink, hardlink]:
+                with self.subTest(source=source, target=target):
+                    self.input.write_bytes(original)
+                    metadata.write_bytes(b"preserve metadata")
+                    with self.input.open("rb") as stdin, target.open("ab") as stdout:
+                        result = subprocess.run([str(WPD), "--info=json", "--icc-out",
+                                                 str(metadata), str(source)], stdin=stdin,
+                                                stdout=stdout, stderr=subprocess.PIPE, timeout=30)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(self.input.read_bytes(), original)
+                    self.assertEqual(metadata.read_bytes(), b"preserve metadata")
+
+    def test_metadata_destination_names_near_the_component_limit(self):
+        limit = os.pathconf(self.work, "PC_NAME_MAX") if os.name == "posix" else 255
+        for length in [limit - 11, limit]:
+            for flag, expected in [("--icc-out", b"ICC\0\xffprofile"),
+                                   ("--exif-out", b"Exif\0\0\x01\xff\x80"),
+                                   ("--xmp-out", b"<xmp>\0\xfe</xmp>")]:
+                dest = self.work / (flag[2] * length)
+                for existing in [False, True]:
+                    with self.subTest(length=length, flag=flag, existing=existing):
+                        if existing:
+                            dest.write_bytes(b"old metadata")
+                        result = self.command(flag, dest, self.input)
+                        self.success(result)
+                        self.assertEqual(dest.read_bytes(), expected)
+                        dest.unlink()
+                        self.assertEqual(list(self.work.glob("*.part")), [])
 
     def test_unicode_metadata_filename(self):
         dest = self.work / "profile-Ω.icc"
@@ -221,11 +272,17 @@ class Cli(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux filename bytes; APFS requires valid Unicode")
     def test_non_utf8_metadata_path_is_preserved(self):
-        name = os.fsencode(self.work) + b"/profile-\xff.icc"
-        result = self.command("--icc-out", name, self.input)
-        self.success(result)
-        with open(name, "rb") as source:
-            self.assertEqual(source.read(), b"ICC\0\xffprofile")
+        for flag, expected in [(b"--icc-out", b"ICC\0\xffprofile"),
+                               (b"--exif-out", b"Exif\0\0\x01\xff\x80"),
+                               (b"--xmp-out", b"<xmp>\0\xfe</xmp>")]:
+            name = os.fsencode(self.work) + b"/profile-\xff=" + flag[2:]
+            for args in [(flag, name), (flag + b"=" + name,)]:
+                with self.subTest(args=args):
+                    result = self.command(*args, self.input)
+                    self.success(result)
+                    with open(name, "rb") as source:
+                        self.assertEqual(source.read(), expected)
+                    os.unlink(name)
 
     def test_first_riff_chunk_is_validated_in_whole_and_split_input(self):
         for name in ["invalid-first-vp8x.webp", "invalid-first-junk.webp", "short-first-partition.webp"]:

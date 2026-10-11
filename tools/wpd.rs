@@ -414,6 +414,33 @@ fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str>
     Ok(())
 }
 
+fn split_long(arg: &OsStr) -> Option<(&str, Option<OsString>)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = arg.as_bytes().strip_prefix(b"--")?;
+        let (name, value) = match bytes.iter().position(|&b| b == b'=') {
+            Some(i) => (
+                &bytes[..i],
+                Some(OsStr::from_bytes(&bytes[i + 1..]).to_owned()),
+            ),
+            None => (bytes, None),
+        };
+
+        Some((std::str::from_utf8(name).ok()?, value))
+    }
+    #[cfg(not(unix))]
+    {
+        let long = arg.to_str()?.strip_prefix("--")?;
+
+        Some(match long.split_once('=') {
+            Some((name, value)) => (name, Some(OsString::from(value))),
+            None => (long, None),
+        })
+    }
+}
+
 #[inline(never)]
 fn parse_args(argv: &[OsString]) -> Parsed {
     let mut o = Options {
@@ -451,13 +478,9 @@ fn parse_args(argv: &[OsString]) -> Parsed {
             v
         };
 
-        if let Some(long) = arg.strip_prefix("--") {
-            if arg_os.to_str().is_none() {
+        if arg.starts_with("--") {
+            let Some((prefix, attached)) = split_long(arg_os) else {
                 return Parsed::Bad(MISSING);
-            }
-            let (prefix, attached) = match long.split_once('=') {
-                Some((n, v)) => (n, Some(OsString::from(v))),
-                None => (long, None),
             };
             let Some((name, takes_value)) = by_prefix(prefix) else {
                 return Parsed::Bad(MISSING);
@@ -1078,6 +1101,45 @@ fn finish_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn attached_metadata_arguments_preserve_filename_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let path = OsStr::from_bytes(b"profile-\xff=meta");
+
+        for (i, name) in ["icc-out", "exif-out", "xmp-out"].iter().enumerate() {
+            let mut attached = format!("--{name}=").into_bytes();
+
+            attached.extend_from_slice(path.as_bytes());
+            let Parsed::Ok(o) = parse_args(&[
+                OsString::from("wpd"),
+                OsString::from_vec(attached),
+                OsString::from("input.webp"),
+            ]) else {
+                panic!("attached metadata path must parse");
+            };
+
+            assert_eq!(
+                o.metadata_out[i].as_deref(),
+                Some(std::path::Path::new(path))
+            );
+        }
+        for invalid in [
+            b"--icc-\xff=path".as_slice(),
+            b"--info=\xff",
+            b"--repeat=\xff",
+        ] {
+            assert!(matches!(
+                parse_args(&[
+                    OsString::from("wpd"),
+                    OsString::from_vec(invalid.to_vec())
+                ]),
+                Parsed::Bad(_)
+            ));
+        }
+    }
 
     #[test]
     fn a_size_takes_a_binary_suffix_and_rejects_overflow() {

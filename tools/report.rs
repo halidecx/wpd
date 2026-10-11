@@ -45,15 +45,15 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(unix)]
+fn handle_metadata(handle: &impl std::os::fd::AsFd) -> io::Result<fs::Metadata> {
+    File::from(handle.as_fd().try_clone_to_owned()?).metadata()
+}
+
+#[cfg(unix)]
 fn same_handle(path: &Path, handle: &impl std::os::fd::AsFd) -> bool {
     use std::os::unix::fs::MetadataExt;
 
-    let Ok(fd) = handle.as_fd().try_clone_to_owned() else {
-        return false;
-    };
-    let file = File::from(fd);
-
-    if let (Ok(a), Ok(b)) = (fs::metadata(path), file.metadata()) {
+    if let (Ok(a), Ok(b)) = (fs::metadata(path), handle_metadata(handle)) {
         a.dev() == b.dev() && a.ino() == b.ino()
     } else {
         false
@@ -71,13 +71,41 @@ fn stdout_alias(path: &Path) -> bool {
     false
 }
 
+#[cfg(unix)]
+fn stdin_alias(path: &Path) -> bool {
+    ["-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"]
+        .iter()
+        .any(|alias| path == Path::new(alias))
+        || same_file(path, Path::new("/dev/stdin"))
+}
+
 fn input_alias(path: &Path, input: &Path) -> bool {
     if same_file(path, input) {
         return true;
     }
     #[cfg(unix)]
-    if input == Path::new("/dev/stdin") && same_handle(path, &io::stdin()) {
+    if stdin_alias(input) && same_handle(path, &io::stdin()) {
         return true;
+    }
+    false
+}
+
+fn input_is_stdout(input: &Path) -> bool {
+    if stdout_alias(input) {
+        return true;
+    }
+    #[cfg(unix)]
+    if stdin_alias(input) {
+        use std::os::unix::fs::MetadataExt;
+
+        // Descriptor paths on macOS identify fdesc nodes. Compare the actual
+        // handles when both input and JSON use redirected standard streams.
+        if let (Ok(a), Ok(b)) = (
+            handle_metadata(&io::stdin()),
+            handle_metadata(&io::stdout()),
+        ) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
     }
     false
 }
@@ -128,6 +156,12 @@ pub fn validate_paths(
     };
     let output = output.map(|p| if is_stdout(p) { stdout } else { Path::new(p) });
 
+    if json && input_is_stdout(input) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "JSON info output collides with input",
+        ));
+    }
     if json && output.is_some_and(stdout_alias) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -196,21 +230,23 @@ fn json_info(decoder: &mut Decoder<'_>) -> io::Result<Vec<u8>> {
 struct Pending {
     path: PathBuf,
     dest: PathBuf,
+    published: bool,
 }
 
 impl Pending {
-    fn new(dest: &Path, data: &[u8]) -> io::Result<Self> {
+    fn new(
+        dest: &Path,
+        data: &[u8],
+        destinations: &[Option<PathBuf>; 3],
+    ) -> io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
         for _ in 0..64 {
-            let mut name = dest.file_name().unwrap().to_os_string();
-
-            name.push(format!(
-                ".{}.{}.part",
+            let path = dest.with_file_name(format!(
+                ".wpd-meta.{}.{}.part",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            let path = dest.with_file_name(name);
             let file = OpenOptions::new().write(true).create_new(true).open(&path);
 
             let mut file: File = match file {
@@ -221,8 +257,18 @@ impl Pending {
             let pending = Self {
                 path,
                 dest: dest.to_owned(),
+                published: false,
             };
 
+            // The bounded staging name must not occupy another requested
+            // destination, including an absent case-insensitive alias.
+            if destinations
+                .iter()
+                .flatten()
+                .any(|p| same_file(&pending.path, p))
+            {
+                continue;
+            }
             file.write_all(data)?;
             file.flush()?;
             if let Ok(meta) = fs::metadata(dest) {
@@ -236,14 +282,18 @@ impl Pending {
         ))
     }
 
-    fn publish(&self) -> io::Result<()> {
-        fs::rename(&self.path, &self.dest)
+    fn publish(&mut self) -> io::Result<()> {
+        fs::rename(&self.path, &self.dest)?;
+        self.published = true;
+        Ok(())
     }
 }
 
 impl Drop for Pending {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if !self.published {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -274,11 +324,15 @@ pub fn write(
             pending.push(Pending::new(
                 path,
                 decoder.metadata(kind).unwrap_or_default(),
+                &metadata,
             )?);
         }
     }
-    for (i, file) in pending.iter().enumerate() {
-        if pending[..i]
+    for i in 0..pending.len() {
+        let (previous, remaining) = pending.split_at_mut(i);
+        let file = &mut remaining[0];
+
+        if previous
             .iter()
             .any(|previous| same_file(&file.dest, &previous.dest))
         {
