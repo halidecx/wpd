@@ -130,6 +130,10 @@ testdata = [
 ]
 
 test('api-testdata', api_test, suite: ['testdata', 'api'], args: [testdata_dir])
+test('cli-reporting', find_program('python3'),
+     suite: ['testdata', 'cli'],
+     args: [files('cli.py'), '--wpd', wpd, '--corpus', testdata_dir],
+     depends: wpd, timeout: 120)
 test('parity', parity_test, suite: ['testdata', 'parity'], args: [testdata_dir],
      timeout: 300)
 test('stream-reopen', wpd, suite: ['testdata', 'testdata-stream'],
