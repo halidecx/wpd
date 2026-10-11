@@ -9,13 +9,13 @@ fully transparent pixels is reported separately and does not fail the run.
 """
 
 import argparse
-from collections import Counter
 import hashlib
 import json
 import math
-from pathlib import Path
 import subprocess
 import tempfile
+from collections import Counter
+from pathlib import Path
 
 
 def digest(path):
@@ -29,8 +29,9 @@ def digest(path):
 def run(command, log, timeout):
     with log.open("wb") as stderr:
         try:
-            status = subprocess.run(command, stdout=subprocess.DEVNULL,
-                                    stderr=stderr, timeout=timeout).returncode
+            status = subprocess.run(
+                command, stdout=subprocess.DEVNULL, stderr=stderr, timeout=timeout
+            ).returncode
         except subprocess.TimeoutExpired:
             return "timeout", "wall-clock limit exceeded"
     with log.open("rb") as stderr:
@@ -55,8 +56,11 @@ def header(source):
         fields[key] = value
     else:
         raise ValueError("invalid PAM header")
-    if (fields[b"DEPTH"] != b"4" or fields[b"MAXVAL"] != b"255" or
-            fields[b"TUPLTYPE"] != b"RGB_ALPHA"):
+    if (
+        fields[b"DEPTH"] != b"4"
+        or fields[b"MAXVAL"] != b"255"
+        or fields[b"TUPLTYPE"] != b"RGB_ALPHA"
+    ):
         raise ValueError("expected straight-RGBA PAM")
     width, height = int(fields[b"WIDTH"]), int(fields[b"HEIGHT"])
     if not 0 < width <= 16384 or not 0 < height <= 16384:
@@ -86,7 +90,7 @@ def compare(a_path, b_path):
                 if aa == bb:
                     continue
                 for i in range(0, size, 4):
-                    if aa[i:i + 4] == bb[i:i + 4]:
+                    if aa[i : i + 4] == bb[i : i + 4]:
                         continue
                     if aa[i + 3] == bb[i + 3] == 0:
                         transparent += 1
@@ -124,14 +128,31 @@ def main():
     versions = None
     for path in sorted(files):
         record = {"path": str(path), "input_sha256": digest(path)}
-        with tempfile.TemporaryDirectory(prefix="webpcompare-", dir=args.work_dir) as td:
+        with tempfile.TemporaryDirectory(
+            prefix="webpcompare-", dir=args.work_dir
+        ) as td:
             work = Path(td)
             outputs = [work / "wpd.pam", work / "libwebp.pam"]
-            results = [run([str(tool), "--fmt", "rgba", "--muxer", "pam",
-                            str(path), str(output)], work / f"{i}.log", args.timeout)
-                       for i, (tool, output) in enumerate(zip(tools, outputs))]
+            results = [
+                run(
+                    [
+                        str(tool),
+                        "--fmt",
+                        "rgba",
+                        "--muxer",
+                        "pam",
+                        str(path),
+                        str(output),
+                    ],
+                    work / f"{i}.log",
+                    args.timeout,
+                )
+                for i, (tool, output) in enumerate(zip(tools, outputs))
+            ]
             if versions is None:
-                versions = [error.splitlines()[0] if error else "" for _, error in results]
+                versions = [
+                    error.splitlines()[0] if error else "" for _, error in results
+                ]
             for name, (status, error) in zip(["wpd", "libwebp"], results):
                 record[f"{name}_status"] = status
                 if status:
@@ -142,23 +163,43 @@ def main():
             elif statuses == [0, 0]:
                 try:
                     outcome, frames, visible, transparent = compare(*outputs)
-                    record.update(frames=frames, visible_pixels=visible,
-                                  transparent_rgb_pixels=transparent,
-                                  wpd_output_sha256=digest(outputs[0]),
-                                  libwebp_output_sha256=digest(outputs[1]))
+                    record.update(
+                        frames=frames,
+                        visible_pixels=visible,
+                        transparent_rgb_pixels=transparent,
+                        wpd_output_sha256=digest(outputs[0]),
+                        libwebp_output_sha256=digest(outputs[1]),
+                    )
                 except (KeyError, ValueError) as error:
                     outcome = "abnormal"
                     record["output_error"] = str(error)
             else:
-                outcome = ("wpd_only" if statuses[0] == 0 else
-                           "libwebp_only" if statuses[1] == 0 else "neither")
+                outcome = (
+                    "wpd_only"
+                    if statuses[0] == 0
+                    else "libwebp_only"
+                    if statuses[1] == 0
+                    else "neither"
+                )
             record["outcome"] = outcome
             counts[outcome] += 1
             print(json.dumps(record), flush=True)
-    print(json.dumps({"summary": dict(counts), "files": len(files),
-                      "tools": [str(tool) for tool in tools], "versions": versions}))
-    return int(any(counts[key] for key in ("visible", "geometry", "wpd_only",
-                                          "libwebp_only", "abnormal")))
+    print(
+        json.dumps(
+            {
+                "summary": dict(counts),
+                "files": len(files),
+                "tools": [str(tool) for tool in tools],
+                "versions": versions,
+            }
+        )
+    )
+    return int(
+        any(
+            counts[key]
+            for key in ("visible", "geometry", "wpd_only", "libwebp_only", "abnormal")
+        )
+    )
 
 
 if __name__ == "__main__":
