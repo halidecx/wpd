@@ -9,6 +9,69 @@ pub const LAYOUT_NB: usize = 5;
 
 pub const UPSAMPLE_BLOCK: usize = 32;
 
+/// Normalized sinc(x) * sinc(x / 5) at the quarter-sample phase, Q14.
+/// The opposite phase reverses these ten coefficients. Their exact sum
+/// preserves constant chroma; negative lobes must survive the first pass.
+pub const LANCZOS5: [i16; 10] =
+    [148, -495, 1146, -2658, 14699, 4740, -1709, 767, -295, 41];
+
+pub type ChromaHorizontalFn = fn(&mut [i16], &[u8]);
+pub type ChromaRowFn = fn(&mut [u8], &[u8], &[&[i16]; 10], &[&[i16]; 10], bool);
+
+/// Each pair reads eleven samples, including the caller's replicated edges.
+/// Q6 intermediates keep sub-byte precision and overshoot without clipping.
+pub fn chroma_horizontal(dst: &mut [i16], src: &[u8]) {
+    for (i, pair) in dst.chunks_exact_mut(2).enumerate() {
+        let mut even = 128;
+        let mut odd = 128;
+
+        for t in 0..10 {
+            even += i32::from(src[i + t]) * i32::from(LANCZOS5[9 - t]);
+            odd += i32::from(src[i + t + 1]) * i32::from(LANCZOS5[t]);
+        }
+        pair[0] = (even >> 8) as i16;
+        pair[1] = (odd >> 8) as i16;
+    }
+}
+
+pub fn chroma_row<const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[&[i16]; 10],
+    v: &[&[i16]; 10],
+    odd: bool,
+) {
+    let coeffs = if odd {
+        LANCZOS5
+    } else {
+        std::array::from_fn(|t| LANCZOS5[9 - t])
+    };
+    let c = channels(L);
+
+    for (x, (d, &y)) in dst.chunks_exact_mut(bpp(L)).zip(y).enumerate() {
+        let mut us = 1 << 13;
+        let mut vs = 1 << 13;
+
+        for t in 0..10 {
+            us += i32::from(u[t][x]) * i32::from(coeffs[t]);
+            vs += i32::from(v[t][x]) * i32::from(coeffs[t]);
+        }
+        // Keep Q6 and signed overshoot through the matrix; clipping chroma
+        // first would change colors that still fit the RGB gamut.
+        let u = (us >> 14) - 128 * 64;
+        let v = (vs >> 14) - 128 * 64;
+        let y = (i32::from(y) - 16) * (19077 * 64);
+        let clip = |n: i32| ((n + (1 << 19)) >> 20).clamp(0, 255) as u8;
+
+        if bpp(L) == 4 {
+            d[c[0]] = 255;
+        }
+        d[c[1]] = clip(y + v * 26149);
+        d[c[2]] = clip(y - u * 6419 - v * 13320);
+        d[c[3]] = clip(y + u * 33050);
+    }
+}
+
 pub const fn bpp(layout: usize) -> usize {
     if layout == LAYOUT_RGB || layout == LAYOUT_BGR {
         3
@@ -589,6 +652,8 @@ fn upsample_block<const L: usize>(
 
 #[derive(Clone)]
 pub struct YuvDsp {
+    pub chroma_horizontal: ChromaHorizontalFn,
+    pub chroma_row: [ChromaRowFn; LAYOUT_NB],
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
     /// Whether a layout's block is fast enough that a row's last few pairs
     /// are better redone as a whole block than finished one pair at a time.
@@ -626,6 +691,14 @@ fn premultiply_row_4444_swapped(row: &mut [u8]) {
 impl YuvDsp {
     pub const fn scalar() -> Self {
         YuvDsp {
+            chroma_horizontal,
+            chroma_row: [
+                chroma_row::<LAYOUT_ARGB>,
+                chroma_row::<LAYOUT_RGBA>,
+                chroma_row::<LAYOUT_BGRA>,
+                chroma_row::<LAYOUT_RGB>,
+                chroma_row::<LAYOUT_BGR>,
+            ],
             upsample_block: [
                 upsample_block::<LAYOUT_ARGB>,
                 upsample_block::<LAYOUT_RGBA>,
@@ -815,6 +888,86 @@ pub fn upsample_row<const L: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lanczos_phases_match_the_normalized_sinc_kernel() {
+        use std::f64::consts::PI;
+
+        let weights: [f64; 10] = std::array::from_fn(|t| {
+            let x = t as f64 - 4.25;
+
+            (PI * x).sin() * (PI * x / 5.0).sin() / (PI * PI * x * x / 5.0)
+        });
+        let sum: f64 = weights.iter().sum();
+
+        assert_eq!(LANCZOS5.iter().map(|&c| i32::from(c)).sum::<i32>(), 16384);
+        for (fixed, float) in LANCZOS5.into_iter().zip(weights) {
+            assert!((f64::from(fixed) / 16384.0 - float / sum).abs() < 1.0 / 16384.0);
+        }
+    }
+
+    #[test]
+    fn lanczos_keeps_fractional_chroma_until_rgb_and_preserves_grey() {
+        let y = vec![128u8; 8];
+        let neutral = vec![128 * 64; 8];
+        let fractional = vec![128 * 64 + 16; 8];
+        let u = [neutral.as_slice(); 10];
+        let v = [fractional.as_slice(); 10];
+        let mut plain = vec![0u8; 32];
+        let mut sharp = plain.clone();
+
+        chroma_row::<LAYOUT_ARGB>(&mut plain, &y, &u, &u, false);
+        chroma_row::<LAYOUT_ARGB>(&mut sharp, &y, &u, &v, false);
+        assert_ne!(plain, sharp, "a quarter-byte of chroma must survive");
+        for px in plain.chunks_exact(4) {
+            assert_eq!(px[0], 255);
+            assert_eq!(px[1], px[2]);
+            assert_eq!(px[2], px[3]);
+        }
+    }
+
+    #[test]
+    fn lanczos_preserves_constants_and_simd_matches_signed_scalar_tails() {
+        let dsp = YuvDsp::new();
+
+        for n in [0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 64, 129] {
+            for mode in 0..4 {
+                let src: Vec<u8> = (0..n + 10)
+                    .map(|x| match mode {
+                        0 => 255,
+                        1 => 0,
+                        2 => ((x & 1) * 255) as u8,
+                        _ => (x as u8).wrapping_mul(73),
+                    })
+                    .collect();
+                let mut want = vec![0i16; 2 * n];
+                let mut got = want.clone();
+
+                chroma_horizontal(&mut want, &src);
+                (dsp.chroma_horizontal)(&mut got, &src);
+                assert_eq!(want, got, "horizontal {n} mode {mode}");
+                if mode <= 1 {
+                    assert!(got.iter().all(|&v| v == i16::from(src[0]) * 64));
+                }
+                let data: [Vec<i16>; 10] = std::array::from_fn(|t| {
+                    got.iter()
+                        .map(|&v| v.wrapping_add(t as i16 * 997 - 4000))
+                        .collect()
+                });
+                let rows = data.each_ref().map(Vec::as_slice);
+                let mut want = vec![0u8; 8 * n];
+                let mut got = want.clone();
+
+                for odd in [false, true] {
+                    let y = vec![127; 2 * n];
+
+                    chroma_row::<LAYOUT_ARGB>(&mut want, &y, &rows, &rows, odd);
+                    (dsp.chroma_row[LAYOUT_ARGB])(&mut got, &y, &rows, &rows, odd);
+                    assert_eq!(want, got, "vertical {n} mode {mode} phase {odd}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_grey_pixel_stays_grey_in_every_layout() {

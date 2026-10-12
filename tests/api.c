@@ -2214,6 +2214,14 @@ static void test_decode_options(const uint8_t *data, size_t size) {
     options.bypass_filtering    = 1;
     options.no_fancy_upsampling = 1;
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    options.extra_fancy_upsampling = 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    options.no_fancy_upsampling = 0;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    options.extra_fancy_upsampling = -1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_BGRA, NULL, &frame) == WPD_OK);
     CHECK(frame.format == WPD_PIX_FMT_BGRA);
     wpd_frame_free(&frame);

@@ -2,6 +2,9 @@
 pub struct Options {
     pub bypass_filtering: bool,
     pub no_fancy_upsampling: bool,
+    /// Lanczos-5 chroma interpolation for unscaled lossy packed output.
+    /// Opt-in: the default fancy interpolator remains libwebp-exact.
+    pub extra_fancy_upsampling: bool,
     pub crop: Option<(i32, i32, i32, i32)>,
     pub scale: Option<(i32, i32)>,
     pub flip: bool,
@@ -17,6 +20,16 @@ pub struct Options {
 }
 
 impl Options {
+    pub(crate) fn sampling(&self) -> crate::convert::Sampling {
+        if self.no_fancy_upsampling {
+            crate::convert::Sampling::Simple
+        } else if self.extra_fancy_upsampling {
+            crate::convert::Sampling::ExtraFancy
+        } else {
+            crate::convert::Sampling::Fancy
+        }
+    }
+
     pub fn transforms(&self) -> bool {
         self.crop.is_some() || self.scale.is_some() || self.flip
     }

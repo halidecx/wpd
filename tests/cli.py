@@ -27,6 +27,19 @@ class Cli(unittest.TestCase):
     def success(self, result):
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
 
+    def test_extra_fancy_is_optional_and_streams_the_same_pixels(self):
+        flags = ["-f", "rgba", "--muxer", "md5"]
+        source = CORPUS / "odd_lossy.webp"
+        plain = self.command(*flags, source, "-")
+        extra = self.command("--extra-fancy", *flags, source, "-")
+        streamed = self.command("--extra-fancy", "--stream", "97", *flags, source, "-")
+        scalar = self.command("--extra-fancy", "--cpumask", "none", *flags, source, "-")
+        for result in [plain, extra, streamed, scalar]:
+            self.success(result)
+        self.assertNotEqual(plain.stdout, extra.stdout)
+        self.assertEqual(extra.stdout, streamed.stdout)
+        self.assertEqual(extra.stdout, scalar.stdout)
+
     def test_json_uses_original_info_and_emits_once(self):
         source = CORPUS / "durations.webp"
         expected = dict(width=100, height=80, coding="unknown", is_animation=True,

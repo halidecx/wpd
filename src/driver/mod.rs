@@ -713,7 +713,11 @@ impl Decoder<'_> {
             .scale
             .is_some_and(|(w, h)| w < 0 || h < 0 || (w == 0 && h == 0));
 
-        if bad_crop || bad_scale || options.n_threads < 0 {
+        if bad_crop
+            || bad_scale
+            || options.n_threads < 0
+            || (options.no_fancy_upsampling && options.extra_fancy_upsampling)
+        {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
         }
         if self.anim_mode == ANIM_SUBFRAME && options.transforms() {
@@ -1326,7 +1330,13 @@ impl Decoder<'_> {
         }
 
         if rows != 0 && rows < decoder.frame.height {
-            rows -= 1;
+            // Lanczos-5 needs five future chroma rows. Only report pixels
+            // whose complete filter support has passed the loop filter.
+            if decoder.options.extra_fancy_upsampling {
+                rows = (rows - 10).max(0);
+            } else {
+                rows -= 1;
+            }
         }
 
         let done = decoder.converted_rows;

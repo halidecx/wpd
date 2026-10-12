@@ -29,6 +29,15 @@ typedef void (*dispatch_alpha_func)(uint8_t *dst, const uint8_t *src,
 typedef void (*yuv_row_func)(uint8_t *dst, const uint8_t *y, const uint8_t *u,
                              const uint8_t *v, int num_pixels);
 
+/* Eight chroma inputs / sixteen Q6 outputs per horizontal block, eight
+ * packed pixels per vertical block. Horizontal input has ten extra samples. */
+typedef void (*chroma_horizontal_func)(int16_t *dst, const uint8_t *src,
+                                       int num_blocks);
+typedef void (*chroma_row_func)(uint8_t *dst, const uint8_t *y,
+                                const int16_t *const u[10],
+                                const int16_t *const v[10], int odd,
+                                int num_blocks);
+
 /* Reorders an ARGB row; dst must not alias src. */
 typedef void (*pack_row_func)(uint8_t *dst, const uint8_t *src, int num_pixels);
 
@@ -79,6 +88,8 @@ typedef struct WPDYUVDSP {
     multiply_argb_row_func    premultiply_argb_row;
     yuv_row_func              yuv444_row[WPD_LAYOUT_NB];
     yuv_row_func              yuv420_row[WPD_LAYOUT_NB];
+    chroma_horizontal_func    chroma_horizontal;
+    chroma_row_func           chroma_row[WPD_LAYOUT_NB];
 } WPDYUVDSP;
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);

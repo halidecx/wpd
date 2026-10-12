@@ -117,6 +117,9 @@ const USAGE_TAIL: &str = concat!(
     "    replay the animation this many times, rewinding between\n",
     "    passes; --stream, which cannot be rewound, reopens instead.\n",
     "    only the first pass is written out. default 1\n",
+    " --extra-fancy\n",
+    "    use Lanczos-5 chroma upsampling for unscaled lossy packed\n",
+    "    output; default fancy upsampling remains libwebp-exact\n",
     " --scale WxH\n",
     "    scale the output; either dimension may be 0 to keep the\n",
     "    aspect ratio of the other\n",
@@ -285,6 +288,7 @@ struct Options {
     max_input: u64,
     max_output: u64,
     n_threads: i32,
+    extra_fancy_upsampling: bool,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
@@ -321,6 +325,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("subframe", None, false),
     ("stream", None, true),
     ("threads", None, true),
+    ("extra-fancy", None, false),
     ("scale", None, true),
     ("frame-size-limit", None, true),
     ("max-input", None, true),
@@ -409,6 +414,7 @@ fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str>
             _ => return Err(BAD_INFO),
         },
         "subframe" => o.subframe = true,
+        "extra-fancy" => o.extra_fancy_upsampling = true,
         _ => return Err(MISSING),
     }
     Ok(())
@@ -718,6 +724,7 @@ fn new_decoder(
     pixel_format: Option<&str>,
     subframe: bool,
     n_threads: i32,
+    extra_fancy_upsampling: bool,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
 ) -> Option<Decoder<'static>> {
@@ -726,6 +733,7 @@ fn new_decoder(
     if decoder
         .set_options(api::Options {
             n_threads,
+            extra_fancy_upsampling,
             scale,
             frame_size_limit,
             ..api::Options::default()
@@ -995,6 +1003,7 @@ fn run<const REPORT: bool>(
             pixel_format,
             opts.subframe,
             opts.n_threads,
+            opts.extra_fancy_upsampling,
             opts.scale,
             opts.frame_size_limit,
         ) else {
@@ -1010,6 +1019,7 @@ fn run<const REPORT: bool>(
                         pixel_format,
                         opts.subframe,
                         opts.n_threads,
+                        opts.extra_fancy_upsampling,
                         opts.scale,
                         opts.frame_size_limit,
                     ) else {

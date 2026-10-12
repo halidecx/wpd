@@ -40,6 +40,27 @@ produces `libwpd-sealed.a` alongside `libwpd.a`. The sealed static lib aborts
 instead of unwinding on an internal panic. The build merges every object into
 one monolithic object for downstream consumers.
 
+## Chroma upsampling
+
+Default fancy upsampling remains bit-exact with libwebp. To opt into Lanczos-5
+interpolation when converting lossy chroma to packed RGB:
+
+```sh
+build/wpd --extra-fancy -f rgba input.webp output.pam
+```
+
+Set `Options.extra_fancy_upsampling` in Rust or
+`WPDDecoderOptions.extra_fancy_upsampling` in C. This is mutually exclusive with
+`no_fancy_upsampling`. Native planar and lossless frames bypass it; still-image
+scaling keeps the existing chroma rescaler. Streaming waits for five future
+chroma rows before exposing the affected pixels.
+
+The implementation uses separable ten-tap filters, signed fractional chroma, a
+small row cache, and handwritten AArch64 NEON and x86-64 AVX2 kernels. Quality
+benefits depend on the encode: Sharp YUV is optimized for the existing fancy
+upsampler. See [quality and speed measurements](docs/chroma.md), and reproduce
+speed comparisons with `./scripts/chromabench.sh`.
+
 ## Library
 
 `meson install -C build` installs the static/shared libraries, `wpd.h`, and

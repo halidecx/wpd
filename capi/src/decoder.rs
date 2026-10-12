@@ -234,6 +234,8 @@ fn set_options(
         || !flag(options.use_cropping)
         || !flag(options.use_scaling)
         || !flag(options.flip)
+        || (options.struct_size >= WPDDecoderOptions::v4()
+            && !flag(options.extra_fancy_upsampling))
     {
         return Err(decoder.fail("invalid decoder options", Error::InvalidArgument));
     }
@@ -298,6 +300,10 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
     if size >= WPDDecoderOptions::v3() {
         local.frame_size_limit =
             unsafe { ptr::addr_of!((*options).frame_size_limit).read() };
+    }
+    if size >= WPDDecoderOptions::v4() {
+        local.extra_fancy_upsampling =
+            unsafe { ptr::addr_of!((*options).extra_fancy_upsampling).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
@@ -933,6 +939,7 @@ mod tests {
             None,
             Some(mem::size_of::<WPDDecoderOptions>()),
             Some(WPDDecoderOptions::v1()),
+            Some(mem::offset_of!(WPDDecoderOptions, extra_fancy_upsampling)),
         ] {
             if let Some(size) = version {
                 let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
@@ -964,7 +971,9 @@ mod tests {
             crate::compat::wpd_set_log_callback(None, ptr::null_mut());
             wpd_decoder_free(decoder);
         }
-        assert_eq!(counts, [1, usize::from(!cfg!(feature = "threads")), 1]);
+        let threaded = usize::from(!cfg!(feature = "threads"));
+
+        assert_eq!(counts, [1, threaded, 1, threaded]);
     }
 
     #[repr(C, align(8))]

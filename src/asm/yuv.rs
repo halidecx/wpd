@@ -21,6 +21,15 @@ pub type UpsampleBlockRaw = unsafe extern "C" fn(
     c_int,
 );
 pub type RowRaw = unsafe extern "C" fn(*mut u8, *const u8, c_int);
+pub type ChromaHorizontalRaw = unsafe extern "C" fn(*mut i16, *const u8, c_int);
+pub type ChromaRowRaw = unsafe extern "C" fn(
+    *mut u8,
+    *const u8,
+    *const *const i16,
+    *const *const i16,
+    c_int,
+    c_int,
+);
 pub type YuvRowRaw =
     unsafe extern "C" fn(*mut u8, *const u8, *const u8, *const u8, c_int);
 pub type PremultiplyRaw = unsafe extern "C" fn(*mut u8, c_int, c_int);
@@ -58,6 +67,25 @@ macro_rules! raw_upsample {
 macro_rules! raw_row {
     ($marker:ident, $inner:ident, $sym:literal) => {
         raw!($marker, $inner, RowRaw, $sym, (*mut u8, *const u8, c_int));
+    };
+}
+
+macro_rules! raw_chroma_row {
+    ($marker:ident, $inner:ident, $sym:literal) => {
+        raw!(
+            $marker,
+            $inner,
+            ChromaRowRaw,
+            $sym,
+            (
+                *mut u8,
+                *const u8,
+                *const *const i16,
+                *const *const i16,
+                c_int,
+                c_int
+            )
+        );
     };
 }
 
@@ -121,6 +149,61 @@ fn yuv444_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
             n as c_int,
         )
     }
+}
+
+fn chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(dst: &mut [i16], src: &[u8]) {
+    let pairs = dst.len() / 2;
+    let blocks = pairs / 8;
+    let done = 8 * blocks;
+
+    assert!(src.len() >= pairs + 10, "short padded chroma row");
+    if blocks != 0 {
+        unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), blocks as c_int) };
+    }
+    crate::dsp::yuv::chroma_horizontal(&mut dst[2 * done..], &src[done..]);
+}
+
+fn chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[&[i16]; 10],
+    v: &[&[i16]; 10],
+    odd: bool,
+) {
+    let n = dst.len() / bpp(L);
+    let blocks = n / 8;
+    let done = 8 * blocks;
+
+    assert!(y.len() >= n, "short luma row");
+    assert!(u.iter().chain(v).all(|r| r.len() >= n), "short chroma row");
+    if blocks != 0 {
+        let up = u.map(<[i16]>::as_ptr);
+        let vp = v.map(<[i16]>::as_ptr);
+
+        unsafe {
+            (T::F)(
+                dst.as_mut_ptr(),
+                y.as_ptr(),
+                up.as_ptr(),
+                vp.as_ptr(),
+                c_int::from(odd),
+                blocks as c_int,
+            )
+        };
+    }
+    if done == n {
+        return;
+    }
+    let ut = u.map(|r| &r[done..]);
+    let vt = v.map(|r| &r[done..]);
+
+    crate::dsp::yuv::chroma_row::<L>(
+        &mut dst[bpp(L) * done..],
+        &y[done..],
+        &ut,
+        &vt,
+        odd,
+    );
 }
 
 fn yuv420_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
@@ -242,6 +325,8 @@ fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
 
 #[derive(Default)]
 pub struct RawTable {
+    pub chroma_horizontal: Option<ChromaHorizontalRaw>,
+    pub chroma_row: Option<[ChromaRowRaw; 5]>,
     pub upsample_block: Option<[UpsampleBlockRaw; 5]>,
     pub upsample_rgb: Option<UpsampleBlockRaw>,
     pub upsample_bgr: Option<UpsampleBlockRaw>,
@@ -462,6 +547,7 @@ macro_rules! ladder {
             $( @packers $packers:ident; )?
             $( @rows $rows:ident; )?
             $( @rows_rgb $rows_rgb:ident; )?
+            $( @extra $extra:ident; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -483,6 +569,13 @@ macro_rules! ladder {
                     $( packers!(dsp, $packers); )?
                     $( yuv_rows!(dsp, $rows); )?
                     $( yuv_rows_rgb!(dsp, $rows_rgb); )?
+                    $( dsp.chroma_row = [
+                        chroma_row::<$extra::ExtraArgb, LAYOUT_ARGB>,
+                        chroma_row::<$extra::ExtraRgba, LAYOUT_RGBA>,
+                        chroma_row::<$extra::ExtraBgra, LAYOUT_BGRA>,
+                        chroma_row::<$extra::ExtraRgb, LAYOUT_RGB>,
+                        chroma_row::<$extra::ExtraBgr, LAYOUT_BGR>,
+                    ]; )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
             )*
@@ -526,6 +619,10 @@ macro_rules! ladder {
                         t.yuv420_row_rgb =
                             Some([$rows_rgb::Yuv420Rgb::F, $rows_rgb::Yuv420Bgr::F]);
                     )?
+                    $( t.chroma_row = Some([
+                        $extra::ExtraArgb::F, $extra::ExtraRgba::F, $extra::ExtraBgra::F,
+                        $extra::ExtraRgb::F, $extra::ExtraBgr::F,
+                    ]); )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
             )*
@@ -618,6 +715,19 @@ mod arch {
 
     pub mod avx2 {
         use super::*;
+
+        raw!(
+            ChromaHorizontal,
+            chroma_h,
+            ChromaHorizontalRaw,
+            "wpd_chroma_horizontal_avx2",
+            (*mut i16, *const u8, c_int)
+        );
+        raw_chroma_row!(ExtraArgb, extra_argb, "wpd_chroma_row_argb_avx2");
+        raw_chroma_row!(ExtraRgba, extra_rgba, "wpd_chroma_row_rgba_avx2");
+        raw_chroma_row!(ExtraBgra, extra_bgra, "wpd_chroma_row_bgra_avx2");
+        raw_chroma_row!(ExtraRgb, extra_rgb, "wpd_chroma_row_rgb_avx2");
+        raw_chroma_row!(ExtraBgr, extra_bgr, "wpd_chroma_row_bgr_avx2");
 
         raw_row!(
             DispatchFirst,
@@ -715,6 +825,10 @@ mod arch {
         AVX2 {
             @upsample avx2;
             @rows avx2;
+            @extra avx2;
+
+            chroma_horizontal = chroma_horizontal::<avx2::ChromaHorizontal>;
+
 
             argb_to_yuv444 = argb_to_yuv444::<avx2::ArgbToYuv444>;
             argb_to_uv = argb_to_uv::<avx2::ArgbToUv>;
@@ -744,6 +858,19 @@ mod arch {
 
     pub mod neon {
         use super::*;
+
+        raw!(
+            ChromaHorizontal,
+            chroma_h,
+            ChromaHorizontalRaw,
+            "wpd_chroma_horizontal_neon",
+            (*mut i16, *const u8, c_int)
+        );
+        raw_chroma_row!(ExtraArgb, extra_argb, "wpd_chroma_row_argb_neon");
+        raw_chroma_row!(ExtraRgba, extra_rgba, "wpd_chroma_row_rgba_neon");
+        raw_chroma_row!(ExtraBgra, extra_bgra, "wpd_chroma_row_bgra_neon");
+        raw_chroma_row!(ExtraRgb, extra_rgb, "wpd_chroma_row_rgb_neon");
+        raw_chroma_row!(ExtraBgr, extra_bgr, "wpd_chroma_row_bgr_neon");
 
         upsample_syms!(
             "wpd_upsample_block_argb_neon",
@@ -836,6 +963,10 @@ mod arch {
             @upsample neon;
             @packers neon;
             @rows neon;
+            @extra neon;
+
+            chroma_horizontal = chroma_horizontal::<neon::ChromaHorizontal>;
+
 
             premultiply_row = premultiply_row::<neon::Premultiply>;
             premultiply_row_4444 = premultiply_row_4444::<neon::Premultiply4444>;

@@ -298,7 +298,7 @@ pub fn convert_to_packed(
     dst: &mut Buffer,
     src: &Frame<'_>,
     format: i32,
-    no_fancy_upsampling: bool,
+    sampling: Sampling,
     premultiply_packed: bool,
     threads: usize,
 ) -> Result<()> {
@@ -311,7 +311,7 @@ pub fn convert_to_packed(
             dst,
             src,
             format,
-            no_fancy_upsampling,
+            sampling,
             premultiply_packed,
             threads,
         );
@@ -330,9 +330,13 @@ pub fn convert_to_packed(
         crate::convert::yuv444_to_packed(dsp, layout, plane, &planes, w, 0, h, threads);
         return Ok(());
     }
-    if no_fancy_upsampling {
+    if sampling == Sampling::Simple {
         crate::convert::yuv420_to_packed_simple(
             dsp, layout, plane, &planes, w, 0, h, threads,
+        );
+    } else if sampling == Sampling::ExtraFancy {
+        crate::convert::yuv420_to_packed_extra(
+            dsp, layout, plane, &planes, w, h, 0, h, threads,
         );
     } else {
         crate::convert::yuv420_to_packed_rows(
@@ -348,7 +352,7 @@ fn convert_to_packed_2byte(
     dst: &mut Buffer,
     src: &Frame<'_>,
     format: i32,
-    no_fancy_upsampling: bool,
+    sampling: Sampling,
     premultiply_packed: bool,
     threads: usize,
 ) -> Result<()> {
@@ -377,10 +381,8 @@ fn convert_to_packed_2byte(
 
     let sampling = if src.chroma_full {
         Sampling::Full
-    } else if no_fancy_upsampling {
-        Sampling::Simple
     } else {
-        Sampling::Fancy
+        sampling
     };
     let planes = yuv_planes(src);
 
@@ -404,18 +406,10 @@ pub fn convert_to_argb(
     dsp: &YuvDsp,
     dst: &mut Buffer,
     src: &Frame<'_>,
-    no_fancy_upsampling: bool,
+    sampling: Sampling,
     threads: usize,
 ) -> Result<()> {
-    convert_to_packed(
-        dsp,
-        dst,
-        src,
-        Format::Argb as i32,
-        no_fancy_upsampling,
-        false,
-        threads,
-    )
+    convert_to_packed(dsp, dst, src, Format::Argb as i32, sampling, false, threads)
 }
 
 pub fn ensure_yuva_rows(
