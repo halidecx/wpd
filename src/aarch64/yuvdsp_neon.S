@@ -1348,24 +1348,21 @@ chroma_row bgra
 chroma_row rgb
 chroma_row bgr
 
-// Quarter-phase Keys cubic (a = -0.75), Q6. The horizontal sum lies
-// in [-2295, 18615], so eight signed samples fit in each NEON register.
-const cubic_odd, align=4
-        .short          -7, 56, 17, -2
+// Tuned three-tap interpolation, Q6. Horizontal sums lie in
+// [-2550, 18870], fitting eight signed samples per NEON register.
+const fast_filter_odd, align=4
+        .short          -10, 56, 18, 0
 endconst
-const cubic_even, align=4
-        .short          -2, 17, 56, -7
+const fast_filter_even, align=4
+        .short          18, 56, -10, 0
 endconst
 
 function wpd_fast_chroma_horizontal_neon, export=1
-        movrel          x3, cubic_odd
+        movrel          x3, fast_filter_odd
         ldr             d5, [x3]
-1:      ldr             d0, [x1]
+1:      ldur            d0, [x1, #1]
         uxtl            v0.8h, v0.8b
-        mul             v1.8h, v0.8h, v5.h[3]
-        ldur            d0, [x1, #1]
-        uxtl            v0.8h, v0.8b
-        mla             v1.8h, v0.8h, v5.h[2]
+        mul             v1.8h, v0.8h, v5.h[2]
         mul             v2.8h, v0.8h, v5.h[0]
         ldur            d0, [x1, #2]
         uxtl            v0.8h, v0.8b
@@ -1375,9 +1372,6 @@ function wpd_fast_chroma_horizontal_neon, export=1
         uxtl            v0.8h, v0.8b
         mla             v1.8h, v0.8h, v5.h[0]
         mla             v2.8h, v0.8h, v5.h[2]
-        ldur            d0, [x1, #4]
-        uxtl            v0.8h, v0.8b
-        mla             v2.8h, v0.8h, v5.h[3]
         zip1            v16.8h, v1.8h, v2.8h
         zip2            v17.8h, v1.8h, v2.8h
         stp             q16, q17, [x0], #32
@@ -1397,11 +1391,15 @@ endconst
 
 .macro  fast_chroma_row layout
 function wpd_fast_chroma_row_\layout\()_neon, export=1
-        movrel          x6,  cubic_even
-        movrel          x9,  cubic_odd
+        movrel          x6,  fast_filter_even
+        movrel          x9,  fast_filter_odd
         cmp             w4,  #0
         csel            x6,  x6, x9, eq
         ldr             d5,  [x6]
+        // The even phase skips the leading zero; the odd skips the trailing one.
+        cset            x6, eq
+        add             x2, x2, x6, lsl #3
+        add             x3, x3, x6, lsl #3
         movrel          x6,  fast_yuv_coeffs
         ld1r            {v24.4s}, [x6], #4
         ld1r            {v25.4s}, [x6], #4
@@ -1411,18 +1409,14 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         ld1r            {v31.4s}, [x6]
         movi            v29.4s, #32, lsl #8
         mov             x7,  #0
-1:      movi            v1.4s, #0
-        movi            v2.4s, #0
-        movi            v3.4s, #0
-        movi            v4.4s, #0
-        ldr             x9,  [x2, #0]
+1:      ldr             x9,  [x2, #0]
         ldr             x10, [x3, #0]
         ldr             q0,  [x9, x7]
         ldr             q7,  [x10, x7]
-        smlal           v1.4s, v0.4h, v5.h[0]
-        smlal2          v2.4s, v0.8h, v5.h[0]
-        smlal           v3.4s, v7.4h, v5.h[0]
-        smlal2          v4.4s, v7.8h, v5.h[0]
+        smull           v1.4s, v0.4h, v5.h[0]
+        smull2          v2.4s, v0.8h, v5.h[0]
+        smull           v3.4s, v7.4h, v5.h[0]
+        smull2          v4.4s, v7.8h, v5.h[0]
         ldr             x9,  [x2, #8]
         ldr             x10, [x3, #8]
         ldr             q0,  [x9, x7]
@@ -1439,14 +1433,6 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         smlal2          v2.4s, v0.8h, v5.h[2]
         smlal           v3.4s, v7.4h, v5.h[2]
         smlal2          v4.4s, v7.8h, v5.h[2]
-        ldr             x9,  [x2, #24]
-        ldr             x10, [x3, #24]
-        ldr             q0,  [x9, x7]
-        ldr             q7,  [x10, x7]
-        smlal           v1.4s, v0.4h, v5.h[3]
-        smlal2          v2.4s, v0.8h, v5.h[3]
-        smlal           v3.4s, v7.4h, v5.h[3]
-        smlal2          v4.4s, v7.8h, v5.h[3]
         srshr           v1.4s, v1.4s, #6
         sub             v1.4s, v1.4s, v29.4s
         srshr           v2.4s, v2.4s, #6
@@ -1486,32 +1472,33 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         sqshrn          v22.4h, v22.4s, #16
         sqshrn2         v22.8h, v23.4s, #16
         sqshrun         v22.8b, v22.8h, #4
+.ifc \layout,rgb
+        mov             v16.8b, v18.8b
+        mov             v17.8b, v20.8b
+        mov             v18.8b, v22.8b
+        st3             {v16.8b-v18.8b}, [x0], #24
+.else
+.ifc \layout,bgr
+        mov             v16.8b, v22.8b
+        mov             v17.8b, v20.8b
+        st3             {v16.8b-v18.8b}, [x0], #24
+.else
+        movi            v0.8b, #255
 .ifc \layout,argb
-        mov             v19.8b, v22.8b
-        mov             v17.8b, v18.8b
-        mov             v18.8b, v20.8b
-        movi            v16.8b, #255
+        zip1            v1.16b, v0.16b, v18.16b
+        zip1            v2.16b, v20.16b, v22.16b
 .else
 .ifc \layout,bgra
-        mov             v16.8b, v22.8b
+        zip1            v1.16b, v22.16b, v20.16b
+        zip1            v2.16b, v18.16b, v0.16b
 .else
-.ifc \layout,bgr
-        mov             v16.8b, v22.8b
-.else
-        mov             v16.8b, v18.8b
-        mov             v18.8b, v22.8b
+        zip1            v1.16b, v18.16b, v20.16b
+        zip1            v2.16b, v22.16b, v0.16b
 .endif
 .endif
-        mov             v17.8b, v20.8b
-        movi            v19.8b, #255
-.endif
-.ifc \layout,rgb
-        st3             {v16.8b-v18.8b}, [x0], #24
-.else
-.ifc \layout,bgr
-        st3             {v16.8b-v18.8b}, [x0], #24
-.else
-        st4             {v16.8b-v19.8b}, [x0], #32
+        zip1            v16.8h, v1.8h, v2.8h
+        zip2            v17.8h, v1.8h, v2.8h
+        stp             q16, q17, [x0], #32
 .endif
 .endif
         add             x7,  x7,  #16

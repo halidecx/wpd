@@ -121,7 +121,7 @@ const USAGE_TAIL: &str = concat!(
     "    use Lanczos-5 chroma upsampling for unscaled lossy packed\n",
     "    output; default fancy upsampling remains libwebp-exact\n",
     " --fast-fancy\n",
-    "    use four-tap cubic chroma upsampling; mutually exclusive\n",
+    "    use three-tap chroma upsampling; mutually exclusive\n",
     "    with --extra-fancy\n",
     " --scale WxH\n",
     "    scale the output; either dimension may be 0 to keep the\n",

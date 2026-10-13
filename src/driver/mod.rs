@@ -1340,7 +1340,7 @@ impl Decoder<'_> {
         if rows != 0 && rows < decoder.frame.height {
             // Only report pixels whose complete interpolation support has
             // passed the loop filter: five future chroma rows for Lanczos,
-            // two for cubic, and one future luma row for default fancy.
+            // two for fast-fancy, and one future luma row for default fancy.
             if decoder.options.extra_fancy_upsampling {
                 rows = (rows - 10).max(0);
             } else if decoder.options.fast_fancy_upsampling {

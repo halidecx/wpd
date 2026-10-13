@@ -73,9 +73,9 @@ pub fn chroma_row<const L: usize>(
     }
 }
 
-/// Keys cubic with a = -0.75, sampled at one quarter and rounded to Q6.
+/// Tuned three-tap interpolation in Q6, padded for the two reversed phases.
 /// The coefficients sum to 64; the horizontal result fits signed 16 bits.
-pub const CUBIC: [i16; 4] = [-7, 56, 17, -2];
+pub const FAST_CHROMA: [i16; 4] = [-10, 56, 18, 0];
 pub type FastChromaRowFn = ChromaRowFn<4>;
 
 pub fn fast_chroma_horizontal(dst: &mut [i16], src: &[u8]) {
@@ -84,8 +84,8 @@ pub fn fast_chroma_horizontal(dst: &mut [i16], src: &[u8]) {
         let mut odd = 0;
 
         for t in 0..4 {
-            even += i32::from(src[i + t]) * i32::from(CUBIC[3 - t]);
-            odd += i32::from(src[i + t + 1]) * i32::from(CUBIC[t]);
+            even += i32::from(src[i + t]) * i32::from(FAST_CHROMA[3 - t]);
+            odd += i32::from(src[i + t + 1]) * i32::from(FAST_CHROMA[t]);
         }
         pair[0] = even as i16;
         pair[1] = odd as i16;
@@ -100,9 +100,9 @@ pub fn fast_chroma_row<const L: usize>(
     odd: bool,
 ) {
     let coeffs = if odd {
-        CUBIC
+        FAST_CHROMA
     } else {
-        std::array::from_fn(|t| CUBIC[3 - t])
+        std::array::from_fn(|t| FAST_CHROMA[3 - t])
     };
     let c = channels(L);
 
@@ -1038,24 +1038,13 @@ mod tests {
     }
 
     #[test]
-    fn cubic_coefficients_are_normalized_keys_samples() {
-        let a = -0.75;
-        let kernel = |x: f64| {
-            let x = x.abs();
-            if x < 1.0 {
-                (a + 2.0) * x.powi(3) - (a + 3.0) * x.powi(2) + 1.0
-            } else {
-                a * x.powi(3) - 5.0 * a * x.powi(2) + 8.0 * a * x - 4.0 * a
-            }
-        };
-        assert_eq!(CUBIC.map(i32::from).iter().sum::<i32>(), 64);
-        for (t, &c) in CUBIC.iter().enumerate() {
-            assert_eq!(c, (kernel(t as f64 - 1.25) * 64.0).round() as i16);
-        }
+    fn fast_filter_coefficients_are_normalized() {
+        assert_eq!(FAST_CHROMA.map(i32::from).iter().sum::<i32>(), 64);
+        assert_eq!(FAST_CHROMA[3], 0);
     }
 
     #[test]
-    fn cubic_preserves_constants_and_simd_matches_signed_scalar_tails() {
+    fn fast_filter_preserves_constants_and_simd_matches_signed_scalar_tails() {
         let dsp = YuvDsp::new();
 
         for n in [0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 64, 129] {

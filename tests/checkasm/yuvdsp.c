@@ -764,7 +764,7 @@ void checkasm_check_yuvdsp(void) {
     check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra", 1);
     check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb", 1);
     check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr", 1);
-    report("chroma_cubic");
+    report("chroma_fast");
     check_upsample_block(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_upsample_block(&dsp, WPD_LAYOUT_RGBA, "rgba");
     check_upsample_block(&dsp, WPD_LAYOUT_BGRA, "bgra");
