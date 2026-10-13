@@ -42,24 +42,27 @@ one monolithic object for downstream consumers.
 
 ## Chroma upsampling
 
-Default fancy upsampling remains bit-exact with libwebp. To opt into Lanczos-5
-interpolation when converting lossy chroma to packed RGB:
+Default fancy upsampling remains bit-exact with libwebp. Two opt-in filters are
+available when converting lossy chroma to packed RGB:
 
 ```sh
-build/wpd --extra-fancy -f rgba input.webp output.pam
+build/wpd --extra-fancy -f rgba input.webp lanczos.pam
+build/wpd --fast-fancy -f rgba input.webp cubic.pam
 ```
 
-Set `Options.extra_fancy_upsampling` in Rust or
-`WPDDecoderOptions.extra_fancy_upsampling` in C. This is mutually exclusive with
-`no_fancy_upsampling`. Native planar and lossless frames bypass it; still-image
-scaling keeps the existing chroma rescaler. Streaming waits for five future
-chroma rows before exposing the affected pixels.
+Extra-fancy uses Lanczos-5 with NEON and AVX2. Fast-fancy uses four-tap cubic
+interpolation with NEON (scalar on other architectures). On the gb82 Q90
+comparison, fast-fancy retains 94% of Lanczos-5's mean metric gain. On M5 Pro,
+its geometric mean decode time is 6.2% above ordinary fancy with one thread, or
+3.3% above with three threads across the five benchmark files.
 
-The implementation uses separable ten-tap filters, signed fractional chroma, a
-small row cache, and handwritten AArch64 NEON and x86-64 AVX2 kernels. Quality
-benefits depend on the encode: Sharp YUV is optimized for the existing fancy
-upsampler. See [quality and speed measurements](docs/chroma.md), and reproduce
-speed comparisons with `./scripts/chromabench.sh`.
+Set `extra_fancy_upsampling` or `fast_fancy_upsampling` in Rust `Options` or C
+`WPDDecoderOptions`. These and `no_fancy_upsampling` are mutually exclusive.
+Native planar and lossless frames bypass interpolation; scaled stills keep the
+existing rescaler. Streaming waits for two future chroma rows for fast-fancy, or
+five for extra-fancy. Quality depends on the encode: Sharp YUV favors the
+existing fancy filter. See [quality and speed measurements](docs/chroma.md), and
+reproduce timings with `./scripts/chromabench.sh`.
 
 ## Library
 

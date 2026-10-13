@@ -27,6 +27,8 @@ pub struct WPDDecoderOptions {
     /// Takes the v3 struct's tail padding before the next version gate.
     pub reserved3: c_int,
     pub extra_fancy_upsampling: c_int,
+    pub reserved4: c_int,
+    pub fast_fancy_upsampling: c_int,
 }
 
 /// What `sizeof` gave the v1 struct: it ended at `flip`, and padded out to the
@@ -50,6 +52,10 @@ const V3_SIZE: usize =
 
 const _: () = assert!(V3_SIZE < WPDDecoderOptions::v4());
 
+const V4_SIZE: usize =
+    WPDDecoderOptions::v4().next_multiple_of(mem::align_of::<WPDDecoderOptions>());
+const _: () = assert!(V4_SIZE < WPDDecoderOptions::v5());
+
 impl WPDDecoderOptions {
     pub(crate) const fn v1() -> usize {
         mem::offset_of!(WPDDecoderOptions, flip) + mem::size_of::<c_int>()
@@ -68,11 +74,18 @@ impl WPDDecoderOptions {
             + mem::size_of::<c_int>()
     }
 
+    pub(crate) const fn v5() -> usize {
+        mem::offset_of!(WPDDecoderOptions, fast_fancy_upsampling)
+            + mem::size_of::<c_int>()
+    }
+
     /// Legacy callers retain serial decoding and serial log callbacks.
     pub(crate) fn to_core(&self) -> Options {
         Options {
             bypass_filtering: self.bypass_filtering != 0,
             no_fancy_upsampling: self.no_fancy_upsampling != 0,
+            fast_fancy_upsampling: self.struct_size >= Self::v5()
+                && self.fast_fancy_upsampling != 0,
             extra_fancy_upsampling: self.struct_size >= Self::v4()
                 && self.extra_fancy_upsampling != 0,
             crop: (self.use_cropping != 0).then_some((
@@ -137,5 +150,17 @@ mod tests {
         }
         options.struct_size = mem::size_of::<WPDDecoderOptions>();
         assert!(options.to_core().extra_fancy_upsampling);
+    }
+    #[test]
+    fn older_options_keep_fast_fancy_disabled() {
+        let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
+
+        options.fast_fancy_upsampling = 1;
+        for size in [V1_SIZE, V2_SIZE, V3_SIZE, V4_SIZE] {
+            options.struct_size = size;
+            assert!(!options.to_core().fast_fancy_upsampling);
+        }
+        options.struct_size = mem::size_of::<WPDDecoderOptions>();
+        assert!(options.to_core().fast_fancy_upsampling);
     }
 }

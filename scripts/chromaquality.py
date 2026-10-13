@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare chroma interpolation using decbench's libwebp Q90 methodology."""
+"""Compare chroma interpolation using decbench's libwebp methodology (Q90 by default)."""
 
 import argparse
 import json
@@ -23,7 +23,10 @@ def main():
         "--output", type=Path, default=Path("wpd-test-data/chromaquality")
     )
     parser.add_argument("--sharp-yuv", action="store_true")
+    parser.add_argument("--quality", type=int, default=90)
     args = parser.parse_args()
+    if not 0 <= args.quality <= 100:
+        parser.error("quality must be between 0 and 100")
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
 
@@ -37,7 +40,7 @@ def main():
                     "-m",
                     "6",
                     "-q",
-                    "90",
+                    args.quality,
                     "-sharp_yuv",
                     reference,
                     "-o",
@@ -85,7 +88,7 @@ def main():
                     "-m",
                     "6",
                     "-q",
-                    "90",
+                    args.quality,
                     "-o",
                     encoded,
                     "--",
@@ -95,7 +98,7 @@ def main():
             )
 
         scores = {}
-        for mode in ["fancy", "extra-fancy", "ffmpeg-filtered"]:
+        for mode in ["fancy", "fast-fancy", "extra-fancy", "ffmpeg-filtered"]:
             decoded = args.output / (reference.stem + "-" + mode + ".ppm")
             if mode == "ffmpeg-filtered":
                 run(
@@ -119,7 +122,7 @@ def main():
                         args.wpd,
                         "-f",
                         "rgb",
-                        *(["--extra-fancy"] if mode == "extra-fancy" else []),
+                        *(["--" + mode] if mode != "fancy" else []),
                         encoded,
                         decoded,
                     ]
@@ -138,6 +141,8 @@ def main():
     if not results:
         parser.error("the reference directory contains no PNGs")
     report = {
+        "quality": args.quality,
+        "sharp_yuv": args.sharp_yuv,
         "images": results,
         "means": {m: statistics.mean(r[m] for r in results) for m in scores},
     }

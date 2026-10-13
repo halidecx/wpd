@@ -672,12 +672,14 @@ static void check_premultiply_argb_regimes(WPDYUVDSP *dsp) {
     }
 }
 
-static void check_chroma_horizontal(WPDYUVDSP *dsp) {
+static void check_chroma_horizontal(WPDYUVDSP *dsp, int fast) {
     uint8_t src[MAX_PIXELS + 11];
     int16_t dst0[2 * MAX_PIXELS + 2], dst1[2 * MAX_PIXELS + 2];
     declare_func(void, int16_t *, const uint8_t *, int);
 
-    if (check_func(dsp->chroma_horizontal, "chroma_horizontal")) {
+    if (check_func(fast ? dsp->fast_chroma_horizontal : dsp->chroma_horizontal,
+                   "%schroma_horizontal",
+                   fast ? "fast_" : "")) {
         for (int n = 1; n <= MAX_BLOCKS; n++) {
             for (int mode = 0; mode < 4; mode++) {
                 for (size_t x = 0; x < sizeof(src); x++)
@@ -698,7 +700,8 @@ static void check_chroma_horizontal(WPDYUVDSP *dsp) {
     }
 }
 
-static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name) {
+static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name,
+                             int fast) {
     int16_t        data[20][MAX_PIXELS + 1];
     const int16_t *u[10], *v[10];
     uint8_t        y[MAX_PIXELS + 1];
@@ -715,7 +718,11 @@ static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name) {
         u[t] = data[t] + 1;
         v[t] = data[t + 10] + 1;
     }
-    if (check_func(dsp->chroma_row[layout], "chroma_row_%s", name)) {
+    if (check_func(
+            fast ? dsp->fast_chroma_row[layout] : dsp->chroma_row[layout],
+            "%schroma_row_%s",
+            fast ? "fast_" : "",
+            name)) {
         for (int n = 1; n <= MAX_BLOCKS; n++) {
             for (int mode = 0; mode < 4; mode++) {
                 for (int x = 0; x <= MAX_PIXELS; x++) y[x] = (uint8_t)rnd();
@@ -744,13 +751,20 @@ void checkasm_check_yuvdsp(void) {
     WPDYUVDSP dsp;
 
     wpd_yuv_dsp_init(&dsp);
-    check_chroma_horizontal(&dsp);
-    check_chroma_row(&dsp, WPD_LAYOUT_ARGB, "argb");
-    check_chroma_row(&dsp, WPD_LAYOUT_RGBA, "rgba");
-    check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra");
-    check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb");
-    check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr");
+    check_chroma_horizontal(&dsp, 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_ARGB, "argb", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGBA, "rgba", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr", 0);
     report("chroma_lanczos5");
+    check_chroma_horizontal(&dsp, 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_ARGB, "argb", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGBA, "rgba", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr", 1);
+    report("chroma_cubic");
     check_upsample_block(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_upsample_block(&dsp, WPD_LAYOUT_RGBA, "rgba");
     check_upsample_block(&dsp, WPD_LAYOUT_BGRA, "bgra");

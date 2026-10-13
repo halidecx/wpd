@@ -152,13 +152,13 @@ static int probe(const RowTest *t, int n) {
     return failed;
 }
 
-static int probe_chroma(const WPDYUVDSP *dsp, int blocks) {
+static int probe_chroma(const WPDYUVDSP *dsp, int blocks, int fast) {
     uint8_t       *maps[23]  = {0};
     size_t         sizes[23] = {0};
     const int      n         = 8 * blocks;
     const int16_t *u[10], *v[10];
-    uint8_t       *src        = guarded(&maps[0], &sizes[0], (size_t)n + 10);
-    int16_t       *horizontal = (int16_t *)guarded(
+    uint8_t *src = guarded(&maps[0], &sizes[0], (size_t)n + (fast ? 4 : 10));
+    int16_t *horizontal = (int16_t *)guarded(
         &maps[1], &sizes[1], (size_t)n * 4);
     uint8_t *y      = guarded(&maps[2], &sizes[2], (size_t)n);
     int      failed = 0;
@@ -181,7 +181,8 @@ static int probe_chroma(const WPDYUVDSP *dsp, int blocks) {
     signal(SIGSEGV, on_fault);
     signal(SIGBUS, on_fault);
     if (sigsetjmp(escape, 1) == 0)
-        dsp->chroma_horizontal(horizontal, src, blocks);
+        (fast ? dsp->fast_chroma_horizontal : dsp->chroma_horizontal)(
+            horizontal, src, blocks);
     for (int layout = 0; layout < WPD_LAYOUT_NB; layout++) {
         uint8_t  *dst_map  = NULL;
         size_t    dst_size = 0;
@@ -194,13 +195,14 @@ static int probe_chroma(const WPDYUVDSP *dsp, int blocks) {
         }
         for (int odd = 0; odd < 2; odd++)
             if (sigsetjmp(escape, 1) == 0)
-                dsp->chroma_row[layout](dst, y, u, v, odd, blocks);
+                (fast ? dsp->fast_chroma_row[layout] : dsp->chroma_row[layout])(
+                    dst, y, u, v, odd, blocks);
         munmap(dst_map, dst_size);
     }
     signal(SIGSEGV, SIG_DFL);
     signal(SIGBUS, SIG_DFL);
     if (trapped) {
-        printf("FAIL chroma: blocks=%d ran past a row\n", blocks);
+        printf("FAIL chroma: fast=%d blocks=%d ran past a row\n", fast, blocks);
         failed = 1;
     }
 done:
@@ -919,8 +921,10 @@ static int check(const WPDYUVDSP *dsp) {
         for (int n = 1; n <= 96; n++) failed |= probe(&tests[i], n);
     for (int n = 1; n <= 96; n++)
         failed |= probe_yuv444(dsp->argb_to_yuv444, n);
-    for (int blocks = 1; blocks <= 8; blocks++)
-        failed |= probe_chroma(dsp, blocks);
+    for (int blocks = 1; blocks <= 8; blocks++) {
+        failed |= probe_chroma(dsp, blocks, 0);
+        failed |= probe_chroma(dsp, blocks, 1);
+    }
     return failed;
 }
 

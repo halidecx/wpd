@@ -716,7 +716,15 @@ impl Decoder<'_> {
         if bad_crop
             || bad_scale
             || options.n_threads < 0
-            || (options.no_fancy_upsampling && options.extra_fancy_upsampling)
+            || ([
+                options.no_fancy_upsampling,
+                options.extra_fancy_upsampling,
+                options.fast_fancy_upsampling,
+            ]
+            .into_iter()
+            .filter(|&v| v)
+            .count()
+                > 1)
         {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
         }
@@ -1330,10 +1338,13 @@ impl Decoder<'_> {
         }
 
         if rows != 0 && rows < decoder.frame.height {
-            // Lanczos-5 needs five future chroma rows. Only report pixels
-            // whose complete filter support has passed the loop filter.
+            // Only report pixels whose complete interpolation support has
+            // passed the loop filter: five future chroma rows for Lanczos,
+            // two for cubic, and one future luma row for default fancy.
             if decoder.options.extra_fancy_upsampling {
                 rows = (rows - 10).max(0);
+            } else if decoder.options.fast_fancy_upsampling {
+                rows = (rows - 4).max(0);
             } else {
                 rows -= 1;
             }

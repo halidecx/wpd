@@ -338,6 +338,10 @@ pub fn convert_to_packed(
         crate::convert::yuv420_to_packed_extra(
             dsp, layout, plane, &planes, w, h, 0, h, threads,
         );
+    } else if sampling == Sampling::FastFancy {
+        crate::convert::yuv420_to_packed_fast(
+            dsp, layout, plane, &planes, w, h, 0, h, threads,
+        );
     } else {
         crate::convert::yuv420_to_packed_rows(
             dsp, layout, plane, &planes, w, h, 0, h, threads,

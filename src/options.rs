@@ -5,6 +5,8 @@ pub struct Options {
     /// Lanczos-5 chroma interpolation for unscaled lossy packed output.
     /// Opt-in: the default fancy interpolator remains libwebp-exact.
     pub extra_fancy_upsampling: bool,
+    /// Four-tap cubic chroma interpolation for unscaled lossy packed output.
+    pub fast_fancy_upsampling: bool,
     pub crop: Option<(i32, i32, i32, i32)>,
     pub scale: Option<(i32, i32)>,
     pub flip: bool,
@@ -25,6 +27,8 @@ impl Options {
             crate::convert::Sampling::Simple
         } else if self.extra_fancy_upsampling {
             crate::convert::Sampling::ExtraFancy
+        } else if self.fast_fancy_upsampling {
+            crate::convert::Sampling::FastFancy
         } else {
             crate::convert::Sampling::Fancy
         }

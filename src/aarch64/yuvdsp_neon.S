@@ -1347,3 +1347,182 @@ chroma_row rgba
 chroma_row bgra
 chroma_row rgb
 chroma_row bgr
+
+// Quarter-phase Keys cubic (a = -0.75), Q6. The horizontal sum lies
+// in [-2295, 18615], so eight signed samples fit in each NEON register.
+const cubic_odd, align=4
+        .short          -7, 56, 17, -2
+endconst
+const cubic_even, align=4
+        .short          -2, 17, 56, -7
+endconst
+
+function wpd_fast_chroma_horizontal_neon, export=1
+        movrel          x3, cubic_odd
+        ldr             d5, [x3]
+1:      ldr             d0, [x1]
+        uxtl            v0.8h, v0.8b
+        mul             v1.8h, v0.8h, v5.h[3]
+        ldur            d0, [x1, #1]
+        uxtl            v0.8h, v0.8b
+        mla             v1.8h, v0.8h, v5.h[2]
+        mul             v2.8h, v0.8h, v5.h[0]
+        ldur            d0, [x1, #2]
+        uxtl            v0.8h, v0.8b
+        mla             v1.8h, v0.8h, v5.h[1]
+        mla             v2.8h, v0.8h, v5.h[1]
+        ldur            d0, [x1, #3]
+        uxtl            v0.8h, v0.8b
+        mla             v1.8h, v0.8h, v5.h[0]
+        mla             v2.8h, v0.8h, v5.h[2]
+        ldur            d0, [x1, #4]
+        uxtl            v0.8h, v0.8b
+        mla             v2.8h, v0.8h, v5.h[3]
+        zip1            v16.8h, v1.8h, v2.8h
+        zip2            v17.8h, v1.8h, v2.8h
+        stp             q16, q17, [x0], #32
+        add             x1, x1, #8
+        subs            w2, w2, #1
+        b.gt            1b
+        ret
+endfunc
+
+// Keep the same full-precision RGB matrix as Lanczos-5. Rounding each
+// matrix term separately can erase metric gains on nearly flat images.
+// Fold the final Q20 rounding bias into luma once. Narrowing by 16 then
+// by 4 gives the same clipped byte as rounding each RGB sum by 20.
+const fast_yuv_coeffs, align=4
+        .word           1220928, 26149, 6419, 13320, 33050, -19010560
+endconst
+
+.macro  fast_chroma_row layout
+function wpd_fast_chroma_row_\layout\()_neon, export=1
+        movrel          x6,  cubic_even
+        movrel          x9,  cubic_odd
+        cmp             w4,  #0
+        csel            x6,  x6, x9, eq
+        ldr             d5,  [x6]
+        movrel          x6,  fast_yuv_coeffs
+        ld1r            {v24.4s}, [x6], #4
+        ld1r            {v25.4s}, [x6], #4
+        ld1r            {v26.4s}, [x6], #4
+        ld1r            {v27.4s}, [x6], #4
+        ld1r            {v28.4s}, [x6], #4
+        ld1r            {v31.4s}, [x6]
+        movi            v29.4s, #32, lsl #8
+        mov             x7,  #0
+1:      movi            v1.4s, #0
+        movi            v2.4s, #0
+        movi            v3.4s, #0
+        movi            v4.4s, #0
+        ldr             x9,  [x2, #0]
+        ldr             x10, [x3, #0]
+        ldr             q0,  [x9, x7]
+        ldr             q7,  [x10, x7]
+        smlal           v1.4s, v0.4h, v5.h[0]
+        smlal2          v2.4s, v0.8h, v5.h[0]
+        smlal           v3.4s, v7.4h, v5.h[0]
+        smlal2          v4.4s, v7.8h, v5.h[0]
+        ldr             x9,  [x2, #8]
+        ldr             x10, [x3, #8]
+        ldr             q0,  [x9, x7]
+        ldr             q7,  [x10, x7]
+        smlal           v1.4s, v0.4h, v5.h[1]
+        smlal2          v2.4s, v0.8h, v5.h[1]
+        smlal           v3.4s, v7.4h, v5.h[1]
+        smlal2          v4.4s, v7.8h, v5.h[1]
+        ldr             x9,  [x2, #16]
+        ldr             x10, [x3, #16]
+        ldr             q0,  [x9, x7]
+        ldr             q7,  [x10, x7]
+        smlal           v1.4s, v0.4h, v5.h[2]
+        smlal2          v2.4s, v0.8h, v5.h[2]
+        smlal           v3.4s, v7.4h, v5.h[2]
+        smlal2          v4.4s, v7.8h, v5.h[2]
+        ldr             x9,  [x2, #24]
+        ldr             x10, [x3, #24]
+        ldr             q0,  [x9, x7]
+        ldr             q7,  [x10, x7]
+        smlal           v1.4s, v0.4h, v5.h[3]
+        smlal2          v2.4s, v0.8h, v5.h[3]
+        smlal           v3.4s, v7.4h, v5.h[3]
+        smlal2          v4.4s, v7.8h, v5.h[3]
+        srshr           v1.4s, v1.4s, #6
+        sub             v1.4s, v1.4s, v29.4s
+        srshr           v2.4s, v2.4s, #6
+        sub             v2.4s, v2.4s, v29.4s
+        srshr           v3.4s, v3.4s, #6
+        sub             v3.4s, v3.4s, v29.4s
+        srshr           v4.4s, v4.4s, #6
+        sub             v4.4s, v4.4s, v29.4s
+        ldr             d0,  [x1], #8
+        uxtl            v0.8h, v0.8b
+        uxtl            v16.4s, v0.4h
+        uxtl2           v17.4s, v0.8h
+        mul             v16.4s, v16.4s, v24.4s
+        mul             v17.4s, v17.4s, v24.4s
+        add             v16.4s, v16.4s, v31.4s
+        add             v17.4s, v17.4s, v31.4s
+        mov             v18.16b, v16.16b
+        mla             v18.4s, v3.4s, v25.4s
+        mov             v20.16b, v16.16b
+        mls             v20.4s, v1.4s, v26.4s
+        mls             v20.4s, v3.4s, v27.4s
+        mov             v22.16b, v16.16b
+        mla             v22.4s, v1.4s, v28.4s
+        mov             v19.16b, v17.16b
+        mla             v19.4s, v4.4s, v25.4s
+        mov             v21.16b, v17.16b
+        mls             v21.4s, v2.4s, v26.4s
+        mls             v21.4s, v4.4s, v27.4s
+        mov             v23.16b, v17.16b
+        mla             v23.4s, v2.4s, v28.4s
+        sqshrn          v18.4h, v18.4s, #16
+        sqshrn2         v18.8h, v19.4s, #16
+        sqshrun         v18.8b, v18.8h, #4
+        sqshrn          v20.4h, v20.4s, #16
+        sqshrn2         v20.8h, v21.4s, #16
+        sqshrun         v20.8b, v20.8h, #4
+        sqshrn          v22.4h, v22.4s, #16
+        sqshrn2         v22.8h, v23.4s, #16
+        sqshrun         v22.8b, v22.8h, #4
+.ifc \layout,argb
+        mov             v19.8b, v22.8b
+        mov             v17.8b, v18.8b
+        mov             v18.8b, v20.8b
+        movi            v16.8b, #255
+.else
+.ifc \layout,bgra
+        mov             v16.8b, v22.8b
+.else
+.ifc \layout,bgr
+        mov             v16.8b, v22.8b
+.else
+        mov             v16.8b, v18.8b
+        mov             v18.8b, v22.8b
+.endif
+.endif
+        mov             v17.8b, v20.8b
+        movi            v19.8b, #255
+.endif
+.ifc \layout,rgb
+        st3             {v16.8b-v18.8b}, [x0], #24
+.else
+.ifc \layout,bgr
+        st3             {v16.8b-v18.8b}, [x0], #24
+.else
+        st4             {v16.8b-v19.8b}, [x0], #32
+.endif
+.endif
+        add             x7,  x7,  #16
+        subs            w5,  w5,  #1
+        b.gt            1b
+        ret
+endfunc
+.endm
+
+fast_chroma_row argb
+fast_chroma_row rgba
+fast_chroma_row bgr
+fast_chroma_row bgra
+fast_chroma_row rgb

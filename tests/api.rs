@@ -89,7 +89,9 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
 
 #[test]
 fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
-    for extra_fancy_upsampling in [false, true] {
+    for (extra_fancy_upsampling, fast_fancy_upsampling) in
+        [(false, false), (true, false), (false, true)]
+    {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
@@ -97,6 +99,7 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
             whole
                 .set_options(Options {
                     extra_fancy_upsampling,
+                    fast_fancy_upsampling,
                     ..Options::default()
                 })
                 .unwrap();
@@ -110,6 +113,7 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
             streamed
                 .set_options(Options {
                     extra_fancy_upsampling,
+                    fast_fancy_upsampling,
                     ..Options::default()
                 })
                 .unwrap();
@@ -144,7 +148,9 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
 
 #[test]
 fn a_partial_frame_hands_out_only_final_rows() {
-    for extra_fancy_upsampling in [false, true] {
+    for (extra_fancy_upsampling, fast_fancy_upsampling) in
+        [(false, false), (true, false), (false, true)]
+    {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
@@ -152,6 +158,7 @@ fn a_partial_frame_hands_out_only_final_rows() {
             whole
                 .set_options(Options {
                     extra_fancy_upsampling,
+                    fast_fancy_upsampling,
                     ..Options::default()
                 })
                 .unwrap();
@@ -180,6 +187,7 @@ fn a_partial_frame_hands_out_only_final_rows() {
                 streamed
                     .set_options(Options {
                         extra_fancy_upsampling,
+                        fast_fancy_upsampling,
                         ..Options::default()
                     })
                     .unwrap();
@@ -405,10 +413,17 @@ fn a_scaled_decode_is_the_same_at_any_thread_count() {
 fn settings_changed_mid_animation_reach_the_next_frame() {
     type Switch = fn(&mut Decoder);
 
-    let switches: [(&str, Switch); 5] = [
+    let switches: [(&str, Switch); 6] = [
         ("extra-fancy", |d| {
             d.set_options(Options {
                 extra_fancy_upsampling: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
+        ("fast-fancy", |d| {
+            d.set_options(Options {
+                fast_fancy_upsampling: true,
                 ..Options::default()
             })
             .unwrap();

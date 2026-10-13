@@ -1,144 +1,155 @@
-# Extra-fancy chroma upsampling
+# Chroma upsampling
 
-`--extra-fancy` selects Lanczos-5 interpolation when converting lossy 4:2:0
-planes to packed RGB. The Rust and C option is `extra_fancy_upsampling`. Default
-fancy upsampling remains libwebp-exact. The two options `no_fancy_upsampling`
-and `extra_fancy_upsampling` cannot both be enabled.
+Default fancy upsampling remains libwebp-exact. Two additional modes are
+available for unscaled lossy packed output:
 
-This follows the filter used by
+- `--extra-fancy`: separable ten-tap Lanczos-5 interpolation.
+- `--fast-fancy`: separable four-tap cubic interpolation, with most of the
+  measured quality gain at a lower cost.
+
+The Rust and C options are `extra_fancy_upsampling` and `fast_fancy_upsampling`.
+These and `no_fancy_upsampling` are mutually exclusive. Older C option structs
+leave newer modes disabled, including when old tail padding contains nonzero
+bytes.
+
+```sh
+build/wpd --extra-fancy -f rgba input.webp lanczos.pam
+build/wpd --fast-fancy -f rgba input.webp cubic.pam
+```
+
+## Filters
+
+Lanczos-5 follows the filter evaluated in
 [Halide's chroma-handling article](https://halide.cx/blog/chroma-handling/) and
 [decbench](https://github.com/gianni-rosato/decbench):
 `scale=flags=lanczos+accurate_rnd+full_chroma_int:param0=5,format=rgb24`. The
-parameter is a radius of five chroma samples, giving ten taps per axis. wpd uses
-centered 4:2:0 siting, including at odd dimensions, rather than resizing an odd
-chroma plane to a slightly different scale factor. Its output is not intended to
-be bit-exact with FFmpeg.
+two quarter-sample phases use reversed, normalized Q14 coefficients. Horizontal
+interpolation retains signed Q6 samples, including negative lobes. The filter
+and its output are preserved alongside the new mode.
 
-## Implementation
+Fast-fancy uses Keys cubic interpolation with `a = -0.75`, sampled at the same
+quarter-sample phase and rounded to Q6: `[-7, 56, 17, -2]`. The opposite phase
+reverses these coefficients. Their sum of 64 preserves constant chroma.
+Horizontal results lie in `[-2295, 18615]`, so NEON can produce eight signed
+samples per register without widening its multiply-accumulates to 32 bits.
 
-The two quarter-sample phases use reversed, normalized Q14 coefficients.
-Horizontal interpolation retains signed Q6 samples. A ring caches up to ten
-horizontal rows of each chroma plane per conversion band, so each source row is
-filtered once per band and scratch space grows with width rather than image
-area. Once the first window is filled, each output row checks only the last
-source row because at most one new row enters its support. Ring lookups use a
-constant modulus, including for tiny images. Edges replicate the nearest source
-sample.
+Both filters retain fractional chroma through the vertical pass and BT.601
+limited-range RGB matrix, then round and clip once. This matters to quality: an
+experiment rounding the matrix's terms separately lost a substantial part of the
+gain on two nearly flat images. The fast NEON kernel instead folds the final
+rounding bias into luma and narrows by 16 then 4 bits, giving exactly the same
+bytes as the full-precision scalar matrix.
 
-The vertical filter and BT.601 limited-range color matrix share one kernel.
-Fractional chroma and negative filter lobes survive until the final rounded RGB
-clipping; a version that rounded chroma to bytes before RGB scored about 0.19
-fssimu2 points lower in this test. Handwritten AArch64 NEON and x86-64 AVX2
-kernels have scalar tails and checkasm coverage for both phases, all five packed
-layouts, signed inputs, unaligned addresses, and output guards. No new x86 SSE
-paths or intrinsics are used.
+Each conversion band caches four horizontal rows per plane for fast-fancy, or
+ten for extra-fancy. Scratch space grows with width. Each source row is filtered
+once per band, and at most one new row enters the support per output row. Edges
+replicate the nearest sample. Both modes use centered 4:2:0 siting, including at
+odd dimensions; neither promises bit-exact FFmpeg output.
 
-Alpha dispatch and premultiplication retain their existing behavior. Two-byte
-packed output uses one ARGB scratch row and keeps the horizontal cache across
-the whole band. Animation preparation captures the sampling option so changing
-it invalidates frames decoded ahead under earlier settings.
+Fast-fancy has handwritten AArch64 NEON kernels for horizontal interpolation and
+all five RGB layouts. Other architectures use its scalar implementation; no new
+AVX2 path is added. Extra-fancy retains its NEON and AVX2 kernels.
 
-Native planar and lossless frames bypass interpolation. Stills scaled to packed
-output retain the existing chroma rescaler. Cropping uses the existing cropped
-plane view and replicates that view's boundaries. Streaming holds back ten luma
-rows until the five future chroma rows needed by the filter are stable.
+Alpha dispatch, premultiplication, and two-byte packed output retain their
+existing behavior. Animation preparation captures the selected mode, so an
+option change invalidates frames prepared under earlier settings. Native planar
+and lossless frames bypass interpolation. Scaled stills retain the existing
+chroma rescaler. Cropping replicates the cropped view's boundaries. Streaming
+holds back four luma rows for cubic or ten for Lanczos-5 until the two or five
+future chroma rows are stable.
 
 ## Quality
 
-Measured on the 25 photographic PNGs in the gb82 image set, at 576x576, with
-cwebp `-m 6 -q 90` and fssimu2 0.2.0. These are arithmetic means on identical
-encoded inputs for each decoder comparison.
+Measured on the same 25 photographic PNGs in the gb82 image set, at 576x576,
+with cwebp `-m 6` and fssimu2 0.2.0. Each row compares identical encoded inputs.
+Scores are arithmetic means; retained gain is
+`(fast - fancy) / (extra - fancy)`.
 
-| Encoding chroma conversion | wpd fancy | wpd extra-fancy | FFmpeg filtered |
-| -------------------------- | --------: | --------------: | --------------: |
-| FFmpeg yuv420p             |   83.5503 |         84.0618 |         84.0614 |
-| cwebp Sharp YUV            |   84.3623 |         83.6808 |         83.6792 |
+| Chroma conversion and quality |   Fancy | Fast-fancy | Extra-fancy | Gain retained |
+| ----------------------------- | ------: | ---------: | ----------: | ------------: |
+| FFmpeg, Q75                   | 69.0974 |    69.2368 |     69.2466 |         93.4% |
+| FFmpeg, Q90                   | 83.5503 |    84.0321 |     84.0618 |         94.2% |
+| FFmpeg, Q95                   | 87.4293 |    88.1338 |     88.2022 |         91.2% |
+| Sharp YUV, Q90                | 84.3623 |    83.8409 |     83.6808 |             — |
 
-With FFmpeg-converted input, extra-fancy improves 23 of 25 images and gains
-0.5116 points on average. Its mean absolute score difference from FFmpeg's
-filtered output is 0.0047 points. Sharp YUV favors the existing fancy
-interpolator, confirming that this option should remain an explicit choice.
-These results measure reconstruction quality; they are not encoder efficiency
-percentages or a guarantee for every image.
+At Q90, fast-fancy improves 23 of 25 images and preserves 94.2% of the average
+Lanczos-5 gain. The same coefficients retain over 91% at Q75 and Q95. These
+fractions describe this dataset's metric differences, not all images or a
+percentage of visual quality. Sharp YUV still favors default fancy, which is why
+the filters remain opt-in.
+
+At Q90, FFmpeg's Lanczos-5 mean is 84.0614, compared with wpd's 84.0618.
+Fast-fancy's choice trades about 0.030 fssimu2 points for a shorter filter.
 
 Reproduce with FFmpeg, cwebp, and fssimu2 on `PATH`:
 
 ```sh
-python3 scripts/chromaquality.py /path/to/gb82-image-set/png
 python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
-    --sharp-yuv --output wpd-test-data/chromaquality-sharp
+    --output wpd-test-data/chroma-fast-q90
+python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
+    --quality 75 --output wpd-test-data/chroma-fast-q75
+python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
+    --quality 95 --output wpd-test-data/chroma-fast-q95
+python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
+    --sharp-yuv --output wpd-test-data/chroma-fast-sharp
 ```
 
-Decoded PPMs, generated WebPs, and per-image JSON results stay under the
-selected output directory. Use separate directories to retain both encoding
-comparisons.
+Decoded PPMs, generated WebPs, and per-image JSON results stay in each output
+directory. Use separate directories to retain each encoding comparison.
 
 ## Speed
 
-The initial SIMD implementation was measured on Apple M5 Pro with a release
-build, assembly enabled, RGBA output, 64 decode repetitions per invocation,
-three warmups, and twelve Hyperfine runs. The table reports milliseconds per
-complete file decode, including all frames for animations, by dividing each
-invocation's elapsed time by 64. Output is discarded. Benchmarks run without
-other build or test jobs.
+Measured on Apple M5 Pro with a release build, assembly enabled, RGBA output, 64
+decode repetitions per invocation, five warmups, and eighteen Hyperfine runs.
+Times are milliseconds per complete file decode, including every frame of
+animations, with output discarded. Builds, tests, and quality measurements were
+finished before timing began.
 
-| File                | Threads | Fancy (ms) | Extra-fancy (ms) | Extra time |
-| ------------------- | ------: | ---------: | ---------------: | ---------: |
-| lossy.webp          |       1 |      2.747 |            3.323 |     +21.0% |
-| lossy.webp          |       3 |      1.627 |            1.850 |     +13.7% |
-| simplelf-lossy.webp |       1 |      2.772 |            3.367 |     +21.5% |
-| simplelf-lossy.webp |       3 |      1.975 |            2.193 |     +11.0% |
-| a_lossy.webp        |       1 |      0.523 |            0.743 |     +42.1% |
-| a_lossy.webp        |       3 |      0.405 |            0.485 |     +20.0% |
-| anim_yuv.webp       |       1 |      2.371 |            2.630 |     +10.9% |
-| anim_yuv.webp       |       3 |      0.916 |            0.997 |      +8.8% |
-| anim_yuva.webp      |       1 |      5.654 |            6.511 |     +15.2% |
-| anim_yuva.webp      |       3 |      2.243 |            2.597 |     +15.8% |
+| File                | Threads | Fancy (ms) | Fast-fancy (ms) | Extra-fancy (ms) | Fast over fancy |
+| ------------------- | ------: | ---------: | --------------: | ---------------: | --------------: |
+| lossy.webp          |       1 |      2.697 |           2.860 |            3.299 |           +6.0% |
+| lossy.webp          |       3 |      1.627 |           1.688 |            1.846 |           +3.8% |
+| simplelf-lossy.webp |       1 |      2.745 |           2.968 |            3.365 |           +8.1% |
+| simplelf-lossy.webp |       3 |      1.999 |           2.052 |            2.208 |           +2.6% |
+| a_lossy.webp        |       1 |      0.530 |           0.586 |            0.746 |          +10.7% |
+| a_lossy.webp        |       3 |      0.411 |           0.419 |            0.469 |           +1.8% |
+| anim_yuv.webp       |       1 |      2.350 |           2.430 |            2.622 |           +3.4% |
+| anim_yuv.webp       |       3 |      0.910 |           0.958 |            1.005 |           +5.2% |
+| anim_yuva.webp      |       1 |      5.724 |           5.895 |            6.711 |           +3.0% |
+| anim_yuva.webp      |       3 |      2.279 |           2.344 |            2.597 |           +2.9% |
 
-The isolated NEON horizontal kernel measures 30.3 ns versus 66.4 ns for the
-scalar implementation. The fused RGBA row measures 42.5 ns versus 210.7 ns,
-about 5x faster. Those calls produce 128 horizontal samples and 64 packed
-pixels, respectively, with data hot in cache; they do not represent whole
-decodes.
+Across these five files, geometric mean fast-fancy time is 6.2% above fancy with
+one thread and 3.3% above with three threads. It takes 13.3% less time than
+Lanczos-5 with one thread and 8.2% less with three. It approaches default
+fancy's speed but does not equal it on these measurements.
 
-Reproduce the end-to-end comparison and save Hyperfine JSON:
+In checkasm, NEON horizontal interpolation takes 6.46 ns for cubic versus 25.79
+ns for Lanczos-5, producing 128 samples. The fused RGBA row takes 25.91 ns
+versus 41.55 ns for 64 pixels. These are kernel timings with data hot in cache,
+not complete decode times. The exact rounding/packing change reduced a separate
+12-run single-threaded `lossy.webp` measurement from 188.1 to 182.4 ms per 64
+decodes; it does not change the filter's output.
 
 ```sh
-./scripts/chromabench.sh
-THREADS=3 BENCH_DIR=build/chromabench-t3 ./scripts/chromabench.sh
-build/checkasm --test=yuvdsp --function='chroma*' --bench
+RUNS=18 WARMUP=5 ./scripts/chromabench.sh
+THREADS=3 RUNS=18 WARMUP=5 BENCH_DIR=build/chromabench-t3 ./scripts/chromabench.sh
+build/checkasm --test=yuvdsp --function='*chroma*' --bench
 ```
 
-The AVX2 kernels build and passed the six new checkasm cases over twenty random
-seeds through a temporary harness that directly selects them under Rosetta.
-Rosetta executes these instructions but does not advertise AVX2/BMI CPU features
-here, so normal x86 dispatch falls back. Library feature detection was left
-unchanged. Native x86 speed has not been measured.
-
-## Optimization follow-up
-
-The row cache now skips nine redundant cache checks after its first window, and
-the SIMD wrapper skips constructing twenty scalar-tail slices when the row is
-fully covered by assembly. These changes preserve the filter and output.
-
-A follow-up compared the original extra-fancy implementation with these changes
-on the same M5 Pro: single-threaded `lossy.webp`, RGBA, 128 repetitions, five
-warmups, and 24 Hyperfine runs. The original averaged 3.475 ms per decode
-(standard deviation 0.022 ms); the current implementation averaged 3.523 ms
-(standard deviation 0.097 ms). This does not establish a decode-speed gain.
-
-Several NEON scheduling experiments were also measured, including reusing
-overlapping horizontal loads, keeping vertical row pointers in registers, and
-splitting ten-tap accumulation into independent sums. They did not produce a
-reliable improvement and were discarded. The initial SIMD speedups above remain
-the measured benefit; native AVX2 timing is still needed.
+Native x86 speed has not been measured. The existing Lanczos-5 AVX2 kernels
+previously passed checkasm under a temporary harness selecting them directly in
+Rosetta, which executes the instructions but does not advertise the required CPU
+features here. Library feature detection is unchanged.
 
 ## Validation
 
 All 237 Meson tests pass, including libwebp parity, the reference corpus, CLI,
-and row-boundary tests. Rust workspace tests pass with and without assembly.
-NEON and AVX2 checkasm each pass twenty seeds. Tests cover kernel coefficients,
-fractional chroma, odd and tiny dimensions, all packed layouts, two-byte output,
-alpha, scalar tails, disjoint conversion bands, incremental row finality, and
-option changes during threaded animation decoding. Older C option structs leave
-extra-fancy disabled. `scripts/stylecheck.sh` passes.
+and row-boundary tests. Rust workspace tests pass with and without assembly; the
+x86-64 build also passes a compile check. Across all 49 top-level corpus files,
+extra-fancy output matches the preserved binary, and fast-fancy NEON output
+matches its scalar fallback. Rust tests cover scalar tails, signed values,
+constants, odd and tiny dimensions, all layouts, two-byte output, alpha,
+disjoint conversion bands, incremental row finality, and changes to options
+during threaded animation decoding. Both NEON filters pass twenty checkasm
+seeds. The C tests cover mutually exclusive flags and legacy option sizes.
+`stylecheck.sh` and the new Python script's Ruff checks pass.

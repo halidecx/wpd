@@ -120,6 +120,9 @@ const USAGE_TAIL: &str = concat!(
     " --extra-fancy\n",
     "    use Lanczos-5 chroma upsampling for unscaled lossy packed\n",
     "    output; default fancy upsampling remains libwebp-exact\n",
+    " --fast-fancy\n",
+    "    use four-tap cubic chroma upsampling; mutually exclusive\n",
+    "    with --extra-fancy\n",
     " --scale WxH\n",
     "    scale the output; either dimension may be 0 to keep the\n",
     "    aspect ratio of the other\n",
@@ -289,6 +292,7 @@ struct Options {
     max_output: u64,
     n_threads: i32,
     extra_fancy_upsampling: bool,
+    fast_fancy_upsampling: bool,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
@@ -326,6 +330,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("stream", None, true),
     ("threads", None, true),
     ("extra-fancy", None, false),
+    ("fast-fancy", None, false),
     ("scale", None, true),
     ("frame-size-limit", None, true),
     ("max-input", None, true),
@@ -415,6 +420,7 @@ fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str>
         },
         "subframe" => o.subframe = true,
         "extra-fancy" => o.extra_fancy_upsampling = true,
+        "fast-fancy" => o.fast_fancy_upsampling = true,
         _ => return Err(MISSING),
     }
     Ok(())
@@ -719,12 +725,14 @@ fn decode_stream(
     drain_frames(decoder, ctx)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_decoder(
     out_format: Option<Format>,
     pixel_format: Option<&str>,
     subframe: bool,
     n_threads: i32,
     extra_fancy_upsampling: bool,
+    fast_fancy_upsampling: bool,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
 ) -> Option<Decoder<'static>> {
@@ -734,6 +742,7 @@ fn new_decoder(
         .set_options(api::Options {
             n_threads,
             extra_fancy_upsampling,
+            fast_fancy_upsampling,
             scale,
             frame_size_limit,
             ..api::Options::default()
@@ -1004,6 +1013,7 @@ fn run<const REPORT: bool>(
             opts.subframe,
             opts.n_threads,
             opts.extra_fancy_upsampling,
+            opts.fast_fancy_upsampling,
             opts.scale,
             opts.frame_size_limit,
         ) else {
@@ -1020,6 +1030,7 @@ fn run<const REPORT: bool>(
                         opts.subframe,
                         opts.n_threads,
                         opts.extra_fancy_upsampling,
+                        opts.fast_fancy_upsampling,
                         opts.scale,
                         opts.frame_size_limit,
                     ) else {

@@ -435,6 +435,21 @@ fn still_packed_direct(
             upto as usize,
             set.threads,
         );
+    } else if options.fast_fancy_upsampling {
+        let planes = yuv_planes(src);
+        let mut out = dst.frame_mut();
+
+        crate::convert::yuv420_to_packed_fast(
+            dsp,
+            layout,
+            &mut out.planes_mut()[0],
+            &planes,
+            src.width as usize,
+            src.height as usize,
+            first as usize,
+            upto as usize,
+            set.threads,
+        );
     } else if upto > first {
         converted_from =
             upsample_fancy(dsp, dst, src, layout, first, upto, set.threads);

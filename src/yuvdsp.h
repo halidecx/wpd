@@ -90,6 +90,8 @@ typedef struct WPDYUVDSP {
     yuv_row_func              yuv420_row[WPD_LAYOUT_NB];
     chroma_horizontal_func    chroma_horizontal;
     chroma_row_func           chroma_row[WPD_LAYOUT_NB];
+    chroma_horizontal_func    fast_chroma_horizontal;
+    chroma_row_func           fast_chroma_row[WPD_LAYOUT_NB];
 } WPDYUVDSP;
 
 void wpd_yuv_dsp_init(WPDYUVDSP *dsp);

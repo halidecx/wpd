@@ -236,6 +236,8 @@ fn set_options(
         || !flag(options.flip)
         || (options.struct_size >= WPDDecoderOptions::v4()
             && !flag(options.extra_fancy_upsampling))
+        || (options.struct_size >= WPDDecoderOptions::v5()
+            && !flag(options.fast_fancy_upsampling))
     {
         return Err(decoder.fail("invalid decoder options", Error::InvalidArgument));
     }
@@ -304,6 +306,9 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
     if size >= WPDDecoderOptions::v4() {
         local.extra_fancy_upsampling =
             unsafe { ptr::addr_of!((*options).extra_fancy_upsampling).read() };
+    }
+    if size >= WPDDecoderOptions::v5() {
+        local.fast_fancy_upsampling = unsafe { ptr::addr_of!((*options).fast_fancy_upsampling).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });

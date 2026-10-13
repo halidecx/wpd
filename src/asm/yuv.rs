@@ -206,6 +206,66 @@ fn chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
     );
 }
 
+#[cfg(target_arch = "aarch64")]
+fn fast_chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(
+    dst: &mut [i16],
+    src: &[u8],
+) {
+    let pairs = dst.len() / 2;
+    let blocks = pairs / 8;
+    let done = 8 * blocks;
+
+    assert!(src.len() >= pairs + 4, "short padded chroma row");
+    if blocks != 0 {
+        unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), blocks as c_int) };
+    }
+    crate::dsp::yuv::fast_chroma_horizontal(&mut dst[2 * done..], &src[done..]);
+}
+
+#[cfg(target_arch = "aarch64")]
+fn fast_chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[&[i16]; 4],
+    v: &[&[i16]; 4],
+    odd: bool,
+) {
+    let n = dst.len() / bpp(L);
+    let blocks = n / 8;
+    let done = 8 * blocks;
+
+    assert!(y.len() >= n, "short luma row");
+    assert!(u.iter().chain(v).all(|r| r.len() >= n), "short chroma row");
+    if blocks != 0 {
+        let up = u.map(<[i16]>::as_ptr);
+        let vp = v.map(<[i16]>::as_ptr);
+
+        unsafe {
+            (T::F)(
+                dst.as_mut_ptr(),
+                y.as_ptr(),
+                up.as_ptr(),
+                vp.as_ptr(),
+                c_int::from(odd),
+                blocks as c_int,
+            )
+        };
+    }
+    if done == n {
+        return;
+    }
+    let ut = u.map(|r| &r[done..]);
+    let vt = v.map(|r| &r[done..]);
+
+    crate::dsp::yuv::fast_chroma_row::<L>(
+        &mut dst[bpp(L) * done..],
+        &y[done..],
+        &ut,
+        &vt,
+        odd,
+    );
+}
+
 fn yuv420_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
     dst: &mut [u8],
     y: &[u8],
@@ -325,6 +385,8 @@ fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
 
 #[derive(Default)]
 pub struct RawTable {
+    pub fast_chroma_horizontal: Option<ChromaHorizontalRaw>,
+    pub fast_chroma_row: Option<[ChromaRowRaw; 5]>,
     pub chroma_horizontal: Option<ChromaHorizontalRaw>,
     pub chroma_row: Option<[ChromaRowRaw; 5]>,
     pub upsample_block: Option<[UpsampleBlockRaw; 5]>,
@@ -548,6 +610,7 @@ macro_rules! ladder {
             $( @rows $rows:ident; )?
             $( @rows_rgb $rows_rgb:ident; )?
             $( @extra $extra:ident; )?
+            $( @fast $fast:ident; )?
             $( $field:ident = $wrap:ident::<$marker:path>; )*
         }
     )*) => {
@@ -575,6 +638,13 @@ macro_rules! ladder {
                         chroma_row::<$extra::ExtraBgra, LAYOUT_BGRA>,
                         chroma_row::<$extra::ExtraRgb, LAYOUT_RGB>,
                         chroma_row::<$extra::ExtraBgr, LAYOUT_BGR>,
+                    ]; )?
+                    $( dsp.fast_chroma_row = [
+                        fast_chroma_row::<$fast::FastArgb, LAYOUT_ARGB>,
+                        fast_chroma_row::<$fast::FastRgba, LAYOUT_RGBA>,
+                        fast_chroma_row::<$fast::FastBgra, LAYOUT_BGRA>,
+                        fast_chroma_row::<$fast::FastRgb, LAYOUT_RGB>,
+                        fast_chroma_row::<$fast::FastBgr, LAYOUT_BGR>,
                     ]; )?
                     $( dsp.$field = $wrap::<$marker>; )*
                 }
@@ -622,6 +692,10 @@ macro_rules! ladder {
                     $( t.chroma_row = Some([
                         $extra::ExtraArgb::F, $extra::ExtraRgba::F, $extra::ExtraBgra::F,
                         $extra::ExtraRgb::F, $extra::ExtraBgr::F,
+                    ]); )?
+                    $( t.fast_chroma_row = Some([
+                        $fast::FastArgb::F, $fast::FastRgba::F, $fast::FastBgra::F,
+                        $fast::FastRgb::F, $fast::FastBgr::F,
                     ]); )?
                     $( t.$field = Some(<$marker as Raw>::F); )*
                 }
@@ -872,6 +946,19 @@ mod arch {
         raw_chroma_row!(ExtraRgb, extra_rgb, "wpd_chroma_row_rgb_neon");
         raw_chroma_row!(ExtraBgr, extra_bgr, "wpd_chroma_row_bgr_neon");
 
+        raw!(
+            FastChromaHorizontal,
+            fast_chroma_h,
+            ChromaHorizontalRaw,
+            "wpd_fast_chroma_horizontal_neon",
+            (*mut i16, *const u8, c_int)
+        );
+        raw_chroma_row!(FastArgb, fast_argb, "wpd_fast_chroma_row_argb_neon");
+        raw_chroma_row!(FastRgba, fast_rgba, "wpd_fast_chroma_row_rgba_neon");
+        raw_chroma_row!(FastBgra, fast_bgra, "wpd_fast_chroma_row_bgra_neon");
+        raw_chroma_row!(FastRgb, fast_rgb, "wpd_fast_chroma_row_rgb_neon");
+        raw_chroma_row!(FastBgr, fast_bgr, "wpd_fast_chroma_row_bgr_neon");
+
         upsample_syms!(
             "wpd_upsample_block_argb_neon",
             "wpd_upsample_block_rgba_neon",
@@ -964,8 +1051,10 @@ mod arch {
             @packers neon;
             @rows neon;
             @extra neon;
+            @fast neon;
 
             chroma_horizontal = chroma_horizontal::<neon::ChromaHorizontal>;
+            fast_chroma_horizontal = fast_chroma_horizontal::<neon::FastChromaHorizontal>;
 
 
             premultiply_row = premultiply_row::<neon::Premultiply>;

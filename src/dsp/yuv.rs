@@ -16,7 +16,8 @@ pub const LANCZOS5: [i16; 10] =
     [148, -495, 1146, -2658, 14699, 4740, -1709, 767, -295, 41];
 
 pub type ChromaHorizontalFn = fn(&mut [i16], &[u8]);
-pub type ChromaRowFn = fn(&mut [u8], &[u8], &[&[i16]; 10], &[&[i16]; 10], bool);
+pub type ChromaRowFn<const N: usize = 10> =
+    fn(&mut [u8], &[u8], &[&[i16]; N], &[&[i16]; N], bool);
 
 /// Each pair reads eleven samples, including the caller's replicated edges.
 /// Q6 intermediates keep sub-byte precision and overshoot without clipping.
@@ -60,6 +61,63 @@ pub fn chroma_row<const L: usize>(
         // first would change colors that still fit the RGB gamut.
         let u = (us >> 14) - 128 * 64;
         let v = (vs >> 14) - 128 * 64;
+        let y = (i32::from(y) - 16) * (19077 * 64);
+        let clip = |n: i32| ((n + (1 << 19)) >> 20).clamp(0, 255) as u8;
+
+        if bpp(L) == 4 {
+            d[c[0]] = 255;
+        }
+        d[c[1]] = clip(y + v * 26149);
+        d[c[2]] = clip(y - u * 6419 - v * 13320);
+        d[c[3]] = clip(y + u * 33050);
+    }
+}
+
+/// Keys cubic with a = -0.75, sampled at one quarter and rounded to Q6.
+/// The coefficients sum to 64; the horizontal result fits signed 16 bits.
+pub const CUBIC: [i16; 4] = [-7, 56, 17, -2];
+pub type FastChromaRowFn = ChromaRowFn<4>;
+
+pub fn fast_chroma_horizontal(dst: &mut [i16], src: &[u8]) {
+    for (i, pair) in dst.chunks_exact_mut(2).enumerate() {
+        let mut even = 0;
+        let mut odd = 0;
+
+        for t in 0..4 {
+            even += i32::from(src[i + t]) * i32::from(CUBIC[3 - t]);
+            odd += i32::from(src[i + t + 1]) * i32::from(CUBIC[t]);
+        }
+        pair[0] = even as i16;
+        pair[1] = odd as i16;
+    }
+}
+
+pub fn fast_chroma_row<const L: usize>(
+    dst: &mut [u8],
+    y: &[u8],
+    u: &[&[i16]; 4],
+    v: &[&[i16]; 4],
+    odd: bool,
+) {
+    let coeffs = if odd {
+        CUBIC
+    } else {
+        std::array::from_fn(|t| CUBIC[3 - t])
+    };
+    let c = channels(L);
+
+    for (x, (d, &y)) in dst.chunks_exact_mut(bpp(L)).zip(y).enumerate() {
+        let mut us = 1 << 5;
+        let mut vs = 1 << 5;
+
+        for t in 0..4 {
+            us += i32::from(u[t][x]) * i32::from(coeffs[t]);
+            vs += i32::from(v[t][x]) * i32::from(coeffs[t]);
+        }
+        // Keep Q6 and signed overshoot through the matrix; clipping chroma
+        // first would change colors that still fit the RGB gamut.
+        let u = (us >> 6) - 128 * 64;
+        let v = (vs >> 6) - 128 * 64;
         let y = (i32::from(y) - 16) * (19077 * 64);
         let clip = |n: i32| ((n + (1 << 19)) >> 20).clamp(0, 255) as u8;
 
@@ -652,6 +710,8 @@ fn upsample_block<const L: usize>(
 
 #[derive(Clone)]
 pub struct YuvDsp {
+    pub fast_chroma_horizontal: ChromaHorizontalFn,
+    pub fast_chroma_row: [FastChromaRowFn; LAYOUT_NB],
     pub chroma_horizontal: ChromaHorizontalFn,
     pub chroma_row: [ChromaRowFn; LAYOUT_NB],
     pub upsample_block: [UpsampleBlockFn; LAYOUT_NB],
@@ -691,6 +751,14 @@ fn premultiply_row_4444_swapped(row: &mut [u8]) {
 impl YuvDsp {
     pub const fn scalar() -> Self {
         YuvDsp {
+            fast_chroma_horizontal,
+            fast_chroma_row: [
+                fast_chroma_row::<LAYOUT_ARGB>,
+                fast_chroma_row::<LAYOUT_RGBA>,
+                fast_chroma_row::<LAYOUT_BGRA>,
+                fast_chroma_row::<LAYOUT_RGB>,
+                fast_chroma_row::<LAYOUT_BGR>,
+            ],
             chroma_horizontal,
             chroma_row: [
                 chroma_row::<LAYOUT_ARGB>,
@@ -963,6 +1031,66 @@ mod tests {
 
                     chroma_row::<LAYOUT_ARGB>(&mut want, &y, &rows, &rows, odd);
                     (dsp.chroma_row[LAYOUT_ARGB])(&mut got, &y, &rows, &rows, odd);
+                    assert_eq!(want, got, "vertical {n} mode {mode} phase {odd}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cubic_coefficients_are_normalized_keys_samples() {
+        let a = -0.75;
+        let kernel = |x: f64| {
+            let x = x.abs();
+            if x < 1.0 {
+                (a + 2.0) * x.powi(3) - (a + 3.0) * x.powi(2) + 1.0
+            } else {
+                a * x.powi(3) - 5.0 * a * x.powi(2) + 8.0 * a * x - 4.0 * a
+            }
+        };
+        assert_eq!(CUBIC.map(i32::from).iter().sum::<i32>(), 64);
+        for (t, &c) in CUBIC.iter().enumerate() {
+            assert_eq!(c, (kernel(t as f64 - 1.25) * 64.0).round() as i16);
+        }
+    }
+
+    #[test]
+    fn cubic_preserves_constants_and_simd_matches_signed_scalar_tails() {
+        let dsp = YuvDsp::new();
+
+        for n in [0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 64, 129] {
+            for mode in 0..4 {
+                let src: Vec<u8> = (0..n + 4)
+                    .map(|x| match mode {
+                        0 => 255,
+                        1 => 0,
+                        2 => ((x & 1) * 255) as u8,
+                        _ => (x as u8).wrapping_mul(73),
+                    })
+                    .collect();
+                let mut want = vec![0i16; 2 * n];
+                let mut got = want.clone();
+
+                fast_chroma_horizontal(&mut want, &src);
+                (dsp.fast_chroma_horizontal)(&mut got, &src);
+                assert_eq!(want, got, "horizontal {n} mode {mode}");
+                if mode <= 1 {
+                    assert!(got.iter().all(|&v| v == i16::from(src[0]) * 64));
+                }
+                let data: [Vec<i16>; 4] = std::array::from_fn(|t| {
+                    got.iter()
+                        .map(|&v| v.wrapping_add(t as i16 * 997 - 4000))
+                        .collect()
+                });
+                let rows = data.each_ref().map(Vec::as_slice);
+                let mut want = vec![0u8; 8 * n];
+                let mut got = want.clone();
+
+                for odd in [false, true] {
+                    let y = vec![127; 2 * n];
+
+                    fast_chroma_row::<LAYOUT_ARGB>(&mut want, &y, &rows, &rows, odd);
+                    (dsp.fast_chroma_row[LAYOUT_ARGB])(&mut got, &y, &rows, &rows, odd);
                     assert_eq!(want, got, "vertical {n} mode {mode} phase {odd}");
                 }
             }
