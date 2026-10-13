@@ -1408,9 +1408,87 @@ pd_ug: times 8 dd 6419
 pd_vg: times 8 dd 13320
 pd_ub: times 8 dd 33050
 
+align 32
+pw_fast_center: times 16 dw 8192
+pw_fast_59: times 16 dw 59
+pw_fast_15: times 16 dw 15
+pw_fast_10: times 16 dw 10
+pd_fast_round: times 8 dd 32
+fast_odd: dd -10, 59, 15
+fast_even: dd 15, 59, -10
+
 SECTION .text
-%macro CHROMA_ROW 2 ; layout, bytes per pixel
+INIT_XMM avx2
+; Eight input samples yield sixteen centered Q6 samples. Both phases share
+; the middle tap; all horizontal products and sums fit signed words.
+cglobal fast_chroma_horizontal, 3, 3, 6, dst, src, blocks
+    mova        m3, [pw_fast_59]
+    mova        m4, [pw_fast_15]
+    mova        m5, [pw_fast_10]
+.loop:
+    vpmovzxbw   m0, [srcq + 1]
+    vpmovzxbw   m1, [srcq + 2]
+    vpmovzxbw   m2, [srcq + 3]
+    pmullw      m1, m3
+    pmullw      m0, m4
+    pmullw      m2, m5
+    paddw       m0, m1
+    psubw       m0, m2
+    vpmovzxbw   m2, [srcq + 3]
+    pmullw      m2, m4
+    paddw       m1, m2
+    vpmovzxbw   m2, [srcq + 1]
+    pmullw      m2, m5
+    psubw       m1, m2
+    psubw       m0, [pw_fast_center]
+    psubw       m1, [pw_fast_center]
+    punpcklwd   m2, m0, m1
+    punpckhwd   m0, m1
+    movu        [dstq], m2
+    movu        [dstq + 16], m0
+    add         srcq, 8
+    add         dstq, 32
+    dec         blocksd
+    jg          .loop
+    RET
+
+SECTION .text
+%macro CHROMA_ROW 2-3 0 ; layout, bytes per pixel, fast
 INIT_YMM avx2
+%if %3
+cglobal fast_chroma_row_%1, 6, 9, 16, dst, y, u, v, odd, blocks, coeff, offset, ptr
+    lea         coeffq, [fast_even]
+    test        oddd, oddd
+    jnz         .coeffs_fast
+    add         uq, 8
+    add         vq, 8
+    jmp         .load_fast
+.coeffs_fast:
+    lea         coeffq, [fast_odd]
+.load_fast:
+    vpbroadcastd m5, [coeffq]
+    vpbroadcastd m6, [coeffq + 4]
+    vpbroadcastd m7, [coeffq + 8]
+    xor         offsetq, offsetq
+.loop:
+    mova        m1, [pd_fast_round]
+    mova        m2, m1
+%assign tap 0
+%rep 3
+%assign creg 5 + tap
+    mov         ptrq, [uq + tap * 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m %+ creg
+    paddd       m1, m0
+    mov         ptrq, [vq + tap * 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m %+ creg
+    paddd       m2, m0
+%assign tap tap + 1
+%endrep
+    psrad       m1, 6
+    psrad       m2, 6
+%else
 cglobal chroma_row_%1, 6, 9, 16, dst, y, u, v, odd, blocks, coeff, offset, ptr
     lea         coeffq, [lanczos5_even]
     test        oddd, oddd
@@ -1515,6 +1593,7 @@ cglobal chroma_row_%1, 6, 9, 16, dst, y, u, v, odd, blocks, coeff, offset, ptr
     psrad       m2, 14
     psubd       m1, [pd_chroma_center]
     psubd       m2, [pd_chroma_center]
+%endif
     vpmovzxbd   m0, [yq]
     psubd       m0, [pd_y16]
     pmulld      m0, [pd_yq6]
@@ -1581,4 +1660,9 @@ CHROMA_ROW rgba, 4
 CHROMA_ROW bgra, 4
 CHROMA_ROW rgb, 3
 CHROMA_ROW bgr, 3
+CHROMA_ROW argb, 4, 1
+CHROMA_ROW rgba, 4, 1
+CHROMA_ROW bgra, 4, 1
+CHROMA_ROW rgb, 3, 1
+CHROMA_ROW bgr, 3, 1
 %endif

@@ -706,6 +706,8 @@ static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name,
     const int16_t *u[10], *v[10];
     uint8_t        y[MAX_PIXELS + 1];
     uint8_t        dst0[4 * MAX_PIXELS + 2], dst1[4 * MAX_PIXELS + 2];
+    const int      lo = fast ? -11000 : -6000;
+    const int      hi = fast ? 11000 : 22000;
     declare_func(void,
                  uint8_t *,
                  const uint8_t *,
@@ -728,11 +730,12 @@ static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name,
                 for (int x = 0; x <= MAX_PIXELS; x++) y[x] = (uint8_t)rnd();
                 for (int t = 0; t < 20; t++)
                     for (int x = 0; x <= MAX_PIXELS; x++)
-                        data[t][x] = mode == 0 ? (int16_t)(rnd() % 28001 - 6000)
-                            : mode == 1        ? 128 * 64
-                            : mode == 2        ? -6000
-                            : (t & 1)          ? 22000
-                                               : -6000;
+                        data[t][x] = mode == 0
+                            ? (int16_t)(rnd() % (hi - lo + 1) + lo)
+                            : mode == 1 ? (fast ? 0 : 128 * 64)
+                            : mode == 2 ? lo
+                            : (t & 1)   ? hi
+                                        : lo;
                 for (int odd = 0; odd < 2; odd++) {
                     memset(dst0, 0x55, sizeof(dst0));
                     memset(dst1, 0x55, sizeof(dst1));

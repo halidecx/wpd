@@ -78,10 +78,12 @@ pub fn chroma_row<const L: usize>(
 pub const FAST_CHROMA: [i16; 4] = [-10, 59, 15, 0];
 pub type FastChromaRowFn = ChromaRowFn<4>;
 
+// Center chroma once per source row. The normalized vertical filter preserves
+// the offset exactly, avoiding a subtraction for every output pixel.
 pub fn fast_chroma_horizontal(dst: &mut [i16], src: &[u8]) {
     for (i, pair) in dst.chunks_exact_mut(2).enumerate() {
-        let mut even = 0;
-        let mut odd = 0;
+        let mut even = -128 * 64;
+        let mut odd = -128 * 64;
 
         for t in 0..4 {
             even += i32::from(src[i + t]) * i32::from(FAST_CHROMA[3 - t]);
@@ -116,8 +118,8 @@ pub fn fast_chroma_row<const L: usize>(
         }
         // Keep Q6 and signed overshoot through the matrix; clipping chroma
         // first would change colors that still fit the RGB gamut.
-        let u = (us >> 6) - 128 * 64;
-        let v = (vs >> 6) - 128 * 64;
+        let u = us >> 6;
+        let v = vs >> 6;
         let y = (i32::from(y) - 16) * (19077 * 64);
         let clip = |n: i32| ((n + (1 << 19)) >> 20).clamp(0, 255) as u8;
 
@@ -1064,7 +1066,7 @@ mod tests {
                 (dsp.fast_chroma_horizontal)(&mut got, &src);
                 assert_eq!(want, got, "horizontal {n} mode {mode}");
                 if mode <= 1 {
-                    assert!(got.iter().all(|&v| v == i16::from(src[0]) * 64));
+                    assert!(got.iter().all(|&v| v == (i16::from(src[0]) - 128) * 64));
                 }
                 let data: [Vec<i16>; 4] = std::array::from_fn(|t| {
                     got.iter()

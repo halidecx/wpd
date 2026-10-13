@@ -1349,7 +1349,8 @@ chroma_row rgb
 chroma_row bgr
 
 // Tuned three-tap interpolation, Q6. Horizontal sums lie in
-// [-2550, 18870], fitting eight signed samples per NEON register.
+// [-2550, 18870], fitting eight signed samples per NEON register. Store
+// them centered at zero, in [-10742, 10678], to simplify the vertical pass.
 const fast_filter_odd, align=4
         .short          -10, 59, 15, 0
 endconst
@@ -1360,6 +1361,7 @@ endconst
 function wpd_fast_chroma_horizontal_neon, export=1
         movrel          x3, fast_filter_odd
         ldr             d5, [x3]
+        movi            v6.8h, #32, lsl #8
 1:      ldur            d0, [x1, #1]
         uxtl            v0.8h, v0.8b
         mul             v1.8h, v0.8h, v5.h[2]
@@ -1372,6 +1374,8 @@ function wpd_fast_chroma_horizontal_neon, export=1
         uxtl            v0.8h, v0.8b
         mla             v1.8h, v0.8h, v5.h[0]
         mla             v2.8h, v0.8h, v5.h[2]
+        sub             v1.8h, v1.8h, v6.8h
+        sub             v2.8h, v2.8h, v6.8h
         zip1            v16.8h, v1.8h, v2.8h
         zip2            v17.8h, v1.8h, v2.8h
         stp             q16, q17, [x0], #32
@@ -1404,7 +1408,6 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         ldr             q6, [x6]
         ldr             d24, [x6, #16]
         dup             v31.4s, v24.s[1]
-        movi            v29.4s, #32, lsl #8
         ldp             x8, x9, [x2]
         ldr             x10, [x2, #16]
         ldp             x11, x12, [x3]
@@ -1429,13 +1432,9 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         smlal           v3.4s, v7.4h, v5.h[2]
         smlal2          v4.4s, v7.8h, v5.h[2]
         srshr           v1.4s, v1.4s, #6
-        sub             v1.4s, v1.4s, v29.4s
         srshr           v2.4s, v2.4s, #6
-        sub             v2.4s, v2.4s, v29.4s
         srshr           v3.4s, v3.4s, #6
-        sub             v3.4s, v3.4s, v29.4s
         srshr           v4.4s, v4.4s, #6
-        sub             v4.4s, v4.4s, v29.4s
         ldr             d0,  [x1], #8
         // Y << 6 fits i16; widen only for the full-precision product.
         ushll           v0.8h, v0.8b, #6

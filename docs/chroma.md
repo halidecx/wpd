@@ -31,8 +31,13 @@ Fast-fancy uses a tuned three-tap filter: `[-10, 59, 15] / 64` for the odd phase
 and `[15, 59, -10] / 64` for the even phase. Both phases share the same three
 source samples. The scalar interface pads the appropriate end with zero to reuse
 the four-row cache; NEON skips that tap entirely. The coefficients sum to 64,
-preserving constant chroma. Horizontal results lie in `[-2550, 18870]`, so NEON
-computes eight signed samples per register without widening to 32 bits.
+preserving constant chroma. Horizontal results lie in `[-2550, 18870]` before
+centering. Subtracting `128 * 64` there stores zero-centered Q6 in
+`[-10742, 10678]`, still fitting eight signed samples per register. Because the
+vertical coefficients sum to 64, this offset commutes exactly with vertical
+filtering and rounding. It moves the subtraction to half as many rows and
+removes four NEON vector subtractions per eight output pixels; RGB output
+remains byte-identical.
 
 The coefficients were selected using fssimu2, Butteraugli, and fcvvdp rather
 than fssimu2 alone. A search around the earlier cubic and three-tap filters
@@ -54,9 +59,9 @@ once per band, and at most one new row enters the support per output row. Edges
 replicate the nearest sample. Both modes use centered 4:2:0 siting, including at
 odd dimensions; neither promises bit-exact FFmpeg output.
 
-Fast-fancy has handwritten AArch64 NEON kernels for horizontal interpolation and
-all five RGB layouts. Other architectures use its scalar implementation; no new
-AVX2 path is added. Extra-fancy retains its NEON and AVX2 kernels.
+Both filters have handwritten AArch64 NEON and x86-64 AVX2 kernels for
+horizontal interpolation and all five RGB layouts. Other architectures use
+scalar implementations.
 
 Alpha dispatch, premultiplication, and two-byte packed output retain their
 existing behavior. Animation preparation captures the selected mode, so an
@@ -124,37 +129,41 @@ the fssimu2-only quality sweep, use `scripts/chromaquality.py --quality 75` or
 ## Speed
 
 Measured on Apple M5 Pro with a release build, assembly enabled, RGBA output, 64
-decode repetitions per invocation, five warmups, and eighteen Hyperfine runs.
-Times are milliseconds per complete file decode, including all animation frames,
-with output discarded. No builds, tests, or quality scoring ran during timing.
-The previous fast binary is commit `87bcdd8` (`[-10, 56, 18] / 64`).
+decode repetitions per invocation, five warmups, and 24 Hyperfine runs. Times
+are milliseconds per complete file decode, including all animation frames, with
+output discarded. No builds, tests, or quality scoring ran during timing. The
+baseline is commit `38c34a6`, with the same filter coefficients before moving
+chroma centering into the horizontal pass. All quality scores remain unchanged.
 
-| File                | Threads | Fancy (ms) | Previous fast (ms) | Balanced fast (ms) | Lanczos-5 (ms) |
+| File                | Threads | Fancy (ms) | Baseline fast (ms) | Centered fast (ms) | Lanczos-5 (ms) |
 | ------------------- | ------: | ---------: | -----------------: | -----------------: | -------------: |
-| lossy.webp          |       1 |      2.688 |              2.781 |              2.772 |          3.294 |
-| lossy.webp          |       3 |      1.630 |              1.668 |              1.667 |          1.843 |
-| simplelf-lossy.webp |       1 |      2.754 |              2.841 |              2.828 |          3.374 |
-| simplelf-lossy.webp |       3 |      1.979 |              2.018 |              2.007 |          2.197 |
-| a_lossy.webp        |       1 |      0.520 |              0.550 |              0.547 |          0.735 |
-| a_lossy.webp        |       3 |      0.398 |              0.409 |              0.407 |          0.475 |
-| anim_yuv.webp       |       1 |      2.371 |              2.399 |              2.408 |          2.607 |
-| anim_yuv.webp       |       3 |      0.897 |              0.929 |              0.926 |          0.996 |
-| anim_yuva.webp      |       1 |      5.647 |              5.946 |              5.900 |          6.622 |
-| anim_yuva.webp      |       3 |      2.237 |              2.311 |              2.292 |          2.569 |
+| lossy.webp          |       1 |      2.868 |              2.960 |              2.881 |          3.427 |
+| lossy.webp          |       3 |      1.634 |              1.675 |              1.658 |          1.846 |
+| simplelf-lossy.webp |       1 |      2.863 |              2.966 |              2.933 |          3.500 |
+| simplelf-lossy.webp |       3 |      1.978 |              2.022 |              2.010 |          2.204 |
+| a_lossy.webp        |       1 |      0.543 |              0.575 |              0.561 |          0.771 |
+| a_lossy.webp        |       3 |      0.400 |              0.413 |              0.410 |          0.481 |
+| anim_yuv.webp       |       1 |      2.453 |              2.465 |              2.449 |          2.685 |
+| anim_yuv.webp       |       3 |      0.921 |              0.940 |              0.927 |          1.026 |
+| anim_yuva.webp      |       1 |      5.795 |              5.968 |              5.921 |          6.793 |
+| anim_yuva.webp      |       3 |      2.279 |              2.329 |              2.320 |          2.596 |
 
-The balanced filter's geometric mean time is 3.4% above fancy at one thread and
-2.3% above at three threads. It takes 15.4% and 10.1% less time than Lanczos-5.
-Compared directly with the previous three-tap binary, it takes 0.4% less time at
-one thread and 0.5% less at three threads; those small differences are within
-the run-to-run variation. Whole-decode speed is essentially unchanged, and it
-still does not beat ordinary fancy.
+A second run alternated baseline and centered fast-fancy invocations, reversing
+order on each pair: four warmup pairs, 24 measured pairs, and 128 decodes per
+invocation. The geometric mean time reduction across the five files was **0.8%
+at one thread and 0.6% at three threads**. Still-image reductions ranged from
+0.0% to 1.9%; animation reductions ranged from -0.2% to 0.7%. This is a small
+improvement, with several individual cases within timing noise. In the four-mode
+Hyperfine run, centered fast-fancy took 1.7% more time than ordinary fancy at
+one thread and 1.6% more at three threads, and 16.4%/10.9% less than Lanczos-5.
 
-The NEON RGBA kernel measures 21.34 ns per 64 pixels, versus the previous 22.79
-ns; horizontal interpolation measures 4.49 ns per 128 samples. Lanczos-5
-measures 41.65 ns and 25.87 ns respectively. These are hot-cache kernel timings.
-The balanced kernel shifts byte luma to Q6 in 16-bit lanes before its widening
-multiply, loads the RGB constants together, and keeps the three row pointers per
-plane in registers. Full-precision RGB sums and output rounding are retained.
+The hot-cache NEON RGBA kernel measures 19.71 ns per 64 pixels; horizontal
+interpolation measures 5.69 ns per 128 samples. Lanczos-5 measures 42.09 ns and
+26.23 ns respectively. The added horizontal centering trades a little horizontal
+work for less work on every output row. The balanced kernel shifts byte luma to
+Q6 in 16-bit lanes before its widening multiply, loads the RGB constants
+together, and keeps the three row pointers per plane in registers.
+Full-precision RGB sums and output rounding are retained.
 
 An additional experiment narrowed the rounded vertical chroma to 16-bit lanes
 and used a doubling multiply for the blue coefficient. It remained bit-exact but
@@ -168,20 +177,21 @@ THREADS=3 RUNS=18 WARMUP=5 BENCH_DIR=build/chromabench-t3 ./scripts/chromabench.
 build/checkasm --test=yuvdsp --function='*chroma*' --bench
 ```
 
-Native x86 speed has not been measured. The existing Lanczos-5 AVX2 kernels
-previously passed checkasm under a temporary harness selecting them directly in
-Rosetta, which executes the instructions but does not advertise the required CPU
-features here. Library feature detection is unchanged.
+Native x86 speed has not been measured. Both filters pass checkasm under a
+temporary harness selecting AVX2 directly in Rosetta, which executes the
+instructions but does not advertise the required CPU features here. Library
+feature detection is unchanged.
 
 ## Validation
 
 All 237 Meson tests pass, including libwebp parity, the reference corpus, CLI,
 and row-boundary tests. Rust workspace tests pass with and without assembly; the
-x86-64 build also passes a compile check. Across all 49 top-level corpus files,
-extra-fancy output matches the preserved binary, and fast-fancy NEON output
-matches its scalar fallback. Rust tests cover scalar tails, signed values,
-constants, odd and tiny dimensions, all layouts, two-byte output, alpha,
-disjoint conversion bands, incremental row finality, and changes to options
-during threaded animation decoding. Both NEON filters pass twenty checkasm
-seeds. The C tests cover mutually exclusive flags and legacy option sizes.
-`stylecheck.sh` and the new Python script's Ruff checks pass.
+x86-64 build also passes. Across 134 corpus, photographic, and screen-content
+files and all five RGB layouts, centered fast-fancy output matches both the
+preserved baseline and scalar fallback byte for byte. Extra-fancy output remains
+unchanged. Rust tests cover scalar tails, signed values, constants, odd and tiny
+dimensions, all layouts, two-byte output, alpha, disjoint conversion bands,
+incremental row finality, and changes to options during threaded animation
+decoding. Both NEON filters pass twenty checkasm seeds. The C tests cover
+mutually exclusive flags and legacy option sizes. `stylecheck.sh` and the new
+Python script's Ruff checks pass.

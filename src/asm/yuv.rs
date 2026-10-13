@@ -206,7 +206,7 @@ fn chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
     );
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn fast_chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(
     dst: &mut [i16],
     src: &[u8],
@@ -222,7 +222,7 @@ fn fast_chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(
     crate::dsp::yuv::fast_chroma_horizontal(&mut dst[2 * done..], &src[done..]);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn fast_chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
     dst: &mut [u8],
     y: &[u8],
@@ -803,6 +803,19 @@ mod arch {
         raw_chroma_row!(ExtraRgb, extra_rgb, "wpd_chroma_row_rgb_avx2");
         raw_chroma_row!(ExtraBgr, extra_bgr, "wpd_chroma_row_bgr_avx2");
 
+        raw!(
+            FastChromaHorizontal,
+            fast_chroma_h,
+            ChromaHorizontalRaw,
+            "wpd_fast_chroma_horizontal_avx2",
+            (*mut i16, *const u8, c_int)
+        );
+        raw_chroma_row!(FastArgb, fast_argb, "wpd_fast_chroma_row_argb_avx2");
+        raw_chroma_row!(FastRgba, fast_rgba, "wpd_fast_chroma_row_rgba_avx2");
+        raw_chroma_row!(FastBgra, fast_bgra, "wpd_fast_chroma_row_bgra_avx2");
+        raw_chroma_row!(FastRgb, fast_rgb, "wpd_fast_chroma_row_rgb_avx2");
+        raw_chroma_row!(FastBgr, fast_bgr, "wpd_fast_chroma_row_bgr_avx2");
+
         raw_row!(
             DispatchFirst,
             dispatch_first,
@@ -900,8 +913,10 @@ mod arch {
             @upsample avx2;
             @rows avx2;
             @extra avx2;
+            @fast avx2;
 
             chroma_horizontal = chroma_horizontal::<avx2::ChromaHorizontal>;
+            fast_chroma_horizontal = fast_chroma_horizontal::<avx2::FastChromaHorizontal>;
 
 
             argb_to_yuv444 = argb_to_yuv444::<avx2::ArgbToYuv444>;
