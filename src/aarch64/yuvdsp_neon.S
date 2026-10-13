@@ -1351,10 +1351,10 @@ chroma_row bgr
 // Tuned three-tap interpolation, Q6. Horizontal sums lie in
 // [-2550, 18870], fitting eight signed samples per NEON register.
 const fast_filter_odd, align=4
-        .short          -10, 56, 18, 0
+        .short          -10, 59, 15, 0
 endconst
 const fast_filter_even, align=4
-        .short          18, 56, -10, 0
+        .short          15, 59, -10, 0
 endconst
 
 function wpd_fast_chroma_horizontal_neon, export=1
@@ -1386,7 +1386,7 @@ endfunc
 // Fold the final Q20 rounding bias into luma once. Narrowing by 16 then
 // by 4 gives the same clipped byte as rounding each RGB sum by 20.
 const fast_yuv_coeffs, align=4
-        .word           1220928, 26149, 6419, 13320, 33050, -19010560
+        .word           19077, 26149, 6419, 13320, 33050, -19010560
 endconst
 
 .macro  fast_chroma_row layout
@@ -1401,34 +1401,29 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         add             x2, x2, x6, lsl #3
         add             x3, x3, x6, lsl #3
         movrel          x6,  fast_yuv_coeffs
-        ld1r            {v24.4s}, [x6], #4
-        ld1r            {v25.4s}, [x6], #4
-        ld1r            {v26.4s}, [x6], #4
-        ld1r            {v27.4s}, [x6], #4
-        ld1r            {v28.4s}, [x6], #4
-        ld1r            {v31.4s}, [x6]
+        ldr             q6, [x6]
+        ldr             d24, [x6, #16]
+        dup             v31.4s, v24.s[1]
         movi            v29.4s, #32, lsl #8
+        ldp             x8, x9, [x2]
+        ldr             x10, [x2, #16]
+        ldp             x11, x12, [x3]
+        ldr             x13, [x3, #16]
         mov             x7,  #0
-1:      ldr             x9,  [x2, #0]
-        ldr             x10, [x3, #0]
-        ldr             q0,  [x9, x7]
-        ldr             q7,  [x10, x7]
+1:      ldr             q0,  [x8, x7]
+        ldr             q7,  [x11, x7]
         smull           v1.4s, v0.4h, v5.h[0]
         smull2          v2.4s, v0.8h, v5.h[0]
         smull           v3.4s, v7.4h, v5.h[0]
         smull2          v4.4s, v7.8h, v5.h[0]
-        ldr             x9,  [x2, #8]
-        ldr             x10, [x3, #8]
         ldr             q0,  [x9, x7]
-        ldr             q7,  [x10, x7]
+        ldr             q7,  [x12, x7]
         smlal           v1.4s, v0.4h, v5.h[1]
         smlal2          v2.4s, v0.8h, v5.h[1]
         smlal           v3.4s, v7.4h, v5.h[1]
         smlal2          v4.4s, v7.8h, v5.h[1]
-        ldr             x9,  [x2, #16]
-        ldr             x10, [x3, #16]
-        ldr             q0,  [x9, x7]
-        ldr             q7,  [x10, x7]
+        ldr             q0,  [x10, x7]
+        ldr             q7,  [x13, x7]
         smlal           v1.4s, v0.4h, v5.h[2]
         smlal2          v2.4s, v0.8h, v5.h[2]
         smlal           v3.4s, v7.4h, v5.h[2]
@@ -1442,27 +1437,26 @@ function wpd_fast_chroma_row_\layout\()_neon, export=1
         srshr           v4.4s, v4.4s, #6
         sub             v4.4s, v4.4s, v29.4s
         ldr             d0,  [x1], #8
-        uxtl            v0.8h, v0.8b
-        uxtl            v16.4s, v0.4h
-        uxtl2           v17.4s, v0.8h
-        mul             v16.4s, v16.4s, v24.4s
-        mul             v17.4s, v17.4s, v24.4s
+        // Y << 6 fits i16; widen only for the full-precision product.
+        ushll           v0.8h, v0.8b, #6
+        smull           v16.4s, v0.4h, v6.h[0]
+        smull2          v17.4s, v0.8h, v6.h[0]
         add             v16.4s, v16.4s, v31.4s
         add             v17.4s, v17.4s, v31.4s
         mov             v18.16b, v16.16b
-        mla             v18.4s, v3.4s, v25.4s
+        mla             v18.4s, v3.4s, v6.s[1]
         mov             v20.16b, v16.16b
-        mls             v20.4s, v1.4s, v26.4s
-        mls             v20.4s, v3.4s, v27.4s
+        mls             v20.4s, v1.4s, v6.s[2]
+        mls             v20.4s, v3.4s, v6.s[3]
         mov             v22.16b, v16.16b
-        mla             v22.4s, v1.4s, v28.4s
+        mla             v22.4s, v1.4s, v24.s[0]
         mov             v19.16b, v17.16b
-        mla             v19.4s, v4.4s, v25.4s
+        mla             v19.4s, v4.4s, v6.s[1]
         mov             v21.16b, v17.16b
-        mls             v21.4s, v2.4s, v26.4s
-        mls             v21.4s, v4.4s, v27.4s
+        mls             v21.4s, v2.4s, v6.s[2]
+        mls             v21.4s, v4.4s, v6.s[3]
         mov             v23.16b, v17.16b
-        mla             v23.4s, v2.4s, v28.4s
+        mla             v23.4s, v2.4s, v24.s[0]
         sqshrn          v18.4h, v18.4s, #16
         sqshrn2         v18.8h, v19.4s, #16
         sqshrun         v18.8b, v18.8h, #4

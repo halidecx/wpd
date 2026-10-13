@@ -52,9 +52,9 @@ build/wpd --fast-fancy -f rgba input.webp fast.pam
 
 Extra-fancy uses Lanczos-5 with NEON and AVX2. Fast-fancy uses tuned three-tap
 interpolation with NEON (scalar on other architectures). On the gb82 Q90
-comparison, fast-fancy slightly exceeds Lanczos-5's mean metric gain. On M5 Pro,
-its geometric mean decode time is 3.8% above ordinary fancy with one thread, or
-2.7% above with three threads across the five benchmark files.
+comparison, fast-fancy retains 99.6% of Lanczos-5's fssimu2 gain, 95.7% of its
+Butteraugli improvement, and 97.7% of its fcvvdp gain. Its M5 Pro decode time
+approaches ordinary fancy; see the detailed measurements below.
 
 Set `extra_fancy_upsampling` or `fast_fancy_upsampling` in Rust `Options` or C
 `WPDDecoderOptions`. These and `no_fancy_upsampling` are mutually exclusive.

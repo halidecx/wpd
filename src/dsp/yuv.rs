@@ -75,7 +75,7 @@ pub fn chroma_row<const L: usize>(
 
 /// Tuned three-tap interpolation in Q6, padded for the two reversed phases.
 /// The coefficients sum to 64; the horizontal result fits signed 16 bits.
-pub const FAST_CHROMA: [i16; 4] = [-10, 56, 18, 0];
+pub const FAST_CHROMA: [i16; 4] = [-10, 59, 15, 0];
 pub type FastChromaRowFn = ChromaRowFn<4>;
 
 pub fn fast_chroma_horizontal(dst: &mut [i16], src: &[u8]) {

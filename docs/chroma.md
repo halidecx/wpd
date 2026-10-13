@@ -27,18 +27,19 @@ two quarter-sample phases use reversed, normalized Q14 coefficients. Horizontal
 interpolation retains signed Q6 samples, including negative lobes. The filter
 and its output are preserved alongside the new mode.
 
-Fast-fancy uses a tuned three-tap filter: `[-10, 56, 18] / 64` for the odd phase
-and `[18, 56, -10] / 64` for the even phase. Both phases share the same three
+Fast-fancy uses a tuned three-tap filter: `[-10, 59, 15] / 64` for the odd phase
+and `[15, 59, -10] / 64` for the even phase. Both phases share the same three
 source samples. The scalar interface pads the appropriate end with zero to reuse
 the four-row cache; NEON skips that tap entirely. The coefficients sum to 64,
 preserving constant chroma. Horizontal results lie in `[-2550, 18870]`, so NEON
 computes eight signed samples per register without widening to 32 bits.
 
-The coefficients were selected by searching around the previous Q6 Keys cubic
-filter `[-7, 56, 17, -2]` on the 25-image gb82 photographic set at Q90, then
-checking Q75 and Q95. This is an empirically tuned filter, not exact Keys cubic
-or Lanczos interpolation. The simpler three-tap support improves the measured
-quality while removing horizontal loads and vertical multiply-accumulates.
+The coefficients were selected using fssimu2, Butteraugli, and fcvvdp rather
+than fssimu2 alone. A search around the earlier cubic and three-tap filters
+included four-tap filters, separate horizontal/vertical coefficients, and
+overshoot limits. The final three-tap filter balances the metrics without adding
+taps. It is an empirically tuned filter, not exact Keys cubic or Lanczos
+interpolation.
 
 Both filters retain fractional chroma through the vertical pass and BT.601
 limited-range RGB matrix, then round and clip once. This matters to quality: an
@@ -67,93 +68,99 @@ until the two or five future chroma rows are stable.
 
 ## Quality
 
-Measured on the same 25 photographic PNGs in the gb82 image set, at 576x576,
-with cwebp `-m 6` and fssimu2 0.2.0. Each row compares identical encoded inputs.
-Scores are arithmetic means; retained gain is
-`(fast - fancy) / (extra - fancy)`.
+The full-metric evaluation uses upstream decbench's encoding and metric
+functions: 25 gb82 photographs, cwebp method 6/Q90, FFmpeg or libwebp-default
+input color conversion, fssimu2 0.2.0, Butteraugli 3-norm at 203 nits, and
+fcvvdp 0.4.0's `fhd` display. PNG metric inputs are produced losslessly from
+wpd's RGB output. Default fancy matches dwebp on every measured image and
+metric.
 
-| Chroma conversion and quality |   Fancy | Fast-fancy | Extra-fancy | Gain retained |
-| ----------------------------- | ------: | ---------: | ----------: | ------------: |
-| FFmpeg, Q75                   | 69.0974 |    69.2774 |     69.2466 |        120.7% |
-| FFmpeg, Q90                   | 83.5503 |    84.0819 |     84.0618 |        103.9% |
-| FFmpeg, Q95                   | 87.4293 |    88.1836 |     88.2022 |         97.6% |
-| Sharp YUV, Q90                | 84.3623 |    83.9773 |     83.6808 |             — |
+Arithmetic mean scores for FFmpeg input conversion at Q90:
 
-Fast-fancy exceeds Lanczos-5's average gain at Q75 and Q90 and retains 97.6% at
-Q95. These fractions describe this dataset's metric differences, not all images
-or a percentage of visual quality. Q75 and Q95 reuse the tuning images; they are
-checks across encoding qualities, not independent image holdouts. Sharp YUV
-still favors default fancy, which is why the filters remain opt-in.
+| Filter             | fssimu2 ↑ | Butteraugli ↓ | fcvvdp ↑ |
+| ------------------ | --------: | ------------: | -------: |
+| Ordinary fancy     |   83.5503 |      0.963581 | 9.831676 |
+| Previous three-tap |   84.0819 |      0.927074 | 9.839952 |
+| Balanced three-tap |   84.0596 |      0.923329 | 9.840240 |
+| Lanczos-5          |   84.0618 |      0.921539 | 9.840444 |
 
-On ten gb82 screen-content PNGs excluded from coefficient tuning, Q90 means are
-84.3894 for fancy, 85.1980 for fast-fancy, and 85.3188 for extra-fancy: 87.0% of
-the Lanczos-5 gain. The previous cubic filter scored 85.2301 here, so the
-photographic improvement comes with a small screen-content regression.
+The balanced filter trades 0.0223 fssimu2 points versus the previous three-tap
+filter for better Butteraugli and fcvvdp scores. The gain retained relative to
+Lanczos-5 is `(fast - fancy) / (extra - fancy)` for each metric:
 
-At photographic Q90, FFmpeg's Lanczos-5 mean is 84.0614, compared with wpd's
-84.0618. Fast-fancy scores 84.0819, versus 84.0321 for the previous cubic
-filter.
+| Input / quality / image set    | fssimu2 | Butteraugli | fcvvdp |
+| ------------------------------ | ------: | ----------: | -----: |
+| FFmpeg / Q75 / photos          |   93.8% |       96.8% | 101.8% |
+| FFmpeg / Q90 / photos          |   99.6% |       95.7% |  97.7% |
+| libwebp default / Q90 / photos |  101.6% |       96.7% |  98.9% |
+| FFmpeg / Q95 / photos          |   98.5% |       96.6% |  96.8% |
+| FFmpeg / Q90 / screen content  |   97.3% |       96.4% |  95.7% |
 
-Reproduce with FFmpeg, cwebp, and fssimu2 on `PATH`:
+The screen-content set contains ten gb82 PNGs. The previous three-tap filter
+retained 87.0%, 86.1%, and 75.6% there. All of these sets and encoding qualities
+informed the final choice; none is an independent final holdout. The fractions
+are differences in metric scores, not bitrate savings or percentages of visual
+quality. Sharp YUV is excluded from filter selection: it targets ordinary fancy,
+which remains the appropriate mode for those encodes.
+
+Reproduce the full Q90 comparison with a decbench checkout and its dependencies
+on `PATH` (`uv` supplies its Rich dependency):
 
 ```sh
-python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
-    --output wpd-test-data/chroma-fast-q90
-python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
-    --quality 75 --output wpd-test-data/chroma-fast-q75
-python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
-    --quality 95 --output wpd-test-data/chroma-fast-q95
-python3 scripts/chromaquality.py /path/to/gb82-image-set/png \
-    --sharp-yuv --output wpd-test-data/chroma-fast-sharp
-python3 scripts/chromaquality.py /path/to/gb82-image-set/sc-png \
-    --output wpd-test-data/chroma-fast-screen
+uv run scripts/chromametrics.py /path/to/gb82-image-set/png \
+    --decbench /path/to/decbench/dec.py \
+    --output wpd-test-data/chromametrics-ffmpeg
+uv run scripts/chromametrics.py /path/to/gb82-image-set/png \
+    --decbench /path/to/decbench/dec.py --encoder libwebp_default \
+    --output wpd-test-data/chromametrics-default
 ```
 
-Decoded PPMs, generated WebPs, and per-image JSON results stay in each output
-directory. Use separate directories to retain each encoding comparison.
+Use `--previous /path/to/previous-wpd` to include a preserved fast-fancy binary.
+Per-image metrics and means are written to JSON. The adapter delegates encoding,
+decoding orchestration, and all three metric parsers to upstream `dec.py`. For
+the fssimu2-only quality sweep, use `scripts/chromaquality.py --quality 75` or
+`--quality 95`, passing the reference directory and a separate output path.
 
 ## Speed
 
 Measured on Apple M5 Pro with a release build, assembly enabled, RGBA output, 64
 decode repetitions per invocation, five warmups, and eighteen Hyperfine runs.
-Times are milliseconds per complete file decode, including every frame of
-animations, with output discarded. Builds, tests, and quality measurements were
-finished before timing began.
+Times are milliseconds per complete file decode, including all animation frames,
+with output discarded. No builds, tests, or quality scoring ran during timing.
+The previous fast binary is commit `87bcdd8` (`[-10, 56, 18] / 64`).
 
-| File                | Threads | Fancy (ms) | Fast-fancy (ms) | Extra-fancy (ms) | Fast over fancy |
-| ------------------- | ------: | ---------: | --------------: | ---------------: | --------------: |
-| lossy.webp          |       1 |      2.719 |           2.814 |            3.327 |           +3.5% |
-| lossy.webp          |       3 |      1.613 |           1.661 |            1.844 |           +3.0% |
-| simplelf-lossy.webp |       1 |      2.752 |           2.864 |            3.392 |           +4.1% |
-| simplelf-lossy.webp |       3 |      1.979 |           2.022 |            2.190 |           +2.1% |
-| a_lossy.webp        |       1 |      0.523 |           0.557 |            0.744 |           +6.5% |
-| a_lossy.webp        |       3 |      0.398 |           0.414 |            0.471 |           +3.8% |
-| anim_yuv.webp       |       1 |      2.362 |           2.404 |            2.619 |           +1.8% |
-| anim_yuv.webp       |       3 |      0.897 |           0.913 |            1.004 |           +1.7% |
-| anim_yuva.webp      |       1 |      5.673 |           5.842 |            6.534 |           +3.0% |
-| anim_yuva.webp      |       3 |      2.241 |           2.305 |            2.575 |           +2.9% |
+| File                | Threads | Fancy (ms) | Previous fast (ms) | Balanced fast (ms) | Lanczos-5 (ms) |
+| ------------------- | ------: | ---------: | -----------------: | -----------------: | -------------: |
+| lossy.webp          |       1 |      2.688 |              2.781 |              2.772 |          3.294 |
+| lossy.webp          |       3 |      1.630 |              1.668 |              1.667 |          1.843 |
+| simplelf-lossy.webp |       1 |      2.754 |              2.841 |              2.828 |          3.374 |
+| simplelf-lossy.webp |       3 |      1.979 |              2.018 |              2.007 |          2.197 |
+| a_lossy.webp        |       1 |      0.520 |              0.550 |              0.547 |          0.735 |
+| a_lossy.webp        |       3 |      0.398 |              0.409 |              0.407 |          0.475 |
+| anim_yuv.webp       |       1 |      2.371 |              2.399 |              2.408 |          2.607 |
+| anim_yuv.webp       |       3 |      0.897 |              0.929 |              0.926 |          0.996 |
+| anim_yuva.webp      |       1 |      5.647 |              5.946 |              5.900 |          6.622 |
+| anim_yuva.webp      |       3 |      2.237 |              2.311 |              2.292 |          2.569 |
 
-Across these five files, geometric mean fast-fancy time is 3.8% above fancy with
-one thread and 2.7% above with three threads. It takes 15.2% less time than
-Lanczos-5 with one thread and 9.9% less with three. It approaches default
-fancy's speed but does not equal or beat it on these measurements.
+The balanced filter's geometric mean time is 3.4% above fancy at one thread and
+2.3% above at three threads. It takes 15.4% and 10.1% less time than Lanczos-5.
+Compared directly with the previous three-tap binary, it takes 0.4% less time at
+one thread and 0.5% less at three threads; those small differences are within
+the run-to-run variation. Whole-decode speed is essentially unchanged, and it
+still does not beat ordinary fancy.
 
-A separate twelve-run comparison against the preserved cubic binary, with four
-warmups and the same five files and repetition count, measures 1.5% less decode
-time at one thread and 1.0% less at three threads (geometric means).
+The NEON RGBA kernel measures 21.34 ns per 64 pixels, versus the previous 22.79
+ns; horizontal interpolation measures 4.49 ns per 128 samples. Lanczos-5
+measures 41.65 ns and 25.87 ns respectively. These are hot-cache kernel timings.
+The balanced kernel shifts byte luma to Q6 in 16-bit lanes before its widening
+multiply, loads the RGB constants together, and keeps the three row pointers per
+plane in registers. Full-precision RGB sums and output rounding are retained.
 
-In checkasm, NEON horizontal interpolation takes 4.66 ns for fast-fancy versus
-26.09 ns for Lanczos-5, producing 128 samples. The fused RGBA row takes 22.79 ns
-versus 41.90 ns for 64 pixels. The previous cubic kernels took 6.46 ns and 25.91
-ns respectively. These are kernel timings with data hot in cache, not complete
-decode times. Besides skipping the zero tap, the new kernel initializes vertical
-sums with widening multiplies and packs four-byte RGB layouts with interleaves
-and paired stores.
-
-Hoisting row pointers and using 16-bit operands for the full-precision RGB
-matrix did not improve whole-decode timing and were dropped. Filters whose
-coefficients could be reduced to a few shifts and adds lost too much metric
-gain.
+An additional experiment narrowed the rounded vertical chroma to 16-bit lanes
+and used a doubling multiply for the blue coefficient. It remained bit-exact but
+did not improve decode timing, so it was dropped. Four-tap filters,
+axis-specific coefficients, and overshoot limits did not offer a sufficiently
+consistent quality advantage over the selected three-tap filter.
 
 ```sh
 RUNS=18 WARMUP=5 ./scripts/chromabench.sh
