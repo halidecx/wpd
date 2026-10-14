@@ -310,7 +310,7 @@ impl<'a> Decoder<'a> {
     pub(crate) fn frame_settings(&self) -> super::slot::FrameSettings {
         super::slot::FrameSettings {
             bypass_filtering: self.filter_bypass(),
-            no_fancy_upsampling: self.options.no_fancy_upsampling,
+            sampling: self.options.sampling(),
             to_argb: self.frame_to_argb(),
             premultiply: self.frame_premultiply(),
         }

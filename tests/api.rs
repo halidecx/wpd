@@ -89,38 +89,58 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
 
 #[test]
 fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
-    for path in corpus() {
-        let bytes = fs::read(&path).unwrap();
-        let mut whole = Decoder::new();
+    for (extra_fancy_upsampling, fast_fancy_upsampling) in
+        [(false, false), (true, false), (false, true)]
+    {
+        for path in corpus() {
+            let bytes = fs::read(&path).unwrap();
+            let mut whole = Decoder::new();
 
-        whole.set_format(Format::Rgba).unwrap();
-        whole
-            .open(&bytes)
-            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
+            whole
+                .set_options(Options {
+                    extra_fancy_upsampling,
+                    fast_fancy_upsampling,
+                    ..Options::default()
+                })
+                .unwrap();
+            whole.set_format(Format::Rgba).unwrap();
+            whole
+                .open(&bytes)
+                .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
 
-        let mut streamed = Decoder::new();
+            let mut streamed = Decoder::new();
 
-        streamed.set_format(Format::Rgba).unwrap();
-        streamed.open_stream().unwrap();
-        for chunk in bytes.chunks(97) {
-            streamed.append(chunk).unwrap();
-        }
-        streamed.end_of_stream().unwrap();
+            streamed
+                .set_options(Options {
+                    extra_fancy_upsampling,
+                    fast_fancy_upsampling,
+                    ..Options::default()
+                })
+                .unwrap();
+            streamed.set_format(Format::Rgba).unwrap();
+            streamed.open_stream().unwrap();
+            for chunk in bytes.chunks(97) {
+                streamed.append(chunk).unwrap();
+            }
+            streamed.end_of_stream().unwrap();
 
-        loop {
-            let want: Option<Vec<Vec<u8>>> = whole
-                .next_frame()
-                .unwrap()
-                .map(|p| p.rows_of(0).map(<[u8]>::to_vec).collect());
-            let got: Option<Vec<Vec<u8>>> = streamed
-                .next_frame()
-                .unwrap()
-                .map(|p| p.rows_of(0).map(<[u8]>::to_vec).collect());
+            loop {
+                let want: Option<Vec<Vec<u8>>> = whole
+                    .next_frame()
+                    .unwrap()
+                    .map(|p| p.rows_of(0).map(<[u8]>::to_vec).collect());
+                let got: Option<Vec<Vec<u8>>> = streamed
+                    .next_frame()
+                    .unwrap()
+                    .map(|p| p.rows_of(0).map(<[u8]>::to_vec).collect());
 
-            assert_eq!(want.is_some(), got.is_some(), "{}", path.display());
-            match (want, got) {
-                (Some(want), Some(got)) => assert_eq!(want, got, "{}", path.display()),
-                _ => break,
+                assert_eq!(want.is_some(), got.is_some(), "{}", path.display());
+                match (want, got) {
+                    (Some(want), Some(got)) => {
+                        assert_eq!(want, got, "{}", path.display())
+                    }
+                    _ => break,
+                }
             }
         }
     }
@@ -128,50 +148,70 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
 
 #[test]
 fn a_partial_frame_hands_out_only_final_rows() {
-    for path in corpus() {
-        let bytes = fs::read(&path).unwrap();
-        let mut whole = Decoder::new();
+    for (extra_fancy_upsampling, fast_fancy_upsampling) in
+        [(false, false), (true, false), (false, true)]
+    {
+        for path in corpus() {
+            let bytes = fs::read(&path).unwrap();
+            let mut whole = Decoder::new();
 
-        whole.set_format(Format::Rgba).unwrap();
-        whole
-            .open(&bytes)
-            .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
-        if whole.info().unwrap().frame_count != 1 {
-            continue;
-        }
-
-        let want: Vec<Vec<u8>> = whole
-            .next_frame()
-            .unwrap()
-            .unwrap()
-            .rows_of(0)
-            .map(<[u8]>::to_vec)
-            .collect();
-
-        /* Each row is checked when it first counts as valid, which is when
-         * a row handed out ahead of the loop filter would still differ. */
-        for step in [251, 4093] {
-            let mut streamed = Decoder::new();
-            let mut checked = 0;
-
-            streamed.set_format(Format::Rgba).unwrap();
-            streamed.open_stream().unwrap();
-            for chunk in bytes.chunks(step) {
-                streamed.append(chunk).unwrap();
-                while streamed.next_frame().unwrap().is_some() {}
-
-                let Some((picture, rows)) = streamed.partial_frame().unwrap() else {
-                    continue;
-                };
-                let rows = rows as usize;
-
-                for (y, row) in picture.rows_of(0).enumerate().take(rows).skip(checked)
-                {
-                    assert_eq!(row, &want[y][..], "{} row {y}", path.display());
-                }
-                checked = checked.max(rows);
+            whole
+                .set_options(Options {
+                    extra_fancy_upsampling,
+                    fast_fancy_upsampling,
+                    ..Options::default()
+                })
+                .unwrap();
+            whole.set_format(Format::Rgba).unwrap();
+            whole
+                .open(&bytes)
+                .unwrap_or_else(|e| panic!("cannot open {}: {e}", path.display()));
+            if whole.info().unwrap().frame_count != 1 {
+                continue;
             }
-            assert_eq!(checked, want.len(), "{}", path.display());
+
+            let want: Vec<Vec<u8>> = whole
+                .next_frame()
+                .unwrap()
+                .unwrap()
+                .rows_of(0)
+                .map(<[u8]>::to_vec)
+                .collect();
+
+            /* Each row is checked when it first counts as valid, which is when
+             * a row handed out ahead of the loop filter would still differ. */
+            for step in [251, 4093] {
+                let mut streamed = Decoder::new();
+                let mut checked = 0;
+
+                streamed
+                    .set_options(Options {
+                        extra_fancy_upsampling,
+                        fast_fancy_upsampling,
+                        ..Options::default()
+                    })
+                    .unwrap();
+                streamed.set_format(Format::Rgba).unwrap();
+                streamed.open_stream().unwrap();
+                for chunk in bytes.chunks(step) {
+                    streamed.append(chunk).unwrap();
+                    while streamed.next_frame().unwrap().is_some() {}
+
+                    let Some((picture, rows)) = streamed.partial_frame().unwrap()
+                    else {
+                        continue;
+                    };
+                    let rows = rows as usize;
+
+                    for (y, row) in
+                        picture.rows_of(0).enumerate().take(rows).skip(checked)
+                    {
+                        assert_eq!(row, &want[y][..], "{} row {y}", path.display());
+                    }
+                    checked = checked.max(rows);
+                }
+                assert_eq!(checked, want.len(), "{}", path.display());
+            }
         }
     }
 }
@@ -373,7 +413,21 @@ fn a_scaled_decode_is_the_same_at_any_thread_count() {
 fn settings_changed_mid_animation_reach_the_next_frame() {
     type Switch = fn(&mut Decoder);
 
-    let switches: [(&str, Switch); 4] = [
+    let switches: [(&str, Switch); 6] = [
+        ("extra-fancy", |d| {
+            d.set_options(Options {
+                extra_fancy_upsampling: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
+        ("fast-fancy", |d| {
+            d.set_options(Options {
+                fast_fancy_upsampling: true,
+                ..Options::default()
+            })
+            .unwrap();
+        }),
         ("planar", |d| d.set_format(Format::Yuv420p).unwrap()),
         ("filter", |d| {
             d.set_options(Options {

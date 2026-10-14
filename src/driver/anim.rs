@@ -44,7 +44,7 @@ fn ahead_share(frame: u64, sizes: &[usize]) -> Option<(usize, usize)> {
 pub struct CPlacement {
     pub geom: Placement,
     pub premultiply: bool,
-    pub no_fancy_upsampling: bool,
+    pub sampling: crate::convert::Sampling,
     pub clear_argb: [u8; 4],
     pub clear_yuva: [u8; 4],
     pub threads: usize,
@@ -169,13 +169,7 @@ fn prepare_canvas(
         if format == Format::Argb && canvas.format == Some(Format::Yuva420p) {
             let yuva = mem::take(canvas);
 
-            convert_to_argb(
-                ydsp,
-                canvas,
-                &yuva.frame(),
-                pl.no_fancy_upsampling,
-                pl.threads,
-            )?;
+            convert_to_argb(ydsp, canvas, &yuva.frame(), pl.sampling, pl.threads)?;
         }
         if pl.geom.frame.prev_anmf_flags & crate::container::ANMF_FLAG_DISPOSE != 0 {
             clear_rect(
@@ -238,7 +232,7 @@ impl<'a> Decoder<'a> {
                 },
             },
             premultiply: format_is_premultiplied(self.out_format.0),
-            no_fancy_upsampling: self.options.no_fancy_upsampling,
+            sampling: self.options.sampling(),
             clear_argb: self.clear_argb,
             clear_yuva: self.clear_yuva.0,
             threads: self.ahead.walk_threads(self.threads.0),

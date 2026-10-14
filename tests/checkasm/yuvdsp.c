@@ -672,10 +672,102 @@ static void check_premultiply_argb_regimes(WPDYUVDSP *dsp) {
     }
 }
 
+static void check_chroma_horizontal(WPDYUVDSP *dsp, int fast) {
+    uint8_t src[MAX_PIXELS + 11];
+    int16_t dst0[2 * MAX_PIXELS + 2], dst1[2 * MAX_PIXELS + 2];
+    declare_func(void, int16_t *, const uint8_t *, int);
+
+    if (check_func(fast ? dsp->fast_chroma_horizontal : dsp->chroma_horizontal,
+                   "%schroma_horizontal",
+                   fast ? "fast_" : "")) {
+        for (int n = 1; n <= MAX_BLOCKS; n++) {
+            for (int mode = 0; mode < 4; mode++) {
+                for (size_t x = 0; x < sizeof(src); x++)
+                    src[x] = mode == 0 ? (uint8_t)rnd()
+                        : mode == 1    ? 255
+                        : mode == 2    ? 0
+                                       : (x & 1) * 255;
+                memset(dst0, 0x55, sizeof(dst0));
+                memset(dst1, 0x55, sizeof(dst1));
+                /* Both source and output may be unaligned. Check guards. */
+                call_ref(dst0 + 1, src + 1, n);
+                call_new(dst1 + 1, src + 1, n);
+                if (memcmp(dst0, dst1, sizeof(dst0)))
+                    fail();
+            }
+        }
+        bench_new(dst1 + 1, src + 1, MAX_BLOCKS);
+    }
+}
+
+static void check_chroma_row(WPDYUVDSP *dsp, int layout, const char *name,
+                             int fast) {
+    int16_t        data[20][MAX_PIXELS + 1];
+    const int16_t *u[10], *v[10];
+    uint8_t        y[MAX_PIXELS + 1];
+    uint8_t        dst0[4 * MAX_PIXELS + 2], dst1[4 * MAX_PIXELS + 2];
+    const int      lo = fast ? -11000 : -6000;
+    const int      hi = fast ? 11000 : 22000;
+    declare_func(void,
+                 uint8_t *,
+                 const uint8_t *,
+                 const int16_t *const *,
+                 const int16_t *const *,
+                 int,
+                 int);
+
+    for (int t = 0; t < 10; t++) {
+        u[t] = data[t] + 1;
+        v[t] = data[t + 10] + 1;
+    }
+    if (check_func(
+            fast ? dsp->fast_chroma_row[layout] : dsp->chroma_row[layout],
+            "%schroma_row_%s",
+            fast ? "fast_" : "",
+            name)) {
+        for (int n = 1; n <= MAX_BLOCKS; n++) {
+            for (int mode = 0; mode < 4; mode++) {
+                for (int x = 0; x <= MAX_PIXELS; x++) y[x] = (uint8_t)rnd();
+                for (int t = 0; t < 20; t++)
+                    for (int x = 0; x <= MAX_PIXELS; x++)
+                        data[t][x] = mode == 0
+                            ? (int16_t)(rnd() % (hi - lo + 1) + lo)
+                            : mode == 1 ? (fast ? 0 : 128 * 64)
+                            : mode == 2 ? lo
+                            : (t & 1)   ? hi
+                                        : lo;
+                for (int odd = 0; odd < 2; odd++) {
+                    memset(dst0, 0x55, sizeof(dst0));
+                    memset(dst1, 0x55, sizeof(dst1));
+                    call_ref(dst0 + 1, y + 1, u, v, odd, n);
+                    call_new(dst1 + 1, y + 1, u, v, odd, n);
+                    if (memcmp(dst0, dst1, sizeof(dst0)))
+                        fail();
+                }
+            }
+        }
+        bench_new(dst1 + 1, y + 1, u, v, 1, MAX_BLOCKS);
+    }
+}
+
 void checkasm_check_yuvdsp(void) {
     WPDYUVDSP dsp;
 
     wpd_yuv_dsp_init(&dsp);
+    check_chroma_horizontal(&dsp, 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_ARGB, "argb", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGBA, "rgba", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb", 0);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr", 0);
+    report("chroma_lanczos5");
+    check_chroma_horizontal(&dsp, 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_ARGB, "argb", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGBA, "rgba", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGRA, "bgra", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_RGB, "rgb", 1);
+    check_chroma_row(&dsp, WPD_LAYOUT_BGR, "bgr", 1);
+    report("chroma_fast");
     check_upsample_block(&dsp, WPD_LAYOUT_ARGB, "argb");
     check_upsample_block(&dsp, WPD_LAYOUT_RGBA, "rgba");
     check_upsample_block(&dsp, WPD_LAYOUT_BGRA, "bgra");

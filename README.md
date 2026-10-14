@@ -40,6 +40,30 @@ produces `libwpd-sealed.a` alongside `libwpd.a`. The sealed static lib aborts
 instead of unwinding on an internal panic. The build merges every object into
 one monolithic object for downstream consumers.
 
+## Chroma upsampling
+
+Default fancy upsampling remains bit-exact with libwebp. Two opt-in filters are
+available when converting lossy chroma to packed RGB:
+
+```sh
+build/wpd --extra-fancy -f rgba input.webp lanczos.pam
+build/wpd --fast-fancy -f rgba input.webp fast.pam
+```
+
+Extra-fancy uses Lanczos-5 with NEON and AVX2. Fast-fancy uses tuned three-tap
+interpolation with NEON and AVX2 (scalar on other architectures). On the gb82
+Q90 comparison, fast-fancy retains 99.6% of Lanczos-5's fssimu2 gain, 95.7% of
+its Butteraugli improvement, and 97.7% of its fcvvdp gain. Its M5 Pro decode
+time approaches ordinary fancy; see the detailed measurements below.
+
+Set `extra_fancy_upsampling` or `fast_fancy_upsampling` in Rust `Options` or C
+`WPDDecoderOptions`. These and `no_fancy_upsampling` are mutually exclusive.
+Native planar and lossless frames bypass interpolation; scaled stills keep the
+existing rescaler. Streaming waits for two future chroma rows for fast-fancy, or
+five for extra-fancy. Quality depends on the encode: Sharp YUV favors the
+existing fancy filter. See [quality and speed measurements](docs/chroma.md), and
+reproduce timings with `./scripts/chromabench.sh`.
+
 ## Library
 
 `meson install -C build` installs the static/shared libraries, `wpd.h`, and

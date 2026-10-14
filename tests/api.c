@@ -2214,6 +2214,34 @@ static void test_decode_options(const uint8_t *data, size_t size) {
     options.bypass_filtering    = 1;
     options.no_fancy_upsampling = 1;
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    options.extra_fancy_upsampling = 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    options.no_fancy_upsampling = 0;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    options.extra_fancy_upsampling = -1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    options.extra_fancy_upsampling = 0;
+    options.fast_fancy_upsampling  = 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
+    options.extra_fancy_upsampling = 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    options.extra_fancy_upsampling = 0;
+    options.no_fancy_upsampling    = 1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    options.no_fancy_upsampling   = 0;
+    options.fast_fancy_upsampling = -1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+          WPD_ERR_INVALID_ARG);
+    /* A v4 caller may leave tail padding and all later memory uninitialized. */
+    options.struct_size = (offsetof(WPDDecoderOptions, extra_fancy_upsampling) +
+                           sizeof(int) + sizeof(size_t) - 1) &
+        ~(sizeof(size_t) - 1);
+    options.reserved4 = -1;
+    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_BGRA, NULL, &frame) == WPD_OK);
     CHECK(frame.format == WPD_PIX_FMT_BGRA);
     wpd_frame_free(&frame);

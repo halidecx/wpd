@@ -1309,3 +1309,360 @@ DISPATCH_ALPHA dispatch_alpha_last,  3
 INIT_YMM avx2
 DISPATCH_ALPHA dispatch_alpha_first, 0
 DISPATCH_ALPHA dispatch_alpha_last,  3
+
+%if ARCH_X86_64
+SECTION_RODATA 32
+lanczos5_odd:  dd 148, -495, 1146, -2658, 14699, 4740, -1709, 767, -295, 41
+lanczos5_even: dd 41, -295, 767, -1709, 4740, 14699, -2658, 1146, -495, 148
+align 32
+pd_lanczos128: times 8 dd 128
+pd_lanczos_round: times 8 dd 524288
+
+SECTION .text
+INIT_YMM avx2
+; Eight chroma samples become sixteen interleaved Q6 output samples.
+cglobal chroma_horizontal, 3, 3, 15, dst, src, blocks
+    vpbroadcastd m5, [lanczos5_odd + 0]
+    vpbroadcastd m6, [lanczos5_odd + 4]
+    vpbroadcastd m7, [lanczos5_odd + 8]
+    vpbroadcastd m8, [lanczos5_odd + 12]
+    vpbroadcastd m9, [lanczos5_odd + 16]
+    vpbroadcastd m10, [lanczos5_odd + 20]
+    vpbroadcastd m11, [lanczos5_odd + 24]
+    vpbroadcastd m12, [lanczos5_odd + 28]
+    vpbroadcastd m13, [lanczos5_odd + 32]
+    vpbroadcastd m14, [lanczos5_odd + 36]
+.loop:
+    mova        m1, [pd_lanczos128]
+    mova        m2, m1
+    vpmovzxbd   m0, [srcq + 0]
+    pmulld      m3, m0, m14
+    paddd       m1, m3
+    vpmovzxbd   m0, [srcq + 1]
+    pmulld      m3, m0, m13
+    paddd       m1, m3
+    pmulld      m3, m0, m5
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 2]
+    pmulld      m3, m0, m12
+    paddd       m1, m3
+    pmulld      m3, m0, m6
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 3]
+    pmulld      m3, m0, m11
+    paddd       m1, m3
+    pmulld      m3, m0, m7
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 4]
+    pmulld      m3, m0, m10
+    paddd       m1, m3
+    pmulld      m3, m0, m8
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 5]
+    pmulld      m3, m0, m9
+    paddd       m1, m3
+    pmulld      m3, m0, m9
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 6]
+    pmulld      m3, m0, m8
+    paddd       m1, m3
+    pmulld      m3, m0, m10
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 7]
+    pmulld      m3, m0, m7
+    paddd       m1, m3
+    pmulld      m3, m0, m11
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 8]
+    pmulld      m3, m0, m6
+    paddd       m1, m3
+    pmulld      m3, m0, m12
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 9]
+    pmulld      m3, m0, m5
+    paddd       m1, m3
+    pmulld      m3, m0, m13
+    paddd       m2, m3
+    vpmovzxbd   m0, [srcq + 10]
+    pmulld      m3, m0, m14
+    paddd       m2, m3
+    psrad       m1, 8
+    psrad       m2, 8
+    punpckldq   m3, m1, m2
+    punpckhdq   m4, m1, m2
+    packssdw    m3, m4
+    movu        [dstq], m3
+    add         srcq, 8
+    add         dstq, 32
+    dec         blocksd
+    jg          .loop
+    RET
+
+SECTION_RODATA 32
+align 32
+pd_chroma_center: times 8 dd 8192
+pd_y16: times 8 dd 16
+pd_yq6: times 8 dd 19077 * 64
+pd_vr: times 8 dd 26149
+pd_ug: times 8 dd 6419
+pd_vg: times 8 dd 13320
+pd_ub: times 8 dd 33050
+
+align 32
+pw_fast_center: times 16 dw 8192
+pw_fast_59: times 16 dw 59
+pw_fast_15: times 16 dw 15
+pw_fast_10: times 16 dw 10
+pd_fast_round: times 8 dd 32
+fast_odd: dd -10, 59, 15
+fast_even: dd 15, 59, -10
+
+SECTION .text
+INIT_XMM avx2
+; Eight input samples yield sixteen centered Q6 samples. Both phases share
+; the middle tap; all horizontal products and sums fit signed words.
+cglobal fast_chroma_horizontal, 3, 3, 6, dst, src, blocks
+    mova        m3, [pw_fast_59]
+    mova        m4, [pw_fast_15]
+    mova        m5, [pw_fast_10]
+.loop:
+    vpmovzxbw   m0, [srcq + 1]
+    vpmovzxbw   m1, [srcq + 2]
+    vpmovzxbw   m2, [srcq + 3]
+    pmullw      m1, m3
+    pmullw      m0, m4
+    pmullw      m2, m5
+    paddw       m0, m1
+    psubw       m0, m2
+    vpmovzxbw   m2, [srcq + 3]
+    pmullw      m2, m4
+    paddw       m1, m2
+    vpmovzxbw   m2, [srcq + 1]
+    pmullw      m2, m5
+    psubw       m1, m2
+    psubw       m0, [pw_fast_center]
+    psubw       m1, [pw_fast_center]
+    punpcklwd   m2, m0, m1
+    punpckhwd   m0, m1
+    movu        [dstq], m2
+    movu        [dstq + 16], m0
+    add         srcq, 8
+    add         dstq, 32
+    dec         blocksd
+    jg          .loop
+    RET
+
+SECTION .text
+%macro CHROMA_ROW 2-3 0 ; layout, bytes per pixel, fast
+INIT_YMM avx2
+%if %3
+cglobal fast_chroma_row_%1, 6, 9, 16, dst, y, u, v, odd, blocks, coeff, offset, ptr
+    lea         coeffq, [fast_even]
+    test        oddd, oddd
+    jnz         .coeffs_fast
+    add         uq, 8
+    add         vq, 8
+    jmp         .load_fast
+.coeffs_fast:
+    lea         coeffq, [fast_odd]
+.load_fast:
+    vpbroadcastd m5, [coeffq]
+    vpbroadcastd m6, [coeffq + 4]
+    vpbroadcastd m7, [coeffq + 8]
+    xor         offsetq, offsetq
+.loop:
+    mova        m1, [pd_fast_round]
+    mova        m2, m1
+%assign tap 0
+%rep 3
+%assign creg 5 + tap
+    mov         ptrq, [uq + tap * 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m %+ creg
+    paddd       m1, m0
+    mov         ptrq, [vq + tap * 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m %+ creg
+    paddd       m2, m0
+%assign tap tap + 1
+%endrep
+    psrad       m1, 6
+    psrad       m2, 6
+%else
+cglobal chroma_row_%1, 6, 9, 16, dst, y, u, v, odd, blocks, coeff, offset, ptr
+    lea         coeffq, [lanczos5_even]
+    test        oddd, oddd
+    jz          .coeffs
+    lea         coeffq, [lanczos5_odd]
+.coeffs:
+    vpbroadcastd m5, [coeffq + 0]
+    vpbroadcastd m6, [coeffq + 4]
+    vpbroadcastd m7, [coeffq + 8]
+    vpbroadcastd m8, [coeffq + 12]
+    vpbroadcastd m9, [coeffq + 16]
+    vpbroadcastd m10, [coeffq + 20]
+    vpbroadcastd m11, [coeffq + 24]
+    vpbroadcastd m12, [coeffq + 28]
+    vpbroadcastd m13, [coeffq + 32]
+    vpbroadcastd m14, [coeffq + 36]
+    xor         offsetq, offsetq
+.loop:
+    mova        m1, [pd_chroma_center]
+    mova        m2, m1
+    mov         ptrq, [uq + 0]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m5
+    paddd       m1, m0
+    mov         ptrq, [vq + 0]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m5
+    paddd       m2, m0
+    mov         ptrq, [uq + 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m6
+    paddd       m1, m0
+    mov         ptrq, [vq + 8]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m6
+    paddd       m2, m0
+    mov         ptrq, [uq + 16]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m7
+    paddd       m1, m0
+    mov         ptrq, [vq + 16]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m7
+    paddd       m2, m0
+    mov         ptrq, [uq + 24]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m8
+    paddd       m1, m0
+    mov         ptrq, [vq + 24]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m8
+    paddd       m2, m0
+    mov         ptrq, [uq + 32]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m9
+    paddd       m1, m0
+    mov         ptrq, [vq + 32]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m9
+    paddd       m2, m0
+    mov         ptrq, [uq + 40]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m10
+    paddd       m1, m0
+    mov         ptrq, [vq + 40]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m10
+    paddd       m2, m0
+    mov         ptrq, [uq + 48]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m11
+    paddd       m1, m0
+    mov         ptrq, [vq + 48]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m11
+    paddd       m2, m0
+    mov         ptrq, [uq + 56]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m12
+    paddd       m1, m0
+    mov         ptrq, [vq + 56]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m12
+    paddd       m2, m0
+    mov         ptrq, [uq + 64]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m13
+    paddd       m1, m0
+    mov         ptrq, [vq + 64]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m13
+    paddd       m2, m0
+    mov         ptrq, [uq + 72]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m14
+    paddd       m1, m0
+    mov         ptrq, [vq + 72]
+    vpmovsxwd   m0, [ptrq + offsetq]
+    pmulld      m0, m14
+    paddd       m2, m0
+    psrad       m1, 14
+    psrad       m2, 14
+    psubd       m1, [pd_chroma_center]
+    psubd       m2, [pd_chroma_center]
+%endif
+    vpmovzxbd   m0, [yq]
+    psubd       m0, [pd_y16]
+    pmulld      m0, [pd_yq6]
+    pmulld      m3, m2, [pd_vr]
+    paddd       m3, m0
+    pmulld      m4, m1, [pd_ug]
+    pmulld      m15, m2, [pd_vg]
+    paddd       m4, m15
+    psubd       m4, m0, m4
+    pmulld      m15, m1, [pd_ub]
+    paddd       m15, m0
+    paddd       m3, [pd_lanczos_round]
+    psrad       m3, 20
+    vextracti128 xm0, m3, 1
+    packssdw    xm3, xm0
+    packuswb    xm3, xm3
+    paddd       m4, [pd_lanczos_round]
+    psrad       m4, 20
+    vextracti128 xm0, m4, 1
+    packssdw    xm4, xm0
+    packuswb    xm4, xm4
+    paddd       m15, [pd_lanczos_round]
+    psrad       m15, 20
+    vextracti128 xm0, m15, 1
+    packssdw    xm15, xm0
+    packuswb    xm15, xm15
+    pcmpeqb     xm0, xm0
+%ifidn %1, argb
+    punpcklbw   xm1, xm0, xm3
+    punpcklbw   xm2, xm4, xm15
+%elifidn %1, bgra
+    punpcklbw   xm1, xm15, xm4
+    punpcklbw   xm2, xm3, xm0
+%elifidn %1, bgr
+    punpcklbw   xm1, xm15, xm4
+    punpcklbw   xm2, xm3, xm0
+%else
+    punpcklbw   xm1, xm3, xm4
+    punpcklbw   xm2, xm15, xm0
+%endif
+    punpcklwd   xm0, xm1, xm2
+    punpckhwd   xm1, xm1, xm2
+%if %2 == 4
+    movu        [dstq], xm0
+    movu        [dstq + 16], xm1
+%else
+    pshufb      xm0, [shuf_drop_a]
+    pshufb      xm1, [shuf_drop_a]
+    movq        [dstq], xm0
+    pextrd      [dstq + 8], xm0, 2
+    movq        [dstq + 12], xm1
+    pextrd      [dstq + 20], xm1, 2
+%endif
+    add         offsetq, 16
+    add         yq, 8
+    add         dstq, 8 * %2
+    dec         blocksd
+    jg          .loop
+    RET
+%endmacro
+
+CHROMA_ROW argb, 4
+CHROMA_ROW rgba, 4
+CHROMA_ROW bgra, 4
+CHROMA_ROW rgb, 3
+CHROMA_ROW bgr, 3
+CHROMA_ROW argb, 4, 1
+CHROMA_ROW rgba, 4, 1
+CHROMA_ROW bgra, 4, 1
+CHROMA_ROW rgb, 3, 1
+CHROMA_ROW bgr, 3, 1
+%endif

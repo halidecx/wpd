@@ -38,6 +38,15 @@ pub type MultiplyRowFn = unsafe extern "C" fn(*mut u8, *const u8, c_int);
 pub type MultiplyArgbFn = unsafe extern "C" fn(*mut u8, c_int);
 pub type YuvRowFn =
     unsafe extern "C" fn(*mut u8, *const u8, *const u8, *const u8, c_int);
+pub type ChromaHorizontalFn = unsafe extern "C" fn(*mut i16, *const u8, c_int);
+pub type ChromaRowFn = unsafe extern "C" fn(
+    *mut u8,
+    *const u8,
+    *const *const i16,
+    *const *const i16,
+    c_int,
+    c_int,
+);
 
 #[repr(C)]
 #[allow(clippy::upper_case_acronyms)]
@@ -63,7 +72,83 @@ pub struct WPDYUVDSP {
     pub premultiply_argb_row: MultiplyArgbFn,
     pub yuv444_row: [YuvRowFn; LAYOUT_NB],
     pub yuv420_row: [YuvRowFn; LAYOUT_NB],
+    pub chroma_horizontal: ChromaHorizontalFn,
+    pub chroma_row: [ChromaRowFn; LAYOUT_NB],
+    pub fast_chroma_horizontal: ChromaHorizontalFn,
+    pub fast_chroma_row: [ChromaRowFn; LAYOUT_NB],
 }
+
+unsafe extern "C" fn chroma_horizontal_c(dst: *mut i16, src: *const u8, blocks: c_int) {
+    let Some(n) = count(blocks).map(|b| 8 * b) else {
+        return;
+    };
+
+    unsafe {
+        k::chroma_horizontal(
+            slice::from_raw_parts_mut(dst, 2 * n),
+            slice::from_raw_parts(src, n + 10),
+        );
+    }
+}
+
+macro_rules! chroma_row_tramp {
+    ($name:ident, $layout:expr, $kernel:ident) => {
+        unsafe extern "C" fn $name(
+            dst: *mut u8,
+            y: *const u8,
+            u: *const *const i16,
+            v: *const *const i16,
+            odd: c_int,
+            blocks: c_int,
+        ) {
+            let Some(n) = count(blocks).map(|b| 8 * b) else {
+                return;
+            };
+
+            unsafe {
+                let u = std::array::from_fn(|t| slice::from_raw_parts(*u.add(t), n));
+                let v = std::array::from_fn(|t| slice::from_raw_parts(*v.add(t), n));
+
+                k::$kernel::<$layout>(
+                    slice::from_raw_parts_mut(dst, bpp($layout) * n),
+                    slice::from_raw_parts(y, n),
+                    &u,
+                    &v,
+                    odd != 0,
+                );
+            }
+        }
+    };
+}
+
+chroma_row_tramp!(chroma_row_argb_c, LAYOUT_ARGB, chroma_row);
+chroma_row_tramp!(chroma_row_rgba_c, LAYOUT_RGBA, chroma_row);
+chroma_row_tramp!(chroma_row_bgra_c, LAYOUT_BGRA, chroma_row);
+chroma_row_tramp!(chroma_row_rgb_c, LAYOUT_RGB, chroma_row);
+chroma_row_tramp!(chroma_row_bgr_c, LAYOUT_BGR, chroma_row);
+
+unsafe extern "C" fn fast_chroma_horizontal_c(
+    dst: *mut i16,
+    src: *const u8,
+    blocks: c_int,
+) {
+    let Some(n) = count(blocks).map(|b| 8 * b) else {
+        return;
+    };
+
+    unsafe {
+        k::fast_chroma_horizontal(
+            slice::from_raw_parts_mut(dst, 2 * n),
+            slice::from_raw_parts(src, n + 4),
+        );
+    }
+}
+
+chroma_row_tramp!(fast_chroma_row_argb_c, LAYOUT_ARGB, fast_chroma_row);
+chroma_row_tramp!(fast_chroma_row_rgba_c, LAYOUT_RGBA, fast_chroma_row);
+chroma_row_tramp!(fast_chroma_row_bgra_c, LAYOUT_BGRA, fast_chroma_row);
+chroma_row_tramp!(fast_chroma_row_rgb_c, LAYOUT_RGB, fast_chroma_row);
+chroma_row_tramp!(fast_chroma_row_bgr_c, LAYOUT_BGR, fast_chroma_row);
 
 macro_rules! upsample_block_tramp {
     ($name:ident, $layout:expr) => {
@@ -283,6 +368,20 @@ unsafe extern "C" fn argb_to_uv_c(
 fn init_asm(dsp: &mut WPDYUVDSP) {
     let t = wpd::asm::yuv::raw_table(wpd::cpu::flags());
 
+    if let Some(v) = t.chroma_horizontal {
+        dsp.chroma_horizontal = v;
+    }
+    if let Some(v) = t.chroma_row {
+        dsp.chroma_row = v;
+    }
+
+    if let Some(v) = t.fast_chroma_horizontal {
+        dsp.fast_chroma_horizontal = v;
+    }
+    if let Some(v) = t.fast_chroma_row {
+        dsp.fast_chroma_row = v;
+    }
+
     if let Some(v) = t.upsample_block {
         dsp.upsample_block = v;
     }
@@ -354,6 +453,22 @@ impl WPDYUVDSP {
     pub(crate) fn new() -> Self {
         #[allow(unused_mut)]
         let mut table = WPDYUVDSP {
+            chroma_horizontal: chroma_horizontal_c,
+            chroma_row: [
+                chroma_row_argb_c,
+                chroma_row_rgba_c,
+                chroma_row_bgra_c,
+                chroma_row_rgb_c,
+                chroma_row_bgr_c,
+            ],
+            fast_chroma_horizontal: fast_chroma_horizontal_c,
+            fast_chroma_row: [
+                fast_chroma_row_argb_c,
+                fast_chroma_row_rgba_c,
+                fast_chroma_row_bgra_c,
+                fast_chroma_row_rgb_c,
+                fast_chroma_row_bgr_c,
+            ],
             upsample_block: [
                 upsample_block_argb_c,
                 upsample_block_rgba_c,

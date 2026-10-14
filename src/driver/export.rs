@@ -329,7 +329,7 @@ pub fn export_packed<'a>(
                         output,
                         &img,
                         format,
-                        options.no_fancy_upsampling,
+                        options.sampling(),
                         premultiply_after_pack(set.animation, set.anim_mode),
                         set.threads,
                     )?;
@@ -420,6 +420,36 @@ fn still_packed_direct(
     }
     if options.no_fancy_upsampling {
         upsample_simple(dsp, dst, src, layout, first, upto, set.threads);
+    } else if options.extra_fancy_upsampling {
+        let planes = yuv_planes(src);
+        let mut out = dst.frame_mut();
+
+        crate::convert::yuv420_to_packed_extra(
+            dsp,
+            layout,
+            &mut out.planes_mut()[0],
+            &planes,
+            src.width as usize,
+            src.height as usize,
+            first as usize,
+            upto as usize,
+            set.threads,
+        );
+    } else if options.fast_fancy_upsampling {
+        let planes = yuv_planes(src);
+        let mut out = dst.frame_mut();
+
+        crate::convert::yuv420_to_packed_fast(
+            dsp,
+            layout,
+            &mut out.planes_mut()[0],
+            &planes,
+            src.width as usize,
+            src.height as usize,
+            first as usize,
+            upto as usize,
+            set.threads,
+        );
     } else if upto > first {
         converted_from =
             upsample_fancy(dsp, dst, src, layout, first, upto, set.threads);
@@ -458,10 +488,8 @@ fn still_packed_2byte(
         .then(|| format_premultiplier_4444(dsp, format));
     let sampling = if src.chroma_full {
         Sampling::Full
-    } else if options.no_fancy_upsampling {
-        Sampling::Simple
     } else {
-        Sampling::Fancy
+        options.sampling()
     };
     let planes = yuv_planes(src);
     let mut out = dst.frame_mut();

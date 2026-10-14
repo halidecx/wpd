@@ -260,10 +260,51 @@ typedef struct WPDDecoderOptions {
      * no such field, gets no limit.
      */
     unsigned frame_size_limit;
+    /** Must be zero. Takes the tail padding after frame_size_limit. */
+    int reserved3;
+    /**
+     * Use Lanczos-5 chroma interpolation for unscaled lossy packed output.
+     * Default 0 retains libwebp-exact fancy upsampling. Mutually exclusive
+     * with no_fancy_upsampling. Native planar and lossless frames bypass it.
+     * Stills scaled to packed output use the existing chroma rescaler.
+     * Streaming output waits for five future chroma rows before exposing a
+     * row. Older option structs leave this off.
+     */
+    int extra_fancy_upsampling;
+    /** Must be zero. Takes the tail padding after extra_fancy_upsampling. */
+    int reserved4;
+    /**
+     * Use four-tap cubic chroma interpolation for unscaled lossy packed output.
+     * This faster alternative to extra_fancy_upsampling retains fractional
+     * chroma through RGB conversion. Mutually exclusive with both other
+     * upsampling options. Streaming waits for two future chroma rows.
+     * Native planar, lossless and scaled still output behave as above.
+     * Older option structs leave this off.
+     */
+    int fast_fancy_upsampling;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {sizeof(WPDDecoderOptions),  \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0,                          \
+     0}
 
 /**
  * Set processing options. Cropping precedes scaling.
