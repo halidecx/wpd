@@ -122,7 +122,8 @@ def main():
                         args.wpd,
                         "-f",
                         "rgb",
-                        *(["--" + mode] if mode != "fancy" else []),
+                        "--uvmode",
+                        str({"fancy": 1, "fast-fancy": 2, "extra-fancy": 3}[mode]),
                         encoded,
                         decoded,
                     ]

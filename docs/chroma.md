@@ -1,20 +1,21 @@
 # Chroma upsampling
 
-Default fancy upsampling remains libwebp-exact. Two additional modes are
-available for unscaled lossy packed output:
+Use `--uvmode` to select chroma upsampling for unscaled lossy packed output:
 
-- `--extra-fancy`: separable ten-tap Lanczos-5 interpolation.
-- `--fast-fancy`: separable tuned three-tap interpolation, with most of the
+- `0`: no interpolation (point-sampled chroma).
+- `1`: libwebp-exact fancy upsampling (the default).
+- `2`: separable tuned three-tap fast fancy interpolation, with most of the
   measured quality gain at a lower cost.
+- `3`: separable ten-tap Lanczos-5 extra fancy interpolation.
 
-The Rust and C options are `extra_fancy_upsampling` and `fast_fancy_upsampling`.
-These and `no_fancy_upsampling` are mutually exclusive. Older C option structs
-leave newer modes disabled, including when old tail padding contains nonzero
-bytes.
+The Rust and C options are `no_fancy_upsampling`, `fast_fancy_upsampling`, and
+`extra_fancy_upsampling`. They are mutually exclusive. Mode 1 leaves all three
+disabled. Older C option structs leave newer modes disabled, including when old
+tail padding contains nonzero bytes.
 
 ```sh
-build/wpd --extra-fancy -f rgba input.webp lanczos.pam
-build/wpd --fast-fancy -f rgba input.webp fast.pam
+build/wpd --uvmode 3 -f rgba input.webp lanczos.pam
+build/wpd --uvmode 2 -f rgba input.webp fast.pam
 ```
 
 ## Filters

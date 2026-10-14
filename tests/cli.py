@@ -27,31 +27,50 @@ class Cli(unittest.TestCase):
     def success(self, result):
         self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
 
-    def test_extra_fancy_is_optional_and_streams_the_same_pixels(self):
+    def test_uvmode_selects_filters_and_streams_the_same_pixels(self):
         flags = ["-f", "rgba", "--muxer", "md5"]
         source = CORPUS / "odd_lossy.webp"
         plain = self.command(*flags, source, "-")
-        extra = self.command("--extra-fancy", *flags, source, "-")
-        streamed = self.command("--extra-fancy", "--stream", "97", *flags, source, "-")
-        scalar = self.command("--extra-fancy", "--cpumask", "none", *flags, source, "-")
-        for result in [plain, extra, streamed, scalar]:
-            self.success(result)
-        self.assertNotEqual(plain.stdout, extra.stdout)
-        self.assertEqual(extra.stdout, streamed.stdout)
-        self.assertEqual(extra.stdout, scalar.stdout)
+        self.success(plain)
+        expected = {
+            0: b"ca7c0a417c36522574c7c4ba4f5d4432\n",
+            1: b"12f56e57c9b5952a584c02d29c6b3033\n",
+            2: b"182265e87a605cf48f241933323de9bf\n",
+            3: b"c3567ec4744ae0139780547d48bdc8eb\n",
+        }
+        outputs = []
+        for mode in range(4):
+            with self.subTest(mode=mode):
+                selected = self.command("--uvmode", str(mode), *flags, source, "-")
+                attached = self.command(f"--uvmode={mode}", *flags, source, "-")
+                streamed = self.command("--uvmode", str(mode), "--stream", "97",
+                                        "--loops", "2", *flags, source, "-")
+                scalar = self.command("--uvmode", str(mode), "--cpumask", "none",
+                                      *flags, source, "-")
+                for result in [selected, attached, streamed, scalar]:
+                    self.success(result)
+                    self.assertEqual(result.stdout, selected.stdout)
+                self.assertEqual(selected.stdout, expected[mode])
+                if mode == 1:
+                    self.assertEqual(selected.stdout, plain.stdout)
+                outputs.append(selected.stdout)
+        self.assertEqual(len(set(outputs)), 4)
+        reset = self.command("--uvmode", "3", "--uvmode", "0", "--uvmode", "1",
+                             *flags, source, "-")
+        self.success(reset)
+        self.assertEqual(reset.stdout, plain.stdout)
 
-    def test_fast_fancy_is_optional_and_streams_the_same_pixels(self):
-        flags = ["-f", "rgba", "--muxer", "md5"]
-        source = CORPUS / "odd_lossy.webp"
-        plain = self.command(*flags, source, "-")
-        extra = self.command("--fast-fancy", *flags, source, "-")
-        streamed = self.command("--fast-fancy", "--stream", "97", *flags, source, "-")
-        scalar = self.command("--fast-fancy", "--cpumask", "none", *flags, source, "-")
-        for result in [plain, extra, streamed, scalar]:
-            self.success(result)
-        self.assertNotEqual(plain.stdout, extra.stdout)
-        self.assertEqual(extra.stdout, streamed.stdout)
-        self.assertEqual(extra.stdout, scalar.stdout)
+    def test_uvmode_rejects_invalid_values_and_replaces_old_switches(self):
+        for value in ["", "-1", "4", "256", "1.5", "fancy", "99999999999999999999"]:
+            with self.subTest(value=value):
+                result = self.command(f"--uvmode={value}", self.input)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"invalid chroma upsampling mode; expected 0..3", result.stderr)
+        for flag in ["--uvmode", "--extra-fancy", "--fast-fancy"]:
+            with self.subTest(flag=flag):
+                result = self.command(flag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"unknown option or missing option value", result.stderr)
 
     def test_json_uses_original_info_and_emits_once(self):
         source = CORPUS / "durations.webp"

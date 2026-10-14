@@ -38,8 +38,8 @@ def main():
 
     decoders = {
         "wpd_fancy": (args.wpd, ""),
-        "wpd_fast": (args.wpd, "--fast-fancy"),
-        "wpd_lanczos5": (args.wpd, "--extra-fancy"),
+        "wpd_fast": (args.wpd, "--uvmode 2"),
+        "wpd_lanczos5": (args.wpd, "--uvmode 3"),
     }
     if args.previous:
         decoders["wpd_previous"] = (args.previous, "--fast-fancy")
