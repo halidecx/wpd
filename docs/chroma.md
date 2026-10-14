@@ -1,197 +1,225 @@
 # Chroma upsampling
 
-Default fancy upsampling remains libwebp-exact. Two additional modes are
-available for unscaled lossy packed output:
+## Select a mode
 
-- `--extra-fancy`: separable ten-tap Lanczos-5 interpolation.
-- `--fast-fancy`: separable tuned three-tap interpolation, with most of the
-  measured quality gain at a lower cost.
+Use `--uvmode` to select the chroma upsampling mode. This option applies to
+unscaled lossy images with packed pixel output. Mode 1 is the default mode.
 
-The Rust and C options are `extra_fancy_upsampling` and `fast_fancy_upsampling`.
-These and `no_fancy_upsampling` are mutually exclusive. Older C option structs
-leave newer modes disabled, including when old tail padding contains nonzero
-bytes.
+| Mode | Filter         | Function                                                  |
+| ---: | -------------- | --------------------------------------------------------- |
+|    0 | Point sampling | Copy the nearest chroma sample. Do not use interpolation. |
+|    1 | Libwebp fancy  | Use the same chroma upsampling as libwebp.                |
+|    2 | Fast fancy     | Use a three-tap filter.                                   |
+|    3 | Extra fancy    | Use a ten-tap Lanczos-5 filter.                           |
+
+Use mode 1 when the output must be the same as libwebp output. Use mode 2 for
+better measured image quality with a small increase in decode time. Use mode 3
+for the highest mean scores in the measured image set. Mode 0 can decrease
+decode time, but it can cause color steps at image edges.
 
 ```sh
-build/wpd --extra-fancy -f rgba input.webp lanczos.pam
-build/wpd --fast-fancy -f rgba input.webp fast.pam
+build/wpd --uvmode 0 -f rgba input.webp point.pam
+build/wpd --uvmode 1 -f rgba input.webp fancy.pam
+build/wpd --uvmode 2 -f rgba input.webp fast.pam
+build/wpd --uvmode 3 -f rgba input.webp lanczos.pam
 ```
 
-## Filters
+The Rust and C interfaces use these options:
 
-Lanczos-5 follows the filter evaluated in
-[Halide's chroma-handling article](https://halide.cx/blog/chroma-handling/) and
-[decbench](https://github.com/gianni-rosato/decbench):
-`scale=flags=lanczos+accurate_rnd+full_chroma_int:param0=5,format=rgb24`. The
-two quarter-sample phases use reversed, normalized Q14 coefficients. Horizontal
-interpolation retains signed Q6 samples, including negative lobes. The filter
-and its output are preserved alongside the new mode.
+| Mode | Option                          |
+| ---: | ------------------------------- |
+|    0 | `no_fancy_upsampling`           |
+|    1 | Set all three options to false. |
+|    2 | `fast_fancy_upsampling`         |
+|    3 | `extra_fancy_upsampling`        |
 
-Fast-fancy uses a tuned three-tap filter: `[-10, 59, 15] / 64` for the odd phase
-and `[15, 59, -10] / 64` for the even phase. Both phases share the same three
-source samples. The scalar interface pads the appropriate end with zero to reuse
-the four-row cache; NEON skips that tap entirely. The coefficients sum to 64,
-preserving constant chroma. Horizontal results lie in `[-2550, 18870]` before
-centering. Subtracting `128 * 64` there stores zero-centered Q6 in
-`[-10742, 10678]`, still fitting eight signed samples per register. Because the
-vertical coefficients sum to 64, this offset commutes exactly with vertical
-filtering and rounding. It moves the subtraction to half as many rows and
-removes four NEON vector subtractions per eight output pixels; RGB output
-remains byte-identical.
+Do not set more than one of these options to true. Older C option structures
+cannot enable the newer modes. Nonzero bytes in the unused part of an older
+structure do not enable these modes.
 
-The coefficients were selected using fssimu2, Butteraugli, and fcvvdp rather
-than fssimu2 alone. A search around the earlier cubic and three-tap filters
-included four-tap filters, separate horizontal/vertical coefficients, and
-overshoot limits. The final three-tap filter balances the metrics without adding
-taps. It is an empirically tuned filter, not exact Keys cubic or Lanczos
-interpolation.
+## Output conditions
 
-Both filters retain fractional chroma through the vertical pass and BT.601
-limited-range RGB matrix, then round and clip once. This matters to quality: an
-experiment rounding the matrix's terms separately lost a substantial part of the
-gain on two nearly flat images. The fast NEON kernel instead folds the final
-rounding bias into luma and narrows by 16 then 4 bits, giving exactly the same
-bytes as the full-precision scalar matrix.
+The selected mode also applies to lossy animation frames. The decoder does not
+use chroma interpolation for lossless frames or native planar output. Scaled
+images use the existing chroma rescaler.
 
-Each conversion band caches four horizontal rows per plane for fast-fancy, or
-ten for extra-fancy. Scratch space grows with width. Each source row is filtered
-once per band, and at most one new row enters the support per output row. Edges
-replicate the nearest sample. Both modes use centered 4:2:0 siting, including at
-odd dimensions; neither promises bit-exact FFmpeg output.
+The modes do not change alpha processing, alpha premultiplication, or two-byte
+pixel formats. An option change causes the decoder to prepare animation frames
+again. The decoder uses the new mode for these frames.
 
-Both filters have handwritten AArch64 NEON and x86-64 AVX2 kernels for
-horizontal interpolation and all five RGB layouts. Other architectures use
-scalar implementations.
+Modes 2 and 3 use centered 4:2:0 chroma positions. They also support odd image
+dimensions. Their output can differ from FFmpeg output. At an image edge, the
+filter uses copies of the nearest sample. For a cropped image, the filter uses
+the edges of the cropped area.
 
-Alpha dispatch, premultiplication, and two-byte packed output retain their
-existing behavior. Animation preparation captures the selected mode, so an
-option change invalidates frames prepared under earlier settings. Native planar
-and lossless frames bypass interpolation. Scaled stills retain the existing
-chroma rescaler. Cropping replicates the cropped view's boundaries. Streaming
-conservatively holds back four luma rows for fast-fancy or ten for Lanczos-5
-until the two or five future chroma rows are stable.
+## Image quality
 
-## Quality
+A quality metric is a numerical measure of image quality. The tests use three
+metrics: fssimu2, Butteraugli, and fcvvdp. A higher fssimu2 or fcvvdp score
+shows better image quality. A lower Butteraugli score shows better image
+quality.
 
-The full-metric evaluation uses upstream decbench's encoding and metric
-functions: 25 gb82 photographs, cwebp method 6/Q90, FFmpeg or libwebp-default
-input color conversion, fssimu2 0.2.0, Butteraugli 3-norm at 203 nits, and
-fcvvdp 0.4.0's `fhd` display. PNG metric inputs are produced losslessly from
-wpd's RGB output. Default fancy matches dwebp on every measured image and
-metric.
+The test set contains 25 gb82 photographs. The encoder is cwebp, with method 6
+and quality 90. FFmpeg converts the input colors before the encoder processes
+each image. The tests use the metric functions from
+[decbench](https://github.com/gianni-rosato/decbench). The test configuration is
+as follows:
 
-Arithmetic mean scores for FFmpeg input conversion at Q90:
+| Metric      | Configuration                        |
+| ----------- | ------------------------------------ |
+| fssimu2     | Version 0.2.0                        |
+| Butteraugli | 3-norm, intensity target of 203 nits |
+| fcvvdp      | Version 0.4.0, `fhd` display model   |
 
-| Filter             | fssimu2 ↑ | Butteraugli ↓ | fcvvdp ↑ |
-| ------------------ | --------: | ------------: | -------: |
-| Ordinary fancy     |   83.5503 |      0.963581 | 9.831676 |
-| Previous three-tap |   84.0819 |      0.927074 | 9.839952 |
-| Balanced three-tap |   84.0596 |      0.923329 | 9.840240 |
-| Lanczos-5          |   84.0618 |      0.921539 | 9.840444 |
+PNG files contain the decoder's RGB output without additional loss. Mode 1 gives
+the same output as dwebp for each measured image and metric. The current mode 1,
+2, and 3 outputs are the same as the outputs from the earlier quality tests. The
+mode 0 tests use the same encoded images.
 
-The balanced filter trades 0.0223 fssimu2 points versus the previous three-tap
-filter for better Butteraugli and fcvvdp scores. The gain retained relative to
-Lanczos-5 is `(fast - fancy) / (extra - fancy)` for each metric:
+All changes in the table below use mode 1 as the reference. Each change is the
+mode's arithmetic mean score minus the mode 1 arithmetic mean score. A positive
+change is better for fssimu2 and fcvvdp. A negative change is better for
+Butteraugli.
 
-| Input / quality / image set    | fssimu2 | Butteraugli | fcvvdp |
-| ------------------------------ | ------: | ----------: | -----: |
-| FFmpeg / Q75 / photos          |   93.8% |       96.8% | 101.8% |
-| FFmpeg / Q90 / photos          |   99.6% |       95.7% |  97.7% |
-| libwebp default / Q90 / photos |  101.6% |       96.7% |  98.9% |
-| FFmpeg / Q95 / photos          |   98.5% |       96.6% |  96.8% |
-| FFmpeg / Q90 / screen content  |   97.3% |       96.4% |  95.7% |
+| Metric      | Mode 1 mean score | Mode 0 change | Mode 2 change | Mode 3 change |
+| ----------- | ----------------: | ------------: | ------------: | ------------: |
+| fssimu2     |         83.550274 |     +0.000368 |     +0.509303 |     +0.511557 |
+| Butteraugli |          0.963581 |     -0.006302 |     -0.040252 |     -0.042042 |
+| fcvvdp      |          9.831676 |     +0.004608 |     +0.008564 |     +0.008768 |
 
-The screen-content set contains ten gb82 PNGs. The previous three-tap filter
-retained 87.0%, 86.1%, and 75.6% there. All of these sets and encoding qualities
-informed the final choice; none is an independent final holdout. The fractions
-are differences in metric scores, not bitrate savings or percentages of visual
-quality. Sharp YUV is excluded from filter selection: it targets ordinary fancy,
-which remains the appropriate mode for those encodes.
+The mode 0 fssimu2 change is very small. Mode 0 gives a lower mean Butteraugli
+score and a higher mean fcvvdp score than mode 1.
 
-Reproduce the full Q90 comparison with a decbench checkout and its dependencies
-on `PATH` (`uv` supplies its Rich dependency):
+The changes are metric score differences. They are not bitrate savings or
+percentages of visual quality. The image sets used for filter selection are not
+independent test sets. These results do not show the quality change for all
+images. SharpYUV inputs were not part of filter selection or this comparison.
+
+## Decode time
+
+The speed tests use an Apple M5 Pro, a release build, NEON assembly, and RGBA
+output. The benchmark executable is from commit `688bd67`. The test set contains
+three still images and two animations. Each animation measurement includes all
+frames. The decoder sends the output to `/dev/null`.
+
+Each command uses five warmup runs and 24 measured runs. Each run decodes the
+complete file 64 times. No build, other test, or quality measurement runs at the
+same time.
+
+All ratios use mode 1 as the reference. A ratio below 1.000 means less decode
+time than mode 1. A ratio above 1.000 means more decode time than mode 1. The
+summary uses the geometric mean of the five file ratios.
+
+| Mode | One thread | Three threads |
+| ---: | ---------: | ------------: |
+|    0 |      0.965 |         0.982 |
+|    1 |      1.000 |         1.000 |
+|    2 |      1.023 |         1.025 |
+|    3 |      1.221 |         1.138 |
+
+The table below gives the ratio for each file.
+
+| File                  | Threads | Mode 0 / mode 1 | Mode 2 / mode 1 | Mode 3 / mode 1 |
+| --------------------- | ------: | --------------: | --------------: | --------------: |
+| `lossy.webp`          |       1 |           0.967 |           1.014 |           1.226 |
+| `lossy.webp`          |       3 |           0.982 |           1.019 |           1.138 |
+| `simplelf-lossy.webp` |       1 |           0.948 |           1.009 |           1.216 |
+| `simplelf-lossy.webp` |       3 |           1.003 |           1.027 |           1.119 |
+| `a_lossy.webp`        |       1 |           0.938 |           1.062 |           1.416 |
+| `a_lossy.webp`        |       3 |           0.992 |           1.080 |           1.217 |
+| `anim_yuv.webp`       |       1 |           0.986 |           1.013 |           1.118 |
+| `anim_yuv.webp`       |       3 |           0.974 |           0.984 |           1.085 |
+| `anim_yuva.webp`      |       1 |           0.986 |           1.017 |           1.151 |
+| `anim_yuva.webp`      |       3 |           0.958 |           1.014 |           1.136 |
+
+Small differences can be the result of measurement variation. The ratios apply
+to this processor and test set. Image dimensions, image content, pixel format,
+and thread count can change the ratios. The tests did not measure speed on a
+native x86 processor.
+
+## Filter operation
+
+A filter tap is a source sample with a coefficient. Mode 2 uses three taps for
+each output phase. The odd phase uses `[-10, 59, 15] / 64`. The even phase uses
+`[15, 59, -10] / 64`. The coefficient sum is 1, so the filter does not change
+constant chroma.
+
+Mode 3 uses the Lanczos-5 filter from
+[Halide's article about chroma upsampling](https://halide.cx/blog/chroma-handling/).
+The FFmpeg filter configuration is as follows:
+
+```text
+scale=flags=lanczos+accurate_rnd+full_chroma_int:param0=5,format=rgb24
+```
+
+Modes 2 and 3 use separate horizontal and vertical filters. Both modes keep
+fractional chroma through the vertical filter and the BT.601 RGB matrix. The RGB
+matrix uses the limited range for its input. The decoder rounds the RGB results
+and limits them to the output range.
+
+Q6 is a fixed-point format with six fractional bits. Mode 2 subtracts `128 * 64`
+from the horizontal Q6 results. The resulting range is `[-10742, 10678]`. This
+operation removes the need for the same subtraction on each output row. The
+output bytes do not change.
+
+Each conversion band stores horizontal results for four rows per chroma plane in
+mode 2. Mode 3 stores results for ten rows per chroma plane. The required memory
+increases with image width. The decoder processes each source row once per band.
+
+Modes 2 and 3 have handwritten NEON and AVX2 assembly for horizontal
+interpolation and all five RGB layouts. When assembly is not available, these
+modes use scalar code. During stream decoding, mode 2 waits for two future
+chroma rows. Mode 3 waits for five future chroma rows. These conditions can
+delay output by four or ten luma rows, respectively.
+
+## Repeat the tests
+
+Install decbench and its required programs. Add the required programs to `PATH`.
+Use the commands below to repeat the quality tests for modes 1, 2, and 3. The
+`uv` program supplies the Rich package.
 
 ```sh
 uv run scripts/chromametrics.py /path/to/gb82-image-set/png \
     --decbench /path/to/decbench/dec.py \
     --output wpd-test-data/chromametrics-ffmpeg
-uv run scripts/chromametrics.py /path/to/gb82-image-set/png \
-    --decbench /path/to/decbench/dec.py --encoder libwebp_default \
-    --output wpd-test-data/chromametrics-default
 ```
 
-Use `--previous /path/to/previous-wpd` to include a preserved fast-fancy binary.
-Per-image metrics and means are written to JSON. The adapter delegates encoding,
-decoding orchestration, and all three metric parsers to upstream `dec.py`. For
-the fssimu2-only quality sweep, use `scripts/chromaquality.py --quality 75` or
-`--quality 95`, passing the reference directory and a separate output path.
+Use `--encoder libwebp_default` to use libwebp input color conversion. The
+script writes individual image scores and mean scores to JSON files. The script
+does not include mode 0. For mode 0, decode the same inputs with `--uvmode 0`
+and use the same decbench metric functions.
 
-## Speed
-
-Measured on Apple M5 Pro with a release build, assembly enabled, RGBA output, 64
-decode repetitions per invocation, five warmups, and 24 Hyperfine runs. Times
-are milliseconds per complete file decode, including all animation frames, with
-output discarded. No builds, tests, or quality scoring ran during timing. The
-baseline is commit `38c34a6`, with the same filter coefficients before moving
-chroma centering into the horizontal pass. All quality scores remain unchanged.
-
-| File                | Threads | Fancy (ms) | Baseline fast (ms) | Centered fast (ms) | Lanczos-5 (ms) |
-| ------------------- | ------: | ---------: | -----------------: | -----------------: | -------------: |
-| lossy.webp          |       1 |      2.868 |              2.960 |              2.881 |          3.427 |
-| lossy.webp          |       3 |      1.634 |              1.675 |              1.658 |          1.846 |
-| simplelf-lossy.webp |       1 |      2.863 |              2.966 |              2.933 |          3.500 |
-| simplelf-lossy.webp |       3 |      1.978 |              2.022 |              2.010 |          2.204 |
-| a_lossy.webp        |       1 |      0.543 |              0.575 |              0.561 |          0.771 |
-| a_lossy.webp        |       3 |      0.400 |              0.413 |              0.410 |          0.481 |
-| anim_yuv.webp       |       1 |      2.453 |              2.465 |              2.449 |          2.685 |
-| anim_yuv.webp       |       3 |      0.921 |              0.940 |              0.927 |          1.026 |
-| anim_yuva.webp      |       1 |      5.795 |              5.968 |              5.921 |          6.793 |
-| anim_yuva.webp      |       3 |      2.279 |              2.329 |              2.320 |          2.596 |
-
-A second run alternated baseline and centered fast-fancy invocations, reversing
-order on each pair: four warmup pairs, 24 measured pairs, and 128 decodes per
-invocation. The geometric mean time reduction across the five files was **0.8%
-at one thread and 0.6% at three threads**. Still-image reductions ranged from
-0.0% to 1.9%; animation reductions ranged from -0.2% to 0.7%. This is a small
-improvement, with several individual cases within timing noise. In the four-mode
-Hyperfine run, centered fast-fancy took 1.7% more time than ordinary fancy at
-one thread and 1.6% more at three threads, and 16.4%/10.9% less than Lanczos-5.
-
-The hot-cache NEON RGBA kernel measures 19.71 ns per 64 pixels; horizontal
-interpolation measures 5.69 ns per 128 samples. Lanczos-5 measures 42.09 ns and
-26.23 ns respectively. The added horizontal centering trades a little horizontal
-work for less work on every output row. The balanced kernel shifts byte luma to
-Q6 in 16-bit lanes before its widening multiply, loads the RGB constants
-together, and keeps the three row pointers per plane in registers.
-Full-precision RGB sums and output rounding are retained.
-
-An additional experiment narrowed the rounded vertical chroma to 16-bit lanes
-and used a doubling multiply for the blue coefficient. It remained bit-exact but
-did not improve decode timing, so it was dropped. Four-tap filters,
-axis-specific coefficients, and overshoot limits did not offer a sufficiently
-consistent quality advantage over the selected three-tap filter.
+Use the commands below to repeat the speed tests for all four modes. The
+commands use mode 1 as the reference.
 
 ```sh
-RUNS=18 WARMUP=5 ./scripts/chromabench.sh
-THREADS=3 RUNS=18 WARMUP=5 BENCH_DIR=build/chromabench-t3 ./scripts/chromabench.sh
-build/checkasm --test=yuvdsp --function='*chroma*' --bench
+mkdir -p build/chromabench
+for threads in 1 3; do
+    for file in lossy simplelf-lossy a_lossy anim_yuv anim_yuva; do
+        hyperfine -N --warmup 5 --runs 24 \
+            --export-json "build/chromabench/$file-t$threads.json" \
+            -n mode1 "build/wpd --uvmode 1 -f rgba --threads $threads --repeat 64 wpd-test-data/$file.webp /dev/null" \
+            -n mode0 "build/wpd --uvmode 0 -f rgba --threads $threads --repeat 64 wpd-test-data/$file.webp /dev/null" \
+            -n mode2 "build/wpd --uvmode 2 -f rgba --threads $threads --repeat 64 wpd-test-data/$file.webp /dev/null" \
+            -n mode3 "build/wpd --uvmode 3 -f rgba --threads $threads --repeat 64 wpd-test-data/$file.webp /dev/null"
+    done
+done
 ```
 
-Native x86 speed has not been measured. Both filters pass checkasm under a
-temporary harness selecting AVX2 directly in Rosetta, which executes the
-instructions but does not advertise the required CPU features here. Library
-feature detection is unchanged.
+Divide each mode's mean time by the mode 1 mean time for the same file and
+thread count. Use the geometric mean of these ratios for the summary.
 
-## Validation
+## Verification
 
-All 237 Meson tests pass, including libwebp parity, the reference corpus, CLI,
-and row-boundary tests. Rust workspace tests pass with and without assembly; the
-x86-64 build also passes. Across 134 corpus, photographic, and screen-content
-files and all five RGB layouts, centered fast-fancy output matches both the
-preserved baseline and scalar fallback byte for byte. Extra-fancy output remains
-unchanged. Rust tests cover scalar tails, signed values, constants, odd and tiny
-dimensions, all layouts, two-byte output, alpha, disjoint conversion bands,
-incremental row finality, and changes to options during threaded animation
-decoding. Both NEON filters pass twenty checkasm seeds. The C tests cover
-mutually exclusive flags and legacy option sizes. `stylecheck.sh` and the new
-Python script's Ruff checks pass.
+The implementation passed all 237 Meson tests. Rust tests passed with and
+without assembly. The x86-64 build also passed.
+
+Mode 2 output was the same as the saved implementation and scalar code for 134
+files and all five RGB layouts. The mode 3 output did not change. Both filters
+passed 20 checkasm seeds on NEON and AVX2. The AVX2 tests used direct kernel
+selection under Rosetta. The library's CPU feature detection did not change.
+
+The tests include output guards, unaligned buffers, both phases, and extreme
+chroma values. Other tests include small dimensions, scalar tails, alpha,
+animation, stream decoding, and option changes. The C tests include older option
+structures. Stylecheck and Ruff checks passed for the implementation.
