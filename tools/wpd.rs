@@ -745,9 +745,7 @@ fn new_decoder(
     if decoder
         .set_options(api::Options {
             n_threads,
-            no_fancy_upsampling: uvmode == 0,
-            fast_fancy_upsampling: uvmode == 2,
-            extra_fancy_upsampling: uvmode == 3,
+            uvmode: u32::from(uvmode),
             scale,
             frame_size_limit,
             ..api::Options::default()

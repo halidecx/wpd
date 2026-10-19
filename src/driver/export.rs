@@ -418,9 +418,9 @@ fn still_packed_direct(
     if first == 0 {
         dst.alloc_packed(src.width, src.height, target.bpp(), target)?;
     }
-    if options.no_fancy_upsampling {
+    if options.uvmode == 0 {
         upsample_simple(dsp, dst, src, layout, first, upto, set.threads);
-    } else if options.extra_fancy_upsampling {
+    } else if options.uvmode == 3 {
         let planes = yuv_planes(src);
         let mut out = dst.frame_mut();
 
@@ -435,7 +435,7 @@ fn still_packed_direct(
             upto as usize,
             set.threads,
         );
-    } else if options.fast_fancy_upsampling {
+    } else if options.uvmode == 2 {
         let planes = yuv_planes(src);
         let mut out = dst.frame_mut();
 

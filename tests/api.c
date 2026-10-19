@@ -2211,37 +2211,19 @@ static void test_decode_options(const uint8_t *data, size_t size) {
     WPDDecoderOptions options = WPD_DECODER_OPTIONS_INIT;
     WPDFrame          frame   = WPD_FRAME_INIT;
 
-    options.bypass_filtering    = 1;
-    options.no_fancy_upsampling = 1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
-    options.extra_fancy_upsampling = 1;
+    CHECK(options.uvmode == 1);
+    options.bypass_filtering = 1;
+    for (unsigned mode = 0; mode <= 3; mode++) {
+        options.uvmode = mode;
+        CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
+              WPD_OK);
+    }
+    options.uvmode = 4;
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
           WPD_ERR_INVALID_ARG);
-    options.no_fancy_upsampling = 0;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
-    options.extra_fancy_upsampling = -1;
+    options.uvmode = (unsigned)-1;
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
           WPD_ERR_INVALID_ARG);
-    options.extra_fancy_upsampling = 0;
-    options.fast_fancy_upsampling  = 1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
-    options.extra_fancy_upsampling = 1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
-          WPD_ERR_INVALID_ARG);
-    options.extra_fancy_upsampling = 0;
-    options.no_fancy_upsampling    = 1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
-          WPD_ERR_INVALID_ARG);
-    options.no_fancy_upsampling   = 0;
-    options.fast_fancy_upsampling = -1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) ==
-          WPD_ERR_INVALID_ARG);
-    /* A v4 caller may leave tail padding and all later memory uninitialized. */
-    options.struct_size = (offsetof(WPDDecoderOptions, extra_fancy_upsampling) +
-                           sizeof(int) + sizeof(size_t) - 1) &
-        ~(sizeof(size_t) - 1);
-    options.reserved4 = -1;
-    CHECK(wpd_decode(data, size, WPD_PIX_FMT_RGBA, &options, &frame) == WPD_OK);
     CHECK(wpd_decode(data, size, WPD_PIX_FMT_BGRA, NULL, &frame) == WPD_OK);
     CHECK(frame.format == WPD_PIX_FMT_BGRA);
     wpd_frame_free(&frame);
@@ -2800,27 +2782,25 @@ done:
     free(data);
 }
 
-/* WPDDecoderOptions as it shipped before n_threads was added, so that a v1
-   caller can be spelled out here exactly as one really looks: the size it
-   passes in struct_size is sizeof this, tail padding included. */
+/* A short options structure with the current uvmode field. The size check
+   must still exclude n_threads, including when the tail padding is dirty. */
 typedef struct WPDDecoderOptionsV1 {
-    size_t struct_size;
-    int    bypass_filtering;
-    int    no_fancy_upsampling;
-    int    use_cropping;
-    int    crop_left;
-    int    crop_top;
-    int    crop_width;
-    int    crop_height;
-    int    use_scaling;
-    int    scaled_width;
-    int    scaled_height;
-    int    flip;
+    size_t   struct_size;
+    int      bypass_filtering;
+    unsigned uvmode;
+    int      use_cropping;
+    int      crop_left;
+    int      crop_top;
+    int      crop_width;
+    int      crop_height;
+    int      use_scaling;
+    int      scaled_width;
+    int      scaled_height;
+    int      flip;
 } WPDDecoderOptionsV1;
 
-/* Output must not depend on how many threads produced it, and a caller built
-   against the options struct as it was before n_threads existed must still get
-   the same pixels it always did. */
+/* Output must not depend on the thread count. A short options structure
+   without n_threads must produce the same pixels. */
 static void test_threads_match(const char *path, WPDPixelFormat format) {
     static const int counts[] = {0, 1, 2, 3, 5, 8, 16};
     size_t           size;
@@ -2857,6 +2837,7 @@ static void test_threads_match(const char *path, WPDPixelFormat format) {
             memset(v1, 0xFF, sizeof(*v1));
             memset(v1, 0, offsetof(WPDDecoderOptionsV1, flip) + sizeof(int));
             v1->struct_size = sizeof(*v1);
+            v1->uvmode      = 1;
             pass            = (const WPDDecoderOptions *)v1;
         }
         CHECK(wpd_decoder_set_options(decoder, pass) == WPD_OK);
@@ -3414,7 +3395,7 @@ int main(int argc, char **argv) {
             {
                 WPDDecoderOptions simple = WPD_DECODER_OPTIONS_INIT;
 
-                simple.no_fancy_upsampling = 1;
+                simple.uvmode = 0;
                 test_partial_matches_whole(
                     path, WPD_PIX_FMT_RGBA, 1021, &simple, 0);
                 test_partial_matches_whole(

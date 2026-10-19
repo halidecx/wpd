@@ -1,12 +1,10 @@
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Options {
     pub bypass_filtering: bool,
-    pub no_fancy_upsampling: bool,
-    /// Lanczos-5 chroma interpolation for unscaled lossy packed output.
-    /// Opt-in: the default fancy interpolator remains libwebp-exact.
-    pub extra_fancy_upsampling: bool,
-    /// Three-tap chroma interpolation for unscaled lossy packed output.
-    pub fast_fancy_upsampling: bool,
+    /// Chroma upsampling for unscaled lossy packed output:
+    /// 0 = point-sampled, 1 = libwebp fancy (default),
+    /// 2 = fast fancy (three-tap), 3 = extra fancy (Lanczos-5).
+    pub uvmode: u32,
     pub crop: Option<(i32, i32, i32, i32)>,
     pub scale: Option<(i32, i32)>,
     pub flip: bool,
@@ -21,16 +19,27 @@ pub struct Options {
     pub frame_size_limit: u32,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            bypass_filtering: false,
+            uvmode: 1,
+            crop: None,
+            scale: None,
+            flip: false,
+            n_threads: 0,
+            frame_size_limit: 0,
+        }
+    }
+}
+
 impl Options {
     pub(crate) fn sampling(&self) -> crate::convert::Sampling {
-        if self.no_fancy_upsampling {
-            crate::convert::Sampling::Simple
-        } else if self.extra_fancy_upsampling {
-            crate::convert::Sampling::ExtraFancy
-        } else if self.fast_fancy_upsampling {
-            crate::convert::Sampling::FastFancy
-        } else {
-            crate::convert::Sampling::Fancy
+        match self.uvmode {
+            0 => crate::convert::Sampling::Simple,
+            2 => crate::convert::Sampling::FastFancy,
+            3 => crate::convert::Sampling::ExtraFancy,
+            _ => crate::convert::Sampling::Fancy,
         }
     }
 
@@ -60,7 +69,7 @@ mod tests {
 
         assert!(!o.transforms());
         o.bypass_filtering = true;
-        o.no_fancy_upsampling = true;
+        o.uvmode = 0;
         assert!(!o.transforms());
         o.flip = true;
         assert!(o.transforms());

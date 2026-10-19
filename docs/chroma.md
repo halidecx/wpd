@@ -14,8 +14,8 @@ unscaled lossy images with packed pixel output. Mode 1 is the default mode.
 
 Use mode 1 when the output must be the same as libwebp output. Use mode 2 for
 better measured image quality with a small increase in decode time. Use mode 3
-for the highest mean scores in the measured image set. Mode 0 can decrease
-decode time, but it can cause color steps at image edges.
+for the highest effort. Mode 0 can decrease decode time, but it can cause color
+stepping at image edges.
 
 ```sh
 build/wpd --uvmode 0 -f rgba input.webp point.pam
@@ -24,18 +24,12 @@ build/wpd --uvmode 2 -f rgba input.webp fast.pam
 build/wpd --uvmode 3 -f rgba input.webp lanczos.pam
 ```
 
-The Rust and C interfaces use these options:
+The Rust and C interfaces use the `uvmode` field. Set this field to a value from
+0 to 3. The values are the same as the command-line values. Other values cause
+an argument error.
 
-| Mode | Option                          |
-| ---: | ------------------------------- |
-|    0 | `no_fancy_upsampling`           |
-|    1 | Set all three options to false. |
-|    2 | `fast_fancy_upsampling`         |
-|    3 | `extra_fancy_upsampling`        |
-
-Do not set more than one of these options to true. Older C option structures
-cannot enable the newer modes. Nonzero bytes in the unused part of an older
-structure do not enable these modes.
+Rust `Options::default()` and C `WPD_DECODER_OPTIONS_INIT` set `uvmode` to 1. C
+callers must use the new header and compile again after this interface change.
 
 ## Output conditions
 
