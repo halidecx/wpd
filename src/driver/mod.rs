@@ -713,19 +713,7 @@ impl Decoder<'_> {
             .scale
             .is_some_and(|(w, h)| w < 0 || h < 0 || (w == 0 && h == 0));
 
-        if bad_crop
-            || bad_scale
-            || options.n_threads < 0
-            || ([
-                options.no_fancy_upsampling,
-                options.extra_fancy_upsampling,
-                options.fast_fancy_upsampling,
-            ]
-            .into_iter()
-            .filter(|&v| v)
-            .count()
-                > 1)
-        {
+        if bad_crop || bad_scale || options.n_threads < 0 || options.uvmode > 3 {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
         }
         if self.anim_mode == ANIM_SUBFRAME && options.transforms() {
@@ -1341,9 +1329,9 @@ impl Decoder<'_> {
             // Only report pixels whose complete interpolation support has
             // passed the loop filter: five future chroma rows for Lanczos,
             // two for fast-fancy, and one future luma row for default fancy.
-            if decoder.options.extra_fancy_upsampling {
+            if decoder.options.uvmode == 3 {
                 rows = (rows - 10).max(0);
-            } else if decoder.options.fast_fancy_upsampling {
+            } else if decoder.options.uvmode == 2 {
                 rows = (rows - 4).max(0);
             } else {
                 rows -= 1;

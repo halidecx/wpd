@@ -177,16 +177,16 @@ static void decode_every_way(const uint8_t *data, size_t size,
         options.scaled_width  = 1 + (int)(rnd() % 128);
         options.scaled_height = 1 + (int)(rnd() % 128);
     }
-    options.flip                = (int)(rnd() & 1);
-    options.no_fancy_upsampling = (int)(rnd() & 1);
-    options.bypass_filtering    = (int)(rnd() & 1);
+    options.flip             = (int)(rnd() & 1);
+    options.uvmode           = rnd() & 3;
+    options.bypass_filtering = (int)(rnd() & 1);
     if (wpd_decode(data, size, format, &options, &frame) == WPD_OK)
         wpd_frame_free(&frame);
 
-    options                     = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
-    options.no_fancy_upsampling = (int)(rnd() & 1);
-    options.bypass_filtering    = (int)(rnd() & 1);
-    decoder                     = wpd_decoder_create();
+    options                  = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    options.uvmode           = rnd() & 3;
+    options.bypass_filtering = (int)(rnd() & 1);
+    decoder                  = wpd_decoder_create();
     if (decoder) {
         size_t offset = 0;
 

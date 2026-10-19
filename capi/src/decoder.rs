@@ -230,14 +230,10 @@ fn set_options(
 
     if options.struct_size < WPDDecoderOptions::v1()
         || !flag(options.bypass_filtering)
-        || !flag(options.no_fancy_upsampling)
+        || options.uvmode > 3
         || !flag(options.use_cropping)
         || !flag(options.use_scaling)
         || !flag(options.flip)
-        || (options.struct_size >= WPDDecoderOptions::v4()
-            && !flag(options.extra_fancy_upsampling))
-        || (options.struct_size >= WPDDecoderOptions::v5()
-            && !flag(options.fast_fancy_upsampling))
     {
         return Err(decoder.fail("invalid decoder options", Error::InvalidArgument));
     }
@@ -302,13 +298,6 @@ entry!(fn wpd_decoder_set_options(decoder, options: *const WPDDecoderOptions) {
     if size >= WPDDecoderOptions::v3() {
         local.frame_size_limit =
             unsafe { ptr::addr_of!((*options).frame_size_limit).read() };
-    }
-    if size >= WPDDecoderOptions::v4() {
-        local.extra_fancy_upsampling =
-            unsafe { ptr::addr_of!((*options).extra_fancy_upsampling).read() };
-    }
-    if size >= WPDDecoderOptions::v5() {
-        local.fast_fancy_upsampling = unsafe { ptr::addr_of!((*options).fast_fancy_upsampling).read() };
     }
     reported(set_options(decoder, &local).map(|()| WPD_OK))
 });
@@ -944,7 +933,7 @@ mod tests {
             None,
             Some(mem::size_of::<WPDDecoderOptions>()),
             Some(WPDDecoderOptions::v1()),
-            Some(mem::offset_of!(WPDDecoderOptions, extra_fancy_upsampling)),
+            Some(WPDDecoderOptions::v3()),
         ] {
             if let Some(size) = version {
                 let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };

@@ -13,6 +13,6 @@ for f in lossy simplelf-lossy a_lossy anim_yuv anim_yuva; do
     hyperfine -N --warmup "$WARMUP" --runs "$RUNS" \
         --export-json "$BENCH_DIR/$f-t$THREADS.json" \
         -n fancy "$WPD -f rgba --threads $THREADS --repeat $REPEAT wpd-test-data/$f.webp /dev/null" \
-        -n fast-fancy "$WPD --fast-fancy -f rgba --threads $THREADS --repeat $REPEAT wpd-test-data/$f.webp /dev/null" \
-        -n extra-fancy "$WPD --extra-fancy -f rgba --threads $THREADS --repeat $REPEAT wpd-test-data/$f.webp /dev/null"
+        -n fast-fancy "$WPD --uvmode 2 -f rgba --threads $THREADS --repeat $REPEAT wpd-test-data/$f.webp /dev/null" \
+        -n extra-fancy "$WPD --uvmode 3 -f rgba --threads $THREADS --repeat $REPEAT wpd-test-data/$f.webp /dev/null"
 done

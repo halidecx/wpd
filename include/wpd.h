@@ -207,16 +207,25 @@ WPD_API WPDDecoder *wpd_decoder_create(void);
 typedef struct WPDDecoderOptions {
     size_t struct_size; ///< Set to sizeof(WPDDecoderOptions).
     int    bypass_filtering; ///< Disable the lossy in-loop filter.
-    int    no_fancy_upsampling; ///< Use point-sampled chroma.
-    int    use_cropping; ///< Enable cropping.
-    int    crop_left;
-    int    crop_top;
-    int    crop_width;
-    int    crop_height;
-    int    use_scaling; ///< Enable scaling.
-    int    scaled_width;
-    int    scaled_height;
-    int    flip; ///< Flip output vertically.
+    /**
+     * Chroma upsampling for unscaled lossy packed output:
+     * 0 = point-sampled, 1 = libwebp fancy (default),
+     * 2 = fast fancy (three-tap), 3 = extra fancy (Lanczos-5).
+     * Native planar and lossless frames bypass this option.
+     * Scaled still output uses the chroma rescaler.
+     * Streaming waits for two future chroma rows in mode 2,
+     * or five future chroma rows in mode 3.
+     */
+    unsigned uvmode;
+    int      use_cropping; ///< Enable cropping.
+    int      crop_left;
+    int      crop_top;
+    int      crop_width;
+    int      crop_height;
+    int      use_scaling; ///< Enable scaling.
+    int      scaled_width;
+    int      scaled_height;
+    int      flip; ///< Flip output vertically.
     /**
      * Must be zero.
      *
@@ -260,51 +269,10 @@ typedef struct WPDDecoderOptions {
      * no such field, gets no limit.
      */
     unsigned frame_size_limit;
-    /** Must be zero. Takes the tail padding after frame_size_limit. */
-    int reserved3;
-    /**
-     * Use Lanczos-5 chroma interpolation for unscaled lossy packed output.
-     * Default 0 retains libwebp-exact fancy upsampling. Mutually exclusive
-     * with no_fancy_upsampling. Native planar and lossless frames bypass it.
-     * Stills scaled to packed output use the existing chroma rescaler.
-     * Streaming output waits for five future chroma rows before exposing a
-     * row. Older option structs leave this off.
-     */
-    int extra_fancy_upsampling;
-    /** Must be zero. Takes the tail padding after extra_fancy_upsampling. */
-    int reserved4;
-    /**
-     * Use four-tap cubic chroma interpolation for unscaled lossy packed output.
-     * This faster alternative to extra_fancy_upsampling retains fractional
-     * chroma through RGB conversion. Mutually exclusive with both other
-     * upsampling options. Streaming waits for two future chroma rows.
-     * Native planar, lossless and scaled still output behave as above.
-     * Older option structs leave this off.
-     */
-    int fast_fancy_upsampling;
 } WPDDecoderOptions;
 
 #define WPD_DECODER_OPTIONS_INIT \
-    {sizeof(WPDDecoderOptions),  \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0,                          \
-     0}
+    {sizeof(WPDDecoderOptions), 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 /**
  * Set processing options. Cropping precedes scaling.

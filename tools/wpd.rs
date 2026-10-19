@@ -117,12 +117,10 @@ const USAGE_TAIL: &str = concat!(
     "    replay the animation this many times, rewinding between\n",
     "    passes; --stream, which cannot be rewound, reopens instead.\n",
     "    only the first pass is written out. default 1\n",
-    " --extra-fancy\n",
-    "    use Lanczos-5 chroma upsampling for unscaled lossy packed\n",
-    "    output; default fancy upsampling remains libwebp-exact\n",
-    " --fast-fancy\n",
-    "    use three-tap chroma upsampling; mutually exclusive\n",
-    "    with --extra-fancy\n",
+    " --uvmode u32\n",
+    "    chroma upsampling for unscaled lossy packed output:\n",
+    "    0 = none (point-sampled), 1 = libwebp fancy (default),\n",
+    "    2 = fast fancy (three-tap), 3 = extra fancy (Lanczos-5)\n",
     " --scale WxH\n",
     "    scale the output; either dimension may be 0 to keep the\n",
     "    aspect ratio of the other\n",
@@ -291,8 +289,7 @@ struct Options {
     max_input: u64,
     max_output: u64,
     n_threads: i32,
-    extra_fancy_upsampling: bool,
-    fast_fancy_upsampling: bool,
+    uvmode: u8,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
@@ -329,8 +326,7 @@ const OPTIONS: &[(&str, Option<char>, bool)] = &[
     ("subframe", None, false),
     ("stream", None, true),
     ("threads", None, true),
-    ("extra-fancy", None, false),
-    ("fast-fancy", None, false),
+    ("uvmode", None, true),
     ("scale", None, true),
     ("frame-size-limit", None, true),
     ("max-input", None, true),
@@ -419,8 +415,15 @@ fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str>
             _ => return Err(BAD_INFO),
         },
         "subframe" => o.subframe = true,
-        "extra-fancy" => o.extra_fancy_upsampling = true,
-        "fast-fancy" => o.fast_fancy_upsampling = true,
+        "uvmode" => {
+            o.uvmode = match value {
+                "0" => 0,
+                "1" => 1,
+                "2" => 2,
+                "3" => 3,
+                _ => return Err(BAD_UVMODE),
+            };
+        }
         _ => return Err(MISSING),
     }
     Ok(())
@@ -460,6 +463,7 @@ fn parse_args(argv: &[OsString]) -> Parsed {
         loops: 1,
         max_input: DEFAULT_MAX_INPUT,
         max_output: DEFAULT_MAX_OUTPUT,
+        uvmode: 1,
         ..Default::default()
     };
     let mut i = 1;
@@ -565,6 +569,7 @@ const BAD_REPEAT: &str = "invalid repeat value; expected 1..INT_MAX";
 const BAD_LOOPS: &str = "invalid loop count; expected 1..INT_MAX";
 const BAD_STREAM: &str = "invalid stream chunk size; expected 1..INT_MAX";
 const BAD_THREADS: &str = "invalid thread count; expected 0..INT_MAX";
+const BAD_UVMODE: &str = "invalid chroma upsampling mode; expected 0..3";
 const BAD_SCALE: &str = "invalid scale; expected WxH, either 0 to keep the ratio";
 const BAD_PIXELS: &str = "invalid frame size limit; expected a pixel count or WxH";
 const BAD_FORMAT: &str = "invalid output pixel format";
@@ -731,8 +736,7 @@ fn new_decoder(
     pixel_format: Option<&str>,
     subframe: bool,
     n_threads: i32,
-    extra_fancy_upsampling: bool,
-    fast_fancy_upsampling: bool,
+    uvmode: u8,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
 ) -> Option<Decoder<'static>> {
@@ -741,8 +745,7 @@ fn new_decoder(
     if decoder
         .set_options(api::Options {
             n_threads,
-            extra_fancy_upsampling,
-            fast_fancy_upsampling,
+            uvmode: u32::from(uvmode),
             scale,
             frame_size_limit,
             ..api::Options::default()
@@ -1012,8 +1015,7 @@ fn run<const REPORT: bool>(
             pixel_format,
             opts.subframe,
             opts.n_threads,
-            opts.extra_fancy_upsampling,
-            opts.fast_fancy_upsampling,
+            opts.uvmode,
             opts.scale,
             opts.frame_size_limit,
         ) else {
@@ -1029,8 +1031,7 @@ fn run<const REPORT: bool>(
                         pixel_format,
                         opts.subframe,
                         opts.n_threads,
-                        opts.extra_fancy_upsampling,
-                        opts.fast_fancy_upsampling,
+                        opts.uvmode,
                         opts.scale,
                         opts.frame_size_limit,
                     ) else {

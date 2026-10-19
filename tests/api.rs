@@ -34,6 +34,30 @@ const FORMATS: [Format; 6] = [
 ];
 
 #[test]
+fn uvmode_defaults_to_fancy_and_rejects_unknown_modes() {
+    assert_eq!(Options::default().uvmode, 1);
+    let mut decoder = Decoder::new();
+
+    for uvmode in [4, u32::MAX] {
+        assert_eq!(
+            decoder.set_options(Options {
+                uvmode,
+                ..Options::default()
+            }),
+            Err(wpd::error::Error::InvalidArgument)
+        );
+    }
+    for uvmode in 0..=3 {
+        decoder
+            .set_options(Options {
+                uvmode,
+                ..Options::default()
+            })
+            .unwrap();
+    }
+}
+
+#[test]
 fn the_corpus_decodes_in_every_packed_format() {
     for path in corpus() {
         let bytes = fs::read(&path).unwrap();
@@ -89,17 +113,14 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
 
 #[test]
 fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
-    for (extra_fancy_upsampling, fast_fancy_upsampling) in
-        [(false, false), (true, false), (false, true)]
-    {
+    for uvmode in 0..=3 {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
 
             whole
                 .set_options(Options {
-                    extra_fancy_upsampling,
-                    fast_fancy_upsampling,
+                    uvmode,
                     ..Options::default()
                 })
                 .unwrap();
@@ -112,8 +133,7 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
 
             streamed
                 .set_options(Options {
-                    extra_fancy_upsampling,
-                    fast_fancy_upsampling,
+                    uvmode,
                     ..Options::default()
                 })
                 .unwrap();
@@ -148,17 +168,14 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
 
 #[test]
 fn a_partial_frame_hands_out_only_final_rows() {
-    for (extra_fancy_upsampling, fast_fancy_upsampling) in
-        [(false, false), (true, false), (false, true)]
-    {
+    for uvmode in 0..=3 {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
 
             whole
                 .set_options(Options {
-                    extra_fancy_upsampling,
-                    fast_fancy_upsampling,
+                    uvmode,
                     ..Options::default()
                 })
                 .unwrap();
@@ -186,8 +203,7 @@ fn a_partial_frame_hands_out_only_final_rows() {
 
                 streamed
                     .set_options(Options {
-                        extra_fancy_upsampling,
-                        fast_fancy_upsampling,
+                        uvmode,
                         ..Options::default()
                     })
                     .unwrap();
@@ -416,14 +432,14 @@ fn settings_changed_mid_animation_reach_the_next_frame() {
     let switches: [(&str, Switch); 6] = [
         ("extra-fancy", |d| {
             d.set_options(Options {
-                extra_fancy_upsampling: true,
+                uvmode: 3,
                 ..Options::default()
             })
             .unwrap();
         }),
         ("fast-fancy", |d| {
             d.set_options(Options {
-                fast_fancy_upsampling: true,
+                uvmode: 2,
                 ..Options::default()
             })
             .unwrap();
@@ -439,7 +455,7 @@ fn settings_changed_mid_animation_reach_the_next_frame() {
         ("format", |d| d.set_format(Format::RgbaPre).unwrap()),
         ("options", |d| {
             d.set_options(Options {
-                no_fancy_upsampling: true,
+                uvmode: 0,
                 ..Options::default()
             })
             .unwrap();

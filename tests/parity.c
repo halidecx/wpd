@@ -541,8 +541,8 @@ static void check_file(const char *dir, const char *name) {
         }
     }
 
-    options                     = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
-    options.no_fancy_upsampling = 1;
+    options        = (WPDDecoderOptions)WPD_DECODER_OPTIONS_INIT;
+    options.uvmode = 0;
     memset(&webp_options, 0, sizeof(webp_options));
     webp_options.no_fancy_upsampling = 1;
     check_all_formats(

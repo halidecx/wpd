@@ -554,6 +554,10 @@ impl Scan {
             }
             let padded = size as usize + (size & 1) as usize;
 
+            // Require the RIFF pad byte even for a final odd-sized VP8L chunk.
+            // A complete image payload without that byte is still Truncated.
+            // This is intentional: libwebp accepts lossless_no_padding.webp,
+            // but wpd requires the complete RIFF chunk, including its padding.
             if self.info.end - (self.pos + 8) < padded {
                 let avail = self.info.end - (self.pos + 8);
 
