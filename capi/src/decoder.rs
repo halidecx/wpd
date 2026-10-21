@@ -285,7 +285,12 @@ unsafe fn set_output_buffer(
         }
     }
     if !decoder.has_sink() || decoder.planes != buffer.plane {
-        let sink = try_box(External(buffer.plane, Rc::clone(&decoder.sink_input)))?;
+        // SAFETY: each plane is null or caller storage lent under the
+        // `WPDOutputPlane` contract until the next set_output_buffer or free,
+        // and the sink is replaced or dropped no later than that.
+        let external =
+            unsafe { External::new(buffer.plane, Rc::clone(&decoder.sink_input)) };
+        let sink = try_box(external)?;
 
         decoder.planes = buffer.plane;
         decoder.set_sink(Some(sink));
@@ -337,8 +342,20 @@ entry!(fn wpd_decoder_set_output_format(decoder, format: c_int) {
 });
 
 entry!(fn wpd_decoder_set_output_buffer(decoder, buffer: *const WPDOutputBuffer) {
-    // SAFETY: `buffer` is null or, per `wpd.h`, a full `WPDOutputBuffer` set
-    // up by the caller; the plane memory it names is the caller's to lend.
+    /* Only `struct_size` is known to be there until it says the rest is, so
+     * a short or future struct is read no further than that first. */
+    if !buffer.is_null() {
+        // SAFETY: `buffer` is non-null and, per `wpd.h`, a caller-initialised
+        // struct that begins with `struct_size`. Reading through `addr_of!`
+        // forms no reference to the rest.
+        let declared = unsafe { ptr::addr_of!((*buffer).struct_size).read() };
+
+        if declared < output_buffer_v1() {
+            return status(decoder.fail("invalid output buffer", Error::InvalidArgument));
+        }
+    }
+    // SAFETY: `buffer` is null, or its `struct_size` vouches for a whole
+    // `WPDOutputBuffer`; the plane memory it names is the caller's to lend.
     reported(unsafe { set_output_buffer(decoder, buffer.as_ref()) }.map(|()| WPD_OK))
 });
 
@@ -1236,6 +1253,29 @@ mod tests {
             );
             assert_eq!(
                 wpd_decoder_append(decoder, &byte, usize::MAX),
+                WPD_ERR_INVALID_ARG
+            );
+            wpd_decoder_free(decoder);
+        }
+    }
+
+    #[test]
+    fn a_short_output_buffer_is_refused_without_reading_past_its_size() {
+        let decoder = wpd_decoder_create();
+        /* Only the size field: anything read past it is out of bounds,
+         * which Miri and the sanitizers report. */
+        let short = Box::new(mem::size_of::<usize>());
+
+        assert!(!decoder.is_null());
+        // SAFETY: `short` is a live `usize` laid out like the leading
+        // `struct_size`, which is all the call may read of a struct that
+        // small; `decoder` is live and freed once.
+        unsafe {
+            assert_eq!(
+                wpd_decoder_set_output_buffer(
+                    decoder,
+                    ptr::from_ref::<usize>(&short).cast::<WPDOutputBuffer>()
+                ),
                 WPD_ERR_INVALID_ARG
             );
             wpd_decoder_free(decoder);

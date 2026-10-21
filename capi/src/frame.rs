@@ -36,11 +36,32 @@ pub struct SinkInput {
     pub overlap: Cell<bool>,
 }
 
-pub struct External(pub [WPDOutputPlane; 4], pub Rc<SinkInput>);
+/// Caller-owned output planes, written row by row.
+pub struct External {
+    planes: [WPDOutputPlane; 4],
+    input: Rc<SinkInput>,
+    /* The row length and count `fits` last accepted for each plane: all
+     * `row` will hand out of it. */
+    vetted: [Cell<(usize, i32)>; 4],
+}
 
-impl RowSink for External {
-    fn fits(&self, p: usize, row_len: usize, rows: i32) -> bool {
-        let plane = &self.0[p];
+impl External {
+    /// # Safety
+    ///
+    /// Every plane with non-null `data` must meet the `WPDOutputPlane`
+    /// contract in `wpd.h`: `size` bytes reachable from `data` in the
+    /// direction of `stride`, writable, and not otherwise accessed for as
+    /// long as the sink lives.
+    pub unsafe fn new(planes: [WPDOutputPlane; 4], input: Rc<SinkInput>) -> Self {
+        External {
+            planes,
+            input,
+            vetted: Default::default(),
+        }
+    }
+
+    fn vet(&self, p: usize, row_len: usize, rows: i32) -> bool {
+        let plane = &self.planes[p];
 
         if plane.data.is_null()
             || plane.stride == 0
@@ -68,26 +89,38 @@ impl RowSink for External {
         let (Some(start), Some(end)) = (start, end) else {
             return false;
         };
-        let (input_start, input_end) = self.1.range.get();
+        let (input_start, input_end) = self.input.range.get();
         if input_start < input_end && start < input_end && input_start < end {
-            self.1.overlap.set(true);
+            self.input.overlap.set(true);
             return false;
         }
         true
     }
+}
+
+impl RowSink for External {
+    fn fits(&self, p: usize, row_len: usize, rows: i32) -> bool {
+        let ok = self.vet(p, row_len, rows);
+
+        self.vetted[p].set(if ok { (row_len, rows) } else { (0, 0) });
+        ok
+    }
 
     fn row(&mut self, p: usize, y: i32, len: usize) -> &mut [u8] {
-        let plane = &self.0[p];
-        // `fits` bounded this product by a size that itself fits an isize;
-        // a row it never vetted stops here instead of wrapping into a pointer.
-        let offset = (y as isize)
-            .checked_mul(plane.stride)
-            .expect("row outside the checked plane");
+        let plane = &self.planes[p];
+        let (row_len, rows) = self.vetted[p].get();
 
-        // SAFETY: the core calls `row` only for a plane `fits` accepted, with
-        // the same `len` as its `row_len` and `y` below its `rows`, so the row
-        // lies inside the `size` bytes the C caller lent (`WPDOutputPlane`
-        // contract). `fits` also rejected overlap with borrowed input.
+        assert!(
+            y >= 0 && y < rows && len <= row_len,
+            "row outside the checked plane"
+        );
+        // `fits` bounded this product by a size that itself fits an isize.
+        let offset = y as isize * plane.stride;
+
+        // SAFETY: `new`'s contract makes the plane `size` writable bytes from
+        // `data` along `stride`, and `fits` checked that `rows` rows of
+        // `row_len` lie inside them and clear of borrowed input. The assert
+        // keeps this row within what `fits` accepted.
         unsafe { slice::from_raw_parts_mut(plane.data.offset(offset), len) }
     }
 }
@@ -307,7 +340,8 @@ mod tests {
             size: 48,
             stride: -16,
         };
-        let sink = External(planes, Rc::clone(&input));
+        // SAFETY: the plane lies inside `storage`, which outlives the sink.
+        let sink = unsafe { External::new(planes, Rc::clone(&input)) };
         assert!(!sink.fits(0, 8, 3));
         assert!(input.overlap.get());
         input.range.set((base + 40, base + 48));
