@@ -79,8 +79,11 @@ impl BitReader {
 
     fn do_fill(&mut self, buf: &[u8]) {
         if self.pos + 8 < buf.len() {
-            let word =
-                u32::from_le_bytes(buf[self.pos..self.pos + 4].try_into().unwrap());
+            let word = u32::from_le_bytes(
+                buf[self.pos..self.pos + 4]
+                    .try_into()
+                    .expect("the slice is 4 long"),
+            );
 
             self.val >>= WBITS;
             self.bit_pos -= WBITS;
@@ -149,7 +152,9 @@ impl BitReader {
         let avail = fast.avail as usize;
         let pos = fast.pos - avail.div_ceil(8);
 
-        self.val = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        self.val = u64::from_le_bytes(
+            buf[pos..pos + 8].try_into().expect("the slice is 8 long"),
+        );
         self.pos = pos + 8;
         self.bit_pos = ((8 - avail % 8) % 8) as i32;
     }
@@ -175,7 +180,11 @@ impl Fast {
 
     #[inline(always)]
     pub fn refill(&mut self, buf: &[u8]) {
-        let word = u64::from_le_bytes(buf[self.pos..self.pos + 8].try_into().unwrap());
+        let word = u64::from_le_bytes(
+            buf[self.pos..self.pos + 8]
+                .try_into()
+                .expect("the slice is 8 long"),
+        );
 
         self.val |= word << (self.avail & 63);
         self.pos += 7 - ((self.avail >> 3) & 7) as usize;

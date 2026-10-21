@@ -60,6 +60,9 @@ unsafe fn lf_v<const SIZE: usize, const INNER: bool>(
     hev: c_int,
 ) {
     let s = stride as usize;
+    // SAFETY: callers pass `dst` with a positive `stride` inside one writable
+    // buffer covering the edge's footprint, 4 rows above and 3 below:
+    // `[dst - 4 * stride, dst + 3 * stride + SIZE)`.
     let buf =
         unsafe { slice::from_raw_parts_mut(dst.offset(-4 * stride), 7 * s + SIZE) };
 
@@ -74,6 +77,9 @@ unsafe fn lf_h<const SIZE: usize, const INNER: bool>(
     hev: c_int,
 ) {
     let s = stride as usize;
+    // SAFETY: callers pass `dst` with a positive `stride` inside one writable
+    // buffer covering the edge's footprint, 4 columns either side over `SIZE`
+    // rows: `[dst - 4, dst + (SIZE - 1) * stride + 4)`.
     let buf = unsafe { slice::from_raw_parts_mut(dst.sub(4), (SIZE - 1) * s + 8) };
 
     k::loop_filter::<SIZE, false, INNER>(buf, s, flim_e, flim_i, hev);
@@ -88,6 +94,8 @@ macro_rules! lf_entry {
             flim_i: c_int,
             hev: c_int,
         ) {
+            // SAFETY: the caller (checkasm) passes `dst` and `stride` covering
+            // the 16-sample edge's footprint that `$driver` requires.
             unsafe { $driver::<16, $inner>(dst, stride, flim_e, flim_i, hev) }
         }
     };
@@ -103,6 +111,9 @@ macro_rules! lf_uv_entry {
             flim_i: c_int,
             hev: c_int,
         ) {
+            // SAFETY: the caller (checkasm) passes `dst_u` and `dst_v`, sharing
+            // `stride`, each covering the 8-sample edge's footprint that
+            // `$driver` requires; the two calls never hold slices at once.
             unsafe {
                 $driver::<8, $inner>(dst_u, stride, flim_e, flim_i, hev);
                 $driver::<8, $inner>(dst_v, stride, flim_e, flim_i, hev);
@@ -122,6 +133,9 @@ lf_uv_entry!(h_loop_filter8uv_inner_c, lf_h, true);
 
 unsafe extern "C" fn v_loop_filter_simple_c(dst: *mut u8, stride: isize, flim: c_int) {
     let s = stride as usize;
+    // SAFETY: the caller (checkasm) passes `dst` with a positive `stride` inside
+    // one writable buffer covering 2 rows above and 1 below the 16-wide edge:
+    // `[dst - 2 * stride, dst + stride + 16)`.
     let buf = unsafe { slice::from_raw_parts_mut(dst.offset(-2 * stride), 3 * s + 16) };
 
     k::loop_filter_simple::<true>(buf, s, flim);
@@ -129,6 +143,9 @@ unsafe extern "C" fn v_loop_filter_simple_c(dst: *mut u8, stride: isize, flim: c
 
 unsafe extern "C" fn h_loop_filter_simple_c(dst: *mut u8, stride: isize, flim: c_int) {
     let s = stride as usize;
+    // SAFETY: the caller (checkasm) passes `dst` with a positive `stride` inside
+    // one writable buffer covering 2 columns either side over 16 rows:
+    // `[dst - 2, dst + 15 * stride + 2)`.
     let buf = unsafe { slice::from_raw_parts_mut(dst.sub(2), 15 * s + 4) };
 
     k::loop_filter_simple::<false>(buf, s, flim);
@@ -156,6 +173,9 @@ unsafe extern "C" fn loop_filter16y_c(
     hev: c_int,
     edges: c_int,
 ) {
+    // SAFETY: the caller (checkasm) passes `dst` at a 16x16 macroblock with 4
+    // writable rows above and 4 columns left of it at `stride`, which covers
+    // every edge filtered here and so each callee's footprint.
     unsafe {
         if edges & 1 != 0 {
             h_loop_filter16y_c(dst, stride, mbedge_e, flim_i, hev);
@@ -185,6 +205,9 @@ unsafe extern "C" fn loop_filter8uv_c(
     hev: c_int,
     edges: c_int,
 ) {
+    // SAFETY: the caller (checkasm) passes `dst_u` and `dst_v` each at an 8x8
+    // block with 4 writable rows above and 4 columns left of it at `stride`,
+    // which covers every edge filtered here and so each callee's footprint.
     unsafe {
         let (u4, v4) = (dst_u.add(4), dst_v.add(4));
 
@@ -203,16 +226,23 @@ unsafe extern "C" fn loop_filter8uv_c(
 }
 
 unsafe extern "C" fn luma_dc_wht_c(block: *mut [[i16; 16]; 16], dc: *mut i16) {
+    // SAFETY: the caller (checkasm) passes `block` valid for 16 blocks of 16
+    // coefficients and `dc` for 16 more, aligned, writable and disjoint.
     unsafe { k::luma_dc_wht(&mut *block, &mut *dc.cast::<[i16; 16]>()) }
 }
 
 unsafe extern "C" fn luma_dc_wht_dc_c(block: *mut [[i16; 16]; 16], dc: *mut i16) {
+    // SAFETY: the caller (checkasm) passes `block` valid for 16 blocks of 16
+    // coefficients and `dc` for 16 more, aligned, writable and disjoint.
     unsafe { k::luma_dc_wht_dc(&mut *block, &mut *dc.cast::<[i16; 16]>()) }
 }
 
 unsafe extern "C" fn idct_add_c(dst: *mut u8, block: *mut i16, stride: isize) {
     let s = stride as usize;
 
+    // SAFETY: the caller (checkasm) passes `dst` valid for 4 writable rows of
+    // 4 bytes at a positive `stride`, and `block` for 16 aligned, writable
+    // coefficients outside them.
     unsafe {
         k::idct_add(
             slice::from_raw_parts_mut(dst, 3 * s + 4),
@@ -225,6 +255,9 @@ unsafe extern "C" fn idct_add_c(dst: *mut u8, block: *mut i16, stride: isize) {
 unsafe extern "C" fn idct_dc_add_c(dst: *mut u8, block: *mut i16, stride: isize) {
     let s = stride as usize;
 
+    // SAFETY: the caller passes `dst` valid for 4 writable rows of 4 bytes at a
+    // positive `stride`, and `block` for 16 aligned, writable coefficients
+    // outside them.
     unsafe {
         k::idct_dc_add(
             slice::from_raw_parts_mut(dst, 3 * s + 4),
@@ -240,6 +273,9 @@ unsafe extern "C" fn idct_dc_add4y_c(
     stride: isize,
 ) {
     for i in 0..4 {
+        // SAFETY: the caller (checkasm) passes `dst` valid for 4 rows of 16
+        // bytes at `stride` and `block` for 4 coefficient blocks, so subblock
+        // `i` meets `idct_dc_add_c`'s contract.
         unsafe { idct_dc_add_c(dst.add(4 * i), block.add(i).cast(), stride) }
     }
 }
@@ -250,6 +286,9 @@ unsafe extern "C" fn idct_dc_add4uv_c(
     stride: isize,
 ) {
     for i in 0..4 {
+        // SAFETY: the caller (checkasm) passes `dst` valid for 8 rows of 8
+        // bytes at `stride` and `block` for 4 coefficient blocks, so the 2x2
+        // subblock `i` meets `idct_dc_add_c`'s contract.
         unsafe {
             let dst = dst.offset(4 * stride * (i as isize / 2)).add(4 * (i % 2));
             idct_dc_add_c(dst, block.add(i).cast(), stride);
@@ -305,8 +344,14 @@ fn init_asm(c: &mut VP8DSPContext) {
     }
 }
 
+/// Fills `*c` with the VP8 transform and loop filter kernels for the running
+/// CPU.
+///
+/// # Safety
+///
+/// `c` must be non-null, aligned and valid for a write of one
+/// `VP8DSPContext`. Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
     #[allow(unused_mut)]
     let mut table = VP8DSPContext {
@@ -353,5 +398,7 @@ pub unsafe extern "C" fn ff_vp8dsp_init(c: *mut VP8DSPContext) {
     ))]
     init_asm(&mut table);
 
+    // SAFETY: `c` is valid for a write of one `VP8DSPContext` per this
+    // function's `# Safety` contract.
     unsafe { c.write(table) }
 }

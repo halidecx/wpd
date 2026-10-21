@@ -24,12 +24,15 @@ build/wpd --uvmode 2 -f rgba input.webp fast.pam
 build/wpd --uvmode 3 -f rgba input.webp lanczos.pam
 ```
 
-The Rust and C interfaces use the `uvmode` field. Set this field to a value from
-0 to 3. The values are the same as the command-line values. Other values cause
-an argument error.
+The Rust and C interfaces use the `uvmode` field. In Rust it is a `UvMode`:
+`Point`, `Fancy`, `FastFancy`, or `ExtraFancy`, whose discriminants are modes 0
+to 3. `UvMode::from_raw` converts a mode number. In C, set the field to a value
+from 0 to 3. The values are the same as the command-line values. Other values
+cause an argument error.
 
-Rust `Options::default()` and C `WPD_DECODER_OPTIONS_INIT` set `uvmode` to 1. C
-callers must use the new header and compile again after this interface change.
+Rust `Options::default()` sets `uvmode` to `UvMode::Fancy`, and C
+`WPD_DECODER_OPTIONS_INIT` sets it to 1. C callers must use the new header and
+compile again after this interface change.
 
 ## Output conditions
 

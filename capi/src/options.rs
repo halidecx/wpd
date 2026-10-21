@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint};
 use std::mem;
 
-use wpd::options::Options;
+use wpd::options::{Options, UvMode};
 
 #[repr(C)]
 pub struct WPDDecoderOptions {
@@ -59,7 +59,8 @@ impl WPDDecoderOptions {
     pub(crate) fn to_core(&self) -> Options {
         Options {
             bypass_filtering: self.bypass_filtering != 0,
-            uvmode: self.uvmode,
+            /* `set_options` rejected any other value before getting here. */
+            uvmode: UvMode::from_raw(self.uvmode).unwrap_or_default(),
             crop: (self.use_cropping != 0).then_some((
                 self.crop_left,
                 self.crop_top,
@@ -89,6 +90,7 @@ mod tests {
 
     #[test]
     fn legacy_options_keep_callbacks_on_the_calling_thread() {
+        // SAFETY: every field is an integer, for which zero is a valid value.
         let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
 
         options.struct_size = V1_SIZE;
@@ -100,6 +102,7 @@ mod tests {
 
     #[test]
     fn older_options_leave_the_size_limit_off() {
+        // SAFETY: every field is an integer, for which zero is a valid value.
         let mut options: WPDDecoderOptions = unsafe { mem::zeroed() };
 
         options.frame_size_limit = 64;

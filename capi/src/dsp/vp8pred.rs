@@ -20,6 +20,9 @@ macro_rules! pred4x4_entry {
         unsafe extern "C" fn $name(src: *mut u8, _tr: *const u8, stride: isize) {
             let s = stride as usize;
             let o = $rows * s + $cols;
+            // SAFETY: the caller (checkasm) passes `src` with a positive
+            // `stride` inside a buffer covering the 4x4 block plus its `$rows`
+            // edge rows above and `$cols` edge columns left: `[src - o, src + 3 * s + 4)`.
             let buf = unsafe { slice::from_raw_parts_mut(src.sub(o), o + 3 * s + 4) };
 
             $k(buf, o, s);
@@ -33,6 +36,9 @@ macro_rules! pred4x4_tr_entry {
             let s = stride as usize;
             let o = $rows * s + $cols;
 
+            // SAFETY: as for `pred4x4_entry`, `[src - o, src + 3 * s + 4)` is
+            // one writable buffer; `tr` is valid for 4 readable bytes outside
+            // it (checkasm keeps its top-right samples apart from `src`).
             unsafe {
                 let buf = slice::from_raw_parts_mut(src.sub(o), o + 3 * s + 4);
 
@@ -48,6 +54,9 @@ macro_rules! pred_entry {
             let s = stride as usize;
             let o = $rows * s + $cols;
             let buf =
+                // SAFETY: the caller (checkasm) passes `src` with a positive
+                // `stride` inside a buffer covering the `$n`x`$n` block plus
+                // its edges: `[src - o, src + ($n - 1) * s + $n)`.
                 unsafe { slice::from_raw_parts_mut(src.sub(o), o + ($n - 1) * s + $n) };
 
             $k(buf, o, s);
@@ -111,8 +120,13 @@ fn init_asm(p: &mut VP8PredContext) {
     }
 }
 
+/// Fills `*p` with the intra predictors for the running CPU.
+///
+/// # Safety
+///
+/// `p` must be non-null, aligned and valid for a write of one
+/// `VP8PredContext`. Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn ff_vp8_pred_init(p: *mut VP8PredContext) {
     #[allow(unused_mut)]
     let mut table = VP8PredContext {
@@ -159,5 +173,7 @@ pub unsafe extern "C" fn ff_vp8_pred_init(p: *mut VP8PredContext) {
     ))]
     init_asm(&mut table);
 
+    // SAFETY: `p` is valid for a write of one `VP8PredContext` per this
+    // function's `# Safety` contract.
     unsafe { p.write(table) }
 }

@@ -5,6 +5,7 @@ find . -path ./subprojects -prune -o -path ./target -prune -o -type f \
     -o -name "*.hpp" -o -name "*.hxx" \) -exec clang-format -i {} +
 
 cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 

@@ -1,6 +1,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(improper_ctypes)]
 #![warn(clippy::all)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::missing_safety_doc)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::wildcard_imports)]
 
 #[cfg(not(panic = "abort"))]
 use std::panic::{catch_unwind, AssertUnwindSafe};

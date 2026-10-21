@@ -53,6 +53,9 @@ macro_rules! import_tramp {
                 fx_scale,
             };
 
+            // SAFETY: the caller (checkasm) passes `frow` valid for
+            // `dst_width * num_channels` writable `u32`s and `src` for
+            // `src_width * num_channels` readable bytes, not overlapping.
             unsafe {
                 $f(
                     slice::from_raw_parts_mut(frow, dw * ch),
@@ -86,6 +89,10 @@ macro_rules! export_expand_tramp {
                 fy_scale,
             };
 
+            // SAFETY: the caller (checkasm) passes `dst` valid for `width`
+            // writable bytes and `frow` for `width` readable `u32`s; `irow`
+            // is only dereferenced when blending, when it is likewise valid
+            // for `width` `u32`s. None of them overlaps `dst`.
             unsafe {
                 $f(
                     slice::from_raw_parts_mut(dst, n),
@@ -121,6 +128,10 @@ macro_rules! export_shrink_tramp {
                 fxy_scale,
             };
 
+            // SAFETY: the caller (checkasm) passes `dst` valid for `width`
+            // writable bytes and `irow` for `width` writable `u32`s; `frow` is
+            // only dereferenced for a nonzero y scale, when it is valid for
+            // `width` readable `u32`s. The three do not overlap.
             unsafe {
                 $f(
                     slice::from_raw_parts_mut(dst, n),
@@ -142,6 +153,9 @@ export_expand_tramp!(export_row_expand_c, k::export_row_expand);
 export_shrink_tramp!(export_row_shrink_c, k::export_row_shrink);
 
 #[cfg(all(feature = "asm", target_arch = "x86_64"))]
+// The trampoline macros expand in here and name the parent's items; which
+// ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod asm {
     use super::*;
     use wpd::asm::rescale::Kernel;
@@ -196,6 +210,9 @@ mod asm {
 }
 
 #[cfg(all(feature = "asm", target_arch = "aarch64"))]
+// The trampoline macros expand in here and name the parent's items; which
+// ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod asm {
     use super::*;
     use wpd::asm::rescale::Kernel;
@@ -289,8 +306,15 @@ pub struct WPDRESCALERAWDSP {
     pub export_shrink0: Option<ExportShrink0Raw>,
 }
 
+/// Fills `*dsp` with the raw rescaler kernels for the running CPU, null
+/// where there are none.
+///
+/// # Safety
+///
+/// `dsp` must be non-null, aligned and valid for a write of one
+/// `WPDRESCALERAWDSP`. Its previous contents are overwritten without being
+/// read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_rescale_raw_dsp_init(dsp: *mut WPDRESCALERAWDSP) {
     #[cfg(all(
         feature = "asm",
@@ -314,11 +338,20 @@ pub unsafe extern "C" fn wpd_rescale_raw_dsp_init(dsp: *mut WPDRESCALERAWDSP) {
     )))]
     let t = WPDRESCALERAWDSP::default();
 
+    // SAFETY: `dsp` is valid for a write of one `WPDRESCALERAWDSP` per this
+    // function's `# Safety` contract.
     unsafe { dsp.write(t) }
 }
 
+/// Fills `*dsp` with the rescaler row kernels for the running CPU.
+///
+/// # Safety
+///
+/// `dsp` must be non-null, aligned and valid for a write of one
+/// `WPDRESCALEDSP`. Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_rescale_dsp_init(dsp: *mut WPDRESCALEDSP) {
+    // SAFETY: `dsp` is valid for a write of one `WPDRESCALEDSP` per this
+    // function's `# Safety` contract.
     unsafe { dsp.write(WPDRESCALEDSP::new()) }
 }

@@ -83,6 +83,8 @@ unsafe extern "C" fn chroma_horizontal_c(dst: *mut i16, src: *const u8, blocks: 
         return;
     };
 
+    // SAFETY: the caller (checkasm) passes `dst` writable for `16 * blocks`
+    // `i16`s and `src` readable for `8 * blocks + 10` bytes, not overlapping.
     unsafe {
         k::chroma_horizontal(
             slice::from_raw_parts_mut(dst, 2 * n),
@@ -105,6 +107,11 @@ macro_rules! chroma_row_tramp {
                 return;
             };
 
+            // SAFETY: the caller (checkasm) passes `u` and `v` each pointing at
+            // as many row pointers as the kernel taps (10, or 4 for the fast
+            // filter), every row readable for `8 * blocks` `i16`s; `y`
+            // readable for `8 * blocks` bytes; `dst` writable for that many
+            // pixels and overlapping none of the sources.
             unsafe {
                 let u = std::array::from_fn(|t| slice::from_raw_parts(*u.add(t), n));
                 let v = std::array::from_fn(|t| slice::from_raw_parts(*v.add(t), n));
@@ -136,6 +143,8 @@ unsafe extern "C" fn fast_chroma_horizontal_c(
         return;
     };
 
+    // SAFETY: the caller (checkasm) passes `dst` writable for `16 * blocks`
+    // `i16`s and `src` readable for `8 * blocks + 4` bytes, not overlapping.
     unsafe {
         k::fast_chroma_horizontal(
             slice::from_raw_parts_mut(dst, 2 * n),
@@ -170,6 +179,11 @@ macro_rules! upsample_block_tramp {
             let pixels = 2 * last;
             let bpp = bpp($layout);
 
+            // SAFETY: the caller (checkasm) passes the luma rows readable for
+            // `pixels` bytes, the four chroma rows for `last + 1`, and the
+            // destination rows writable for `pixels` pixels of the layout,
+            // disjoint from every source and each other; the bottom pair may
+            // instead be null, which is never turned into a slice.
             unsafe {
                 k::upsample_pairs::<$layout>(
                     slice::from_raw_parts(top_y, pixels),
@@ -205,6 +219,8 @@ macro_rules! row_tramp {
                 return;
             };
 
+            // SAFETY: the caller (checkasm) passes `dst` writable for `$d * n`
+            // bytes and `src` readable for `$s * n`, not overlapping.
             unsafe {
                 k::$kernel(
                     slice::from_raw_parts_mut(dst, $d * n),
@@ -223,6 +239,8 @@ macro_rules! inplace_tramp {
                 return;
             };
 
+            // SAFETY: the caller (checkasm) passes `row` writable for
+            // `$bpp * n` bytes.
             k::$kernel(unsafe { slice::from_raw_parts_mut(row, $bpp * n) }, $extra);
         }
     };
@@ -242,6 +260,9 @@ macro_rules! yuv_row_tramp {
             };
             let samples = n.div_ceil($chroma);
 
+            // SAFETY: the caller (checkasm) passes `y` readable for `n` bytes,
+            // `u` and `v` for `ceil(n / $chroma)` each, and `dst` writable for
+            // `n` pixels of the layout, overlapping none of them.
             unsafe {
                 k::$kernel::<$layout>(
                     slice::from_raw_parts_mut(dst, bpp($layout) * n),
@@ -284,6 +305,8 @@ unsafe extern "C" fn premultiply_row_c(rgba: *mut u8, alpha_first: c_int, n: c_i
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `rgba` writable for `n` 4-byte
+    // pixels.
     let row = unsafe { slice::from_raw_parts_mut(rgba, 4 * n) };
 
     k::premultiply_row(row, alpha_first != 0);
@@ -294,6 +317,8 @@ unsafe extern "C" fn multiply_row_c(plane: *mut u8, alpha: *const u8, n: c_int) 
         return;
     };
 
+    // SAFETY: the caller (checkasm) passes `plane` writable and `alpha`
+    // readable for `n` bytes each, not overlapping.
     unsafe {
         k::multiply_row(
             slice::from_raw_parts_mut(plane, n),
@@ -307,6 +332,8 @@ unsafe extern "C" fn premultiply_argb_row_c(argb: *mut u8, n: c_int) {
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `argb` writable for `n` 4-byte
+    // pixels.
     let row = unsafe { slice::from_raw_parts_mut(argb, 4 * n) };
 
     k::premultiply_argb_row(row, false);
@@ -323,6 +350,8 @@ unsafe extern "C" fn argb_to_yuv444_c(
         return;
     };
 
+    // SAFETY: the caller (checkasm) passes `y`, `u` and `v` writable for `n`
+    // bytes each and `argb` readable for `n` pixels, all four disjoint.
     unsafe {
         k::argb_to_yuv444(
             slice::from_raw_parts_mut(y, n),
@@ -349,6 +378,9 @@ unsafe extern "C" fn argb_to_uv_c(
     };
     let chroma = n.div_ceil(2);
 
+    // SAFETY: the caller (checkasm) passes `u` and `v` writable for
+    // `ceil(n / 2)` bytes each and `argb` readable for two rows of `n` pixels
+    // `argb_stride` bytes apart (`4 * n + stride`), all three disjoint.
     unsafe {
         k::argb_to_uv(
             slice::from_raw_parts_mut(u, chroma),
@@ -520,15 +552,37 @@ impl WPDYUVDSP {
     }
 }
 
+/// Fills `*dsp` with the YUV and packing kernels for the running CPU.
+///
+/// # Safety
+///
+/// `dsp` must be non-null, aligned and valid for a write of one `WPDYUVDSP`.
+/// Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv_dsp_init(dsp: *mut WPDYUVDSP) {
+    // SAFETY: `dsp` is valid for a write of one `WPDYUVDSP` per this
+    // function's `# Safety` contract.
     unsafe { dsp.write(WPDYUVDSP::new()) }
 }
 
+/// Converts rows `row_start..row_end` of a `width` x `height` 4:2:0 picture to
+/// the packed `layout`, returning the first row not yet written; invalid
+/// arguments return `row_start` without touching any pointer.
+///
+/// # Safety
+///
+/// When the arguments pass validation (positive strides each at least its
+/// row's width in bytes, non-null planes, `0 <= row_start < row_end <=
+/// height`, a valid `layout`):
+///
+/// - `dst` must be writable for `(height - 1) * dst_stride + bpp * width`
+///   bytes, and overlap none of the source planes.
+/// - `y` must be readable for `(height - 1) * y_stride + width` bytes.
+/// - `u` and `v` must each be readable for
+///   `(ceil(height / 2) - 1) * uv_stride + ceil(width / 2)` bytes.
+/// - `a` must be null or readable for `(height - 1) * a_stride + width` bytes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     layout: c_int,
     dst: *mut u8,
@@ -589,6 +643,9 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
         Some(len)
     };
 
+    // SAFETY: the extents were checked above against `plane_extent`, and per
+    // this function's `# Safety` contract each non-null plane is valid for
+    // exactly that extent, with `dst` writable and disjoint from the sources.
     unsafe {
         let mut out = PlaneMut::borrowed(
             slice::from_raw_parts_mut(dst, dst_len),
@@ -619,9 +676,14 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed_rows(
     }
 }
 
+/// Converts a whole 4:2:0 picture to the packed `layout`: every row of
+/// [`wpd_yuv420_to_packed_rows`].
+///
+/// # Safety
+///
+/// As for [`wpd_yuv420_to_packed_rows`].
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_yuv420_to_packed(
     layout: c_int,
     dst: *mut u8,
@@ -636,6 +698,8 @@ pub unsafe extern "C" fn wpd_yuv420_to_packed(
     width: c_int,
     height: c_int,
 ) {
+    // SAFETY: this function's `# Safety` contract is that of
+    // `wpd_yuv420_to_packed_rows`, and `0..height` is a valid row range.
     unsafe {
         wpd_yuv420_to_packed_rows(
             layout, dst, dst_stride, y, y_stride, u, v, uv_stride, a, a_stride, width,
@@ -660,6 +724,8 @@ mod tests {
             (LAYOUT_ARGB as c_int, 1, 1, 0, 2),
         ] {
             assert_eq!(
+                // SAFETY: every case is rejected by the bounds checks before
+                // any pointer is used, so the null pointers are never read.
                 unsafe {
                     wpd_yuv420_to_packed_rows(
                         layout,
