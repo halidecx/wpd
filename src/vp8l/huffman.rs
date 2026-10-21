@@ -254,7 +254,9 @@ fn analyze(p: &mut Plan, lengths: &[u8], sorted: &mut [u16]) -> bool {
 
     let mut symbol = 0;
     while symbol + 8 <= lengths.len() {
-        let run: [u8; 8] = lengths[symbol..symbol + 8].try_into().unwrap();
+        let run: [u8; 8] = lengths[symbol..symbol + 8]
+            .try_into()
+            .expect("the slice is 8 long");
 
         if u64::from_ne_bytes(run) == 0 {
             symbol += 8;

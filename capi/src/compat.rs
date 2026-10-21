@@ -38,8 +38,14 @@ pub extern "C" fn wpd_version_string() -> *const c_char {
     concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
 }
 
+/// # Safety
+///
+/// `callback`, if set, must be safe to call with `opaque`, a log level, and a
+/// NUL-terminated message for as long as it stays installed. A decoder running
+/// with more than one thread may call it from worker threads, concurrently, so
+/// it and whatever `opaque` points to must be thread-safe. It must not call
+/// back into the decoder that invoked it.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_set_log_callback(
     callback: Option<WPDLogCallback>,
     opaque: *mut c_void,
@@ -74,5 +80,9 @@ pub(crate) fn forward_log(level: Level, message: &str) {
         Level::Warning => 1,
     };
 
+    // SAFETY: `callback` and `opaque` were installed together through
+    // `wpd_set_log_callback`, whose C contract makes the caller vouch for them.
+    // `text` is NUL-terminated: `bytes` holds no NUL and fills at most
+    // MESSAGE_MAX of its MESSAGE_MAX + 1 zeroed bytes, and outlives the call.
     unsafe { callback(opaque, level, text.as_ptr().cast()) };
 }

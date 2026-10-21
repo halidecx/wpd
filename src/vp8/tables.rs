@@ -1,4 +1,8 @@
-use crate::dsp::vp8pred::*;
+use crate::dsp::vp8pred::{
+    DC_PRED, DC_PRED8X8, DIAG_DOWN_LEFT_PRED, DIAG_DOWN_RIGHT_PRED, HOR_DOWN_PRED,
+    HOR_PRED, HOR_PRED8X8, HOR_UP_PRED, PLANE_PRED8X8, TM_VP8_PRED, VERT_LEFT_PRED,
+    VERT_PRED, VERT_PRED8X8, VERT_RIGHT_PRED,
+};
 
 pub const MODE_I4: usize = 4;
 

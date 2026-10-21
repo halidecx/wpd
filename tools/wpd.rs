@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use wpd::api::{self, Animation, Decoder, Metadata};
+use wpd::api::{self, Animation, Decoder, Metadata, UvMode};
 use wpd::image::Format;
 
 use output::{format_name, Muxer, Output, PIXEL_FORMATS};
@@ -289,7 +289,7 @@ struct Options {
     max_input: u64,
     max_output: u64,
     n_threads: i32,
-    uvmode: u8,
+    uvmode: UvMode,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
     info: bool,
@@ -417,10 +417,10 @@ fn set(o: &mut Options, name: &str, value: OsString) -> Result<(), &'static str>
         "subframe" => o.subframe = true,
         "uvmode" => {
             o.uvmode = match value {
-                "0" => 0,
-                "1" => 1,
-                "2" => 2,
-                "3" => 3,
+                "0" => UvMode::Point,
+                "1" => UvMode::Fancy,
+                "2" => UvMode::FastFancy,
+                "3" => UvMode::ExtraFancy,
                 _ => return Err(BAD_UVMODE),
             };
         }
@@ -463,7 +463,6 @@ fn parse_args(argv: &[OsString]) -> Parsed {
         loops: 1,
         max_input: DEFAULT_MAX_INPUT,
         max_output: DEFAULT_MAX_OUTPUT,
-        uvmode: 1,
         ..Default::default()
     };
     let mut i = 1;
@@ -736,7 +735,7 @@ fn new_decoder(
     pixel_format: Option<&str>,
     subframe: bool,
     n_threads: i32,
-    uvmode: u8,
+    uvmode: UvMode,
     scale: Option<(i32, i32)>,
     frame_size_limit: u32,
 ) -> Option<Decoder<'static>> {
@@ -745,7 +744,7 @@ fn new_decoder(
     if decoder
         .set_options(api::Options {
             n_threads,
-            uvmode: u32::from(uvmode),
+            uvmode,
             scale,
             frame_size_limit,
             ..api::Options::default()
@@ -819,6 +818,9 @@ fn restore_sigpipe() {
         fn signal(sig: i32, handler: usize) -> usize;
     }
 
+    // SAFETY: signal matches the C prototype (int, pointer-sized handler),
+    // SIGPIPE is 13 and SIG_DFL 0 on every unix target, and this runs first
+    // in main, before any other thread exists.
     unsafe { signal(SIGPIPE, SIG_DFL) };
 }
 

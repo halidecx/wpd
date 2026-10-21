@@ -40,15 +40,22 @@ const META_TAG: [u32; METADATA_NB] = [
 const META_VP8X_FLAG: [u8; METADATA_NB] =
     [VP8X_FLAG_ICCP, VP8X_FLAG_EXIF, VP8X_FLAG_XMP];
 
+/// How a still image is coded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum Coding {
+    /// Not known, or an animation, whose frames may mix both.
     #[default]
     Unknown,
+    /// VP8.
     Lossy,
+    /// VP8L.
     Lossless,
 }
 
 impl Coding {
+    /// The coding's name, in lower case.
+    #[must_use]
     pub fn name(self) -> &'static str {
         match self {
             Coding::Unknown => "unknown",

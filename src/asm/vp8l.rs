@@ -110,6 +110,9 @@ fn pred_add<
     if TL {
         assert!(UP && up >= 1, "no top-left neighbour");
     }
+    // SAFETY: the asserts keep in/out[0..n], out[-1] (LEFT) and
+    // upper[-1..=n] (UP, TL) inside plane; every pointer comes from one
+    // as_mut_ptr, so the in-place, overlapping access is raw and allowed.
     unsafe {
         let base = plane.as_mut_ptr();
 
@@ -136,6 +139,9 @@ fn pred_pair<T: Raw<Sig = PredPairRaw>>(
         up >= 1 && up + n <= out && out + n <= below && below + n <= plane.len(),
         "picture too small"
     );
+    // SAFETY: the assert keeps upper[-1..n], both rows' [-1..n] and their
+    // n outputs inside plane, all derived from one as_mut_ptr; no top right
+    // is read, so up + n <= out suffices.
     unsafe {
         let base = plane.as_mut_ptr();
 
@@ -164,6 +170,9 @@ fn pred_green<T: Raw<Sig = PredGreenRaw>, const UP: bool>(
     if UP {
         assert!(above.len() > n + 1, "row above too short");
     }
+    // SAFETY: res holds the n residuals read; row.len() > n covers the left
+    // byte row[0] and the writes to row[1..=n], above.len() > n + 1 the reads
+    // of above[0..=n + 1] (upper[-1..=n]) with UP.
     unsafe {
         (T::F)(
             res.as_ptr(),
@@ -180,6 +189,8 @@ fn pred_green<T: Raw<Sig = PredGreenRaw>, const UP: bool>(
 
 fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
     assert!(palette.len() >= 256, "short palette");
+    // SAFETY: the kernel maps row.len() pixels in place, each through its
+    // green byte, an index below 256 that the assert keeps inside palette.
     unsafe {
         let p = row.as_mut_ptr().cast::<u8>();
 
@@ -188,6 +199,7 @@ fn map_color32<T: Raw<Sig = MapColorRaw>>(row: &mut [u32], palette: &[u32]) {
 }
 
 fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
+    // SAFETY: the kernel transforms exactly row.len() pixels in place.
     unsafe {
         let p = row.as_mut_ptr();
 
@@ -198,10 +210,13 @@ fn color_row<T: Raw<Sig = ColorRowRaw>>(row: &mut [u32], mult: u32) {
 fn blend_row<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len()) / 4;
 
+    // SAFETY: n pixels are 4 * n bytes, within both dst and src, which
+    // cannot alias as & and &mut.
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
 fn add_green<T: Raw<Sig = AddGreenRaw>>(row: &mut [u32]) {
+    // SAFETY: the kernel transforms exactly row.len() pixels in place.
     unsafe {
         let p = row.as_mut_ptr();
 
@@ -219,6 +234,8 @@ fn expand_alpha<T: Raw<Sig = ExpandAlphaRaw>>(
     let whole = dst.len() & !15;
 
     assert!(src.len() >= dst.len().div_ceil(2), "short indices");
+    // SAFETY: whole / 16 blocks write whole <= dst.len() bytes and read
+    // whole / 2 index bytes, inside src by the assert; palette is 16 bytes.
     unsafe {
         (T::F)(
             dst.as_mut_ptr(),
@@ -237,6 +254,8 @@ fn expand_alpha<T: Raw<Sig = ExpandAlphaRaw>>(
 fn extract_green<T: Raw<Sig = BlendRowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = dst.len().min(src.len() / 4);
 
+    // SAFETY: n bytes of dst are written from n pixels (4 * n bytes) of src,
+    // both in bounds by the min.
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
@@ -436,10 +455,15 @@ macro_rules! ladder {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
-    use super::*;
+    use super::{
+        add_green, blend_row, color_row, expand_alpha, extract_green, map_color32,
+        pred_add, pred_green, pred_pair, CpuFlags, Raw, RawTable, Vp8lDsp,
+    };
 
     pub mod sse2 {
-        use super::*;
+        use crate::asm::vp8l::{AddGreenRaw, PredAddRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         preds! {
             Pred0, pred0, "wpd_pred_add_0_sse2";
@@ -460,7 +484,9 @@ mod arch {
     }
 
     pub mod sse4 {
-        use super::*;
+        use crate::asm::vp8l::PredAddRaw;
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         preds! {
             Pred13, pred13, "wpd_pred_add_13_sse4";
@@ -468,7 +494,9 @@ mod arch {
     }
 
     pub mod ssse3 {
-        use super::*;
+        use crate::asm::vp8l::{AddGreenRaw, BlendRowRaw, ColorRowRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw_vp8l!(ColorRow, color_row, color_row, "wpd_color_row_ssse3");
         raw_vp8l!(AddGreen, add_green, add_green, "wpd_add_green_ssse3");
@@ -481,7 +509,12 @@ mod arch {
     }
 
     pub mod avx2 {
-        use super::*;
+        use crate::asm::vp8l::{
+            AddGreenRaw, BlendRowRaw, ColorRowRaw, ExpandAlphaRaw, MapColorRaw,
+            PredAddRaw, PredGreenRaw, PredPairRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         preds! {
             Pred0, pred0, "wpd_pred_add_0_avx2";
@@ -554,10 +587,18 @@ mod arch {
 
 #[cfg(target_arch = "aarch64")]
 mod arch {
-    use super::*;
+    use super::{
+        add_green, blend_row, color_row, expand_alpha, extract_green, map_color32,
+        pred_add, pred_green, pred_pair, CpuFlags, Raw, RawTable, Vp8lDsp,
+    };
 
     pub mod neon {
-        use super::*;
+        use crate::asm::vp8l::{
+            AddGreenRaw, BlendRowRaw, ColorRowRaw, ExpandAlphaRaw, MapColorRaw,
+            PredAddRaw, PredGreenRaw, PredPairRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         preds! {
             Pred0, pred0, "wpd_pred_add_0_neon";
@@ -609,7 +650,9 @@ mod arch {
 
     #[cfg(wpd_asm_dotprod)]
     pub mod dotprod {
-        use super::*;
+        use crate::asm::vp8l::{PredAddRaw, PredPairRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         preds! {
             Pred11, pred11, "wpd_pred_add_11_neon_dotprod";
@@ -646,7 +689,7 @@ mod arch {
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
-    use super::*;
+    use super::{CpuFlags, RawTable, Vp8lDsp};
 
     pub fn init(_dsp: &mut Vp8lDsp, _flags: CpuFlags) {}
 

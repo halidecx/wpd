@@ -34,6 +34,8 @@ impl Window {
     /* The caller must have checked a window covering the additional offset. */
     #[inline(always)]
     unsafe fn add(self, offset: usize) -> Self {
+        // SAFETY: the caller keeps `offset` inside the window that was
+        // bounds-checked when this `Window` was made, so it stays in `p`.
         Self(unsafe { self.0.add(offset) })
     }
 }
@@ -58,6 +60,8 @@ fn check_v(
             && end.is_some_and(|end| p.len() >= end),
         "plane too small"
     );
+    // SAFETY: the assert proved `o + down * s + n <= p.len()`, so `o` is in
+    // bounds of `p`.
     Window(unsafe { p.as_mut_ptr().add(o) })
 }
 
@@ -79,6 +83,8 @@ fn check_h(
         n != 0 && o >= left && end.is_some_and(|end| p.len() >= end),
         "plane too small"
     );
+    // SAFETY: the assert proved `o + (n - 1) * s + right <= p.len()`, so `o`
+    // is at most `p.len()`.
     Window(unsafe { p.as_mut_ptr().add(o) })
 }
 
@@ -92,6 +98,8 @@ fn check_block(p: &mut [u8], o: usize, s: usize, rows: usize, width: usize) -> *
         .and_then(|down| o.checked_add(down))
         .and_then(|end| end.checked_add(width));
     assert!(end.is_some_and(|end| p.len() >= end), "plane too small");
+    // SAFETY: the assert proved `o + (rows - 1) * s + width <= p.len()`, so
+    // `o` is at most `p.len()`.
     unsafe { p.as_mut_ptr().add(o) }
 }
 
@@ -210,6 +218,8 @@ fn lf_v<T: Raw<Sig = LfRaw>, const N: usize>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: every caller checked `w` to cover the 4 lines before the edge
+    // and the 4 from it, N long, which is all the filter reads or writes.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, i, hev) }
 }
 
@@ -231,6 +241,8 @@ fn lf_h<T: Raw<Sig = LfRaw>, const N: usize>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: every caller checked `w` to cover the 4 lines before the edge
+    // and the 4 from it, N long, which is all the filter reads or writes.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, i, hev) }
 }
 
@@ -254,6 +266,8 @@ fn lf_v_uv<T: Raw<Sig = LfUvRaw>>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: every caller checked `u` and `v` to cover the 4 lines before
+    // the edge and the 4 from it, 8 long, all the filter reads or writes.
     unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, i, hev) }
 }
 
@@ -287,6 +301,8 @@ fn lf_h_uv<T: Raw<Sig = LfUvRaw>>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: every caller checked `u` and `v` to cover the 4 lines before
+    // the edge and the 4 from it, 8 long, all the filter reads or writes.
     unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, i, hev) }
 }
 
@@ -319,6 +335,8 @@ fn lf_h_mb<T: Raw<Sig = LfMbRaw>>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: `w` was checked by `check_h(p, o, s, 4, 16, 16)`: 16 rows of
+    // columns -4..16, covering the macroblock edge and its three inner edges.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev) }
 }
 
@@ -344,6 +362,8 @@ fn lf_h_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
     i: i32,
     hev: i32,
 ) {
+    // SAFETY: `u` and `v` were each checked by `check_h(.., 4, 8, 8)`: 8 rows
+    // of columns -4..8, covering the macroblock edge and the inner edge.
     unsafe { (T::F)(u.as_mut_ptr(), v.as_mut_ptr(), s as isize, e, be, i, hev) }
 }
 
@@ -371,6 +391,8 @@ fn checked_lf_h_uv_mb<T: Raw<Sig = LfUvMbRaw>>(
 }
 
 fn lf_v_simple<T: Raw<Sig = LfSimpleRaw>>(w: Window, s: usize, e: i32) {
+    // SAFETY: every caller checked `w` to cover the 2 lines before the edge
+    // and the 2 from it, 16 long, which is all the simple filter touches.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e) }
 }
 
@@ -384,6 +406,8 @@ fn checked_lf_v_simple<T: Raw<Sig = LfSimpleRaw>>(
 }
 
 fn lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(w: Window, s: usize, e: i32) {
+    // SAFETY: every caller checked `w` to cover the 2 lines before the edge
+    // and the 2 from it, 16 long, which is all the simple filter touches.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e) }
 }
 
@@ -398,6 +422,8 @@ fn checked_lf_h_simple<T: Raw<Sig = LfSimpleRaw>>(
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(w: Window, s: usize, e: i32, be: i32) {
+    // SAFETY: `w` was checked by `check_v(p, o, s, 2, 13, 16)`: rows -2..=13,
+    // the reach of the simple filter on edges at rows 0, 4, 8 and 12.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be) }
 }
 
@@ -413,6 +439,8 @@ fn checked_lf_v_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(
 }
 
 fn lf_h_simple_mb<T: Raw<Sig = LfSimpleMbRaw>>(w: Window, s: usize, e: i32, be: i32) {
+    // SAFETY: `w` was checked by `check_h(p, o, s, 2, 14, 16)`: 16 rows of
+    // columns -2..14, the simple filter's reach on columns 0, 4, 8 and 12.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be) }
 }
 
@@ -443,6 +471,9 @@ fn checked_lf16y<T: Raw<Sig = LfAllRaw>>(
     let w = check_v(p, o, s, up, 15, 16);
 
     assert!(edges & 1 == 0 || o >= 8, "plane too small");
+    // SAFETY: `w` covers 16 rows of 16 and, when the top edge is filtered,
+    // the 4 rows above; the assert covers the 8 bytes the left edge reaches
+    // back from each row.
     unsafe { (T::F)(w.as_mut_ptr(), s as isize, e, be, i, hev, edges as c_int) }
 }
 
@@ -464,6 +495,9 @@ fn checked_lf8uv<T: Raw<Sig = LfUvAllRaw>>(
     let (u, v) = (check_v(u, ou, s, up, 7, 8), check_v(v, ov, s, up, 7, 8));
 
     assert!(edges & 1 == 0 || (ou >= 8 && ov >= 8), "plane too small");
+    // SAFETY: `u` and `v` each cover 8 rows of 8 and, when the top edge is
+    // filtered, the 4 rows above; the assert covers the 8 bytes the left edge
+    // reaches back from each row.
     unsafe {
         (T::F)(
             u.as_mut_ptr(),
@@ -499,8 +533,12 @@ fn mb_from<E, I, const VERT: bool>(
     };
 
     lf_v::<E, 16>(w, s, e, i, hev);
+    // SAFETY: the window spans 3 * step past `o` plus the inner filter's
+    // 4-line reach on each side, so each inner origin and its reach fit.
     lf_v::<I, 16>(unsafe { w.add(step) }, s, be, i, hev);
+    // SAFETY: as above, `2 * step` is inside the checked window.
     lf_v::<I, 16>(unsafe { w.add(2 * step) }, s, be, i, hev);
+    // SAFETY: as above, `3 * step` is inside the checked window.
     lf_v::<I, 16>(unsafe { w.add(3 * step) }, s, be, i, hev);
 }
 
@@ -529,7 +567,10 @@ fn uv_mb_from<E, I, const VERT: bool>(
 
     lf_v_uv::<E>(u, v, s, e, i, hev);
     lf_v_uv::<I>(
+        // SAFETY: each window spans `step` past its origin plus the inner
+        // filter's 4-line reach on each side.
         unsafe { u.add(step) },
+        // SAFETY: as for `u`; `v` was checked with the same extent.
         unsafe { v.add(step) },
         s,
         be,
@@ -554,12 +595,18 @@ fn simple_mb_from<T: Raw<Sig = LfSimpleRaw>, const VERT: bool>(
     };
 
     lf_v_simple::<T>(w, s, e);
+    // SAFETY: the window spans 3 * step past `o` plus the simple filter's
+    // 2-line reach on each side, so each inner origin and its reach fit.
     lf_v_simple::<T>(unsafe { w.add(step) }, s, be);
+    // SAFETY: as above, `2 * step` is inside the checked window.
     lf_v_simple::<T>(unsafe { w.add(2 * step) }, s, be);
+    // SAFETY: as above, `3 * step` is inside the checked window.
     lf_v_simple::<T>(unsafe { w.add(3 * step) }, s, be);
 }
 
 fn wht<T: Raw<Sig = WhtRaw>>(block: &mut [[i16; 16]; 16], dc: &mut [i16; 16]) {
+    // SAFETY: `block` is a `&mut` to the 16 blocks the transform scatters a DC
+    // into, and `dc` a `&mut [i16; 16]` holding the 16 DCs it reads and clears.
     unsafe { (T::F)(block, dc.as_mut_ptr()) }
 }
 
@@ -570,6 +617,8 @@ fn idct<T: Raw<Sig = IdctRaw>>(
     block: &mut [i16; 16],
 ) {
     let dst = check_block(p, o, s, 4, 4);
+    // SAFETY: `check_block` covered the 4x4 destination, and `block` is a
+    // `&mut [i16; 16]`, the coefficients the asm reads and clears.
     unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
@@ -580,6 +629,8 @@ fn idct4y<T: Raw<Sig = Idct4Raw>>(
     block: &mut [[i16; 16]; 4],
 ) {
     let dst = check_block(p, o, s, 4, 16);
+    // SAFETY: `check_block` covered 4 rows of 16 (four 4x4 blocks side by
+    // side), and `block` is a `&mut` to their four coefficient arrays.
     unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
@@ -590,6 +641,8 @@ fn idct4uv<T: Raw<Sig = Idct4Raw>>(
     block: &mut [[i16; 16]; 4],
 ) {
     let dst = check_block(p, o, s, 8, 8);
+    // SAFETY: `check_block` covered 8 rows of 8 (a 2x2 of 4x4 blocks), and
+    // `block` is a `&mut` to their four coefficient arrays.
     unsafe { (T::F)(dst, block.as_mut_ptr(), s as isize) }
 }
 
@@ -797,6 +850,9 @@ macro_rules! ladder {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 
@@ -906,7 +962,10 @@ mod arch {
     #[repr(C, align(32))]
     pub struct Transposed(pub [u8; 16 * 16]);
 
-    #[allow(clippy::missing_safety_doc)]
+    /// # Safety
+    ///
+    /// `dst` must be valid for reads and writes over 16 rows of `stride`,
+    /// from 4 bytes before to 16 bytes after `dst` in each row.
     pub unsafe extern "C" fn h16_mb_avx2(
         dst: *mut u8,
         stride: isize,
@@ -918,6 +977,10 @@ mod arch {
         let mut tmp = Transposed([0; 16 * 16]);
         let t = tmp.0.as_mut_ptr();
 
+        // SAFETY: the caller's window holds columns -4..16 of 16 rows. The
+        // transposes move columns -4..12 through the 256-byte `tmp`; the
+        // filters on `tmp` stay in its rows 0..16, and the inner filter at
+        // `dst + 12` reaches columns 8..16.
         unsafe {
             avx2::h16_transpose(dst, stride, t);
             (ssse3::V16::F)(t.add(4 * 16), 16, mbedge_e, flim_i, hev);
@@ -928,7 +991,10 @@ mod arch {
         }
     }
 
-    #[allow(clippy::missing_safety_doc)]
+    /// # Safety
+    ///
+    /// `dst_u` and `dst_v` must each be valid for reads and writes over 8 rows
+    /// of `stride`, from 4 bytes before to 8 bytes after them in each row.
     pub unsafe extern "C" fn h8uv_mb_avx2(
         dst_u: *mut u8,
         dst_v: *mut u8,
@@ -941,6 +1007,9 @@ mod arch {
         let mut tmp = Transposed([0; 16 * 16]);
         let t = tmp.0.as_mut_ptr();
 
+        // SAFETY: the caller's windows hold columns -4..8 of 8 rows in each
+        // plane. The transposes move those 12 columns of both planes through
+        // the 256-byte `tmp`, and the filters on `tmp` stay in its rows 0..12.
         unsafe {
             avx2::h8uv_transpose(dst_u, dst_v, stride, t);
             (ssse3::V16::F)(t.add(4 * 16), 16, mbedge_e, flim_i, hev);
@@ -989,6 +1058,9 @@ mod arch {
 }
 
 #[cfg(target_arch = "aarch64")]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 
@@ -1036,6 +1108,9 @@ mod arch {
 }
 
 #[cfg(target_arch = "arm")]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 
@@ -1100,6 +1175,9 @@ mod arch {
     target_arch = "aarch64",
     target_arch = "arm"
 )))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 

@@ -39,6 +39,9 @@ fn import_row_expand<T: Raw<Sig = ImportExpandRaw>, const LUMA: bool>(
         frow.len() >= n && src.len() >= p.src_width * p.num_channels,
         "short rescaler row"
     );
+    // SAFETY: the assert covers the n frow words written and the src row;
+    // the gate above keeps the kernel to its 4- (or 1-) channel, >= 8 pixel
+    // contract, and Rescaler derives x_add/x_sub so the window stays in src.
     unsafe {
         (T::F)(
             frow.as_mut_ptr(),
@@ -68,6 +71,9 @@ fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
         frow.len() >= n && src.len() >= p.src_width * p.num_channels,
         "short rescaler row"
     );
+    // SAFETY: the assert covers the n frow words written and the src row;
+    // the kernel reads n / 4 * x_add / x_sub pixels, which is src_width for
+    // the x_add = src_width, x_sub = dst_width Rescaler sets up.
     unsafe {
         (T::F)(
             frow.as_mut_ptr(),
@@ -90,6 +96,8 @@ where
     assert!(frow.len() >= n, "short rescaler row");
     if let Some((a, b)) = p.blend() {
         assert!(irow.len() >= n, "short rescaler row");
+        // SAFETY: n is dst.len() and both asserts give irow and frow >= n
+        // words; the kernel touches exactly n elements of each.
         unsafe {
             (B::F)(
                 dst.as_mut_ptr(),
@@ -102,6 +110,8 @@ where
             )
         }
     } else {
+        // SAFETY: n is dst.len() and frow.len() >= n was asserted above; the
+        // kernel touches exactly n elements of each.
         unsafe { (D::F)(dst.as_mut_ptr(), frow.as_ptr(), n as c_int, p.fy_scale) }
     }
 }
@@ -121,6 +131,8 @@ fn export_row_shrink<S, Z>(
     assert!(irow.len() >= n, "short rescaler row");
     if yscale != 0 {
         assert!(frow.len() >= n, "short rescaler row");
+        // SAFETY: n is dst.len() and both asserts give irow and frow >= n
+        // words; the kernel touches exactly n elements of each.
         unsafe {
             (S::F)(
                 dst.as_mut_ptr(),
@@ -132,6 +144,8 @@ fn export_row_shrink<S, Z>(
             )
         }
     } else {
+        // SAFETY: n is dst.len() and irow.len() >= n was asserted above; the
+        // kernel touches exactly n elements of each.
         unsafe { (Z::F)(dst.as_mut_ptr(), irow.as_mut_ptr(), n as c_int, p.fxy_scale) }
     }
 }
@@ -202,10 +216,19 @@ macro_rules! ladder {
 
 #[cfg(target_arch = "x86_64")]
 mod arch {
-    use super::*;
+    use super::{
+        export_row_expand, export_row_shrink, import_row_expand, import_row_shrink,
+        CpuFlags, ExportExpand, ExportShrink, Import, Kernel, Raw, RawTable,
+        RescaleDsp, Selection,
+    };
 
     pub mod sse2 {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+            ImportExpandRaw, ImportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -252,7 +275,11 @@ mod arch {
     }
 
     pub mod avx2 {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -366,10 +393,19 @@ mod arch {
 
 #[cfg(target_arch = "aarch64")]
 mod arch {
-    use super::*;
+    use super::{
+        export_row_expand, export_row_shrink, import_row_expand, import_row_shrink,
+        CpuFlags, ExportExpand, ExportShrink, Import, Kernel, Raw, RawTable,
+        RescaleDsp, Selection,
+    };
 
     pub mod neon {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+            ImportExpandRaw, ImportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -467,7 +503,7 @@ mod arch {
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
-    use super::*;
+    use super::{CpuFlags, RawTable, RescaleDsp, Selection};
 
     pub fn init(_dsp: &mut RescaleDsp, _flags: CpuFlags) {}
 

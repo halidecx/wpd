@@ -1,5 +1,5 @@
 use crate::cpu::CpuFlags;
-use crate::dsp::vp8pred::*;
+use crate::dsp::vp8pred::{Vp8Pred, PRED4X4_COUNT, PRED8X8_COUNT};
 
 pub type PredRaw = unsafe extern "C" fn(*mut u8, isize);
 pub type Pred4x4Raw = unsafe extern "C" fn(*mut u8, *const u8, isize);
@@ -39,11 +39,17 @@ fn check(p: &[u8], o: usize, s: usize, n: usize) {
 
 fn pred<T: Raw<Sig = PredRaw>, const N: usize>(p: &mut [u8], o: usize, s: usize) {
     check(p, o, s, N);
+    // SAFETY: `check` proved `o > s`, so the row above and the top-left byte
+    // exist, and that the N x N block at `o` fits; with the left column that
+    // is all the asm touches.
     unsafe { (T::F)(p.as_mut_ptr().add(o), s as isize) }
 }
 
 fn pred4x4<T: Raw<Sig = Pred4x4Raw>>(p: &mut [u8], o: usize, s: usize, tr: &[u8; 4]) {
     check(p, o, s, 4);
+    // SAFETY: `check` proved `o > s`, so the row above and the top-left byte
+    // exist, and that the 4x4 block at `o` fits; `tr` is the 4 top-right
+    // bytes the diagonal modes read.
     unsafe { (T::F)(p.as_mut_ptr().add(o), tr.as_ptr(), s as isize) }
 }
 
@@ -72,8 +78,17 @@ macro_rules! ladder {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
+    use crate::dsp::vp8pred::{
+        DC_PRED, DC_PRED8X8, DIAG_DOWN_LEFT_PRED, DIAG_DOWN_RIGHT_PRED, HOR_DOWN_PRED,
+        HOR_PRED, HOR_PRED8X8, HOR_UP_PRED, LEFT_DC_PRED8X8, PLANE_PRED8X8,
+        TM_VP8_PRED, TOP_DC_PRED8X8, VERT_LEFT_PRED, VERT_PRED, VERT_PRED8X8,
+        VERT_RIGHT_PRED,
+    };
 
     pub mod sse {
         use super::*;
@@ -207,8 +222,17 @@ mod arch {
 }
 
 #[cfg(target_arch = "aarch64")]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
+    use crate::dsp::vp8pred::{
+        DC_PRED, DC_PRED8X8, DIAG_DOWN_LEFT_PRED, DIAG_DOWN_RIGHT_PRED, HOR_DOWN_PRED,
+        HOR_PRED, HOR_PRED8X8, HOR_UP_PRED, LEFT_DC_PRED8X8, PLANE_PRED8X8,
+        TM_VP8_PRED, TOP_DC_PRED8X8, VERT_LEFT_PRED, VERT_PRED, VERT_PRED8X8,
+        VERT_RIGHT_PRED,
+    };
 
     pub mod neon {
         use super::*;
@@ -280,8 +304,15 @@ mod arch {
 }
 
 #[cfg(target_arch = "arm")]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
+    use crate::dsp::vp8pred::{
+        DC_128_PRED8X8, DC_PRED8X8, HOR_PRED8X8, LEFT_DC_PRED8X8, TOP_DC_PRED8X8,
+        VERT_PRED8X8,
+    };
 
     pub mod neon {
         use super::*;
@@ -320,6 +351,9 @@ mod arch {
     target_arch = "aarch64",
     target_arch = "arm"
 )))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 

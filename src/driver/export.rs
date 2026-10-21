@@ -12,7 +12,7 @@ use crate::dsp::rescale::RescaleDsp;
 use crate::dsp::yuv::{RowFn, YuvDsp};
 use crate::error::{Error, Result};
 use crate::handout::{Handout, Pixels, RowSink};
-use crate::options::Options;
+use crate::options::{Options, UvMode};
 use crate::picture::{Buffer, Frame};
 use crate::rescale::Scratches;
 use std::ops::Range;
@@ -418,9 +418,9 @@ fn still_packed_direct(
     if first == 0 {
         dst.alloc_packed(src.width, src.height, target.bpp(), target)?;
     }
-    if options.uvmode == 0 {
+    if options.uvmode == UvMode::Point {
         upsample_simple(dsp, dst, src, layout, first, upto, set.threads);
-    } else if options.uvmode == 3 {
+    } else if options.uvmode == UvMode::ExtraFancy {
         let planes = yuv_planes(src);
         let mut out = dst.frame_mut();
 
@@ -435,7 +435,7 @@ fn still_packed_direct(
             upto as usize,
             set.threads,
         );
-    } else if options.uvmode == 2 {
+    } else if options.uvmode == UvMode::FastFancy {
         let planes = yuv_planes(src);
         let mut out = dst.frame_mut();
 

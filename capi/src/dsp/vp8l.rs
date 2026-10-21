@@ -41,6 +41,8 @@ unsafe extern "C" fn pred_add_0_c(
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `out` valid for `n` writable
+    // pixels.
     unsafe { k::pred_add_0(slice::from_raw_parts_mut(out, n)) }
 }
 
@@ -54,6 +56,8 @@ unsafe extern "C" fn pred_add_1_c(
     let Some(n) = count(n).filter(|&n| n != 0) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `out` valid for `n` writable pixels
+    // with a readable left neighbour at `out[-1]`.
     unsafe {
         let left = *out.sub(1);
         k::pred_add_1(slice::from_raw_parts_mut(out, n), left);
@@ -72,6 +76,10 @@ macro_rules! pred_tramp {
             let Some(n) = count(n).filter(|&n| n != 0) else {
                 return;
             };
+            // SAFETY: the caller (checkasm) passes `out` valid for `n` writable
+            // pixels plus a readable `out[-1]`, and `upper`, disjoint from
+            // `out`, readable over `upper[-1..=n]`; this reads only the part
+            // of that the mode's flags select.
             unsafe {
                 let left = if $l { *out.sub(1) } else { 0 };
                 let top_left = if $tl { *upper.sub(1) } else { 0 };
@@ -98,6 +106,9 @@ unsafe extern "C" fn pred_add_4_c(
     if count(n).is_none_or(|n| n == 0) {
         return;
     }
+    // SAFETY: the caller (checkasm) passes `upper` readable over
+    // `upper[-1..=n]`, so `upper - 1` is readable for the `n` pixels mode 2
+    // reads; `out` is passed through under the same contract.
     unsafe { pred_add_2_c(inp, upper.sub(1), n, out) }
 }
 pred_tramp!(pred_add_5_c, pred_add_5, true, false, true);
@@ -121,6 +132,10 @@ macro_rules! pair_tramp {
             in_b: *const u32,
             out_b: *mut u32,
         ) {
+            // SAFETY: the caller (checkasm) passes each row as `$single`
+            // requires: `out`/`out_b` writable for `n` pixels with a readable
+            // `[-1]`, `upper` and `out` (the second row's upper) readable over
+            // `[-1..=n]`, and the three rows disjoint.
             unsafe {
                 $single(inp, upper, n, out);
                 $single(in_b, out.cast_const(), n, out_b);
@@ -156,6 +171,9 @@ macro_rules! green_tramp {
             let Some(n) = count(n) else {
                 return;
             };
+            // SAFETY: the caller (checkasm) passes `out` writable over
+            // `out[-1..n]`, `res` readable for `n` pixels and, for every mode
+            // but 1, `upper` readable over `upper[-1..=n]`; none overlap `out`.
             unsafe {
                 let above: &[u8] = if $up {
                     slice::from_raw_parts(upper.sub(1), n + 2)
@@ -191,6 +209,9 @@ unsafe extern "C" fn add_green_c(dst: *mut u32, src: *const u32, n: c_int) {
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `dst` valid for `n` writable
+    // pixels and `src` for `n` readable ones; `ptr::copy` tolerates overlap,
+    // and only `dst` is borrowed afterwards.
     unsafe {
         if dst.cast_const() != src {
             std::ptr::copy(src, dst, n);
@@ -203,6 +224,8 @@ unsafe extern "C" fn extract_green_c(dst: *mut u8, src: *const u8, n: c_int) {
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `dst` valid for `n` writable bytes
+    // and `src` for `n` readable ARGB pixels, not overlapping.
     unsafe {
         k::extract_green(
             slice::from_raw_parts_mut(dst, n),
@@ -220,6 +243,9 @@ unsafe extern "C" fn map_color32_c(
     let Some(n) = count(n).map(|n| 4 * n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `palette` readable for 256 entries,
+    // `dst` writable for `n` pixels, and `src` either equal to `dst` (the
+    // in-place path, one borrow) or readable for `n` pixels apart from it.
     unsafe {
         let palette = slice::from_raw_parts(palette, 256);
         if dst.cast_const() == src {
@@ -243,6 +269,9 @@ unsafe extern "C" fn expand_alpha_nibbles_c(
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `n` blocks: `dst` writable for
+    // `16 * n` bytes, `src` readable for `8 * n`, `palette` for 16, with
+    // neither source overlapping `dst`.
     unsafe {
         k::expand_alpha_nibbles(
             slice::from_raw_parts_mut(dst, 16 * n),
@@ -256,6 +285,9 @@ unsafe extern "C" fn color_row_c(dst: *mut u32, src: *const u32, n: c_int, mult:
     let Some(n) = count(n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `dst` writable for `n` pixels and
+    // `src` either equal to it (never borrowed then) or readable for `n`
+    // pixels apart from it.
     unsafe {
         let row = slice::from_raw_parts_mut(dst, n);
 
@@ -270,6 +302,8 @@ unsafe extern "C" fn blend_row_argb_c(dst: *mut u8, src: *const u8, n: c_int) {
     let Some(n) = count(n).map(|n| 4 * n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `dst` writable and `src` readable
+    // for `n` ARGB pixels each, not overlapping.
     unsafe {
         k::blend_row_argb(
             slice::from_raw_parts_mut(dst, n),
@@ -282,6 +316,8 @@ unsafe extern "C" fn blend_row_argb_premult_c(dst: *mut u8, src: *const u8, n: c
     let Some(n) = count(n).map(|n| 4 * n) else {
         return;
     };
+    // SAFETY: the caller (checkasm) passes `dst` writable and `src` readable
+    // for `n` ARGB pixels each, not overlapping.
     unsafe {
         k::blend_row_argb_premult(
             slice::from_raw_parts_mut(dst, n),
@@ -406,8 +442,15 @@ impl WPDLosslessDSP {
     }
 }
 
+/// Fills `*dsp` with the lossless kernels for the running CPU.
+///
+/// # Safety
+///
+/// `dsp` must be non-null, aligned and valid for a write of one
+/// `WPDLosslessDSP`. Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_vp8l_dsp_init(dsp: *mut WPDLosslessDSP) {
+    // SAFETY: `dsp` is valid for a write of one `WPDLosslessDSP` per this
+    // function's `# Safety` contract.
     unsafe { dsp.write(WPDLosslessDSP::new()) }
 }

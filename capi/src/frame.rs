@@ -84,6 +84,10 @@ impl RowSink for External {
             .checked_mul(plane.stride)
             .expect("row outside the checked plane");
 
+        // SAFETY: the core calls `row` only for a plane `fits` accepted, with
+        // the same `len` as its `row_len` and `y` below its `rows`, so the row
+        // lies inside the `size` bytes the C caller lent (`WPDOutputPlane`
+        // contract). `fits` also rejected overlap with borrowed input.
         unsafe { slice::from_raw_parts_mut(plane.data.offset(offset), len) }
     }
 }
@@ -136,12 +140,16 @@ pub(crate) fn plane_extent(
 }
 
 pub(crate) unsafe fn frame_valid(frame: *const WPDFrame) -> bool {
+    // SAFETY: `frame` is non-null here, and the caller guarantees it points
+    // to a `WPDFrame` whose leading `struct_size` is readable.
     !frame.is_null()
         && unsafe { ptr::addr_of!((*frame).struct_size).read() }
             >= private_data_extent()
 }
 
 pub(crate) unsafe fn frame_extent(frame: *const WPDFrame) -> usize {
+    // SAFETY: the caller guarantees `frame` is non-null and readable at least
+    // through `struct_size`.
     if unsafe { ptr::addr_of!((*frame).struct_size).read() } >= has_alpha_extent() {
         has_alpha_extent()
     } else {
@@ -151,8 +159,11 @@ pub(crate) unsafe fn frame_extent(frame: *const WPDFrame) -> usize {
 
 pub(crate) unsafe fn frame_clear(frame: *mut WPDFrame) {
     let head = frame_head();
+    // SAFETY: the caller guarantees `frame` passed `frame_valid`.
     let extent = unsafe { frame_extent(frame) };
 
+    // SAFETY: `frame_extent` never exceeds the caller's `struct_size`, which
+    // the caller guarantees is writable, and is at least `head`.
     unsafe { ptr::write_bytes(frame.cast::<u8>().add(head), 0, extent - head) };
 }
 
@@ -161,6 +172,8 @@ pub(crate) unsafe fn write_frame(
     ext: &[WPDOutputPlane; 4],
     frame: *mut WPDFrame,
 ) {
+    // SAFETY: the caller guarantees `frame` passed `frame_valid` and is
+    // writable through its `struct_size`.
     unsafe { frame_clear(frame) };
 
     let planes = handout.planes();
@@ -170,6 +183,8 @@ pub(crate) unsafe fn write_frame(
             for p in 0..planes {
                 let (data, stride) = handout_plane(img, p);
 
+                // SAFETY: `p` < `planes` <= 4 indexes the `data` and `stride`
+                // arrays, which lie inside any frame `frame_valid` accepts.
                 unsafe {
                     ptr::addr_of_mut!((*frame).data)
                         .cast::<*const u8>()
@@ -184,6 +199,8 @@ pub(crate) unsafe fn write_frame(
         }
         Pixels::Sink => {
             for (p, plane) in ext.iter().enumerate() {
+                // SAFETY: `p` < 4 indexes the `data` and `stride` arrays,
+                // which lie inside any frame `frame_valid` accepts.
                 unsafe {
                     ptr::addr_of_mut!((*frame).data)
                         .cast::<*const u8>()
@@ -198,6 +215,8 @@ pub(crate) unsafe fn write_frame(
         }
         Pixels::None => {}
     }
+    // SAFETY: these fields all precede `private_data`, so they lie within the
+    // extent `frame_valid` guaranteed.
     unsafe {
         ptr::addr_of_mut!((*frame).width).write(handout.width);
         ptr::addr_of_mut!((*frame).height).write(handout.height);
@@ -205,9 +224,12 @@ pub(crate) unsafe fn write_frame(
         ptr::addr_of_mut!((*frame).duration).write(handout.duration);
         ptr::addr_of_mut!((*frame).timestamp).write(handout.timestamp);
     }
+    // SAFETY: `frame` passed `frame_valid`, per the caller.
     if unsafe { frame_extent(frame) } < has_alpha_extent() {
         return;
     }
+    // SAFETY: the caller's `struct_size` reaches `has_alpha` (checked just
+    // above), so every field written here lies inside its frame.
     unsafe {
         ptr::addr_of_mut!((*frame).pos_x).write(handout.pos_x);
         ptr::addr_of_mut!((*frame).pos_y).write(handout.pos_y);
@@ -226,10 +248,14 @@ pub(crate) unsafe fn write_frame(
 }
 
 pub(crate) unsafe fn frame_private_data(frame: *const WPDFrame) -> *mut c_void {
+    // SAFETY: the caller guarantees `frame` passed `frame_valid`, so its
+    // storage reaches past `private_data`.
     unsafe { ptr::addr_of!((*frame).private_data).read() }
 }
 
 pub(crate) unsafe fn frame_set_private_data(frame: *mut WPDFrame, owner: *mut c_void) {
+    // SAFETY: the caller guarantees `frame` passed `frame_valid`, so its
+    // writable storage reaches past `private_data`.
     unsafe { ptr::addr_of_mut!((*frame).private_data).write(owner) };
 }
 
@@ -239,6 +265,8 @@ pub(crate) unsafe fn frame_set_plane(
     data: *const u8,
     stride: isize,
 ) {
+    // SAFETY: the caller guarantees `frame` passed `frame_valid` and `p` < 4,
+    // so both writes land inside the `data` and `stride` arrays.
     unsafe {
         ptr::addr_of_mut!((*frame).data)
             .cast::<*const u8>()
@@ -317,6 +345,8 @@ mod tests {
         };
         let frame = (&mut frame as *mut LegacyFrame).cast::<WPDFrame>();
 
+        // SAFETY: `frame` points to a live `LegacyFrame`, which begins with
+        // `struct_size` like a `WPDFrame`.
         assert!(unsafe { frame_valid(frame) });
         let handout = Handout {
             width: 23,
@@ -325,9 +355,15 @@ mod tests {
             timestamp: 37,
             ..Handout::default()
         };
+        // SAFETY: `frame` passed `frame_valid`, and its `struct_size` is the
+        // full `LegacyFrame`, which `write_frame` must not write past.
         unsafe { write_frame(&handout, &[WPDOutputPlane::empty(); 4], frame) };
+        // SAFETY: `width`, `height` and `private_data` share their offsets with
+        // `LegacyFrame`'s, which is live and initialised.
         assert_eq!(unsafe { ptr::addr_of!((*frame).width).read() }, 23);
+        // SAFETY: as above.
         assert_eq!(unsafe { ptr::addr_of!((*frame).height).read() }, 29);
+        // SAFETY: as above.
         assert!(unsafe { frame_private_data(frame) }.is_null());
     }
 

@@ -309,14 +309,16 @@ pub fn dispatch_alpha_last(dst: &mut [u8], src: &[u8]) {
 
 pub fn pack_rgba(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-        let pixel = u32::from_le_bytes(s.try_into().unwrap()).rotate_right(8);
+        let pixel = u32::from_le_bytes(s.try_into().expect("chunks are 4 bytes"))
+            .rotate_right(8);
         d.copy_from_slice(&pixel.to_le_bytes());
     }
 }
 
 pub fn pack_bgra(dst: &mut [u8], src: &[u8]) {
     for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-        let pixel = u32::from_le_bytes(s.try_into().unwrap()).swap_bytes();
+        let pixel =
+            u32::from_le_bytes(s.try_into().expect("chunks are 4 bytes")).swap_bytes();
         d.copy_from_slice(&pixel.to_le_bytes());
     }
 }

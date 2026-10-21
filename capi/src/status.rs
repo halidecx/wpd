@@ -23,5 +23,8 @@ pub fn status(e: Error) -> c_int {
         Error::NotWebp => WPD_ERR_NOT_WEBP,
         Error::Unsupported => WPD_ERR_UNSUPPORTED,
         Error::BufferTooSmall => WPD_ERR_BUFFER_TOO_SMALL,
+        /* `Error` is non-exhaustive. A variant with no status of its own yet
+         * is nothing the caller can act on, so it surfaces as a defect. */
+        _ => WPD_ERR_INTERNAL,
     }
 }
