@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::mem;
 use std::ptr;
 
-use wpd::api::{self, Animation, Decoder, Options};
+use wpd::api::{self, Animation, Decoder, Options, UvMode};
 use wpd::image::Format;
 use wpd_capi::decoder::{wpd_decode_into, WPDOutputBuffer};
 use wpd_capi::frame::{WPDFrame, WPDOutputPlane};
@@ -46,7 +46,7 @@ fn decode_options(data: &[u8]) -> (Options, bool) {
         frame_size_limit: budget::MAX_PIXELS,
         n_threads: [1, 2, 3, 8][usize::from(flags >> 6)],
         bypass_filtering: flags & 8 != 0,
-        uvmode: u32::from(byte(data, 2) & 3),
+        uvmode: UvMode::from_raw(u32::from(byte(data, 2) & 3)).unwrap_or_default(),
         flip: !subframe && flags & 32 != 0,
         ..Options::default()
     };
@@ -115,7 +115,7 @@ fn decode_external(data: &[u8], options: Options) {
     let options = WPDDecoderOptions {
         struct_size: mem::size_of::<WPDDecoderOptions>(),
         bypass_filtering: i32::from(options.bypass_filtering),
-        uvmode: options.uvmode,
+        uvmode: options.uvmode as u32,
         use_cropping: i32::from(options.crop.is_some()),
         crop_left: options.crop.map_or(0, |v| v.0),
         crop_top: options.crop.map_or(0, |v| v.1),

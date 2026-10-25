@@ -76,13 +76,13 @@ pub fn join<A: Send, B>(
 
     std::thread::scope(|s| {
         let job = &side;
-        let handle = std::thread::Builder::new()
-            .spawn_scoped(s, move || job.lock().unwrap().take().unwrap()());
+        let handle =
+            std::thread::Builder::new().spawn_scoped(s, move || take_job(job)());
         let b = main(handle.is_ok());
 
         let a = match handle {
             Ok(handle) => unwrap_joined(handle.join()),
-            Err(_) => side.lock().unwrap().take().unwrap()(),
+            Err(_) => take_job(&side)(),
         };
         (a, b)
     })
@@ -115,18 +115,10 @@ pub fn for_each<T: Send>(threads: usize, items: &mut [T], f: impl Fn(&mut T) + S
                 // A failed spawn leaves the job here, so resource limits only
                 // reduce parallelism.
                 match std::thread::Builder::new().spawn_scoped(s, move || {
-                    borrowed
-                        .lock()
-                        .unwrap()
-                        .take()
-                        .unwrap()
-                        .iter_mut()
-                        .for_each(f);
+                    take_job(borrowed).iter_mut().for_each(f);
                 }) {
                     Ok(handle) => handles.push(handle),
-                    Err(_) => {
-                        job.lock().unwrap().take().unwrap().iter_mut().for_each(f)
-                    }
+                    Err(_) => take_job(job).iter_mut().for_each(f),
                 }
             }
             if let Some(chunk) = last {
@@ -285,7 +277,9 @@ pub fn relay<'s, T: Send, R>(
         /* A failed spawn dropped the ends of the channels it was given, so
          * the steps already running stop once the producer's end goes too,
          * and the buffers stay queued for the producer to run here. */
-        let r = complete.then(|| produce.take().unwrap()(&mut relay));
+        let r = complete.then(|| {
+            produce.take().expect("the producer runs at most once")(&mut relay)
+        });
         let Route::Across(idle_rx, first_tx) = relay.route else {
             unreachable!()
         };
@@ -299,7 +293,11 @@ pub fn relay<'s, T: Send, R>(
 
     match ran {
         (Some(r), items) => (r, items),
-        (None, items) => here(items, produce.take().unwrap(), steps),
+        (None, items) => here(
+            items,
+            produce.take().expect("the producer has not run"),
+            steps,
+        ),
     }
 }
 
@@ -330,6 +328,15 @@ fn wait<T>(rx: &Receiver<T>) -> Option<T> {
             std::hint::spin_loop();
         }
     }
+}
+
+/// Takes a job handed to a thread, which happens exactly once. A poisoned
+/// lock means a thread panicked holding it, and joining it re-raises that.
+fn take_job<T>(job: &std::sync::Mutex<Option<T>>) -> T {
+    job.lock()
+        .expect("a job's thread panicked")
+        .take()
+        .expect("a job is taken once")
 }
 
 fn unwrap_joined<T>(joined: std::thread::Result<T>) -> T {

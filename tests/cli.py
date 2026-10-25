@@ -21,7 +21,7 @@ class Cli(unittest.TestCase):
         self.input.write_bytes((CORPUS / "metadata_binary.webp").read_bytes())
 
     def command(self, *args, input=None, stdout=subprocess.PIPE):
-        return subprocess.run([str(WPD), *map(os.fspath, args)], input=input,
+        return subprocess.run([*WPD_ARGS, *map(os.fspath, args)], input=input,
                               stdout=stdout, stderr=subprocess.PIPE, timeout=30)
 
     def success(self, result):
@@ -261,7 +261,7 @@ class Cli(unittest.TestCase):
                 with self.subTest(flags=flags):
                     self.input.write_bytes(original)
                     with self.input.open("rb") as stdin:
-                        result = subprocess.run([str(WPD), *flags], stdin=stdin,
+                        result = subprocess.run([*WPD_ARGS, *flags], stdin=stdin,
                                                 capture_output=True, timeout=30)
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertEqual(self.input.read_bytes(), original)
@@ -281,7 +281,7 @@ class Cli(unittest.TestCase):
                         link.symlink_to(descriptor)
                         name = str(link) if linked else descriptor
                         args = [flag, str(self.input), name] if flag else ["--info=json", name, str(self.input)]
-                        result = subprocess.run([str(WPD), *args], stdin=subprocess.DEVNULL,
+                        result = subprocess.run([*WPD_ARGS, *args], stdin=subprocess.DEVNULL,
                                                 pass_fds=(source.fileno(),), capture_output=True, timeout=30)
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertEqual(self.input.read_bytes(), original)
@@ -291,7 +291,7 @@ class Cli(unittest.TestCase):
                 link.unlink(missing_ok=True)
                 link.symlink_to(descriptor)
                 name = str(link) if linked else descriptor
-                result = subprocess.run([str(WPD), "--icc-out", str(metadata), "--stream", "1", name],
+                result = subprocess.run([*WPD_ARGS, "--icc-out", str(metadata), "--stream", "1", name],
                                         stdin=subprocess.DEVNULL, pass_fds=(source.fileno(),),
                                         capture_output=True, timeout=30)
             self.success(result)
@@ -312,7 +312,7 @@ class Cli(unittest.TestCase):
                     link.unlink(missing_ok=True)
                     link.symlink_to(descriptor)
                     name = str(link) if linked else descriptor
-                    result = subprocess.run([str(WPD), "--info=json", "--icc-out", str(metadata), name],
+                    result = subprocess.run([*WPD_ARGS, "--info=json", "--icc-out", str(metadata), name],
                                             stdin=subprocess.DEVNULL, stdout=stdout, stderr=subprocess.PIPE,
                                             pass_fds=(source.fileno(),), timeout=30)
                 self.assertEqual(result.returncode, 2, result.stderr)
@@ -337,7 +337,7 @@ class Cli(unittest.TestCase):
                             link.unlink(missing_ok=True)
                             link.symlink_to(descriptor)
                             output = str(link) if linked else descriptor
-                            result = subprocess.run([str(WPD), "--info=json", "--icc-out", str(metadata), name, output],
+                            result = subprocess.run([*WPD_ARGS, "--info=json", "--icc-out", str(metadata), name, output],
                                                     stdin=source if input_kind == "stdin" else subprocess.DEVNULL,
                                                     pass_fds=(source.fileno(), target.fileno()),
                                                     capture_output=True, timeout=30)
@@ -377,7 +377,7 @@ class Cli(unittest.TestCase):
                     self.input.write_bytes(original)
                     metadata.write_bytes(b"preserve metadata")
                     with self.input.open("rb") as stdin, target.open("ab") as stdout:
-                        result = subprocess.run([str(WPD), "--info=json", "--icc-out",
+                        result = subprocess.run([*WPD_ARGS, "--info=json", "--icc-out",
                                                  str(metadata), str(source)], stdin=stdin,
                                                 stdout=stdout, stderr=subprocess.PIPE, timeout=30)
                     self.assertEqual(result.returncode, 2, result.stderr)
@@ -456,6 +456,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wpd", type=Path, required=True)
     parser.add_argument("--corpus", type=Path, required=True)
+    # scripts/testdata.sh runs every testdata test under each CPU mask. A
+    # test's own later --cpumask still wins, as the CLI keeps the last one.
+    parser.add_argument("--cpumask")
     args, remaining = parser.parse_known_args()
     WPD, CORPUS = args.wpd.resolve(), args.corpus.resolve()
+    WPD_ARGS = [str(WPD), *(["--cpumask", args.cpumask] if args.cpumask else [])]
     unittest.main(argv=[__file__, *remaining])

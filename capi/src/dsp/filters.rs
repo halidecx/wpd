@@ -22,6 +22,9 @@ macro_rules! unfilter_tramp {
                 return;
             };
 
+            // SAFETY: the caller (checkasm) passes `row` valid for `width`
+            // writable bytes and `prev` either null or valid for `width`
+            // readable bytes that do not overlap `row`.
             unsafe {
                 $k(
                     (!prev.is_null()).then(|| slice::from_raw_parts(prev, width)),
@@ -73,8 +76,15 @@ impl WPDFILTERSDSP {
     }
 }
 
+/// Fills `*dsp` with the unfilter kernels for the running CPU.
+///
+/// # Safety
+///
+/// `dsp` must be non-null, aligned and valid for a write of one
+/// `WPDFILTERSDSP`. Its previous contents are overwritten without being read.
 #[no_mangle]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_filters_dsp_init(dsp: *mut WPDFILTERSDSP) {
+    // SAFETY: `dsp` is valid for a write of one `WPDFILTERSDSP` per this
+    // function's `# Safety` contract.
     unsafe { dsp.write(WPDFILTERSDSP::new()) }
 }

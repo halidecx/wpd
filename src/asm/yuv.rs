@@ -115,6 +115,9 @@ fn upsample_block<T: Raw<Sig = UpsampleBlockRaw>, const L: usize>(
         assert!(y.len() >= pixels, "short luma row");
         assert!(d.len() >= bpp(L) * pixels, "short output row");
     }
+    // SAFETY: the asserts cover the 2 * last luma and output pixels per row
+    // and chroma [0..=last] the kernel reads; bottom is null exactly when
+    // both bottom rows are absent, which the kernel then skips.
     unsafe {
         (T::F)(
             src.top_y.as_ptr(),
@@ -140,6 +143,8 @@ fn yuv444_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
 ) {
     let n = (dst.len() / bpp(L)).min(y.len()).min(u.len()).min(v.len());
 
+    // SAFETY: n is clamped to every row, so the n pixels read and written
+    // stay in bounds.
     unsafe {
         (T::F)(
             dst.as_mut_ptr(),
@@ -158,6 +163,8 @@ fn chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(dst: &mut [i16], src: &[
 
     assert!(src.len() >= pairs + 10, "short padded chroma row");
     if blocks != 0 {
+        // SAFETY: blocks write 16 * blocks <= dst.len() samples and read
+        // src[..8 * blocks + 10], inside src by the assert.
         unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), blocks as c_int) };
     }
     crate::dsp::yuv::chroma_horizontal(&mut dst[2 * done..], &src[done..]);
@@ -180,6 +187,9 @@ fn chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
         let up = u.map(<[i16]>::as_ptr);
         let vp = v.map(<[i16]>::as_ptr);
 
+        // SAFETY: 8 * blocks <= n pixels, n <= dst.len() / bpp(L), and the
+        // asserts give y and every u/v row >= n elements; up/vp hold the
+        // row pointers for the call's duration.
         unsafe {
             (T::F)(
                 dst.as_mut_ptr(),
@@ -217,6 +227,8 @@ fn fast_chroma_horizontal<T: Raw<Sig = ChromaHorizontalRaw>>(
 
     assert!(src.len() >= pairs + 4, "short padded chroma row");
     if blocks != 0 {
+        // SAFETY: blocks write 16 * blocks <= dst.len() samples and read
+        // src[..8 * blocks + 4], inside src by the assert.
         unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), blocks as c_int) };
     }
     crate::dsp::yuv::fast_chroma_horizontal(&mut dst[2 * done..], &src[done..]);
@@ -240,6 +252,9 @@ fn fast_chroma_row<T: Raw<Sig = ChromaRowRaw>, const L: usize>(
         let up = u.map(<[i16]>::as_ptr);
         let vp = v.map(<[i16]>::as_ptr);
 
+        // SAFETY: 8 * blocks <= n pixels, n <= dst.len() / bpp(L), and the
+        // asserts give y and every u/v row >= n elements; up/vp hold the
+        // row pointers for the call's duration.
         unsafe {
             (T::F)(
                 dst.as_mut_ptr(),
@@ -277,6 +292,8 @@ fn yuv420_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
         .min(2 * u.len())
         .min(2 * v.len());
 
+    // SAFETY: n is clamped to dst and y, and pixel i reads chroma i / 2, so
+    // n <= 2 * len keeps the chroma reads inside u and v.
     unsafe {
         (T::F)(
             dst.as_mut_ptr(),
@@ -291,24 +308,30 @@ fn yuv420_row<T: Raw<Sig = YuvRowRaw>, const L: usize>(
 fn dispatch_alpha<T: Raw<Sig = RowRaw>>(dst: &mut [u8], src: &[u8]) {
     let n = (dst.len() / 4).min(src.len());
 
+    // SAFETY: n alpha bytes are read and stored into n 4-byte pixels, both
+    // in bounds by the min.
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
 fn pack_row<T: Raw<Sig = RowRaw>, const BPP: usize>(dst: &mut [u8], src: &[u8]) {
     let n = (dst.len() / BPP).min(src.len() / 4);
 
+    // SAFETY: n pixels are BPP * n bytes of dst and 4 * n of src, in bounds
+    // by the min; & and &mut cannot alias, as the kernel requires.
     unsafe { (T::F)(dst.as_mut_ptr(), src.as_ptr(), n as c_int) }
 }
 
 fn premultiply_row<T: Raw<Sig = PremultiplyRaw>>(rgba: &mut [u8], alpha_first: bool) {
     let n = rgba.len() / 4;
 
+    // SAFETY: n 4-byte pixels fit in rgba, transformed in place.
     unsafe { (T::F)(rgba.as_mut_ptr(), c_int::from(alpha_first), n as c_int) }
 }
 
 fn premultiply_row_4444<T: Raw<Sig = Premultiply4444Raw>>(row: &mut [u8]) {
     let n = row.len() / 2;
 
+    // SAFETY: n 2-byte pixels fit in row, transformed in place.
     unsafe { (T::F)(row.as_mut_ptr(), n as c_int) }
 }
 
@@ -323,6 +346,7 @@ fn multiply_row<T: Raw<Sig = MultiplyRowRaw>>(
 
     let n = plane.len().min(alpha.len());
 
+    // SAFETY: n bytes of plane and alpha, in bounds by the min.
     unsafe { (T::F)(plane.as_mut_ptr(), alpha.as_ptr(), n as c_int) }
 }
 
@@ -330,12 +354,15 @@ fn premultiply_argb_row<T: Raw<Sig = MultiplyArgbRaw>>(argb: &mut [u8], inverse:
     if inverse {
         return crate::dsp::yuv::premultiply_argb_row(argb, true);
     }
+    // SAFETY: argb.len() / 4 whole pixels fit in argb, transformed in place.
     unsafe { (T::F)(argb.as_mut_ptr(), (argb.len() / 4) as c_int) }
 }
 
 fn argb_to_y<T: Raw<Sig = RowRaw>>(y: &mut [u8], argb: &[u8]) {
     let n = y.len().min(argb.len() / 4);
 
+    // SAFETY: n bytes of y from n pixels (4 * n bytes) of argb, in bounds by
+    // the min.
     unsafe { (T::F)(y.as_mut_ptr(), argb.as_ptr(), n as c_int) }
 }
 
@@ -347,6 +374,8 @@ fn argb_to_yuv444<T: Raw<Sig = ArgbToYuv444Raw>>(
 ) {
     let n = y.len().min(u.len()).min(v.len()).min(argb.len() / 4);
 
+    // SAFETY: n bytes of each plane from n pixels (4 * n bytes) of argb, in
+    // bounds by the min.
     unsafe {
         (T::F)(
             y.as_mut_ptr(),
@@ -371,6 +400,8 @@ fn argb_to_uv<T: Raw<Sig = ArgbToUvRaw>>(
         u.len() >= n.div_ceil(2) && v.len() >= n.div_ceil(2),
         "short chroma row"
     );
+    // SAFETY: the asserts cover the two rows of 4 * n bytes at argb and
+    // argb + stride, and the n.div_ceil(2) samples written to u and v.
     unsafe {
         (T::F)(
             u.as_mut_ptr(),
@@ -707,13 +738,30 @@ macro_rules! ladder {
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod arch {
-    use super::*;
+    use super::{
+        argb_to_y, dispatch_alpha, multiply_row, pack_row, premultiply_argb_row,
+        premultiply_row, premultiply_row_4444, CpuFlags, Raw, RawTable, YuvDsp,
+    };
+    /* The YUV conversion kernels are assembled for x86_64 only. */
+    #[cfg(target_arch = "x86_64")]
+    use super::{
+        argb_to_uv, argb_to_yuv444, chroma_horizontal, chroma_row,
+        fast_chroma_horizontal, fast_chroma_row, upsample_block, yuv420_row,
+        yuv444_row,
+    };
+    #[cfg(target_arch = "x86_64")]
     use crate::dsp::yuv::{
         LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_RGB, LAYOUT_RGBA,
     };
 
     pub mod sse2 {
-        use super::*;
+        use crate::asm::yuv::{
+            MultiplyArgbRaw, MultiplyRowRaw, Premultiply4444Raw, RowRaw,
+        };
+        #[cfg(target_arch = "x86_64")]
+        use crate::asm::yuv::{UpsampleBlockRaw, YuvRowRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw_row!(
             DispatchFirst,
@@ -751,7 +799,11 @@ mod arch {
     }
 
     pub mod ssse3 {
-        use super::*;
+        #[cfg(target_arch = "x86_64")]
+        use crate::asm::yuv::{ArgbToYuv444Raw, UpsampleBlockRaw, YuvRowRaw};
+        use crate::asm::yuv::{PremultiplyRaw, RowRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         pack_syms!(
             "wpd_pack_rgba_ssse3",
@@ -788,7 +840,16 @@ mod arch {
     }
 
     pub mod avx2 {
-        use super::*;
+        #[cfg(target_arch = "x86_64")]
+        use crate::asm::yuv::{
+            ArgbToUvRaw, ArgbToYuv444Raw, UpsampleBlockRaw, YuvRowRaw,
+        };
+        use crate::asm::yuv::{
+            ChromaHorizontalRaw, ChromaRowRaw, MultiplyArgbRaw, MultiplyRowRaw,
+            Premultiply4444Raw, PremultiplyRaw, RowRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ChromaHorizontal,
@@ -940,13 +1001,24 @@ mod arch {
 
 #[cfg(target_arch = "aarch64")]
 mod arch {
-    use super::*;
+    use super::{
+        argb_to_uv, argb_to_y, argb_to_yuv444, chroma_horizontal, chroma_row,
+        dispatch_alpha, fast_chroma_horizontal, fast_chroma_row, multiply_row,
+        pack_row, premultiply_argb_row, premultiply_row, premultiply_row_4444,
+        upsample_block, yuv420_row, yuv444_row, CpuFlags, Raw, RawTable, YuvDsp,
+    };
     use crate::dsp::yuv::{
         LAYOUT_ARGB, LAYOUT_BGR, LAYOUT_BGRA, LAYOUT_RGB, LAYOUT_RGBA,
     };
 
     pub mod neon {
-        use super::*;
+        use crate::asm::yuv::{
+            ArgbToUvRaw, ArgbToYuv444Raw, ChromaHorizontalRaw, ChromaRowRaw,
+            MultiplyArgbRaw, MultiplyRowRaw, Premultiply4444Raw, PremultiplyRaw,
+            RowRaw, UpsampleBlockRaw, YuvRowRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ChromaHorizontal,
@@ -1034,7 +1106,9 @@ mod arch {
 
     #[cfg(wpd_asm_dotprod)]
     pub mod dotprod {
-        use super::*;
+        use crate::asm::yuv::{ArgbToYuv444Raw, RowRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_neon_dotprod");
         raw!(
@@ -1048,7 +1122,9 @@ mod arch {
 
     #[cfg(wpd_asm_i8mm)]
     pub mod i8mm {
-        use super::*;
+        use crate::asm::yuv::{ArgbToYuv444Raw, RowRaw};
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw_row!(ArgbToY, argb_to_y, "wpd_argb_to_y_neon_i8mm");
         raw!(
@@ -1099,7 +1175,7 @@ mod arch {
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
-    use super::*;
+    use super::{CpuFlags, RawTable, YuvDsp};
 
     pub fn init(_dsp: &mut YuvDsp, _flags: CpuFlags) {}
 

@@ -6,24 +6,43 @@ pub const FILE_PADDING: usize = 64;
 
 pub const MAX_SCALED: i32 = 16384;
 
+/// An output pixel format. Packed formats are named in memory byte order;
+/// `Pre` formats have premultiplied alpha.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum Format {
+    /// Planar 8-bit Y, U, V with 4:2:0 chroma.
     Yuv420p,
+    /// [`Yuv420p`](Self::Yuv420p) with a full-resolution alpha plane.
     Yuva420p,
+    /// Packed 8-bit A, R, G, B.
     #[default]
     Argb,
+    /// Packed 8-bit R, G, B, A.
     Rgba,
+    /// Packed 8-bit B, G, R, A.
     Bgra,
+    /// Packed 8-bit R, G, B.
     Rgb,
+    /// Packed 8-bit B, G, R.
     Bgr,
+    /// [`Argb`](Self::Argb), premultiplied.
     ArgbPre,
+    /// [`Rgba`](Self::Rgba), premultiplied.
     RgbaPre,
+    /// [`Bgra`](Self::Bgra), premultiplied.
     BgraPre,
+    /// 16-bit 5:6:5 R, G, B.
     Rgb565,
+    /// 16-bit 4:4:4:4 R, G, B, A.
     Rgba4444,
+    /// [`Rgba4444`](Self::Rgba4444), premultiplied.
     Rgba4444Pre,
+    /// 16-bit 5:6:5 B, G, R.
     Bgr565,
+    /// 16-bit 4:4:4:4 B, G, R, A.
     Bgra4444,
+    /// [`Bgra4444`](Self::Bgra4444), premultiplied.
     Bgra4444Pre,
 }
 

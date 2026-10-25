@@ -57,7 +57,7 @@ wpd = { git = "https://github.com/halidecx/wpd" }
 ```
 
 ```rust
-use wpd::{api::Decoder, image::Format, options::Options};
+use wpd::api::{Decoder, Format, Options};
 
 let mut decoder = Decoder::new();
 decoder.set_format(Format::Rgba)?;

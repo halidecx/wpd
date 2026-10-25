@@ -1,8 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use wpd::api::{Animation, Decoder, Options};
-use wpd::image::Format;
+use wpd::api::{Animation, Decoder, Format, Options, UvMode};
 
 fn corpus() -> Vec<PathBuf> {
     if cfg!(miri) {
@@ -33,21 +32,24 @@ const FORMATS: [Format; 6] = [
     Format::Rgb565,
 ];
 
+const UV_MODES: [UvMode; 4] = [
+    UvMode::Point,
+    UvMode::Fancy,
+    UvMode::FastFancy,
+    UvMode::ExtraFancy,
+];
+
 #[test]
 fn uvmode_defaults_to_fancy_and_rejects_unknown_modes() {
-    assert_eq!(Options::default().uvmode, 1);
+    assert_eq!(Options::default().uvmode, UvMode::Fancy);
+    for raw in [4, u32::MAX] {
+        assert_eq!(UvMode::from_raw(raw), None);
+    }
+
     let mut decoder = Decoder::new();
 
-    for uvmode in [4, u32::MAX] {
-        assert_eq!(
-            decoder.set_options(Options {
-                uvmode,
-                ..Options::default()
-            }),
-            Err(wpd::error::Error::InvalidArgument)
-        );
-    }
-    for uvmode in 0..=3 {
+    for uvmode in UV_MODES {
+        assert_eq!(UvMode::from_raw(uvmode as u32), Some(uvmode));
         decoder
             .set_options(Options {
                 uvmode,
@@ -113,7 +115,7 @@ fn a_planar_decode_hands_out_subsampled_chroma() {
 
 #[test]
 fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
-    for uvmode in 0..=3 {
+    for uvmode in UV_MODES {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
@@ -168,7 +170,7 @@ fn a_stream_reaches_the_same_pixels_as_a_whole_file() {
 
 #[test]
 fn a_partial_frame_hands_out_only_final_rows() {
-    for uvmode in 0..=3 {
+    for uvmode in UV_MODES {
         for path in corpus() {
             let bytes = fs::read(&path).unwrap();
             let mut whole = Decoder::new();
@@ -432,14 +434,14 @@ fn settings_changed_mid_animation_reach_the_next_frame() {
     let switches: [(&str, Switch); 6] = [
         ("extra-fancy", |d| {
             d.set_options(Options {
-                uvmode: 3,
+                uvmode: UvMode::ExtraFancy,
                 ..Options::default()
             })
             .unwrap();
         }),
         ("fast-fancy", |d| {
             d.set_options(Options {
-                uvmode: 2,
+                uvmode: UvMode::FastFancy,
                 ..Options::default()
             })
             .unwrap();
@@ -455,7 +457,7 @@ fn settings_changed_mid_animation_reach_the_next_frame() {
         ("format", |d| d.set_format(Format::RgbaPre).unwrap()),
         ("options", |d| {
             d.set_options(Options {
-                uvmode: 0,
+                uvmode: UvMode::Point,
                 ..Options::default()
             })
             .unwrap();

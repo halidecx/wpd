@@ -68,8 +68,11 @@ mod imp {
         #[inline(always)]
         fn refill(&mut self, buf: &[u8]) {
             if self.pos < self.buf_max {
-                let word =
-                    u64::from_be_bytes(buf[self.pos..self.pos + 8].try_into().unwrap());
+                let word = u64::from_be_bytes(
+                    buf[self.pos..self.pos + 8]
+                        .try_into()
+                        .expect("the slice is 8 long"),
+                );
 
                 self.value = (self.value << 56) | (word >> 8);
                 self.pos += 7;

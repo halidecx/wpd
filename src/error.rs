@@ -1,16 +1,29 @@
+/// Why a decoder call failed.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[non_exhaustive]
+#[must_use]
 pub enum Error {
+    /// The call was not valid with these arguments or in this state.
     InvalidArgument,
+    /// The bitstream is corrupt.
     InvalidData,
+    /// An allocation failed.
     NoMemory,
+    /// The image exceeds 16384x16384 or the configured frame size limit.
     TooLarge,
+    /// The input ended before the data needed.
     Truncated,
+    /// The input is not a WebP file.
     NotWebp,
+    /// The file uses a feature the decoder does not support.
     Unsupported,
+    /// The caller's output buffer cannot hold the frame.
     BufferTooSmall,
 }
 
 impl Error {
+    /// A short, static description of the error.
+    #[must_use]
     pub fn message(self) -> &'static str {
         match self {
             Error::InvalidArgument => "invalid argument",
@@ -39,6 +52,7 @@ pub enum Status {
     NeedMore,
 }
 
+/// A `Result` whose error is [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;
 
 pub const MAX_DIMENSION: i32 = 16384;

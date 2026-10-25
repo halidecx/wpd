@@ -24,6 +24,9 @@ fn unfilter<T: Raw<Sig = UnfilterRaw>>(prev: Option<&[u8]>, row: &mut [u8]) {
     if let Some(prev) = prev {
         assert!(prev.len() >= row.len(), "short previous row");
     }
+    // SAFETY: the asm rewrites `row` and reads `prev` (when not null) over the
+    // first `row.len() as c_int` bytes, which the assert keeps within both; a
+    // count that truncates is smaller, or non-positive and makes it return.
     unsafe {
         (T::F)(
             prev.map_or(std::ptr::null(), <[u8]>::as_ptr),
@@ -68,6 +71,9 @@ macro_rules! ladder {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 
@@ -100,6 +106,9 @@ mod arch {
 }
 
 #[cfg(target_arch = "aarch64")]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 
@@ -121,6 +130,9 @@ mod arch {
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))]
+// The symbol-set macros expand in here and name the parent's items;
+// which ones differs per target, so an explicit list would not fit all.
+#[allow(clippy::wildcard_imports)]
 mod arch {
     use super::*;
 

@@ -27,6 +27,10 @@ fn import_row_expand<T: Raw<Sig = ImportExpandRaw>, const LUMA: bool>(
 ) {
     let n = p.dst_width * p.num_channels;
 
+    /* An empty row writes nothing, whatever its steps say. */
+    if n == 0 {
+        return;
+    }
     /* The blends take unsigned 16-bit weights, and the sliding windows
      * want a run of at least eight source pixels. */
     if p.src_width < 8
@@ -39,6 +43,18 @@ fn import_row_expand<T: Raw<Sig = ImportExpandRaw>, const LUMA: bool>(
         frow.len() >= n && src.len() >= p.src_width * p.num_channels,
         "short rescaler row"
     );
+    /* The kernel reads as far into src as x_add and x_sub take it, without
+     * looking at src_width; only this pairing, which Rescaler builds and
+     * checkasm tests, keeps that inside the row. */
+    assert!(
+        p.dst_width > p.src_width
+            && p.x_add as usize == p.dst_width - 1
+            && p.x_sub as usize == p.src_width - 1,
+        "rescaler steps do not match its widths"
+    );
+    // SAFETY: the asserts cover the n frow words written and the src row,
+    // and tie x_add/x_sub to the widths so the window stays in src; the gate
+    // above keeps the kernel to its 4- (or 1-) channel, >= 8 pixel contract.
     unsafe {
         (T::F)(
             frow.as_mut_ptr(),
@@ -59,6 +75,10 @@ fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
 ) {
     let n = p.dst_width * p.num_channels;
 
+    /* An empty row writes nothing, whatever its steps say. */
+    if n == 0 {
+        return;
+    }
     /* x_sub is a 16-bit multiplier lane, and sum * x_sub must stay inside
      * sixteen unsigned bits too: a 1/128 ratio. */
     if p.num_channels != 4 || p.x_sub >= 1 << 16 || p.x_add > p.x_sub << 7 {
@@ -68,6 +88,16 @@ fn import_row_shrink<T: Raw<Sig = ImportShrinkRaw>>(
         frow.len() >= n && src.len() >= p.src_width * p.num_channels,
         "short rescaler row"
     );
+    /* The kernel reads n / 4 * x_add / x_sub pixels without looking at
+     * src_width; only this pairing, which Rescaler builds and checkasm
+     * tests, makes that src_width. */
+    assert!(
+        p.x_add as usize == p.src_width && p.x_sub as usize == p.dst_width,
+        "rescaler steps do not match its widths"
+    );
+    // SAFETY: the asserts cover the n frow words written and the src row,
+    // and tie x_add/x_sub to the widths so the kernel reads src_width
+    // pixels.
     unsafe {
         (T::F)(
             frow.as_mut_ptr(),
@@ -90,6 +120,8 @@ where
     assert!(frow.len() >= n, "short rescaler row");
     if let Some((a, b)) = p.blend() {
         assert!(irow.len() >= n, "short rescaler row");
+        // SAFETY: n is dst.len() and both asserts give irow and frow >= n
+        // words; the kernel touches exactly n elements of each.
         unsafe {
             (B::F)(
                 dst.as_mut_ptr(),
@@ -102,6 +134,8 @@ where
             )
         }
     } else {
+        // SAFETY: n is dst.len() and frow.len() >= n was asserted above; the
+        // kernel touches exactly n elements of each.
         unsafe { (D::F)(dst.as_mut_ptr(), frow.as_ptr(), n as c_int, p.fy_scale) }
     }
 }
@@ -121,6 +155,8 @@ fn export_row_shrink<S, Z>(
     assert!(irow.len() >= n, "short rescaler row");
     if yscale != 0 {
         assert!(frow.len() >= n, "short rescaler row");
+        // SAFETY: n is dst.len() and both asserts give irow and frow >= n
+        // words; the kernel touches exactly n elements of each.
         unsafe {
             (S::F)(
                 dst.as_mut_ptr(),
@@ -132,6 +168,8 @@ fn export_row_shrink<S, Z>(
             )
         }
     } else {
+        // SAFETY: n is dst.len() and irow.len() >= n was asserted above; the
+        // kernel touches exactly n elements of each.
         unsafe { (Z::F)(dst.as_mut_ptr(), irow.as_mut_ptr(), n as c_int, p.fxy_scale) }
     }
 }
@@ -202,10 +240,19 @@ macro_rules! ladder {
 
 #[cfg(target_arch = "x86_64")]
 mod arch {
-    use super::*;
+    use super::{
+        export_row_expand, export_row_shrink, import_row_expand, import_row_shrink,
+        CpuFlags, ExportExpand, ExportShrink, Import, Kernel, Raw, RawTable,
+        RescaleDsp, Selection,
+    };
 
     pub mod sse2 {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+            ImportExpandRaw, ImportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -252,7 +299,11 @@ mod arch {
     }
 
     pub mod avx2 {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -366,10 +417,19 @@ mod arch {
 
 #[cfg(target_arch = "aarch64")]
 mod arch {
-    use super::*;
+    use super::{
+        export_row_expand, export_row_shrink, import_row_expand, import_row_shrink,
+        CpuFlags, ExportExpand, ExportShrink, Import, Kernel, Raw, RawTable,
+        RescaleDsp, Selection,
+    };
 
     pub mod neon {
-        use super::*;
+        use crate::asm::rescale::{
+            ExportBlendRaw, ExportDirectRaw, ExportShrink0Raw, ExportShrinkRaw,
+            ImportExpandRaw, ImportShrinkRaw,
+        };
+        use crate::asm::Raw;
+        use std::ffi::c_int;
 
         raw!(
             ExportDirect,
@@ -467,7 +527,7 @@ mod arch {
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod arch {
-    use super::*;
+    use super::{CpuFlags, RawTable, RescaleDsp, Selection};
 
     pub fn init(_dsp: &mut RescaleDsp, _flags: CpuFlags) {}
 

@@ -18,7 +18,9 @@ mod zeroed {
     /// An all-zero bit pattern must be a valid value of the type.
     pub(crate) unsafe trait Zeroable: Copy {}
 
+    // SAFETY: every bit pattern, all zeros included, is a valid u8.
     unsafe impl Zeroable for u8 {}
+    // SAFETY: every bit pattern, all zeros included, is a valid u32.
     unsafe impl Zeroable for u32 {}
 
     pub(crate) fn try_zeroed<T: Zeroable>(n: usize) -> Result<Vec<T>> {
@@ -27,11 +29,16 @@ mod zeroed {
         if layout.size() == 0 {
             return Ok(Vec::new());
         }
+        // SAFETY: layout came from Layout::array and its size was just
+        // checked non-zero, as alloc_zeroed requires.
         let p = unsafe { alloc_zeroed(layout) }.cast::<T>();
 
         if p.is_null() {
             return Err(Error::NoMemory);
         }
+        // SAFETY: p is non-null and came from the global allocator with
+        // Layout::array::<T>(n), so capacity n matches; all n elements are
+        // zeroed, which Zeroable makes valid T.
         Ok(unsafe { Vec::from_raw_parts(p, n, n) })
     }
 }

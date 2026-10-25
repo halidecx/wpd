@@ -5,7 +5,12 @@ use crate::bits::{rl16, rl24};
 use crate::dsp::vp8::Vp8Dsp;
 use crate::dsp::vp8pred::{self as pred, Vp8Pred};
 use rac::{RangeCoder, TokenCoder};
-use tables::*;
+use tables::{
+    AC_QLOOKUP, COEFF_BAND, COEFF_BAND_INDEXES, DCT_CAT1_PROB, DCT_CAT2_PROB,
+    DCT_CAT_PROB, DC_QLOOKUP, MODE_I4, PRED16X16_PROB_INTRA, PRED4X4_MODE,
+    PRED4X4_PROB_INTRA, PRED8X8C_PROB_INTRA, TOKEN_DEFAULT_PROBS, TOKEN_UPDATE_PROBS,
+    ZIGZAG_SCAN,
+};
 
 const NUM_DCT_TOKENS: usize = 12;
 const MAX_PARTITIONS: usize = 8;
@@ -690,7 +695,7 @@ impl Decoder {
     fn decode_intra4x4_modes(&mut self, buf: &[u8], mb: &mut Macroblock, mb_x: usize) {
         let top: &mut [u8; 4] = (&mut self.intra4x4_pred_mode_top[4 * mb_x..][..4])
             .try_into()
-            .unwrap();
+            .expect("the slice is 4 long");
         let mut t = *top;
 
         for y in 0..4 {
@@ -840,8 +845,9 @@ impl Coeffs {
         self.left_nnz = (nz >> 16) as u16;
 
         if dc_nz != 0 {
-            let luma: &mut [[i16; 16]; 16] =
-                (&mut mb.block.0[..16]).try_into().unwrap();
+            let luma: &mut [[i16; 16]; 16] = (&mut mb.block.0[..16])
+                .try_into()
+                .expect("the slice is 16 long");
 
             if dc_nz == 1 {
                 (self.dsp.luma_dc_wht_dc)(luma, &mut self.block_dc.0);
@@ -916,7 +922,9 @@ impl Recon {
             let tr_right: [u8; 4] = if last {
                 [luma[off[0] - ls + 15]; 4]
             } else {
-                luma[off[0] - ls + 16..off[0] - ls + 20].try_into().unwrap()
+                luma[off[0] - ls + 16..off[0] - ls + 20]
+                    .try_into()
+                    .expect("the slice is 4 long")
             };
 
             for y in 0..4 {
@@ -926,7 +934,7 @@ impl Recon {
                     } else {
                         let at = ptr + 4 + 4 * x - ls;
 
-                        luma[at..at + 4].try_into().unwrap()
+                        luma[at..at + 4].try_into().expect("the slice is 4 long")
                     };
                     let mode = mb.intra4x4_pred_mode_mb[4 * y + x] as usize;
 
@@ -993,8 +1001,10 @@ impl Recon {
                             }
                         }
                     } else {
-                        let block: &mut [[i16; 16]; 4] =
-                            (&mut mb.block.0[4 * y..4 * y + 4]).try_into().unwrap();
+                        let block: &mut [[i16; 16]; 4] = (&mut mb.block.0
+                            [4 * y..4 * y + 4])
+                            .try_into()
+                            .expect("the slice is 4 long");
 
                         (self.dsp.idct_dc_add4y)(luma, y_dst, ls, block);
                     }
@@ -1032,8 +1042,9 @@ impl Recon {
                 }
             } else {
                 let base = 4 * (4 + ch);
-                let block: &mut [[i16; 16]; 4] =
-                    (&mut mb.block.0[base..base + 4]).try_into().unwrap();
+                let block: &mut [[i16; 16]; 4] = (&mut mb.block.0[base..base + 4])
+                    .try_into()
+                    .expect("the slice is 4 long");
 
                 (self.dsp.idct_dc_add4uv)(chroma, ch_dst, uvls, block);
             }
@@ -1470,7 +1481,7 @@ impl Decoder {
             part: self.coeffs.coeff_partition[part],
             intra4x4_top: self.intra4x4_pred_mode_top[4 * mb_x..4 * mb_x + 4]
                 .try_into()
-                .unwrap(),
+                .expect("the slice is 4 long"),
             intra4x4_left: self.intra4x4_pred_mode_left,
             top_nnz: self.coeffs.top_nnz[mb_x],
             left_nnz: self.coeffs.left_nnz,

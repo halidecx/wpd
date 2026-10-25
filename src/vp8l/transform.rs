@@ -328,7 +328,8 @@ pub fn color_indexing_alpha<T: Indexed>(
         (size_reduction, dsp.expand_alpha_nibbles, T::bytes(src))
     {
         let AlphaDst { data, stride, .. } = dst;
-        let lut: &[u8; 16] = palette.first_chunk().unwrap();
+        let lut: &[u8; 16] =
+            palette.first_chunk().expect("the palette has 256 entries");
 
         for y in 0..height as usize {
             expand(

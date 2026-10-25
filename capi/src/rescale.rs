@@ -11,9 +11,16 @@ fn disjoint(a: *const u8, a_len: usize, b: *const u8, b_len: usize) -> bool {
     a.saturating_add(a_len) <= b || b.saturating_add(b_len) <= a
 }
 
+/// # Safety
+///
+/// For a valid geometry, `dst` must be writable for
+/// `(dst_height - 1) * dst_stride + dst_width * num_channels` bytes, `src`
+/// readable for the same expression over the source arguments, and `work`
+/// writable for `2 * dst_width * num_channels` `u32`s, all for the duration of
+/// the call. Invalid geometry, null, misaligned `work`, or overlapping buffers
+/// make the call return without touching any of them.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn wpd_rescale_plane(
     dst: *mut u8,
     dst_stride: c_int,
@@ -64,6 +71,10 @@ pub unsafe extern "C" fn wpd_rescale_plane(
         return;
     }
 
+    // SAFETY: all three pointers are non-null and `work` is aligned (checked
+    // above). The caller guarantees `dst_extent`, `src_extent` and `work_len`
+    // valid elements behind them, each extent fits an isize, and the three
+    // ranges were checked disjoint, so the `&mut` slices alias nothing.
     crate::guard((), || unsafe {
         let mut out = PlaneMut::borrowed(
             slice::from_raw_parts_mut(dst, dst_extent),
@@ -103,6 +114,8 @@ mod tests {
             (1, 1, 1, 0),
             (1, 1, 1, -1),
         ] {
+            // SAFETY: every geometry here is invalid, so the call returns
+            // before touching the null pointers.
             unsafe {
                 wpd_rescale_plane(
                     std::ptr::null_mut(),
@@ -127,8 +140,11 @@ mod tests {
         let mut work = [0u32; 64];
         let mut misaligned = [0u8; 256];
         let work_ptr = work.as_mut_ptr();
+        // SAFETY: offset 1 stays inside the 256-byte `misaligned` array.
         let odd = unsafe { misaligned.as_mut_ptr().add(1) }.cast::<u32>();
 
+        // SAFETY: each call names live local arrays covering the declared
+        // extents; the overlapping or misaligned ones are rejected unused.
         unsafe {
             wpd_rescale_plane(
                 src.as_mut_ptr(),
@@ -160,6 +176,8 @@ mod tests {
         assert!(src.iter().all(|&b| b == 7));
         assert!(misaligned.iter().all(|&b| b == 0));
 
+        // SAFETY: `dst` (64 bytes) covers 3 * 8 + 4, `src` (64) covers
+        // 7 * 8 + 8, `work` holds 64 >= 2 * 4 `u32`s, and the three are disjoint.
         unsafe {
             wpd_rescale_plane(
                 dst.as_mut_ptr(),

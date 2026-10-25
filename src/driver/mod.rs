@@ -18,7 +18,7 @@ use crate::handout::{Handout, RowSink};
 use crate::image::Format;
 use crate::info::{FrameInfo, ImageInfo};
 use crate::input::Input;
-use crate::options::Options;
+use crate::options::{Options, UvMode};
 use crate::picture::{Buffer, Frame, PlaneRef};
 use crate::rescale::Scratches;
 use crate::vp8l::Output as Lossless;
@@ -713,7 +713,7 @@ impl Decoder<'_> {
             .scale
             .is_some_and(|(w, h)| w < 0 || h < 0 || (w == 0 && h == 0));
 
-        if bad_crop || bad_scale || options.n_threads < 0 || options.uvmode > 3 {
+        if bad_crop || bad_scale || options.n_threads < 0 {
             return Err(self.fail("invalid decoder options", Error::InvalidArgument));
         }
         if self.anim_mode == ANIM_SUBFRAME && options.transforms() {
@@ -1329,9 +1329,9 @@ impl Decoder<'_> {
             // Only report pixels whose complete interpolation support has
             // passed the loop filter: five future chroma rows for Lanczos,
             // two for fast-fancy, and one future luma row for default fancy.
-            if decoder.options.uvmode == 3 {
+            if decoder.options.uvmode == UvMode::ExtraFancy {
                 rows = (rows - 10).max(0);
-            } else if decoder.options.uvmode == 2 {
+            } else if decoder.options.uvmode == UvMode::FastFancy {
                 rows = (rows - 4).max(0);
             } else {
                 rows -= 1;
